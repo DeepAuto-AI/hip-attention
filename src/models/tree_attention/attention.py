@@ -8,8 +8,8 @@ from performer_pytorch import FastAttention
 import numpy as np
 from ...utils import get_bench
 
-# get_bench().synchronize = True
-# get_bench().disabled = False
+get_bench().synchronize = True
+get_bench().disabled = False
 
 timer = lambda x: get_bench().region(x)
 
@@ -135,7 +135,7 @@ def forward_mask(self_w: int, self_k: int, q: Tensor, k: Tensor, scale_up: float
             # TODO: topk masked pixels
             t_tsrcs = tsrcs #torch.masked_select(tsrcs, need_expand).view(N, -1, 1)
             tws = ws #torch.masked_select(ws, need_expand).view(N, -1, 1)
-            # print('a', t_tsrcs.shape, pixels.shape)
+            print('a', t_tsrcs.shape, pixels.shape, w)
             tpixels = pixels #torch.masked_select(pixels, need_expand)
             # tpixels = tpixels.view(N, -1, pixels.shape[-1])
             tpixels_mask = pixels_mask #torch.masked_select(pixels_mask, need_expand).view(N, -1, pixels.shape[-1])
@@ -222,6 +222,11 @@ def forward_mask(self_w: int, self_k: int, q: Tensor, k: Tensor, scale_up: float
     # ret = torch.empty((N, T_DST, T_SRC), device=device).fill_(-32000.0)
     # ret.scatter_(dim=-1, index=pixels, value=0)
     # return ret
+    
+    if not get_bench().disabled:
+        print(get_bench().format_tracetree())
+        get_bench().reset_measures()
+        get_bench().reset_trace()
     
     N, A, Z = pixels.shape
     _, C, _ = k.shape
