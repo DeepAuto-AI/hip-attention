@@ -485,7 +485,7 @@ class TreeAttention(nn.Module):
                 indices = torch.concat([
                     torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1),
                     torch.arange(tdst, device=cols.device).view(1, -1, 1, 1),
-                    cols.view(bsz, tdst, -1, 1).contigous()
+                    cols.view(bsz, tdst, -1, 1).contiguous()
                 ], dim=-1).view(-1, 3)
                 values = values.view(-1)
                 probs = torch.sparse_coo_tensor(
