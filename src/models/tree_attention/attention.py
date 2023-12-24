@@ -255,13 +255,6 @@ class TreeAttention(nn.Module):
         self.scale_up = scale_up
         self.oversample = oversample
         assert causal
-        
-        self.performer = FastAttention(
-            dim_heads=64,
-            nb_features=64,
-            causal=self.causal,
-            generalized_attention=self.causal,
-        )
     
     def forward_single_quary(
         self, 
@@ -425,11 +418,21 @@ class TreeAttention(nn.Module):
         t_dense = max(0, max(self.start_w, self.k) - T_SRC + T_DST)
         if t_dense > 0:
             q, q_dense = q[..., t_dense:, :], q[..., :t_dense, :]
-            mask, mask_dense = mask[..., t_dense:, :], mask[..., :t_dense, :]
-            scores = torch.matmul(q_dense, k.transpose(-1, -2))
-            scores = scores + mask_dense
-            probs = torch.softmax(scores, -1)
-            context = torch.matmul(probs, v)
+            if mask is not None:
+                mask, mask_dense = mask[..., t_dense:, :], mask[..., :t_dense, :]
+                scores = torch.matmul(q_dense, k.transpose(-1, -2))
+                scores = scores + mask_dense
+                probs = torch.softmax(scores, -1)
+                context = torch.matmul(probs, v)
+            else:
+                # need causal flash attention
+                context = F.scaled_dot_product_attention(
+                    q_dense,
+                    k,
+                    v,
+                    is_causal=True,
+                    scale=1,
+                )
             contexts.append(context)
         
         # t_mask = max(0, self.w - T_SRC + T_SRC)
