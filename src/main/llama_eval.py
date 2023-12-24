@@ -50,7 +50,8 @@ if __name__ == '__main__':
         encodings = torch.load(cache_path)
 
     max_length = model.config.max_position_embeddings
-    stride = args.stride if args.stride > 0 else model.config.max_position_embeddings
+    max_length = stride = args.stride if args.stride > 0 else model.config.max_position_embeddings
+    # max_length = stride = 512
     seq_len = encodings.size(1)
 
     nlls = []

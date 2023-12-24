@@ -301,7 +301,7 @@ class LlamaAttention(nn.Module):
         self.tree_attention = TreeAttention(
             causal=True,
             k=128,
-            start_w=2048,
+            start_w=256,
             w=128,
             scale_up=2.0,
             oversample=1.0
@@ -415,7 +415,7 @@ class LlamaAttention(nn.Module):
                 v=v.permute(0, 2, 1, 3),
                 attention_mask=None,
             )
-            attn_output = attn_output.permute(0, 2, 1, 3).view(bsz, q_len, h_size)
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, h_size)
             attn_weights = None
         else:
             raise Exception()

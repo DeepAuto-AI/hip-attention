@@ -478,19 +478,22 @@ class TreeAttention(nn.Module):
                 import torch.sparse._triton_ops as triton_ops
                 probs = triton_ops.bsr_softmax(scores) #.to_dense().to(q.dtype)
                 bsz, tdst, tsrc = probs.shape
-                cols = probs.col_indices() # N*A, Z
-                values = probs.values().squeeze(-1).squeeze(-1) # N*A, Z
+                cols = probs.col_indices() # N, A*Z
+                values = probs.values().squeeze(-1).squeeze(-1) # N, A*Z
                 
-                nnz = cols.shape[-1]
+                nnz = values.shape[-1] // tdst
+                # print(torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1).expand(bsz, tdst, nnz, 1).shape,
+                #     torch.arange(tdst, device=cols.device).view(1, -1, 1, 1).expand(bsz, tdst, nnz, 1).shape,
+                #     cols.view(bsz, tdst, -1, 1).contiguous().shape)
                 indices = torch.concat([
-                    torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1).expand(bsz, tdst, nnz, 1),
-                    torch.arange(tdst, device=cols.device).view(1, -1, 1, 1).expand(bsz, tdst, nnz, 1),
-                    cols.view(bsz, tdst, -1, 1).contiguous()
-                ], dim=-1).view(-1, 3)
+                    torch.arange(bsz, device=cols.device).view(1, -1, 1, 1).expand(1, bsz, tdst, nnz),
+                    torch.arange(tdst, device=cols.device).view(1, 1, -1, 1).expand(1, bsz, tdst, nnz),
+                    cols.view(1, bsz, tdst, -1).contiguous()
+                ], dim=0).view(3, -1)
                 values = values.view(-1)
                 probs = torch.sparse_coo_tensor(
-                    indices=indices,
-                    values=values,
+                    indices=indices.long(),
+                    values=values.to(torch.float32),
                     size=probs.shape
                 )
                 
@@ -500,7 +503,7 @@ class TreeAttention(nn.Module):
                 #     values=probs.values().squeeze(-1).squeeze(-1),
                 #     size=probs.shape
                 # )
-                context = torch.bmm(probs, v.view(N*H, T_SRC, HID))
+                context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
                 context = context.view(N, H, t_sparse, HID)
             
             # mask_sparse = mask_sparse.view(N, H, t_sparse, T_SRC)
