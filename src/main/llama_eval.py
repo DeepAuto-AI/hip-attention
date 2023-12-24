@@ -5,6 +5,9 @@ from src.models.tree_llama.modeling_flash_llama import LlamaForCausalLM
 from datasets import load_dataset
 from tqdm import tqdm
 import argparse
+from transformers import (
+    BitsAndBytesConfig,
+)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -14,12 +17,18 @@ if __name__ == '__main__':
     device = 'cuda:0'
     model = LlamaForCausalLM.from_pretrained(
         "togethercomputer/LLaMA-2-7B-32K", 
-        trust_remote_code=True, 
+        load_in_4bit=True,
+        device_map={"" : "cuda:0"},
+        quantization_config=BitsAndBytesConfig(
+            load_in_4bit=True,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        ),
         torch_dtype=torch.float16,
-        device_map={'': device},
-        low_cpu_mem_usage=True,
-        use_cache=False,
-        load_in_8bit=True,
+        trust_remote_code=True,
     )
     
     for m in model.modules():
