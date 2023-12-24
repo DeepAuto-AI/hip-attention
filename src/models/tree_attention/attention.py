@@ -483,8 +483,8 @@ class TreeAttention(nn.Module):
                 
                 nnz = cols.shape[-1]
                 indices = torch.concat([
-                    torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1),
-                    torch.arange(tdst, device=cols.device).view(1, -1, 1, 1),
+                    torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1).expand(bsz, tdst, nnz, 1),
+                    torch.arange(tdst, device=cols.device).view(1, -1, 1, 1).expand(bsz, tdst, nnz, 1),
                     cols.view(bsz, tdst, -1, 1).contiguous()
                 ], dim=-1).view(-1, 3)
                 values = values.view(-1)
