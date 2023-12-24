@@ -301,7 +301,7 @@ class LlamaAttention(nn.Module):
         self.tree_attention = TreeAttention(
             causal=True,
             k=128,
-            start_w=256,
+            start_w=4096,
             w=128,
             scale_up=2.0,
             oversample=1.0
