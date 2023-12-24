@@ -12,6 +12,7 @@ from transformers import (
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='none')
+    parser.add_argument('--stride', type=int, default=-1)
     args = parser.parse_args()
     
     device = 'cuda:0'
@@ -49,7 +50,7 @@ if __name__ == '__main__':
         encodings = torch.load(cache_path)
 
     max_length = model.config.max_position_embeddings
-    stride = model.config.max_position_embeddings
+    stride = args.stride if args.stride > 0 else model.config.max_position_embeddings
     seq_len = encodings.size(1)
 
     nlls = []

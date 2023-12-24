@@ -476,7 +476,24 @@ class TreeAttention(nn.Module):
                     size=scores.shape
                 )
                 import torch.sparse._triton_ops as triton_ops
-                probs = triton_ops.bsr_softmax(scores).to_dense().to(q.dtype)
+                probs = triton_ops.bsr_softmax(scores) #.to_dense().to(q.dtype)
+                bsz, tdst, tsrc = probs.shape
+                cols = probs.col_indices() # N*A, Z
+                values = probs.values().squeeze(-1).squeeze(-1) # N*A, Z
+                
+                nnz = cols.shape[-1]
+                indices = torch.concat([
+                    torch.arange(bsz, device=cols.device).view(-1, 1, 1, 1),
+                    torch.arange(tdst, device=cols.device).view(1, -1, 1, 1),
+                    cols.view(bsz, tdst, -1, 1).contigous()
+                ], dim=-1).view(-1, 3)
+                values = values.view(-1)
+                probs = torch.sparse_coo_tensor(
+                    indices=indices,
+                    values=values,
+                    size=probs.shape
+                )
+                
                 # probs = torch.sparse_csr_tensor(
                 #     crow_indices=probs.crow_indices(),
                 #     col_indices=probs.col_indices(),
