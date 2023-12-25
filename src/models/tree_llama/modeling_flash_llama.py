@@ -300,10 +300,10 @@ class LlamaAttention(nn.Module):
         from src.models.tree_attention.attention import TreeAttention
         self.tree_attention = TreeAttention(
             causal=True,
-            k=128,
-            start_w=4096,
-            w=128,
-            scale_up=2.0,
+            k=64,
+            start_w=8192,
+            w=32,
+            scale_up=8.0,
             oversample=1.0
         )
 
