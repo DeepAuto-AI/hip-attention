@@ -248,9 +248,14 @@ class OPTAttention(nn.Module):
             causal=True,
             k=128,
             start_w=1024,
-            w=128,
+            w=64,
             scale_up=2.0,
             oversample=1.0,
+        )
+        
+        from ..tree_attention.attention2 import TreeAttention
+        self.tree_attention2 = TreeAttention(
+            causal=True
         )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
@@ -547,11 +552,16 @@ class OPTAttention(nn.Module):
             context = self.tree_attention(q, k, v, attention_mask)
             context = context.permute(0, 2, 1, 3).contiguous().view(N, T_DST, H*HID)
             
-            # if not self.benchmarking:
-            #     attention_probs = torch.zeros((N, H, T_DST, T_SRC), device=q.device, dtype=q.dtype)
-            # else:
             attention_probs = None
+            return context, attention_probs
+        elif self.attention_method == "tree2":
+            q = q.view(N, H, T_DST, HID)
+            k = k.view(N, H, T_SRC, HID)
+            v = v.view(N, H, T_SRC, HID)
             
+            context = self.tree_attention2(q, k, v, attention_mask)
+            context = context.permute(0, 2, 1, 3).contiguous().view(N, T_DST, H*HID)
+            attention_probs = None
             return context, attention_probs
         else:
             raise Exception()
