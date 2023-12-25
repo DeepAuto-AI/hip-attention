@@ -6,79 +6,79 @@ from torch import nn, optim
 import tqdm
 import wandb
 from ..models import hf_bert as berts
-from ..dataset.lra_benchmarks import get_loaders
+# from ..dataset.lra_benchmarks import get_loaders
 from ..utils.get_optimizer import get_optimizer
 from ..utils import batch_to
-from ..dataset.lra_benchmarks.list_ops import get_tokenizer as get_tokenizer_listops
-from ..dataset.lra_benchmarks.text import get_tokenizer as get_tokenizer_text
-from ..dataset.lra_benchmarks.image import get_tokenizer as get_tokenizer_image
+# from ..dataset.lra_benchmarks.list_ops import get_tokenizer as get_tokenizer_listops
+# from ..dataset.lra_benchmarks.text import get_tokenizer as get_tokenizer_text
+# from ..dataset.lra_benchmarks.image import get_tokenizer as get_tokenizer_image
 from ..utils import Metric, seed
 
 BF16 = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
-LRA_TASKS = {
-    'listops': {
-        'batch_size': 32,
-        'dataloader_fn': lambda bs: get_loaders('listops', bs),
-        'lr': 2e-3,
-        'wd': 1e-1,
-        'epochs': 30,
-        'eval_steps': 6000,
-        'wandb_steps': 10,
-        'gradient_accumulation_steps': 8,
-        'config': berts.BertConfig(
-            max_position_embeddings=2048,
-            num_attention_heads=8,
-            num_hidden_layers=6,
-            hidden_size=512,
-            intermediate_size=2048,
-            num_labels=10,
-            vocab_size=get_tokenizer_listops().vocab_size,
-        )
-    },
-    'text': {
-        'batch_size': 16,
-        'dataloader_fn': lambda bs: get_loaders('text', bs),
-        'lr': 1e-5,
-        'wd': 1e-1,
-        'epochs': 30,
-        'eval_steps': 12000,
-        'wandb_steps': 10,
-        'gradient_accumulation_steps': 2,
-        'config': berts.BertConfig(
-            max_position_embeddings=1024,
-            num_attention_heads=4,
-            num_hidden_layers=4,
-            hidden_size=256,
-            intermediate_size=1024,
-            num_labels=2,
-            hidden_dropout_prob=0.2,
-            attention_probs_dropout_prob=0.2,
-            vocab_size=get_tokenizer_text().vocab_size,
-        )
-    },
-    'image': {
-        'batch_size': 256,
-        'dataloader_fn': lambda bs: get_loaders('image', bs),
-        'lr': 1e-3,
-        'wd': 0.0,
-        'epochs': 500,
-        'eval_steps': 12000,
-        'wandb_steps': 10,
-        'gradient_accumulation_steps': 256//256,
-        'config': berts.BertConfig(
-            max_position_embeddings=1024,
-            num_attention_heads=1,
-            num_hidden_layers=1,
-            hidden_size=32,
-            intermediate_size=64,
-            num_labels=10,
-            hidden_dropout_prob=0.3,
-            attention_probs_dropout_prob=0.2,
-            vocab_size=get_tokenizer_image().vocab_size,
-        )
-    }
-}
+# LRA_TASKS = {
+#     'listops': {
+#         'batch_size': 32,
+#         'dataloader_fn': lambda bs: get_loaders('listops', bs),
+#         'lr': 2e-3,
+#         'wd': 1e-1,
+#         'epochs': 30,
+#         'eval_steps': 6000,
+#         'wandb_steps': 10,
+#         'gradient_accumulation_steps': 8,
+#         'config': berts.BertConfig(
+#             max_position_embeddings=2048,
+#             num_attention_heads=8,
+#             num_hidden_layers=6,
+#             hidden_size=512,
+#             intermediate_size=2048,
+#             num_labels=10,
+#             vocab_size=get_tokenizer_listops().vocab_size,
+#         )
+#     },
+#     'text': {
+#         'batch_size': 16,
+#         'dataloader_fn': lambda bs: get_loaders('text', bs),
+#         'lr': 1e-5,
+#         'wd': 1e-1,
+#         'epochs': 30,
+#         'eval_steps': 12000,
+#         'wandb_steps': 10,
+#         'gradient_accumulation_steps': 2,
+#         'config': berts.BertConfig(
+#             max_position_embeddings=1024,
+#             num_attention_heads=4,
+#             num_hidden_layers=4,
+#             hidden_size=256,
+#             intermediate_size=1024,
+#             num_labels=2,
+#             hidden_dropout_prob=0.2,
+#             attention_probs_dropout_prob=0.2,
+#             vocab_size=get_tokenizer_text().vocab_size,
+#         )
+#     },
+#     'image': {
+#         'batch_size': 256,
+#         'dataloader_fn': lambda bs: get_loaders('image', bs),
+#         'lr': 1e-3,
+#         'wd': 0.0,
+#         'epochs': 500,
+#         'eval_steps': 12000,
+#         'wandb_steps': 10,
+#         'gradient_accumulation_steps': 256//256,
+#         'config': berts.BertConfig(
+#             max_position_embeddings=1024,
+#             num_attention_heads=1,
+#             num_hidden_layers=1,
+#             hidden_size=32,
+#             intermediate_size=64,
+#             num_labels=10,
+#             hidden_dropout_prob=0.3,
+#             attention_probs_dropout_prob=0.2,
+#             vocab_size=get_tokenizer_image().vocab_size,
+#         )
+#     }
+# }
 
 class Trainer:
     def __init__(

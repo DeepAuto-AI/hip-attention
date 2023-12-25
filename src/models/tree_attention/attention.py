@@ -135,7 +135,7 @@ def forward_mask(self_w: int, self_k: int, q: Tensor, k: Tensor, scale_up: float
             # TODO: topk masked pixels
             t_tsrcs = tsrcs #torch.masked_select(tsrcs, need_expand).view(N, -1, 1)
             tws = ws #torch.masked_select(ws, need_expand).view(N, -1, 1)
-            print('a', t_tsrcs.shape, pixels.shape, w)
+            # print('a', t_tsrcs.shape, pixels.shape, w)
             tpixels = pixels #torch.masked_select(pixels, need_expand)
             # tpixels = tpixels.view(N, -1, pixels.shape[-1])
             tpixels_mask = pixels_mask #torch.masked_select(pixels_mask, need_expand).view(N, -1, pixels.shape[-1])
@@ -508,7 +508,8 @@ class TreeAttention(nn.Module):
                 #     values=probs.values().squeeze(-1).squeeze(-1),
                 #     size=probs.shape
                 # )
-                context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
+                with torch.autocast('cuda', torch.float32):
+                    context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
                 context = context.view(N, H, t_sparse, HID)
             
             # mask_sparse = mask_sparse.view(N, H, t_sparse, T_SRC)
