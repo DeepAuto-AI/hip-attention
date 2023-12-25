@@ -46,6 +46,51 @@ timer = lambda x: get_bench().region(x)
 
 DBG_T = 6
 
+def masked_bmm_masked_indices(a: Tensor, b: Tensor, xs: Tensor):
+    """
+    a: [N, A, B]
+    b: [N, C, B]
+    
+    xs: [N, A, Z] < C
+    xs_mask: [N, A, Z] \in {0, 1}
+    value: float
+    
+    - return
+    ys: [N, A, Z] \in { (R := a[i, :] \dot b[:, j]) if xs_mask == 1 else value }
+    """
+    
+    device = a.device
+    dtype = a.dtype
+    
+    N, A, B = a.shape
+    _N, C, _B = b.shape
+    assert B == _B
+    assert N == _N
+    _N, _A, Z = xs.shape
+    assert N == _N
+    assert A == _A
+    
+    xs = torch.clamp_max(xs, C - 1)
+    
+    # sparse implementation
+    col_idx = xs.view(N, A * Z)
+    crow_idx = (torch.arange(0, A+1, device=device) * Z)[None, :].expand(N, A+1)
+    values = torch.zeros_like(col_idx, dtype=dtype)
+    mask = torch.sparse_csr_tensor(
+        crow_indices=crow_idx,
+        col_indices=col_idx,
+        values=values.to(torch.float32),
+        size=(N, A, C)
+    )
+    with timer("addmm"):
+        ys = torch.sparse.sampled_addmm(
+            mask, a.to(torch.float32), b.transpose(-1, -2).to(torch.float32)
+        )
+    ys_values = ys.values()
+    assert ys_values.shape == values.shape
+    ys = ys_values.view(N, A, Z).to(dtype)
+    return ys
+
 def topk_prime(
     zs: Tensor, 
     zs_mask: Tensor,
@@ -86,24 +131,34 @@ def topk_prime(
     _, T_SRC, _ = key.shape
     assert key.shape == (N, T_SRC, HID)
     
-    # ##print('asdf', N, T_DST, Z)
-    
-    # key_cumsum = key
-    key_cumsum = key.cumsum(dim=-2)
-    zs_start = torch.clamp(torch.round(zs * (tsrcs / ws)), 0, T_SRC-1).long().unsqueeze(-1)
-    zs_end = torch.clamp(torch.round((zs+1) * (tsrcs / ws)), 0, T_SRC-1).long().unsqueeze(-1)
-    ks_start = key_cumsum\
-        .unsqueeze(1)\
-        .expand(N, T_DST, T_SRC, HID)\
-        .gather(dim=-2, index=zs_start.expand(N, T_DST, Z, HID))
-    ks_end = key_cumsum\
-        .unsqueeze(1)\
-        .expand(N, T_DST, T_SRC, HID)\
-        .gather(dim=-2, index=zs_end.expand(N, T_DST, Z, HID))
-    # ks_avgpool = ks_end
-    ks_avgpool = (ks_end - ks_start) / (zs_end - zs_start)
-    qs = query
-    scores = torch.einsum("...td,...tzd->...tz", qs, ks_avgpool)
+    method = 'key'
+    if method == 'cumsum':
+        key_cumsum = key.cumsum(dim=-2)
+        zs_start = torch.clamp(torch.round(zs * (tsrcs / ws)), 0, T_SRC-1).long().unsqueeze(-1)
+        zs_end = torch.clamp(torch.round((zs+1) * (tsrcs / ws)), 0, T_SRC-1).long().unsqueeze(-1)
+        ks_start = key_cumsum\
+            .unsqueeze(1)\
+            .expand(N, T_DST, T_SRC, HID)\
+            .gather(dim=-2, index=zs_start.expand(N, T_DST, Z, HID))
+        ks_end = key_cumsum\
+            .unsqueeze(1)\
+            .expand(N, T_DST, T_SRC, HID)\
+            .gather(dim=-2, index=zs_end.expand(N, T_DST, Z, HID))
+        ks_avgpool = (ks_end - ks_start) / (zs_end - zs_start)
+        qs = query
+        scores = torch.einsum("...td,...tzd->...tz", qs, ks_avgpool)
+    elif method == 'key':
+        # zs_start = torch.clamp(torch.round(zs * (tsrcs / ws)), 0, T_SRC-1).long().unsqueeze(-1)
+        # ks_start = key\
+        #     .unsqueeze(1)\
+        #     .expand(N, T_DST, T_SRC, HID)\
+        #     .gather(dim=-2, index=zs_start.expand(N, T_DST, Z, HID))
+        # qs = query
+        # scores = torch.einsum("...td,...tzd->...tz", qs, ks_start)
+        zs_start = torch.clamp(torch.round(zs * (tsrcs / ws)), 0, T_SRC-1).long()
+        scores = masked_bmm_masked_indices(query, key, zs_start)
+    else:
+        pass
     assert scores.shape == (N, T_DST, Z)
     scores[...,-1:] = 999
     scores.masked_fill_(zs_mask < 0.5, torch.finfo(scores.dtype).min)
@@ -111,11 +166,9 @@ def topk_prime(
     if not last_loop:
         topk = torch.clamp_max(torch.clamp_min(torch.round((ws / tsrcs) * ks), ps), zs_mask.sum(-1, keepdim=True))
         assert topk.shape == (N, T_DST, 1)
-        
-        ##print(topk[0, DBG_T], ps[0, DBG_T])
     else:
         topk = ks
-    need_update = topk <= ps
+    need_update = topk <= (ps * 2)
     if not last_loop:
         topk = topk * 1.5
     
@@ -164,10 +217,8 @@ def resize(
         ps_counts = (zs_end - zs_start)[:, :, :, None]
         reps = torch.arange(0, max_scale_up, device=zs.device)[None, None, None, :]
         reps = reps * zs_mask[:, :, :, None]
-        # ##print(reps[1, 1, -1])
         ps = ps + torch.clamp_max(reps, torch.clamp_min(ps_counts - 1, 0)).long()
         ps = ps.view(N * A, Z * max_scale_up)
-        # ##print(ps[DBG_T])
     
     with timer("resize.unique"):
         _, indices = torch.unique_consecutive(ps, return_inverse=True)
@@ -286,6 +337,7 @@ def approx_mask(
     need_update = torch.full((1, T_DST, 1), True, dtype=torch.bool, device=device)
     
     w = init_w
+    life = 1
     last_loop = False
     while True:
         Z = zs.shape[-1]
@@ -366,6 +418,9 @@ def approx_mask(
             # break
             if last_loop:
                 # print('breaked')
+                # if life == 0:
+                #     break
+                # life -= 1
                 break
             last_loop = True
             need_update = torch.full((1, T_DST, 1), True, dtype=torch.bool, device=device)
@@ -412,8 +467,8 @@ class TreeAttention(nn.Module):
     def __init__(
         self,
         causal: bool,
-        k: int = 128,
-        start_w: int = 1024,
+        k: int = 256,
+        start_w: int = 4096,
         w: int = 64,
         scale_up: int = 4,
         p: int = 32,
