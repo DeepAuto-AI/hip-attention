@@ -8,8 +8,8 @@ from performer_pytorch import FastAttention
 import numpy as np
 from ...utils import get_bench
 
-get_bench().synchronize = True
-get_bench().disabled = False
+# get_bench().synchronize = True
+# get_bench().disabled = False
 
 timer = lambda x: get_bench().region(x)
 

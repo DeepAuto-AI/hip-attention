@@ -30,7 +30,15 @@ approximator is log N, but sparse attention is quadratic
 """
 
 from typing import Union
-from torch import Tensor
+from torch import Tensor, nn
+import torch
+import torch.nn.functional as F
+from ...utils import get_bench
+
+# get_bench().synchronize = True
+# get_bench().disabled = False
+
+timer = lambda x: get_bench().region(x)
 
 def topk_prime(
     zs: Tensor, 
@@ -81,6 +89,8 @@ def approx_mask(
     key: Tensor,
     ps: Union[int, Tensor],
     ks: Union[int, Tensor],
+    init_w: int,
+    scale_up: int,
 ) -> Tensor:
     """Generate Tree Attention Mask
 
@@ -89,5 +99,103 @@ def approx_mask(
         key (Tensor): fp[N, T_SRC, HID]
         ps (Union[int, Tensor]): patches. accept int or fp[N, T_DST, 1]
         ks (Union[int, Tensor]): top-ks. accept int or fp[N, T_DST, 1]
+    
+    Return:
+        fp[N, T_DST, T_SRC] <-- sparse_csr_tensor
     """
     pass
+
+class TreeAttention(nn.Module):
+    def __init__(
+        self,
+        causal: bool,
+        k: int = 128,
+        start_w: int = 4096,
+        w: int = 64,
+        scale_up: int = 4,
+        p: int = 32,
+    ):
+        super().__init__()
+        
+        self.causal = causal
+        self.k = k
+        self.start_w = start_w
+        self.w = w
+        self.scale_up = scale_up
+        self.p = p
+        assert causal
+    
+    def forward_batch(self, q: Tensor, k: Tensor, v: Tensor, mask: Tensor):
+        N, H, T_SRC, HID = k.shape
+        N, H, T_DST, HID = q.shape
+        
+        contexts = []
+        t_dense = max(0, max(self.start_w, self.k) - T_SRC + T_DST)
+        if t_dense > 0:
+            q, q_dense = q[..., t_dense:, :], q[..., :t_dense, :]
+            if mask is not None:
+                mask, mask_dense = mask[..., t_dense:, :], mask[..., :t_dense, :]
+                scores = torch.matmul(q_dense, k.transpose(-1, -2))
+                scores = scores + mask_dense
+                probs = torch.softmax(scores, -1)
+                context = torch.matmul(probs, v)
+            else:
+                # need causal flash attention
+                context = F.scaled_dot_product_attention(
+                    q_dense,
+                    k,
+                    v,
+                    is_causal=True,
+                    scale=1,
+                )
+            contexts.append(context)
+        
+        t_sparse = T_DST - t_dense
+        if t_sparse > 0:
+            q = q.view(N*H, t_sparse, HID)
+            k = k.view(N*H, T_SRC, HID)
+            with timer("fmask"):
+                mask_sparse = approx_mask(
+                    query=q,
+                    key=k,
+                    ps=self.p,
+                    ks=self.k,
+                    init_w=self.w,
+                    scale_up=self.scale_up,
+                )
+            
+            with timer("attention"):
+                scores = torch.sparse.sampled_addmm(
+                    mask_sparse, q.to(torch.float32), k.transpose(-1, -2).to(torch.float32)
+                )
+                scores = torch.sparse_bsr_tensor(
+                    crow_indices=scores.crow_indices(),
+                    col_indices=scores.col_indices(),
+                    values=scores.values().unsqueeze(-1).unsqueeze(-1),
+                    size=scores.shape
+                )
+                import torch.sparse._triton_ops as triton_ops
+                probs = triton_ops.bsr_softmax(scores) #.to_dense().to(q.dtype)
+                bsz, tdst, tsrc = probs.shape
+                cols = probs.col_indices() # N, A*Z
+                values = probs.values().squeeze(-1).squeeze(-1) # N, A*Z
+                
+                nnz = values.shape[-1] // tdst
+                indices = torch.concat([
+                    torch.arange(bsz, device=cols.device).view(1, -1, 1, 1).expand(1, bsz, tdst, nnz),
+                    torch.arange(tdst, device=cols.device).view(1, 1, -1, 1).expand(1, bsz, tdst, nnz),
+                    cols.view(1, bsz, tdst, -1).contiguous()
+                ], dim=0).view(3, -1)
+                values = values.view(-1)
+                probs = torch.sparse_coo_tensor(
+                    indices=indices.long(),
+                    values=values.to(torch.float32),
+                    size=probs.shape
+                )
+                context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
+                context = context.view(N, H, t_sparse, HID)
+            contexts.append(context)
+        
+        contexts = torch.concat(contexts, dim=-2)
+        
+        return contexts

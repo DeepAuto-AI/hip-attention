@@ -300,11 +300,16 @@ class LlamaAttention(nn.Module):
         from src.models.tree_attention.attention import TreeAttention
         self.tree_attention = TreeAttention(
             causal=True,
-            k=64,
-            start_w=8192,
-            w=32,
-            scale_up=8.0,
+            k=128,
+            start_w=4096,
+            w=64,
+            scale_up=4.0,
             oversample=1.0
+        )
+        
+        from src.models.tree_attention.attention2 import TreeAttention as TreeAttention2
+        self.tree_attention2 = TreeAttention2(
+            causal=True
         )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
@@ -410,6 +415,15 @@ class LlamaAttention(nn.Module):
                 attn_weights = attn_outputs[2] if output_attentions else None
         elif self.attention_method == 'tree':
             attn_output = self.tree_attention(
+                q=q.permute(0, 2, 1, 3) / self.norm_factor,
+                k=k.permute(0, 2, 1, 3),
+                v=v.permute(0, 2, 1, 3),
+                attention_mask=None,
+            )
+            attn_output = attn_output.permute(0, 2, 1, 3).reshape(bsz, q_len, h_size)
+            attn_weights = None
+        elif self.attention_method == 'tree2':
+            attn_output = self.tree_attention2(
                 q=q.permute(0, 2, 1, 3) / self.norm_factor,
                 k=k.permute(0, 2, 1, 3),
                 v=v.permute(0, 2, 1, 3),
