@@ -37,6 +37,7 @@ import numpy as np
 from torch import Tensor, nn
 import torch
 import torch.nn.functional as F
+import tqdm
 from ...utils import get_bench
 
 # get_bench().synchronize = True
@@ -111,7 +112,7 @@ def topk_prime(
         ws (Tensor): fp[N, T_DST, 1]
         tsrcs (Tensor): fp[N, T_DST, 1]
         ks (int): top-k in final one
-        ps (Tensor): fp[N, T_DST, 1] patches to exit iteration
+        ps (int): patches to exit iteration
         query (Tensor): fp[N, T_DST, HID]
         key (Tensor): fp[N, T_SRC, HID]
     
@@ -125,7 +126,7 @@ def topk_prime(
     assert ws.shape == (N, T_DST, 1)
     assert tsrcs.shape == (N, T_DST, 1)
     assert isinstance(ks, int)
-    assert ps.shape == (N, T_DST, 1)
+    # assert ps.shape == (N, T_DST, 1)
     _, _, HID = query.shape
     assert query.shape[:2] == (N, T_DST)
     _, T_SRC, _ = key.shape
@@ -170,7 +171,7 @@ def topk_prime(
         topk = ks
     need_update = topk <= (ps * 2)
     if not last_loop:
-        topk = topk * 1.5
+        topk = torch.where(need_update, topk * 1.5, topk)
     
     _, indices = torch.sort(scores, dim=-1, descending=True)
     assert indices.shape == (N, T_DST, Z)
@@ -189,6 +190,10 @@ def resize(
     ws_to: Tensor,
     scale_up: float,
     Z_MAX: int,
+    ks: int,
+    ps: int,
+    max_scale_up: int,
+    is_last_loop: bool,
 ) -> Tuple[Tensor, Tensor]:
     """
     Resize zs from ws_from to ws_to
@@ -204,6 +209,8 @@ def resize(
         zs_mask (Tensor),
     ]
     """
+    patches = ps
+    
     max_scale_up = int(math.ceil(scale_up))
     with timer("resize.expand"):
         # TODO: resize from ws_new to ws
@@ -213,14 +220,16 @@ def resize(
         zs_end = (zs + 1) * scale
         zs_start = torch.round(zs_start).long()
         zs_end = torch.round(zs_end).long()
-        ps = zs_start[:, :, :, None].expand(N, A, Z, max_scale_up)
+        ps = zs_start[:, :, :, None].expand(N, A, Z, max_scale_up).contiguous()
         ps_counts = (zs_end - zs_start)[:, :, :, None]
         reps = torch.arange(0, max_scale_up, device=zs.device)[None, None, None, :]
         reps = reps * zs_mask[:, :, :, None]
-        ps = ps + torch.clamp_max(reps, torch.clamp_min(ps_counts - 1, 0)).long()
+        # ps = ps + torch.clamp_max(reps, torch.clamp_min(ps_counts - 1, 0)).long()
+        ps.add_(torch.clamp_max(reps, torch.clamp_min(ps_counts - 1, 0)).long())
         ps = ps.view(N * A, Z * max_scale_up)
     
     with timer("resize.unique"):
+        # print(ps.shape)
         _, indices = torch.unique_consecutive(ps, return_inverse=True)
         indices -= indices.min(dim=1, keepdim=True)[0]
         result = torch.full_like(ps, -1)
@@ -232,12 +241,12 @@ def resize(
         zs_mask = torch.logical_and(ps >= 0, ps < Z_MAX).to(torch.long)
         # ##print(zs_mask[0, DBG_T])
         zs = ps.masked_fill(torch.logical_or(ps < 0, ps >= Z_MAX), Z_MAX)
-        max_z = int(zs_mask.sum(-1, dtype=torch.long).max().item())
-        # if is_last_loop:
-        #     max_z = self_k
-        # else:
-        #     max_z = int(round(self_k * 2))
-        # ##print(is_last_loop, max_z, int(pixels_mask.sum(-1).max().item()))
+        # max_z = int(zs_mask.sum(-1, dtype=torch.long).max().item())
+        if is_last_loop:
+            max_z = ks
+        else:
+            max_z = int(round(patches * max_scale_up * 1.5))
+        # print(max_z, int(zs_mask.sum(-1).max().item()))
         zs = zs[..., :max_z].contiguous()
         zs_mask = zs_mask[..., :max_z].contiguous()
         ##print(zs[0, DBG_T])
@@ -308,12 +317,14 @@ def approx_mask(
     assert _N == N
     assert _HID == HID
     
-    if isinstance(ps, int):
-        ps = torch.tensor(ps, device=device, dtype=torch.long).view(1, 1, 1).expand(N, T_DST, 1)
-    elif isinstance(ps, float) or (isinstance(ps, Tensor) and ps.dtype != torch.long):
-        raise Exception("ps should be int or int Tensor")
+    if isinstance(ps, Tensor):
+        ps = ps.max().long().item()
+    elif isinstance(ps, float):
+        ps = int(round(ps))
+    elif isinstance(ps, int):
+        pass
     else:
-        assert isinstance(ps, Tensor)
+        raise Exception()
     
     if isinstance(ks, Tensor):
         ks = ks.max().long().item()
@@ -336,96 +347,126 @@ def approx_mask(
     tsrcs = torch.arange(T_SRC+1-T_DST, T_SRC+1, device=device).view(1, T_DST, 1).expand(N, T_DST, 1)
     need_update = torch.full((1, T_DST, 1), True, dtype=torch.bool, device=device)
     
+    # print('zs', zs.shape)
+    
     w = init_w
     life = 1
     last_loop = False
     while True:
-        Z = zs.shape[-1]
-        tzs = torch.masked_select(zs, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
-        tzs_mask = torch.masked_select(zs_mask, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
-        tws = torch.masked_select(ws, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
-        t_tsrcs = torch.masked_select(tsrcs, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
-        tks = ks # torch.masked_select(ks, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
-        tps = torch.masked_select(ps, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
-        tquery = torch.masked_select(query, need_update.expand(N, T_DST, HID)).view(N, -1, HID)
-        
-        ##print('bb', tzs_mask[0, DBG_T])
-        
-        next_need_update, next_zs_mask = topk_prime(
-            zs=tzs,
-            zs_mask=tzs_mask,
-            ws=tws,
-            tsrcs=t_tsrcs,
-            ks=tks,
-            ps=tps,
-            query=tquery,
-            key=key,
-            last_loop=last_loop
-        )
-        assert next_zs_mask.dtype == torch.long
-        
-        ##print('bb', next_zs_mask[0, DBG_T])
-        
-        def pack_zs(zs: Tensor, zs_mask: Tensor) -> Tuple[Tensor, Tensor]:
-            new_zs = zs.masked_fill(zs_mask < 0.5, Z_MAX)
-            # ##print(zs_mask[0,0]<0.5)
-            new_zs, idx = torch.sort(new_zs, dim=-1, descending=False)
-            new_zs_mask = zs_mask.gather(dim=-1, index=idx)
+        with timer("loop"):
+            Z = zs.shape[-1]
+            # tzs = torch.masked_select(zs, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
+            # if tzs.shape[1] == 0:
+            #     break
+            # tzs_mask = torch.masked_select(zs_mask, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
+            # tws = torch.masked_select(ws, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            # t_tsrcs = torch.masked_select(tsrcs, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            # tks = ks # torch.masked_select(ks, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            # tps = ps #torch.masked_select(ps, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            # tquery = torch.masked_select(query, need_update.expand(N, T_DST, HID)).view(N, -1, HID)
             
-            max_item = zs_mask.sum(dim=-1, dtype=torch.long).max().item()
-            new_zs = new_zs[...,:max_item]
-            new_zs_mask = new_zs_mask[...,:max_item]
-            
-            return new_zs, new_zs_mask
-        
-        ##print('b', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
-        
-        tzs, next_zs_mask = pack_zs(tzs, next_zs_mask)
-        
-        ##print('c', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
-        
-        next_tws = torch.min(tws * scale_up, t_tsrcs)
-        tzs, next_zs_mask = resize(
-            zs=tzs, 
-            zs_mask=next_zs_mask,
-            ws_from=tws,
-            ws_to=next_tws,
-            scale_up=scale_up,
-            Z_MAX=Z_MAX
-        )
-        
-        ##print('d', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
-        
-        ws.masked_scatter_(need_update.expand(N, T_DST, 1), next_tws)
-        zs, tzs = padd_zs(zs, tzs, value=Z_MAX)
-        assert zs_mask.dtype == next_zs_mask.dtype
-        zs_mask, next_zs_mask = padd_zs(zs_mask, next_zs_mask, value=0)
-        assert zs.shape == zs_mask.shape, f"{zs.shape} == {zs_mask.shape}"
-        assert zs_mask.dtype == next_zs_mask.dtype
-        Z = zs.shape[-1]
-        zs = zs.masked_scatter(need_update.expand(N, T_DST, Z), tzs)
-        zs_mask = zs_mask.masked_scatter(need_update.expand(N, T_DST, Z), next_zs_mask)
-        
-        imshow_pixels(zs, zs_mask.float(), N, T_DST, T_SRC)
-        
-        # print('iter', zs.shape, zs_mask.shape, ws.max().item(), w, T_SRC)
-        if next_need_update.any():
-            # print('updated')
-            need_update = need_update\
-                .masked_scatter_(need_update, next_need_update)\
-                .view(need_update.shape)
-        else:
-            # break
-            if last_loop:
-                # print('breaked')
-                # if life == 0:
-                #     break
-                # life -= 1
+            tzs = zs #torch.masked_select(zs, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
+            if tzs.shape[1] == 0:
                 break
-            last_loop = True
-            need_update = torch.full((1, T_DST, 1), True, dtype=torch.bool, device=device)
-            # break
-        w = w * scale_up
+            tzs_mask = zs_mask #torch.masked_select(zs_mask, need_update.expand(N, T_DST, Z)).view(N, -1, Z)
+            tws = ws #torch.masked_select(ws, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            t_tsrcs = tsrcs #torch.masked_select(tsrcs, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            tks = ks # torch.masked_select(ks, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            tps = ps #torch.masked_select(ps, need_update.expand(N, T_DST, 1)).view(N, -1, 1)
+            tquery = query #torch.masked_select(query, need_update.expand(N, T_DST, HID)).view(N, -1, HID)
+            
+            # print('bb', tzs_mask[0, DBG_T])
+            
+            with timer("topk_prime"):
+                next_need_update, next_zs_mask = topk_prime(
+                    zs=tzs,
+                    zs_mask=tzs_mask,
+                    ws=tws,
+                    tsrcs=t_tsrcs,
+                    ks=tks,
+                    ps=tps,
+                    query=tquery,
+                    key=key,
+                    last_loop=last_loop
+                )
+                assert next_zs_mask.dtype == torch.long
+            
+            # print('bb', next_zs_mask[0, DBG_T])
+            
+            def pack_zs(zs: Tensor, zs_mask: Tensor) -> Tuple[Tensor, Tensor]:
+                new_zs = zs.masked_fill(zs_mask < 0.5, Z_MAX)
+                # ##print(zs_mask[0,0]<0.5)
+                new_zs, idx = torch.sort(new_zs, dim=-1, descending=False)
+                new_zs_mask = zs_mask.gather(dim=-1, index=idx)
+                
+                # max_item = zs_mask.sum(dim=-1, dtype=torch.long).max().item()
+                max_item = int(ps * scale_up * 1.5)
+                new_zs = new_zs[...,:max_item]
+                new_zs_mask = new_zs_mask[...,:max_item]
+                
+                return new_zs, new_zs_mask
+            
+            # print('b', tzs.shape)
+            # print('b', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
+            
+            tzs, next_zs_mask = pack_zs(tzs, next_zs_mask)
+            
+            # print('c', tzs.shape)
+            # print('c', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
+            
+            with timer("resize"):
+                next_tws = torch.min(tws * scale_up, t_tsrcs)
+                tzs, next_zs_mask = resize(
+                    zs=tzs, 
+                    zs_mask=next_zs_mask,
+                    ws_from=tws,
+                    ws_to=next_tws,
+                    scale_up=scale_up,
+                    Z_MAX=Z_MAX,
+                    ks=ks,
+                    ps=ps,
+                    max_scale_up=scale_up,
+                    is_last_loop=False
+                )
+            
+            # print('d', tzs.shape)
+            # print('d', tzs[0, DBG_T], next_zs_mask[0, DBG_T])
+            
+            ws.masked_scatter_(need_update.expand(N, T_DST, 1), next_tws)
+            zs, tzs = padd_zs(zs, tzs, value=Z_MAX)
+            assert zs_mask.dtype == next_zs_mask.dtype
+            zs_mask, next_zs_mask = padd_zs(zs_mask, next_zs_mask, value=0)
+            assert zs.shape == zs_mask.shape, f"{zs.shape} == {zs_mask.shape}"
+            assert zs_mask.dtype == next_zs_mask.dtype
+            Z = zs.shape[-1]
+            zs = zs.masked_scatter(need_update.expand(N, T_DST, Z), tzs)
+            zs_mask = zs_mask.masked_scatter(need_update.expand(N, T_DST, Z), next_zs_mask)
+            
+            imshow_pixels(zs, zs_mask.float(), N, T_DST, T_SRC)
+            
+            # print('iter', zs.shape, zs_mask.shape, ws.max().item(), w, T_SRC)
+            if w <= T_SRC:
+                # print('updated')
+                if isinstance(next_need_update, Tensor):
+                    need_update = need_update\
+                        .masked_scatter_(need_update, next_need_update)\
+                        .view(need_update.shape)
+                else:
+                    need_update = need_update\
+                        .masked_fill_(need_update, next_need_update)\
+                        .view(need_update.shape)
+            else:
+                # break
+                if last_loop:
+                    # print('breaked')
+                    # if life == 0:
+                    #     break
+                    # life -= 1
+                    break
+                last_loop = True
+                need_update = torch.full((1, T_DST, 1), True, dtype=torch.bool, device=device)
+                # break
+            w = w * scale_up
     
     # ##print(ws)
     ##print(zs.shape, zs_mask.shape)
@@ -436,7 +477,11 @@ def approx_mask(
         ws_from=ws,
         ws_to=tsrcs,
         scale_up=scale_up,
-        Z_MAX=Z_MAX
+        Z_MAX=Z_MAX,
+        ks=ks,
+        ps=ps,
+        max_scale_up=scale_up,
+        is_last_loop=True
     )
     zs_mask = (zs < T_SRC).long() * zs_mask
     
@@ -487,106 +532,139 @@ class TreeAttention(nn.Module):
         N, H, T_SRC, HID = k.shape
         N, H, T_DST, HID = q.shape
         
-        contexts = []
-        t_dense = max(0, max(self.start_w, self.k) - T_SRC + T_DST)
-        if t_dense > 0:
-            q, q_dense = q[..., t_dense:, :], q[..., :t_dense, :]
-            if attention_mask is not None:
-                attention_mask, mask_dense = attention_mask[..., t_dense:, :], attention_mask[..., :t_dense, :]
-                scores = torch.matmul(q_dense, k.transpose(-1, -2))
-                scores = scores + mask_dense
-                probs = torch.softmax(scores, -1)
-                context = torch.matmul(probs, v)
-            else:
-                # need causal flash attention
-                context = F.scaled_dot_product_attention(
-                    q_dense,
-                    k,
-                    v,
-                    is_causal=True,
-                    scale=1,
-                )
-            contexts.append(context)
-        
-        t_sparse = T_DST - t_dense
-        if t_sparse > 0:
-            q = q.view(N*H, t_sparse, HID)
-            k = k.view(N*H, T_SRC, HID)
-            DENSE = False
-            with timer("fmask"):
-                mask_sparse = approx_mask(
-                    query=q,
-                    key=k,
-                    ps=self.p,
-                    ks=self.k,
-                    init_w=self.w,
-                    scale_up=self.scale_up,
-                    mask_value=1 if DENSE else 0
-                )
+        with timer("tree2"):
+            contexts = []
+            t_dense = max(0, max(self.start_w, self.k) - T_SRC + T_DST)
+            if t_dense > 0:
+                with timer("dense_attention"):
+                    q, q_dense = q[..., t_dense:, :], q[..., :t_dense, :]
+                    if attention_mask is not None:
+                        attention_mask, mask_dense = attention_mask[..., t_dense:, :], attention_mask[..., :t_dense, :]
+                        scores = torch.matmul(q_dense, k.transpose(-1, -2))
+                        scores = scores + mask_dense
+                        probs = torch.softmax(scores, -1)
+                        context = torch.matmul(probs, v)
+                    else:
+                        # need causal flash attention
+                        context = F.scaled_dot_product_attention(
+                            q_dense,
+                            k,
+                            v,
+                            is_causal=True,
+                            scale=1,
+                        )
+                    contexts.append(context)
             
-            if DENSE:
-                scores = torch.matmul(q, k.transpose(-1, -2))
-                scores = scores + (1 - torch.clamp(mask_sparse.to_dense(), 0, 1)) * -32000
-                # scores = scores + attention_mask
-                probs = torch.softmax(scores, -1)
-                context = torch.matmul(probs, v)
-            else:
-                with timer("attention"):
-                    scores = torch.sparse.sampled_addmm(
-                        mask_sparse, q.to(torch.float32), k.transpose(-1, -2).to(torch.float32)
+            t_sparse = T_DST - t_dense
+            if t_sparse > 0:
+                q = q.view(N*H, t_sparse, HID)
+                k = k.view(N*H, T_SRC, HID)
+                DENSE = False
+                with timer("fmask"):
+                    mask_sparse = approx_mask(
+                        query=q,
+                        key=k,
+                        ps=self.p,
+                        ks=self.k,
+                        init_w=self.w,
+                        scale_up=self.scale_up,
+                        mask_value=1 if DENSE else 0
                     )
-                    scores = torch.sparse_bsr_tensor(
-                        crow_indices=scores.crow_indices(),
-                        col_indices=scores.col_indices(),
-                        values=scores.values().unsqueeze(-1).unsqueeze(-1),
-                        size=scores.shape
-                    )
-                    import torch.sparse._triton_ops as triton_ops
-                    probs = triton_ops.bsr_softmax(scores) #.to_dense().to(q.dtype)
-                    bsz, tdst, tsrc = probs.shape
-                    cols = probs.col_indices() # N, A*Z
-                    values = probs.values().squeeze(-1).squeeze(-1) # N, A*Z
-                    
-                    nnz = values.shape[-1] // tdst
-                    indices = torch.concat([
-                        torch.arange(bsz, device=cols.device).view(1, -1, 1, 1).expand(1, bsz, tdst, nnz),
-                        torch.arange(tdst, device=cols.device).view(1, 1, -1, 1).expand(1, bsz, tdst, nnz),
-                        cols.view(1, bsz, tdst, -1).contiguous()
-                    ], dim=0).view(3, -1)
-                    values = values.view(-1)
-                    probs = torch.sparse_coo_tensor(
-                        indices=indices.long(),
-                        values=values.to(torch.float32),
-                        size=probs.shape
-                    )
-                    with torch.autocast('cuda', torch.float32):
-                        context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
-                    context = context.view(N, H, t_sparse, HID)
-            contexts.append(context)
-        
-        contexts = torch.concat(contexts, dim=-2)
-        
-        return contexts
+                
+                with timer("sparse_attention"):
+                    if DENSE:
+                        scores = torch.matmul(q, k.transpose(-1, -2))
+                        scores = scores + (1 - torch.clamp(mask_sparse.to_dense(), 0, 1)) * -32000
+                        # scores = scores + attention_mask
+                        probs = torch.softmax(scores, -1)
+                        context = torch.matmul(probs, v)
+                    else:
+                        with timer("attention"):
+                            scores = torch.sparse.sampled_addmm(
+                                mask_sparse, q.to(torch.float32), k.transpose(-1, -2).to(torch.float32)
+                            )
+                            scores = torch.sparse_bsr_tensor(
+                                crow_indices=scores.crow_indices(),
+                                col_indices=scores.col_indices(),
+                                values=scores.values().unsqueeze(-1).unsqueeze(-1),
+                                size=scores.shape
+                            )
+                            import torch.sparse._triton_ops as triton_ops
+                            probs = triton_ops.bsr_softmax(scores) #.to_dense().to(q.dtype)
+                            bsz, tdst, tsrc = probs.shape
+                            cols = probs.col_indices() # N, A*Z
+                            values = probs.values().squeeze(-1).squeeze(-1) # N, A*Z
+                            
+                            nnz = values.shape[-1] // tdst
+                            indices = torch.concat([
+                                torch.arange(bsz, device=cols.device).view(1, -1, 1, 1).expand(1, bsz, tdst, nnz),
+                                torch.arange(tdst, device=cols.device).view(1, 1, -1, 1).expand(1, bsz, tdst, nnz),
+                                cols.view(1, bsz, tdst, -1).contiguous()
+                            ], dim=0).view(3, -1)
+                            values = values.view(-1)
+                            probs = torch.sparse_coo_tensor(
+                                indices=indices.long(),
+                                values=values.to(torch.float32),
+                                size=probs.shape
+                            )
+                            with torch.autocast('cuda', torch.float32):
+                                context = torch.bmm(probs, v.view(N*H, T_SRC, HID).to(torch.float32)).to(v.dtype)
+                            context = context.view(N, H, t_sparse, HID)
+                    contexts.append(context)
+            
+            contexts = torch.concat(contexts, dim=-2)
+            
+            return contexts
 
 if __name__ == '__main__':
     torch.random.manual_seed(42)
+    torch.cuda.set_sync_debug_mode("warn")
+    
+    # device = 'cuda:0'
+    # batch_size = 1
+    # head_size = 16
+    # head_dim = 64
+    # seq_len = 128
+    # attention = TreeAttention(
+    #     causal=True, 
+    #     start_w=0,
+    #     w=4,
+    #     scale_up=4,
+    #     p=4,
+    #     k=16
+    # )
+    
+    # query = torch.randn((batch_size, head_size, seq_len, head_dim), device=device)
+    # key = query.clone()
+    # value = query.clone()
+    
+    # attention(query, key, value)
+    
+    bench = get_bench()
+    # bench.synchronize = True
+    # bench.disabled = False
     
     device = 'cuda:0'
     batch_size = 1
-    head_size = 16
+    head_size = 512
     head_dim = 64
-    seq_len = 128
+    seq_len = 16384 * 4
     attention = TreeAttention(
         causal=True, 
-        start_w=0,
-        w=4,
-        scale_up=4,
-        p=4,
-        k=16
+        start_w=4096,
+        w=64,
+        scale_up=16,
+        p=8,
+        k=128
     )
     
-    query = torch.randn((batch_size, head_size, seq_len, head_dim), device=device)
-    key = query.clone()
-    value = query.clone()
+    query = torch.randn((batch_size, head_size, 1, head_dim), device=device)
+    key = torch.randn((batch_size, head_size, seq_len, head_dim), device=device).clone()
+    value = key.clone()
     
-    attention(query, key, value)
+    for i in tqdm.tqdm(range(100)):
+        attention(query, key, value)
+        torch.cuda.synchronize()
+    
+    if not bench.disabled:
+        print(bench.format_tracetree())
