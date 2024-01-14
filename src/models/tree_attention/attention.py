@@ -43,18 +43,19 @@ def mask(
     queries: ndarray, 
     keys: ndarray, 
     
-    w_start: int = 64,
-    n_patches: int = 32,
+    w_start: int = 32,
+    n_patches: int = 16,
     mask_k: int = 128,
-    scale_up: int = 2,
+    scale_up: int = 4,
     
     # w_start: int = 4,
     # n_patches: int = 8,
     # mask_k: int = 16,
     # scale_up: int = 2,
 ) -> ndarray:
-    queries_cs = queries.cumsum(1)
-    keys_cs = keys.cumsum(1)
+    # NOTE: uncomment for cumsum
+    # queries_cs = queries.cumsum(1)
+    # keys_cs = keys.cumsum(1)
     
     dtype = np.float32
     N, T_DST, HID = queries.shape
@@ -68,9 +69,8 @@ def mask(
     ks = ws.copy()
     mask = (np.arange(mask_k, dtype=np.float32).reshape((1, 1, mask_k)) / ks)
     t_mask = np.zeros((N, T_DST, mask_k*math.ceil(scale_up)), dtype=np.float32)
-    scores = np.zeros(t_mask.shape, dtype=dtype)
+    scores = np.zeros((N, T_DST, mask_k*math.ceil(scale_up)), dtype=dtype)
     
-    print(ks.shape, mask.shape, t_mask.shape)
     def to_dense(mask, ks, ws):
         dense = np.zeros((N, T_DST, T_SRC))
         for i in range(N):
@@ -102,34 +102,36 @@ def mask(
                             loc_idx_end = int(loc_idx_end / w_old * w_new)
                             dup_pixels = loc_idx_end - loc_idx_start
                             for l in range(dup_pixels):
-                                # print(k_old, w_old, w_new, t_mask.shape, i, j, l, dup_pixels, num_pixels)
                                 t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
                             num_pixels += dup_pixels
                         return num_pixels
                     
-                    # if k_new > n_patches and k_old != min(t_src, mask_k):
-                    #     # do only scale up
-                    #     k_new = min(t_src, mask_k)
-                    #     w_new = t_src
-                    #     ws[i, j, 0] = w_new
-                    # else:
-                    #     # scale up and top-k(k_new)
                     k_new = min(t_src, max(n_patches, k_new))
-                    ws[i, j, 0] = w_new
-                        
+                    
+                    # mask -> t_mask    
                     num_pixels = resize_query(i, j, mask, t_mask, k_old, w_old, w_new)
-                    # mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
                     
-                    for k in range(num_pixels):
-                        loc = t_mask[i, j, k]
-                        loc = int(loc * t_src)
-                        vec_q = queries[i, j, :]
-                        vec_k = keys[i, loc, :]
-                        score = np.dot(vec_q, vec_k)
-                        scores[i, j, k] = -score # NOTE: store negative store
-                    
-                    # print(num_pixels, k_new)
+                    # t_mask -> mask (using scores)
                     if k_new < num_pixels:
+                        # need top_k, so compute scores
+                        for k in range(num_pixels):
+                            vec_q = queries[i, j, :]
+                            
+                            # NOTE: nearest
+                            loc = t_mask[i, j, k]
+                            vec_k = keys[i, int(loc * t_src), :]
+                            
+                            # NOTE: cumsum
+                            # loc_start = int(int(loc * w_new) * (t_src / w_new))
+                            # loc_end = int((int(loc * w_new) + 1) * (t_src / w_new))
+                            # loc_end = max(loc_end, loc_start + 1)
+                            # vec_k = keys_cs[i, loc_end - 1, :]# - keys_cs[i, loc_start, :]
+                            # if loc_start > 0:
+                            #     vec_k -= keys_cs[i, loc_start - 1, :]
+                            
+                            score = np.dot(vec_q, vec_k)
+                            scores[i, j, k] = -score # NOTE: store negative store
+                        
                         topk_indices = np.argpartition(scores[i, j, :num_pixels], kth=k_new)
                         topk_indices = np.sort(topk_indices[:k_new])
                         for k in range(k_new):
@@ -137,19 +139,23 @@ def mask(
                     else:
                         mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
                     
+                    ws[i, j, 0] = w_new
                     ks[i, j, 0] = min(k_new, num_pixels)
                 # end if w_old != w_new
             # end for j
         # end for i
-        x = to_dense(mask, ks, ws)[0]
-        x = skimage.measure.block_reduce(x, (4, 4), np.max)
-        plt.imshow(x)
-        plt.savefig('hello.png', dpi=200)
-        input('>>> ')
+        
+        # NOTE: debug image output
+        # x = to_dense(mask, ks, ws)[0]
+        # x = skimage.measure.block_reduce(x, (4, 4), np.max)
+        # plt.imshow(x)
+        # plt.savefig('hello.png', dpi=200)
+        # input('>>> ')
         
         w_curr = round(w_curr * scale_up)
     # end while
     
+    # NOTE: for debug image output
     # print mask
     mask = to_dense(mask, ks, ws)[0]
     x = skimage.measure.block_reduce(mask, (4, 4), np.max)
@@ -164,10 +170,11 @@ def mask(
     x = skimage.measure.block_reduce(x, (8, 8), np.max) ** 0.2
     plt.imshow(x)
     plt.savefig('hello_2.png', dpi=200)
+    # NOTE: end of debug output
     
     print(ks)
     
-    return mask, ks, scores
+    return
 
 def sparse_attention(q: ndarray, k: ndarray, v: ndarray, csr_mask: ndarray):
     pass
