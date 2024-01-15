@@ -88,6 +88,7 @@ def mask(
                 w_old = ws[i, j, 0]
                 t_src = t_srcs[i, j, 0]
                 w_new = min(round(w_old * scale_up), t_src)
+                # print(i, j, w_old, w_new)
                 if w_old != w_new:
                     k_old = ks[i, j, 0]
                     k_new = max(n_patches, int(min(mask_k / t_src, 1.0) * w_new))
@@ -144,6 +145,9 @@ def mask(
                 # end if w_old != w_new
             # end for j
         # end for i
+        
+        # print(t_mask[0, 1000:1016, :5])
+        # print(ws[0, 1000:1016])
         
         # NOTE: debug image output
         x = to_dense(mask, ks, ws)[0]

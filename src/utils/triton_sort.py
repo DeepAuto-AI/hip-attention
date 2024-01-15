@@ -1,5 +1,7 @@
 # sort
-from triton import jit
+
+from triton.runtime.jit import jit
+from triton.language import core, math
 from triton.language import zeros_like, core
 
 @jit

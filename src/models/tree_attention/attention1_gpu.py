@@ -48,8 +48,9 @@ def __triton_kth_large(
     BLOCK_SCORES: tl.constexpr,
 ) -> tl.tensor:
     sorted_score = tl.sort(scores)
+    tl.debug_barrier()
     sorted_score_mask = tl.arange(0, BLOCK_SCORES) < k
-    return tl.max(sorted_score * sorted_score_mask + (-32000) * (~sorted_score_mask))
+    return tl.max(sorted_score * sorted_score_mask + (-32000.0) * (~sorted_score_mask))
 
 @triton.jit
 def __mask_iter_compute(
@@ -99,14 +100,18 @@ def __mask_iter_compute(
             idx_tdst * stride_tsrcs_tdst,
     )
     
-    w_new = min(tl.math.round(w_old * scale_up), t_src)
+    w_new = tl.minimum(
+        tl.math.round(w_old.to(tl.float32) * scale_up.to(tl.float32)).to(tl.float32), 
+        t_src
+    ).to(tl.int64)
     
     """
     if w_old != w_new:
     """
     if w_old == w_new:
         return
-    
+    # return
+
     """
     k_old = ks[i, j, 0]
     k_new = max(n_patches, int(min(mask_k / t_src, 1.0) * w_new))
@@ -117,9 +122,17 @@ def __mask_iter_compute(
         ks + \
             idx_n * stride_ks_n +\
             idx_tdst * stride_ks_tdst,
+    ).to(tl.int64)
+    k_new = tl.maximum(
+        n_patches, 
+        (
+            tl.minimum(
+                mask_k.to(tl.float64) / t_src.to(tl.float64), 
+                1.0
+            ) * w_new.to(tl.float64)
+        ).to(tl.int64)
     )
-    k_new = tl.maximum(n_patches, (min(mask_k / t_src, 1.0) * w_new).to(tl.int64))
-    k_new = min(t_src, tl.maximum(n_patches, k_new))
+    k_new = tl.minimum(t_src, tl.maximum(n_patches, k_new))
     
     """
     # mask -> t_mask
@@ -146,27 +159,31 @@ def __mask_iter_compute(
         mask = k_old_mask,
         other = 0
     )
+    
     loc_idx_start_vec = (loc_vec * w_old).to(tl.int64)
     loc_idx_end_vec = loc_idx_start_vec + 1
-    loc_idx_start_vec = (loc_idx_start_vec / w_old * w_new).to(tl.int64)
-    loc_idx_end_vec = (loc_idx_end_vec / w_old * w_new).to(tl.int64)
+    loc_idx_start_vec = (loc_idx_start_vec.to(tl.float64) / w_old.to(tl.float64) * w_new.to(tl.float64)).to(tl.int64)
+    loc_idx_end_vec = (loc_idx_end_vec.to(tl.float64) / w_old.to(tl.float64) * w_new.to(tl.float64)).to(tl.int64)
     
     dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
+    dup_pixels_vec = dup_pixels_vec * k_old_mask
     num_pixels_vec = tl.cumsum(dup_pixels_vec)
     dup_pixels_first = tl.min(num_pixels_vec)
     num_pixels_scalar = tl.max(num_pixels_vec)
     
-    dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)[None, :]
-    dup_pixels_mask = (dup_pixels_range < dup_pixels_vec[:, None]) & k_old_mask[:, None]
+    dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)
+    dup_pixels_mask = (dup_pixels_range[None, :] <= dup_pixels_vec[:, None]) & k_old_mask[:, None]
+    tl.debug_barrier()
     tl.store(
         tmask + \
             idx_n * stride_tmask_n +\
-            idx_tdst * stride_tmask_n +\
-            ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range) * stride_tmask_k,
+            idx_tdst * stride_tmask_tdst +\
+            ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
         mask=dup_pixels_mask,
         value=(
-            (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]) / w_new
+            (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
         )
+        # value = num_pixels_scalar=
     )
     tl.debug_barrier()
     
@@ -174,7 +191,7 @@ def __mask_iter_compute(
     # t_mask -> mask (using scores)
     if k_new < num_pixels:
     """
-    if k_new < num_pixels_scalar:
+    if k_new < num_pixels_scalar and True:
         """
         # need top_k, so compute scores
         vec_q = queries[i, j, :]
@@ -195,7 +212,8 @@ def __mask_iter_compute(
                 hid_range * stride_queries_hid,
             mask = hid_mask,
             other = 0,
-        )[None, :]
+        )[:, None]
+        tl.debug_barrier()
         
         num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
         num_pixels_mask = num_pixels_range < num_pixels_scalar
@@ -207,7 +225,8 @@ def __mask_iter_compute(
             mask = num_pixels_mask,
             other = 0,
         )
-        loc_k_vec = (loc_k_vec * t_src).to(tl.int64)
+        tl.debug_barrier()
+        loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
         vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
         vec_k = tl.load(
             keys +\
@@ -217,18 +236,19 @@ def __mask_iter_compute(
             mask = vec_k_mask,
             other = 0,
         )
+        tl.debug_barrier()
         
         # TODO: support tensorCore
         
         # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
         # 1x128 @ 128x512 512x128 @ 128x1
         scores = -tl.sum(
-            tl.reshape(vec_q, (BLOCK_HID, 1)) *\
-            tl.reshape(vec_k, (BLOCK_HID, BLOCK_TMASK_K)), 
-            axis=0
+            vec_q.to(tl.float32) * vec_k.to(tl.float32), 
+            axis=0,
         )
+        tl.debug_barrier()
         
-        scores = tl.reshape(scores, (BLOCK_TMASK_K, ))
+        # scores = tl.reshape(scores, (BLOCK_TMASK_K, ))
         
         """
         _, topk_indices = torch.topk(scores[i, j, :num_pixels], k=k_new, largest=False)
@@ -237,10 +257,22 @@ def __mask_iter_compute(
         """
         
         # select min-k from negative scores -> select top-k
-        masked_scores = scores + (tl.arange(0, BLOCK_TMASK_K) >= num_pixels_scalar) * 32000.0
+        masked_scores = scores + (~num_pixels_mask) * 32000.0
+        tl.debug_barrier()
         scores_kth_large = __triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
-        topk_mask = scores <= scores_kth_large
-        topk_range = tl.cumsum(topk_mask.to(tl.int32)) - 1
+        tl.debug_barrier()
+        # tl.device_print("", k_new)
+        # tl.device_print("", scores_kth_large)
+        topk_mask = masked_scores <= scores_kth_large
+        topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
+        tl.debug_barrier()
+        # tl.device_print("", masked_scores)
+        # tl.device_print("", topk_mask.to(tl.int64))
+        # tl.device_print("", tl.sum(topk_mask.to(tl.int64)))
+        topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, k_new - 1)
+        tl.debug_barrier()
+        # tl.device_print('sooidx', idx_tdst)
+        # tl.device_print('soo', topk_mask_cumsum)
         
         temp_range = tl.arange(0, BLOCK_TMASK_K)
         temp_mask = temp_range < num_pixels_scalar
@@ -250,17 +282,25 @@ def __mask_iter_compute(
                 idx_tdst * stride_tmask_tdst +\
                 temp_range * stride_tmask_k,
             mask=temp_mask,
-            other=0
+            other=42
         )
+        tl.debug_barrier()
+        
+        # tl.device_assert(tl.max(topk_range) < mask_k, "oops")
+        # tl.device_print("", num_pixels_scalar)
+        # tl.device_print("asdf", tl.sum((topk_mask & temp_mask).to(tl.int32)))
+        
+        tl.debug_barrier()
         tl.store(
             mask +\
                 idx_n * stride_mask_n +\
                 idx_tdst * stride_mask_tdst +\
                 topk_range * stride_mask_k,
-            mask=topk_mask,
+            mask=topk_mask & temp_mask,
             value=temp,
+            # value=0.1,
         )
-        # del temp, temp_range, temp_mask
+        tl.debug_barrier()
     else:
         """
         else:
@@ -268,39 +308,46 @@ def __mask_iter_compute(
         """
         temp1_range = tl.arange(0, BLOCK_MASK_K)
         temp1_mask = temp1_range < num_pixels_scalar
+        tl.debug_barrier()
         temp1 = tl.load(
             tmask +\
                 idx_n * stride_tmask_n +\
                 idx_tdst * stride_tmask_tdst +\
-                temp1_mask * stride_tmask_k,
+                temp1_range * stride_tmask_k,
             mask=temp1_mask,
         )
+        
+        tl.debug_barrier()
         tl.store(
             mask +\
                 idx_n * stride_mask_n +\
                 idx_tdst * stride_mask_tdst +\
                 temp1_range * stride_mask_k,
             mask=temp1_mask,
-            value=temp1
+            value=temp1,
         )
+        tl.debug_barrier()
         # del temp1, temp1_range, temp1_mask
     
     """
     ws[i, j, 0] = w_new
     ks[i, j, 0] = min(k_new, num_pixels)
     """
+    tl.debug_barrier()
     tl.store(
         ws +\
             idx_n * stride_ws_n +\
             idx_tdst * stride_ws_tdst,
         value = w_new
     )
+    tl.debug_barrier()
     tl.store(
         ks +\
             idx_n * stride_ks_n +\
             idx_tdst * stride_ks_tdst,
-        value = min(k_new, num_pixels_scalar)
+        value = tl.minimum(k_new, num_pixels_scalar)
     )
+    tl.debug_barrier()
 
 def mask_iter(
     # input matrices
@@ -313,10 +360,6 @@ def mask_iter(
     N: int, T_DST: int, T_SRC: int, HID: int,
 ):
     grid = (N, T_DST)
-    
-    ws = ws.unsqueeze(-1).contiguous()
-    ks = ks.unsqueeze(-1).contiguous()
-    t_srcs = t_srcs.unsqueeze(-1).contiguous()
     
     __mask_iter_compute[grid](
         # input matrices
@@ -362,7 +405,7 @@ def mask(
     
     # NOTE: width of last query
     w_curr = round(w_start / scale_up)
-    t_srcs = np.arange(T_SRC-T_DST+1, T_SRC+1, 1, dtype=np.int32).reshape((1, T_DST, 1)).repeat(N, axis=0)
+    t_srcs = np.arange(T_SRC-T_DST+1, T_SRC+1, 1, dtype=np.int64).reshape((1, T_DST, 1)).repeat(N, axis=0)
     ws = t_srcs.clip(0, w_curr)
     ks = ws.copy()
     mask = (np.arange(mask_k, dtype=np.float32).reshape((1, 1, mask_k)) / ks)
@@ -373,23 +416,36 @@ def mask(
         dense = np.zeros((N, T_DST, T_SRC))
         for i in range(N):
             for j in range(T_DST):
-                nonzero_k = ks[i, j, 0]
+                nonzero_k = ks[i, j, 0].item()
                 for k in range(nonzero_k):
                     dense[i, j, int(mask[i, j, k] * ws[i, j, 0])] = 1
         return dense
     
     # NOTE: to cuda
     device = 'cuda:0'
-    queries = torch.tensor(queries, device=device)
-    keys = torch.tensor(keys, device=device)
-    mask = torch.tensor(mask, device=device)
-    t_mask = torch.tensor(t_mask, device=device)
-    scores = torch.tensor(scores, device=device)
-    ws = torch.tensor(ws, device=device)
-    ks = torch.tensor(ks, device=device)
-    t_srcs = torch.tensor(t_srcs, device=device)
+    queries = torch.tensor(queries, device=device, dtype=torch.float32)
+    keys = torch.tensor(keys, device=device, dtype=torch.float32)
+    mask = torch.tensor(mask, device=device, dtype=torch.float32)
+    t_mask = torch.tensor(t_mask, device=device, dtype=torch.float32)
+    scores = torch.tensor(scores, device=device, dtype=torch.float32)
+    ws = torch.tensor(ws, device=device, dtype=torch.int64)
+    ks = torch.tensor(ks, device=device, dtype=torch.int64)
+    t_srcs = torch.tensor(t_srcs, device=device, dtype=torch.int64)
+    
+    queries = queries.contiguous()
+    keys = keys.contiguous()
+    mask = mask.contiguous()
+    t_mask = t_mask.contiguous()
+    scores = scores.contiguous()
+    ws = ws.squeeze(-1).contiguous()
+    ks = ks.squeeze(-1).contiguous()
+    t_srcs = t_srcs.squeeze(-1).contiguous()
     
     while w_curr < T_SRC:
+        print(ws[0, :16])
+        
+        t_mask.fill_(0)
+        
         mask_iter(
             # input matrices
             queries, keys, mask, t_mask, scores, 
@@ -402,6 +458,30 @@ def mask(
         )
         w_curr = round(w_curr * scale_up)
         print(w_curr, T_SRC)
+        
+        # print(mask[0, 1:16, :5])
+        # print(t_mask[0, 1:16, :5])
+        # print(ks[0, 1:16])
+        # print(ws[0, 1:16])
+        
+        # print(mask[0, -16:, 90:105])
+        # print(t_mask[0, -16:, 90:105])
+        # print(ks[0, -16:])
+        # print(ws[0, -16:])
+        
+        # x = to_dense(
+        #     mask.cpu().numpy(), 
+        #     ks.cpu().unsqueeze(-1).numpy(), 
+        #     ws.cpu().unsqueeze(-1).numpy()
+        # )[0]
+        # x = skimage.measure.block_reduce(x, (1, 1), np.max)
+        # plt.imshow(x)
+        # plt.savefig('hello.png', dpi=500)
+        # input('>>>')
+    
+    # ws = t_srcs.clone()
+    ks = (torch.logical_and(mask[:, :, 1:] > 0.0, mask[:, :, 1:] < 1.0).int().sum(dim=-1) + 1).clamp_max(mask_k)
+    print(ks[:, -16:])
     
     # NOTE: to numpy
     queries = queries.cpu().numpy()
@@ -409,14 +489,14 @@ def mask(
     mask = mask.cpu().numpy()
     t_mask = t_mask.cpu().numpy()
     scores = scores.cpu().numpy()
-    ws = ws.cpu().numpy()
-    ks = ks.cpu().numpy()
-    t_srcs = t_srcs.cpu().numpy()
+    ws = ws.cpu().unsqueeze(-1).numpy()
+    ks = ks.cpu().unsqueeze(-1).numpy()
+    t_srcs = t_srcs.cpu().unsqueeze(-1).numpy()
     
     # NOTE: for debug image output
     # print mask
     mask = to_dense(mask, ks, ws)[0]
-    x = skimage.measure.block_reduce(mask, (4, 4), np.max)
+    x = skimage.measure.block_reduce(mask, (2, 2), np.max)
     plt.imshow(x)
     plt.savefig('hello.png', dpi=200)
     
@@ -464,7 +544,7 @@ if __name__ == '__main__':
         v = state['v']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        idx = 7
+        idx = 30
         q = q.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
         k = k.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
         v = v.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
