@@ -146,11 +146,11 @@ def mask(
         # end for i
         
         # NOTE: debug image output
-        # x = to_dense(mask, ks, ws)[0]
-        # x = skimage.measure.block_reduce(x, (4, 4), np.max)
-        # plt.imshow(x)
-        # plt.savefig('hello.png', dpi=200)
-        # input('>>> ')
+        x = to_dense(mask, ks, ws)[0]
+        x = skimage.measure.block_reduce(x, (4, 4), np.max)
+        plt.imshow(x)
+        plt.savefig('hello.png', dpi=200)
+        input('>>> ')
         
         w_curr = round(w_curr * scale_up)
     # end while
@@ -206,7 +206,7 @@ if __name__ == '__main__':
         v = state['v']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        idx = 3
+        idx = 7
         q = q.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
         k = k.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
         v = v.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
