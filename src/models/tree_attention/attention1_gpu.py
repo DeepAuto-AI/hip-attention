@@ -772,8 +772,8 @@ def tree_attention(
     
     w_start: int = 64,
     n_patches: int = 32,
-    mask_k: int = 128,
-    scale_up: int = 4,
+    mask_k: int = 256,
+    scale_up: int = 2,
 ):
     assert q.ndim == 3
     assert k.ndim == 3
@@ -801,6 +801,16 @@ def tree_attention(
         probs,
     )
     
+    # context_avg = v.cumsum(1) / torch.arange(0, v.shape[1], device=v.device)[None, :, None]
+    # context_avg = context_avg[:, T_SRC-T_DST:, :]
+    
+    # # context = context * 0.975 + context_avg * 0.025
+    # min_probs, _ = torch.topk(probs, k=3, dim=-1, largest=False)
+    # t_srcs = torch.arange(T_SRC-T_DST, T_SRC, device=v.device) + 1
+    # min_probs = torch.clamp(min_probs.mean(-1, keepdim=True) * (t_srcs[None, :, None] - mask_k) * 0.2, 0, 0.2)
+    # # print(min_probs)
+    # context = context * (1 - min_probs) + context_avg * min_probs
+    
     return context, (indices, ks, probs)
 
 def __load_checkouts():
@@ -808,7 +818,7 @@ def __load_checkouts():
     device = 0
     if data_source == 'llama':
         state = torch.load('./cache/llama/qkvout.pth', map_location='cpu')
-        q = state['q']
+        q = state['q'] / (state['q'].shape[-1] ** 0.5)
         k = state['k']
         v = state['v']
         out = state['out']
@@ -838,20 +848,20 @@ def main_debug():
     
     q, k, v, out = __load_checkouts()
     
-    context, attention_probs = tree_attention(
-        q, 
-        k, 
+    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+        q,
+        k,
         v,
-        w_start=64,
-        n_patches=32,
-        mask_k=128,
-        scale_up=2,
+        # w_start=64,
+        # n_patches=32,
+        # mask_k=128,
+        # scale_up=2,
     )
     
-    print(
-        F.mse_loss(out, context).item() ** 0.5, 
-        torch.std_mean(context)
-    )
+    stderr = (out - context).abs().mean().item()
+    stdcontext = torch.std_mean(context)[0].item()
+    
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
 
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
@@ -861,7 +871,7 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
 
 def flash_attention(q: Tensor, k: Tensor, v: Tensor):
     context = F.scaled_dot_product_attention(
-        q, k, v, is_causal=True,
+        q, k, v, is_causal=True, scale=1.0,
     )
     return context, None
 
@@ -880,7 +890,7 @@ def main_latency_benchmark():
     
     METHOD = 'tree'
     METHOD = 'torch'
-    METHOD = 'flash'
+    # METHOD = 'flash'
     
     samples = []
     for i in tqdm.tqdm(range(1000)):
@@ -914,5 +924,5 @@ def main_latency_benchmark():
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    main_debug()
-    # main_latency_benchmark()
+    # main_debug()
+    main_latency_benchmark()

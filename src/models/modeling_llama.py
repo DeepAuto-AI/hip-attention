@@ -647,6 +647,136 @@ class LlamaFlashAttention2(LlamaAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
+from src.models.tree_attention.attention1_gpu import tree_attention, flash_attention
+
+class LlamaCustomAttention(LlamaAttention):
+    def __init__(self, config: LlamaConfig, layer_idx = None):
+        super().__init__(config, layer_idx)
+        
+        self.attention_method = 'none'
+        self.tree_avgpool_scaler = nn.Sequential(
+            nn.Linear(config.hidden_size, config.num_attention_heads),
+        )
+    
+    # Adapted from LlamaAttention.forward
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
+        if query_states.device.type == "cuda" and attention_mask is not None:
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
+
+        if self.attention_method == 'none':
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+                is_causal=self.is_causal and attention_mask is None and q_len > 1,
+            )
+            if os.environ.get('CHECKOUT_STATES', '0') == '1':
+                os.makedirs('./cache/llama/', exist_ok=True)
+                torch.save({
+                    'q': query_states,
+                    'k': key_states,
+                    'v': value_states,
+                    'out': attn_output,
+                }, './cache/llama/qkvout.pth')
+                input('stored. press enter to continue >>> ')
+        elif self.attention_method == 'tree':
+            DENSE_QUERIES = 2048
+            
+            q = query_states / (query_states.shape[-1] ** 0.5)
+            k = key_states
+            v = value_states
+            
+            N, H, TDST, HID = q.shape
+            _, _, TSRC, _ = k.shape
+            assert k.shape == v.shape
+            
+            q = q.view(N*H, TDST, HID).contiguous().to(torch.float32)
+            k = k.view(N*H, TSRC, HID).contiguous().to(torch.float32)
+            v = v.view(N*H, TSRC, HID).contiguous().to(torch.float32)
+            
+            attn_output_flash, _ = flash_attention(
+                q[:, :DENSE_QUERIES, :],
+                k[:, :DENSE_QUERIES, :],
+                v[:, :DENSE_QUERIES, :]
+            )
+            
+            if q.shape[1] > DENSE_QUERIES:
+                attn_output_tree, _ = tree_attention(
+                    q[:, DENSE_QUERIES:, :].contiguous(),
+                    k,
+                    v
+                )
+                
+                context_avg = v.cumsum(-2) / torch.arange(0, v.shape[1], device=v.device)[None, :, None]
+                context_avg = context_avg[:, TSRC-TDST:, :]
+                # N, H, TDST
+                scale_avg = torch.sigmoid(
+                    self.tree_avgpool_scaler(hidden_states).transpose(-1, -2).view(N*H, TDST, 1)
+                )
+                attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
+                
+                attn_output = torch.cat([
+                    attn_output_flash, 
+                    attn_output_tree
+                ], dim=-2)
+            else:
+                attn_output = attn_output_flash
+            
+            attn_output = attn_output.view(N, H, TDST, HID).to(hidden_states.dtype)
+        else:
+            raise Exception(self.attention_method)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
 
 class LlamaSdpaAttention(LlamaAttention):
     """
@@ -748,7 +878,8 @@ class LlamaSdpaAttention(LlamaAttention):
 LLAMA_ATTENTION_CLASSES = {
     "eager": LlamaAttention,
     "flash_attention_2": LlamaFlashAttention2,
-    "sdpa": LlamaSdpaAttention,
+    # "sdpa": LlamaSdpaAttention,
+    "sdpa": LlamaCustomAttention,
 }
 
 
