@@ -39,6 +39,7 @@ from torch import Tensor
 import matplotlib.pyplot as plt
 import tqdm
 import skimage.measure
+import torch.nn.functional as F
 
 import triton
 import triton.language as tl
@@ -545,16 +546,18 @@ def to_dense(
                 dense[i, j, indices[i, j, k]] = value[i, j, k]
     return dense
 
+DEBUG = False
+
 def attention_matrix(
     queries: Tensor, 
     keys: Tensor, 
     
-    w_start: int = 64,
-    n_patches: int = 32,
-    mask_k: int = 256,
-    scale_up: int = 4,
+    w_start: int,
+    n_patches: int,
+    mask_k: int,
+    scale_up: int,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    DEBUG = True
+    global DEBUG
     
     dtype = queries.dtype
     device = queries.device
@@ -648,15 +651,130 @@ def attention_matrix(
     
     return indices, ks, probs
 
+@triton.jit
+def __sdbmm_compute(
+    # inputs
+    indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
+    ks, stride_ks_n, stride_ks_tdst, 
+    probs, stride_probs_n, stride_probs_tdst, stride_probs_k,
+    values, stride_values_n, stride_values_tsrc, stride_values_hid,
+    
+    # output
+    context, stride_context_n, stride_context_tdst, stride_context_hid,
+    
+    # variables
+    N, TSRC, TDST, HID, K,
+    
+    # kernel blocks
+    BLOCK_K: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    idx_n = tl.program_id(0)
+    idx_tdst = tl.program_id(1)
+    
+    idx_k = tl.arange(0, BLOCK_K)
+    mask_k = idx_k < K
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
+    
+    n_k = tl.load(
+        ks +\
+            idx_n * stride_ks_n+\
+            idx_tdst * stride_ks_tdst,
+    )
+    mask_k = mask_k & (tl.arange(0, BLOCK_K) < n_k)
+    
+    # atten_indices: [BLOCK_K]
+    atten_indices = tl.load(
+        indices +\
+            idx_n * stride_indices_n +\
+            idx_tdst * stride_indices_tdst +\
+            idx_k * stride_indices_k,
+        mask = mask_k
+    )
+    
+    # atten_probs: [BLOCK_K]
+    atten_probs = tl.load(
+        probs +\
+            idx_n * stride_probs_n +\
+            idx_tdst * stride_probs_tdst +\
+            idx_k * stride_probs_k,
+        mask = mask_k
+    )
+    
+    # value: [BLOCK_K, BLOCK_HID]
+    value = tl.load(
+        values +\
+            idx_n * stride_values_n +\
+            atten_indices[:, None] * stride_values_tsrc +\
+            idx_hid[None, :] * stride_values_hid,
+        mask = mask_k[:, None] & mask_hid[None, :]
+    )
+    
+    # output: [BLOCK_HID] <- atten_probs[1, BLOCK_K] @ value[BLOCK_K, BLOCK_HID]
+    output = tl.sum(atten_probs[:, None] * value, axis=0)
+    tl.store(
+        context +\
+            idx_n * stride_context_n +\
+            idx_tdst * stride_context_tdst +\
+            idx_hid * stride_context_hid,
+        mask = mask_hid,
+        value = output
+    )
+
 def sparse_attention(
+    # attention values
     values: Tensor,
+    
+    # attention matrix
     indices: Tensor,
     ks: Tensor,
     probs: Tensor,
 ) -> Tensor:
-    pass
+    N, T_SRC, HID = values.shape
+    _, T_DST, K = indices.shape
+    assert ks.shape == (N, T_DST)
+    assert probs.shape == indices.shape
+    
+    context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
+    
+    grid = (N, T_DST)
+    BLOCK_K = triton.next_power_of_2(K)
+    BLOCK_HID = triton.next_power_of_2(HID)
+    
+    # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
+    
+    __sdbmm_compute[grid](
+        # inputs
+        indices, indices.stride(0), indices.stride(1), indices.stride(2),
+        ks, ks.stride(0), ks.stride(1),
+        probs, probs.stride(0), probs.stride(1), probs.stride(2),
+        values, values.stride(0), values.stride(1), values.stride(2),
+        
+        # output
+        context, context.stride(0), context.stride(1), context.stride(2),
+        
+        # input variables
+        N, T_SRC, T_DST, HID, K,
+        
+        # blocks
+        BLOCK_K,
+        BLOCK_HID,
+    )
+    
+    return context
 
-def attention(q: Tensor, k: Tensor, v: Tensor):
+def tree_attention(
+    q: Tensor, 
+    k: Tensor, 
+    v: Tensor,
+    
+    w_start: int = 64,
+    n_patches: int = 32,
+    mask_k: int = 128,
+    scale_up: int = 4,
+):
     assert q.ndim == 3
     assert k.ndim == 3
     assert v.ndim == 3
@@ -669,7 +787,13 @@ def attention(q: Tensor, k: Tensor, v: Tensor):
     indices, ks, probs = attention_matrix(
         q,
         k,
+        
+        w_start,
+        n_patches,
+        mask_k,
+        scale_up,
     )
+    
     context = sparse_attention(
         v,
         indices,
@@ -679,7 +803,7 @@ def attention(q: Tensor, k: Tensor, v: Tensor):
     
     return context, (indices, ks, probs)
 
-if __name__ == '__main__':
+def __load_checkouts():
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
@@ -687,19 +811,108 @@ if __name__ == '__main__':
         q = state['q']
         k = state['k']
         v = state['v']
+        out = state['out']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
         idx = 7
         q = q.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
         k = k.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
         v = v.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
+        out = out.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
     else:
         q = torch.randn((1, 64, 4))
         k = torch.randn((1, 64, 4))
         v = k.clone()
+        out = q.clone()
     
     q = q.to(device, dtype=torch.float32)
     k = k.to(device, dtype=torch.float32)
     v = v.to(device, dtype=torch.float32)
+    out = out.to(device, dtype=torch.float32)
     
-    out = attention(q, k, v)
+    return q, k, v, out
+
+def main_debug():
+    global DEBUG
+    DEBUG = True
+    
+    q, k, v, out = __load_checkouts()
+    
+    context, attention_probs = tree_attention(
+        q, 
+        k, 
+        v,
+        w_start=64,
+        n_patches=32,
+        mask_k=128,
+        scale_up=2,
+    )
+    
+    print(
+        F.mse_loss(out, context).item() ** 0.5, 
+        torch.std_mean(context)
+    )
+
+def torch_attention(q: Tensor, k: Tensor, v: Tensor):
+    scores = torch.bmm(q, k.transpose(-1, -2))
+    probs = torch.softmax(scores, dim=-1)
+    context = torch.bmm(probs, v)
+    return context, probs
+
+def flash_attention(q: Tensor, k: Tensor, v: Tensor):
+    context = F.scaled_dot_product_attention(
+        q, k, v, is_causal=True,
+    )
+    return context, None
+
+def main_latency_benchmark():
+    global DEBUG
+    DEBUG = False
+    
+    q, k, v, out = __load_checkouts()
+    
+    BSIZE = 2048
+    DUPS = 2
+    QUERY_SIZE = 1
+    q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
+    k = k.repeat(BSIZE, DUPS, 1)
+    v = v.repeat(BSIZE, DUPS, 1)
+    
+    METHOD = 'tree'
+    METHOD = 'torch'
+    METHOD = 'flash'
+    
+    samples = []
+    for i in tqdm.tqdm(range(1000)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        if METHOD == 'torch':
+            torch_attention(q, k, v)
+        elif METHOD == 'flash':
+            flash_attention(q, k, v)
+        elif METHOD == 'tree':
+            tree_attention(
+                q,
+                k,
+                v,
+                w_start=64,
+                n_patches=32,
+                mask_k=128,
+                scale_up=2,
+            )
+        else:
+            raise Exception()
+        end.record()
+        torch.cuda.synchronize()
+        elapsed = start.elapsed_time(end)
+        
+        if i > 100:
+            samples.append(elapsed)
+    
+    samples = np.array(samples)
+    print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
+
+if __name__ == '__main__':
+    main_debug()
+    # main_latency_benchmark()
