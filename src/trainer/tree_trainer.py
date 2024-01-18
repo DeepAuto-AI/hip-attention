@@ -16,7 +16,7 @@ from pytorch_lightning.profilers import PyTorchProfiler
 
 import transformers
 
-from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
 
 import os
 from dataclasses import dataclass, field
@@ -27,8 +27,9 @@ from torch.utils.data import DataLoader, random_split
 
 @dataclass
 class TrainConfig:
+    using_fsdp: bool = False
     lr: float = 1e-4
-    batch_size: int = 256
+    batch_size: int = 1
     model_checkpoint_dir: str = "./saves/dev"
 
 class LabDataModule(pl.LightningDataModule):
@@ -209,9 +210,22 @@ class LabModule(pl.LightningModule):
                 params.append(p)
         return torch.optim.AdamW(params, lr=0.0001)
 
+from lightning.pytorch.strategies import FSDPStrategy
+
 def main(config: TrainConfig):
     os.makedirs('./saves/dev/wandb', exist_ok=True)
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
+    
+    if config.using_fsdp:
+        policy = {LlamaDecoderLayer}
+        devices = "auto"
+        strategy = FSDPStrategy(
+            auto_wrap_policy=policy,
+            activation_checkpointing_policy=policy,
+        )
+    else:
+        devices = "1"
+        strategy = "auto"
     
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
@@ -224,9 +238,9 @@ def main(config: TrainConfig):
     
     trainer = pl.Trainer(
         log_every_n_steps=1,
-        devices="1",
+        devices=devices,
         accelerator="gpu",
-        strategy="auto",
+        strategy=strategy,
         precision="32-true",
         default_root_dir='./saves/dev/checkpoint/',
         enable_checkpointing=True,
@@ -243,5 +257,14 @@ def main(config: TrainConfig):
     trainer.fit(model=model, datamodule=datamodule) 
 
 if __name__ == "__main__":
-    train_config = TrainConfig()
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--using_fsdp', action='store_true')
+    args = parser.parse_args()
+    
+    train_config = TrainConfig(
+        using_fsdp=args.using_fsdp,
+    )
+    
     main(train_config)
