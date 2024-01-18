@@ -655,7 +655,9 @@ class LlamaCustomAttention(LlamaAttention):
         
         self.attention_method = 'none'
         self.tree_avgpool_scaler = nn.Sequential(
-            nn.Linear(config.hidden_size, config.num_attention_heads),
+            nn.Linear(config.hidden_size, config.hidden_size // 4),
+            nn.ReLU(),
+            nn.Linear(config.hidden_size // 4,  config.num_attention_heads)
         )
     
     # Adapted from LlamaAttention.forward

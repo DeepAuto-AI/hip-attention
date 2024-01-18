@@ -50,6 +50,11 @@ if __name__ == '__main__':
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = args.method
+        
+        if hasattr(m, 'gradient_checkpointing'):
+            import torch.utils.checkpoint
+            m.gradient_checkpointing = True
+            m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
     
     model = prepare_model_for_kbit_training(model)
     model = get_peft_model(model, peft_config)

@@ -30,27 +30,28 @@ class TrainConfig:
     using_fsdp: bool = False
     lr: float = 1e-4
     batch_size: int = 1
+    seq_len: int = 4096
     model_checkpoint_dir: str = "./saves/dev"
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
         self,
+        config: TrainConfig,
         num_workers: int = 0,
         data_dir: Path ="data",
-        batch_size: int = 1,
-        block_size: int = 4096,
         download: bool = True,
         train_size: float = 0.9,
     ):
         super().__init__()
+        self.config = config
         self.data_dir = data_dir
-        self.block_size = block_size
+        self.block_size = config.seq_len
         self.download = download
         self.num_workers = num_workers
         self.train_size = train_size
         self.dataset = None
         self.tokenizer = load_tokenizer()
-        self.bsize = batch_size
+        self.bsize = config.batch_size
     
     def prepare_data(self):
         self.dataset = LabDataset(
@@ -109,7 +110,7 @@ def load_model(method = 'tree', device = 'cuda:0'):
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=64,
+            r=16,
             lora_alpha=32, 
             lora_dropout=0.1,
             modules_to_save=['tree_avgpool_scaler']
@@ -127,7 +128,7 @@ def load_tokenizer():
     return tokenizer
 
 class LabModule(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, config: TrainConfig):
         super().__init__()
         
         self.model = load_model()
@@ -135,6 +136,8 @@ class LabModule(pl.LightningModule):
         
         self.validation_preds = []
         self.validation_targets = []
+        
+        self.config = config
 
     def forward(self, inputs, target, output_hidden_states=False):
         return self.model(
@@ -167,7 +170,7 @@ class LabModule(pl.LightningModule):
             reduction='batchmean',
         )
         
-        loss = loss_model * 0.1 + loss_kd_hidden + loss_kd_logits
+        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.1
         
         self.log("training/loss_model", loss_model.item())
         self.log("training/loss_kd_hidden", loss_kd_hidden.item())
@@ -184,7 +187,7 @@ class LabModule(pl.LightningModule):
             output.view(-1, output.shape[-1]), 
             target.view(-1)
         )
-        self.log("val-loss", loss.item())
+        self.log("val/loss", loss.item())
         
         self.validation_preds.append(output.cpu())
         self.validation_targets.append(target.cpu())
@@ -196,8 +199,8 @@ class LabModule(pl.LightningModule):
             calculator.update(preds, target)
         ppl = calculator.compute()
         ppl = ppl.item()
-        print('val-ppl', ppl)
-        self.log("val-ppl", ppl)
+        print('val/ppl', ppl)
+        self.log("val/ppl", ppl)
         
         self.validation_preds.clear()
         self.validation_targets.clear()
@@ -208,7 +211,7 @@ class LabModule(pl.LightningModule):
             print(name, p.requires_grad, p.shape, p.dtype)
             if p.requires_grad:
                 params.append(p)
-        return torch.optim.AdamW(params, lr=0.0001)
+        return torch.optim.AdamW(params, lr=self.config.lr)
 
 from lightning.pytorch.strategies import FSDPStrategy
 
@@ -232,9 +235,11 @@ def main(config: TrainConfig):
         monitor="step",
         mode="max",
         dirpath="saves/dev/checkpoint",
-        filename="llama32k-wikitext2-{epoch:02d}-{step}",
-        every_n_train_steps=50,
+        filename=f"llama32k-wikitext2-{config.seq_len}-{{epoch:02d}}-{{step}}",
+        every_n_train_steps=25,
     )
+    checkpoint_callback.CHECKPOINT_EQUALS_CHAR = '-'
+    checkpoint_callback.FILE_EXTENSION = '.pth'
     
     trainer = pl.Trainer(
         log_every_n_steps=1,
@@ -244,16 +249,16 @@ def main(config: TrainConfig):
         precision="32-true",
         default_root_dir='./saves/dev/checkpoint/',
         enable_checkpointing=True,
-        accumulate_grad_batches=4,
-        max_epochs=4,
+        accumulate_grad_batches=8,
+        max_epochs=20,
         logger=WandbLogger(save_dir="saves/dev/wandb"),
         callbacks=[
             checkpoint_callback
         ],
     )
     
-    datamodule = LabDataModule()
-    model = LabModule()
+    datamodule = LabDataModule(config=config)
+    model = LabModule(config=config)
     trainer.fit(model=model, datamodule=datamodule) 
 
 if __name__ == "__main__":
