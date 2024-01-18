@@ -25,11 +25,14 @@ from pathlib import Path
 from src.dataset.labdataset import LabDataset
 from torch.utils.data import DataLoader, random_split
 
+torch.set_float32_matmul_precision('high')
+
 @dataclass
 class TrainConfig:
     using_fsdp: bool = False
     lr: float = 1e-4
     batch_size: int = 1
+    # lora_r: int = 64
     seq_len: int = 4096
     model_checkpoint_dir: str = "./saves/dev"
 
@@ -110,7 +113,7 @@ def load_model(method = 'tree', device = 'cuda:0'):
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=16,
+            r=32,
             lora_alpha=32, 
             lora_dropout=0.1,
             modules_to_save=['tree_avgpool_scaler']
@@ -147,11 +150,15 @@ class LabModule(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
+        self.teacher.eval()
+        self.model.train()
+        
         inputs, target = batch
         
-        with torch.no_grad():
-            output_teacher = self.teacher(inputs, output_hidden_states=True)
-        output = self(inputs, target, output_hidden_states=True)
+        with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
+            output_teacher = self.teacher(inputs, output_hidden_states=False)
+        with torch.autocast('cuda', torch.bfloat16):
+            output = self(inputs, target, output_hidden_states=False)
         logits = output.logits
         
         loss_model = torch.nn.functional.cross_entropy(
@@ -160,9 +167,9 @@ class LabModule(pl.LightningModule):
         )
         
         loss_kd_hidden = 0
-        for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
-            loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
-        loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
+        # for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
+        #     loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
+        # loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
         
         loss_kd_logits = torch.nn.functional.kl_div(
             output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
@@ -173,20 +180,22 @@ class LabModule(pl.LightningModule):
         loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.1
         
         self.log("training/loss_model", loss_model.item())
-        self.log("training/loss_kd_hidden", loss_kd_hidden.item())
+        # self.log("training/loss_kd_hidden", loss_kd_hidden.item())
         self.log("training/loss_kd_logits", loss_kd_logits.item())
         self.log("training/loss", loss.item())
         
         return loss
     
     def validation_step(self, batch, batch_idx):
+        self.model.eval()
+        
         inputs, target = batch
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
             output = self(inputs, target).logits
-        loss = torch.nn.functional.cross_entropy(
-            output.view(-1, output.shape[-1]), 
-            target.view(-1)
-        )
+            loss = torch.nn.functional.cross_entropy(
+                output.view(-1, output.shape[-1]), 
+                target.view(-1)
+            )
         self.log("val/loss", loss.item())
         
         self.validation_preds.append(output.cpu())
@@ -225,10 +234,18 @@ def main(config: TrainConfig):
         strategy = FSDPStrategy(
             auto_wrap_policy=policy,
             activation_checkpointing_policy=policy,
+            cpu_offload=True,
         )
     else:
         devices = "1"
         strategy = "auto"
+        
+        # policy = {LlamaDecoderLayer}
+        # strategy = FSDPStrategy(
+        #     auto_wrap_policy=policy,
+        #     activation_checkpointing_policy=policy,
+        #     # cpu_offload=True,
+        # )
     
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
@@ -246,7 +263,7 @@ def main(config: TrainConfig):
         devices=devices,
         accelerator="gpu",
         strategy=strategy,
-        precision="32-true",
+        precision=16,
         default_root_dir='./saves/dev/checkpoint/',
         enable_checkpointing=True,
         accumulate_grad_batches=8,
