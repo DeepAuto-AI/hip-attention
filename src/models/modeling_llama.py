@@ -752,13 +752,13 @@ class LlamaCustomAttention(LlamaAttention):
                     v
                 )
                 
-                context_avg = v.cumsum(-2) / torch.arange(0, v.shape[1], device=v.device)[None, :, None]
-                context_avg = context_avg[:, TSRC-TDST:, :]
+                context_avg = v.cumsum(-2, dtype=torch.float32) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
+                context_avg = context_avg[:, TSRC-TDST+DENSE_QUERIES:, :]
                 # N, H, TDST
                 scale_avg = torch.sigmoid(
-                    self.tree_avgpool_scaler(hidden_states).transpose(-1, -2).view(N*H, TDST, 1)
+                    self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:, :]).transpose(-1, -2).reshape(N*H, TDST-DENSE_QUERIES, 1)
                 )
-                attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
+                attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
                 
                 attn_output = torch.cat([
                     attn_output_flash, 

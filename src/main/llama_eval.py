@@ -5,18 +5,32 @@ from datasets import load_dataset
 from tqdm import tqdm
 import argparse
 
+from peft import LoraConfig, TaskType
+from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='none')
     parser.add_argument('--stride', type=int, default=-1)
+    parser.add_argument('--checkpoint', type=str, default=None)
     args = parser.parse_args()
     
     device = 'cuda:0'
     model_id = 'togethercomputer/LLaMA-2-7B-32K'
+    
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
+    
+    peft_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        inference_mode=True,
+        r=64,
+        lora_alpha=32, 
+        lora_dropout=0.1,
+        modules_to_save=['tree_avgpool_scaler']
+    )
+    
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
@@ -24,8 +38,7 @@ if __name__ == '__main__':
         device_map={"" : device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
+            llm_int8_skip_modules=['tree_avgpool_scaler'],
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
@@ -37,6 +50,19 @@ if __name__ == '__main__':
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = args.method
+    
+    model = prepare_model_for_kbit_training(model)
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+    
+    if args.checkpoint is not None:
+        state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
+        keys = list(state_dict.keys())
+        for key in keys:
+            x = state_dict[key]
+            state_dict[key.strip('model.')] = x
+            del state_dict[key]
+        model.load_state_dict(state_dict)
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 

@@ -31,6 +31,7 @@ approximator is log N, but sparse attention is quadratic
 
 import math
 from typing import Tuple
+import warnings
 import numba
 import numpy as np
 import torch
@@ -765,6 +766,7 @@ def sparse_attention(
     
     return context
 
+@torch.no_grad()
 def tree_attention(
     q: Tensor, 
     k: Tensor, 
@@ -784,15 +786,22 @@ def tree_attention(
     assert N == _N
     assert HID == _HID
     
-    indices, ks, probs = attention_matrix(
-        q,
-        k,
-        
-        w_start,
-        n_patches,
-        mask_k,
-        scale_up,
-    )
+    if q.dtype != torch.float32:
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        warnings.warn("tree attention does not support 32 bits right now.")
+    
+    with torch.autocast('cuda', torch.float32):
+        indices, ks, probs = attention_matrix(
+            q,
+            k,
+            
+            w_start,
+            n_patches,
+            mask_k,
+            scale_up,
+        )
     
     context = sparse_attention(
         v,
@@ -881,15 +890,15 @@ def main_latency_benchmark():
     
     q, k, v, out = __load_checkouts()
     
-    BSIZE = 2048
-    DUPS = 2
+    BSIZE = 512
+    DUPS = 8
     QUERY_SIZE = 1
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
     
     METHOD = 'tree'
-    METHOD = 'torch'
+    # METHOD = 'torch'
     # METHOD = 'flash'
     
     samples = []
@@ -906,10 +915,10 @@ def main_latency_benchmark():
                 q,
                 k,
                 v,
-                w_start=64,
-                n_patches=32,
-                mask_k=128,
-                scale_up=2,
+                # w_start=64,
+                # n_patches=32,
+                # mask_k=128,
+                # scale_up=2,
             )
         else:
             raise Exception()

@@ -12,6 +12,7 @@ import requests
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
+import tqdm
 from transformers import AutoTokenizer
 
 class LabDataset(Dataset):
@@ -25,17 +26,22 @@ class LabDataset(Dataset):
         tokenizer: AutoTokenizer = None,
     ) -> None:
         super().__init__()
-        self.path = Path(data_dir) / "wikitext-2.txt"
-        if download:
-            self.download(self.path)
-        document = tokenize(self.path)
         
+        os.makedirs('./cache/wikitext2', exist_ok=True)
         cache_path = './cache/wikitext2/tokenized.pth'
-        if os.path.exists():
+        if os.path.exists(cache_path):
             data = torch.load(cache_path)
         else:
+            self.path = Path(data_dir) / "wikitext-2.txt"
+            if download:
+                self.download(self.path)
+            document = tokenize(self.path)
             print('tokenizing')
-            data = tokenizer(document, return_tensors='pt').input_ids.view(-1)
+            lines = []
+            for line in tqdm.tqdm(document, dynamic_ncols=True, leave=False):
+                data = tokenizer(line, return_tensors='pt').input_ids.view(-1)
+                lines.append(data)
+            data = torch.cat(lines)
             torch.save(data, cache_path)
             print('tokenized')
         
@@ -85,8 +91,8 @@ def tokenize(path: Path) -> Tuple[Tensor, Dictionary]:
     lines = []
     with open(path, encoding="utf8") as f:
         for line in f:
-            lines.append(line)
-    return "\n".join(lines)
+            lines.append(line + '\n')
+    return lines
     #         words = line.split()
     #         for word in words:
     #             dictionary.add_word(word)
