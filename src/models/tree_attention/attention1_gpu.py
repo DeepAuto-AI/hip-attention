@@ -634,7 +634,7 @@ def attention_matrix(
             probs.cpu().numpy(),
             N, T_DST, T_SRC
         )[0]
-        x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.2
+        x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
         plt.imshow(x)
         plt.savefig('hello.png', dpi=200, bbox_inches='tight')
         
@@ -645,10 +645,10 @@ def attention_matrix(
         x = x + (1 - np.tri(*x.shape)) * (-32000)
         x = np.exp(x - x.max(-1, keepdims=True))
         x = x / x.sum(-1, keepdims=True)
-        x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.2
+        x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
         plt.imshow(x)
         plt.savefig('hello_2.png', dpi=200, bbox_inches='tight')
-        # print(ks)
+        print(ks)
     
     return indices, ks, probs
 
@@ -772,10 +772,13 @@ def tree_attention(
     k: Tensor, 
     v: Tensor,
     
-    w_start: int = 64,
+    w_start: int = 512,
     n_patches: int = 128,
     mask_k: int = 256,
     scale_up: float = 2,
+    
+    # heuristics: mask_k == n_patches * scale_up
+    # heuristics: mask_k == w_start * scale_up
 ):
     assert q.ndim == 3
     assert k.ndim == 3
@@ -833,7 +836,7 @@ def __load_checkouts():
         out = state['out']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        idx = 7
+        idx = 24
         q = q.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
         k = k.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
         v = v.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
@@ -898,7 +901,7 @@ def main_latency_benchmark():
     v = v.repeat(BSIZE, DUPS, 1)
     
     METHOD = 'tree'
-    METHOD = 'torch'
+    # METHOD = 'torch'
     # METHOD = 'flash'
     
     samples = []

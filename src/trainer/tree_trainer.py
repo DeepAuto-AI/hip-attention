@@ -32,9 +32,10 @@ class TrainConfig:
     using_fsdp: bool = False
     lr: float = 5e-5
     batch_size: int = 1
-    # lora_r: int = 64
+    accumulation_steps: int = 16
+    lora_r: int = 32
     seq_len: int = 4096
-    model_checkpoint_dir: str = "./saves/dev"
+    model_checkpoint_dir: str = "./saves/dev/checkpoint"
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -66,8 +67,8 @@ class LabDataModule(pl.LightningDataModule):
     
     def setup(self, stage: str):
         if stage == "fit" or stage is None:
-            train_size = int(len(self.dataset) * self.train_size)
-            test_size = len(self.dataset) - train_size
+            test_size = min(100, len(self.dataset) * (1 - self.train_size))
+            train_size = int(len(self.dataset) - test_size)
             self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
         if stage == "test" or stage is None:
             self.test_data = self.val_data
@@ -84,23 +85,31 @@ class LabDataModule(pl.LightningDataModule):
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 
-def load_model(method = 'tree', device = 'cuda:0'):
-    model_id = 'togethercomputer/LLaMA-2-7B-32K'
+def load_model(
+    train_config: TrainConfig = None, 
+    method = 'tree', 
+    device = 'cuda:0',
+    model_id = 'togethercomputer/LLaMA-2-7B-32K',
+):
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
+    
+    quant_config = transformers.BitsAndBytesConfig(
+        load_in_4bit=True,
+        llm_int8_skip_modules=['tree_avgpool_scaler'],
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+    if train_config.using_fsdp:
+        quant_config = None
     
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
         load_in_4bit=True,
         device_map={"" : device},
-        quantization_config=transformers.BitsAndBytesConfig(
-            load_in_4bit=True,
-            llm_int8_skip_modules=['tree_avgpool_scaler'],
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        ),
+        quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
@@ -113,7 +122,7 @@ def load_model(method = 'tree', device = 'cuda:0'):
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=32,
+            r=train_config.lora_r,
             lora_alpha=32, 
             lora_dropout=0.1,
             modules_to_save=['tree_avgpool_scaler']
@@ -134,8 +143,8 @@ class LabModule(pl.LightningModule):
     def __init__(self, config: TrainConfig):
         super().__init__()
         
-        self.model = load_model()
-        self.teacher = load_model(method = 'none')
+        self.model = load_model(train_config=config)
+        self.teacher = load_model(train_config=config, method='none')
         
         self.validation_preds = []
         self.validation_targets = []
@@ -251,7 +260,7 @@ def main(config: TrainConfig):
         save_top_k=3,
         monitor="step",
         mode="max",
-        dirpath="saves/dev/checkpoint",
+        dirpath=config.model_checkpoint_dir,
         filename=f"llama32k-wikitext2-{config.seq_len}-{{epoch:02d}}-{{step}}",
         every_n_train_steps=25,
     )
@@ -264,11 +273,14 @@ def main(config: TrainConfig):
         accelerator="gpu",
         strategy=strategy,
         precision=16,
-        default_root_dir='./saves/dev/checkpoint/',
-        enable_checkpointing=True,
-        accumulate_grad_batches=16,
+        default_root_dir=config.model_checkpoint_dir,
+        accumulate_grad_batches=config.accumulation_steps,
         max_epochs=20,
-        logger=WandbLogger(save_dir="saves/dev/wandb"),
+        logger=WandbLogger(
+            save_dir="saves/dev/wandb", 
+            project="tree-attention"
+        ),
+        enable_checkpointing=True,
         callbacks=[
             checkpoint_callback
         ],

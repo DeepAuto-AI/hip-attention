@@ -25,7 +25,7 @@ if __name__ == '__main__':
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=True,
-        r=64,
+        r=32,
         lora_alpha=32, 
         lora_dropout=0.1,
         modules_to_save=['tree_avgpool_scaler']

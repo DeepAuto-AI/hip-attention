@@ -61,11 +61,22 @@ class LabDataset(Dataset):
     @staticmethod
     def download(destination: Path) -> None:
         os.makedirs(destination.parent, exist_ok=True)
-        url = "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt"
-        if os.path.exists(destination):
-            return
+        
+        dataset = 'wikitext103'
+        if dataset == 'wikitext2':
+            url = "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt"
+            if os.path.exists(destination):
+                return
+            data = requests.get(url).text
+        elif dataset == 'wikitext103':
+            from datasets import load_dataset
+            test = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+            data = "\n\n".join(test["text"])
+        else:
+            raise Exception()
+        
         with open(destination, "w") as f:
-            f.write(requests.get(url).text)
+            f.write(data)
 
 
 class Dictionary:
