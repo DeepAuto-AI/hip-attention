@@ -30,7 +30,7 @@ torch.set_float32_matmul_precision('high')
 @dataclass
 class TrainConfig:
     using_fsdp: bool = False
-    lr: float = 1e-4
+    lr: float = 5e-5
     batch_size: int = 1
     # lora_r: int = 64
     seq_len: int = 4096
@@ -266,7 +266,7 @@ def main(config: TrainConfig):
         precision=16,
         default_root_dir='./saves/dev/checkpoint/',
         enable_checkpointing=True,
-        accumulate_grad_batches=8,
+        accumulate_grad_batches=16,
         max_epochs=20,
         logger=WandbLogger(save_dir="saves/dev/wandb"),
         callbacks=[

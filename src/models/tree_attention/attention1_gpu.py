@@ -372,7 +372,7 @@ def mask_iter(
         # block constant
         triton.next_power_of_2(mask.shape[-1]),
         triton.next_power_of_2(t_mask.shape[-1]),
-        triton.next_power_of_2(scale_up),
+        triton.next_power_of_2(math.ceil(scale_up)),
         triton.next_power_of_2(HID),
     )
 
@@ -773,9 +773,9 @@ def tree_attention(
     v: Tensor,
     
     w_start: int = 64,
-    n_patches: int = 32,
+    n_patches: int = 128,
     mask_k: int = 256,
-    scale_up: int = 2,
+    scale_up: float = 2,
 ):
     assert q.ndim == 3
     assert k.ndim == 3
@@ -890,15 +890,15 @@ def main_latency_benchmark():
     
     q, k, v, out = __load_checkouts()
     
-    BSIZE = 512
-    DUPS = 8
+    BSIZE = 512*8
+    DUPS = 2
     QUERY_SIZE = 1
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
     
     METHOD = 'tree'
-    # METHOD = 'torch'
+    METHOD = 'torch'
     # METHOD = 'flash'
     
     samples = []
