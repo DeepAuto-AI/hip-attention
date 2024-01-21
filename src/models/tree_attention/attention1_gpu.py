@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt
 import tqdm
 import skimage.measure
 import torch.nn.functional as F
+from torch.autograd import Function
 
 import triton
 import triton.language as tl
@@ -653,7 +654,7 @@ def attention_matrix(
     return indices, ks, probs
 
 @triton.jit
-def __sdbmm_compute(
+def _sdbmm_compute(
     # inputs
     indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
     ks, stride_ks_n, stride_ks_tdst, 
@@ -724,6 +725,251 @@ def __sdbmm_compute(
         value = output
     )
 
+@triton.jit
+def _sdbmm_compute_bwd_values(
+    # input matrices
+    probs, stride_probs_n, stride_probs_tdst, stride_probs_k,
+    indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
+    # grad output (read)
+    grad_context, stride_grad_context_n, stride_grad_context_tdst, stride_grad_context_hid,
+    # grad input (write)
+    grad_values, stride_grad_values_n, stride_grad_values_tsrc, stride_grad_values_hid,
+    # input variables
+    N, TDST, TSRC, HID, K,
+    # block constant
+    BLOCK_HID: tl.constexpr,
+):
+    """
+    probs: fp[N, TDST, K]
+    indices: int[N, TDST, K]
+    
+    grad_context: fp[N, TDST, HID]
+    grad_values: fp[N, TSRC, HID]
+    ----
+    foreach n in range(N)
+    foreach tdst in range(TDST)
+    foreach k in range(K)
+    
+    grad_values[n, indices[n, tdst, k], :] +=(atmoic) probs[n, tdst, k] * grad_context[n, tdst, :]
+    """
+    
+    idx_n = tl.program_id(0)
+    idx_tdst = tl.program_id(1)
+    idx_k = tl.program_id(2)
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
+    
+    idx_src = tl.load(
+        indices +\
+            idx_n * stride_indices_n +\
+            idx_tdst * stride_indices_tdst +\
+            idx_k * stride_indices_k
+    )
+    
+    prob = tl.load(
+        probs +\
+            idx_n * stride_probs_n +\
+            idx_tdst * stride_probs_tdst +\
+            idx_k * stride_probs_k,
+    )
+    grad = tl.load(
+        grad_context +\
+            idx_n * stride_grad_context_n +\
+            idx_tdst * stride_grad_context_tdst +\
+            idx_hid * stride_grad_context_hid,
+        mask = mask_hid,
+    )
+    output = prob * grad
+    
+    tl.atomic_add(
+        grad_values +\
+            idx_n * stride_grad_values_n +\
+            idx_src * stride_grad_values_tsrc +\
+            idx_hid * stride_grad_values_hid,
+        val = output,
+        mask = mask_hid,
+    )
+
+@triton.jit
+def _sdbmm_compute_bwd_probs(
+    # input indices
+    indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
+    values, stride_values_n, stride_values_trsc, stride_values_hid,
+    # grad output (read)
+    grad_context, stride_grad_context_n, stride_grad_context_tdst, stride_grad_context_hid,
+    # grad input (write)
+    grad_probs, stride_grad_probs_n, stride_grad_probs_tdst, stride_grad_probs_k,
+    # input variables
+    N, TDST, TSRC, HID, K,
+    # blcok constant
+    BLOCK_HID: tl.constexpr,
+):
+    """
+    indices: fp[N, TDST, K]
+    values: fp[N, TSRC, HID]
+    grad_context: fp[N, TDST, HID]
+    grad_probs: fp[N, TDST, K]
+    -----
+    foreach n in [..N]
+    foreach tdst in [..TDST]
+    foreach k in [..K]
+    
+    grad_probs[n, tdst, k] = sum(
+        values[n, indices[n, tdst, k], :] * grad_context[n, tdst, :]
+    )
+    """
+    
+    idx_n = tl.program_id(0)
+    idx_tdst = tl.program_id(1)
+    idx_k = tl.program_id(2)
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
+    
+    idx_tsrc = tl.load(
+        indices +\
+            idx_n * stride_indices_n +\
+            idx_tdst * stride_indices_tdst +\
+            idx_k * stride_indices_k,
+    )
+    
+    value = tl.load(
+        values +\
+            idx_n * stride_values_n +\
+            idx_tsrc * stride_values_trsc +\
+            idx_hid * stride_values_hid,
+        mask = mask_hid,
+        other = 0,
+    )
+    vec_grad_context = tl.load(
+        grad_context +\
+            idx_n * stride_grad_context_n +\
+            idx_tdst * stride_grad_context_tdst +\
+            idx_hid * stride_grad_context_hid,
+        mask = mask_hid,
+        other = 0
+    )
+    scores = value * vec_grad_context
+    score = tl.sum(scores)
+    
+    tl.store(
+        grad_probs +\
+            idx_n * stride_grad_probs_n +\
+            idx_tdst * stride_grad_probs_tdst +\
+            idx_k * stride_grad_probs_k,
+        value = score,
+    )
+
+class SparseAttentionAutoGradFn(Function):
+    @staticmethod
+    def forward(
+        ctx, 
+        # attention values
+        values: Tensor,
+        
+        # attention matrix
+        indices: Tensor,
+        ks: Tensor,
+        probs: Tensor,
+    ):
+        N, T_SRC, HID = values.shape
+        _, T_DST, K = indices.shape
+        assert ks.shape == (N, T_DST)
+        assert probs.shape == indices.shape
+        
+        ctx.save_for_backward(values, indices, ks, probs)
+        
+        context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
+        
+        grid = (N, T_DST)
+        BLOCK_K = triton.next_power_of_2(K)
+        BLOCK_HID = triton.next_power_of_2(HID)
+        
+        # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
+        
+        _sdbmm_compute[grid](
+            # inputs
+            indices, indices.stride(0), indices.stride(1), indices.stride(2),
+            ks, ks.stride(0), ks.stride(1),
+            probs, probs.stride(0), probs.stride(1), probs.stride(2),
+            values, values.stride(0), values.stride(1), values.stride(2),
+            
+            # output
+            context, context.stride(0), context.stride(1), context.stride(2),
+            
+            # input variables
+            N, T_SRC, T_DST, HID, K,
+            
+            # blocks
+            BLOCK_K,
+            BLOCK_HID,
+        )
+        
+        return context
+
+    @staticmethod
+    def backward(ctx, grad_context):
+        values, indices, ks, probs = ctx.saved_tensors
+        grad_values = grad_indices = grad_ks = grad_probs = None
+        
+        N, T_SRC, HID = values.shape
+        _, T_DST, K = indices.shape
+        assert ks.shape == (N, T_DST)
+        assert probs.shape == indices.shape
+
+        # for values
+        if ctx.needs_input_grad[0]:
+            grid = (N, T_DST, K)
+            BLOCK_HID = triton.next_power_of_2(HID)
+
+            grad_values = torch.zeros(
+                (N, T_SRC, HID), 
+                device=values.device, 
+                dtype=values.dtype,
+            )
+            
+            _sdbmm_compute_bwd_values[grid](
+                probs, probs.stride(0), probs.stride(1), probs.stride(2),
+                indices, indices.stride(0), indices.stride(1), indices.stride(2),
+                
+                grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
+                
+                grad_values, grad_values.stride(0), grad_values.stride(1), grad_values.stride(2),
+                
+                N, T_DST, T_SRC, HID, K,
+                
+                BLOCK_HID,
+            )
+            
+            # print(grad_values.abs().sum())
+        
+        # for probs
+        if ctx.needs_input_grad[3]:
+            grid = (N, T_DST, K)
+            BLOCK_HID = triton.next_power_of_2(HID)
+            
+            grad_probs = torch.zeros(
+                (N, T_DST, K),
+                device=probs.device,
+                dtype=probs.dtype,
+            )
+            
+            _sdbmm_compute_bwd_probs[grid](
+                indices, indices.stride(0), indices.stride(1), indices.stride(2),
+                values, values.stride(0), values.stride(1), values.stride(2), 
+                
+                grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
+                
+                grad_probs, grad_probs.stride(0), grad_probs.stride(1), grad_probs.stride(2),
+                
+                N, T_DST, T_SRC, HID, K,
+                
+                BLOCK_HID,
+            )
+
+        return grad_values, grad_indices, grad_ks, grad_probs
+
 def sparse_attention(
     # attention values
     values: Tensor,
@@ -733,38 +979,9 @@ def sparse_attention(
     ks: Tensor,
     probs: Tensor,
 ) -> Tensor:
-    N, T_SRC, HID = values.shape
-    _, T_DST, K = indices.shape
-    assert ks.shape == (N, T_DST)
-    assert probs.shape == indices.shape
-    
-    context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
-    
-    grid = (N, T_DST)
-    BLOCK_K = triton.next_power_of_2(K)
-    BLOCK_HID = triton.next_power_of_2(HID)
-    
-    # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
-    
-    __sdbmm_compute[grid](
-        # inputs
-        indices, indices.stride(0), indices.stride(1), indices.stride(2),
-        ks, ks.stride(0), ks.stride(1),
-        probs, probs.stride(0), probs.stride(1), probs.stride(2),
-        values, values.stride(0), values.stride(1), values.stride(2),
-        
-        # output
-        context, context.stride(0), context.stride(1), context.stride(2),
-        
-        # input variables
-        N, T_SRC, T_DST, HID, K,
-        
-        # blocks
-        BLOCK_K,
-        BLOCK_HID,
+    return SparseAttentionAutoGradFn.apply(
+        values, indices, ks, probs,
     )
-    
-    return context
 
 @torch.no_grad()
 def tree_attention(
@@ -825,7 +1042,7 @@ def tree_attention(
     
     return context, (indices, ks, probs)
 
-def __load_checkouts():
+def load_checkouts():
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
@@ -858,7 +1075,7 @@ def main_debug():
     global DEBUG
     DEBUG = True
     
-    q, k, v, out = __load_checkouts()
+    q, k, v, out = load_checkouts()
     
     context, (atten_indices, atten_ks, atten_probs) = tree_attention(
         q,
@@ -891,7 +1108,7 @@ def main_latency_benchmark():
     global DEBUG
     DEBUG = False
     
-    q, k, v, out = __load_checkouts()
+    q, k, v, out = load_checkouts()
     
     BSIZE = 512*8
     DUPS = 2
