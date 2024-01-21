@@ -129,9 +129,12 @@ def load_model(
             target_modules=[
                 'q_proj', 'k_proj', 'v_proj', 'o_proj', 
                 'gate_proj', 'up_proj', 'down_proj', 
-                'input_layernorm', 'post_attention_layernorm'
+                # 'input_layernorm', 'post_attention_layernorm'
             ],
-            modules_to_save=['tree_avgpool_scaler']
+            modules_to_save=[
+                'tree_avgpool_scaler',
+                'input_layernorm', 'post_attention_layernorm'
+            ]
         )
         
         model = prepare_model_for_kbit_training(model)
