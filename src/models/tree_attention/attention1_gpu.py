@@ -58,7 +58,7 @@ def _triton_kth_large(
     return tl.max(sorted_score * sorted_score_mask + (-32000.0) * (~sorted_score_mask))
 
 @triton.jit
-def _mask_iter_compute(
+def _masking_iteration_compute(
     # input matrices
     queries, stride_queries_n, stride_queries_tdst, stride_queries_hid,
     keys, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
@@ -233,6 +233,8 @@ def _mask_iter_compute(
             other = 0,
         )
         # tl.debug_barrier()
+        # NOTE: random key selection with in the block
+        # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
         loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
         vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
         vec_k = tl.load(
@@ -340,7 +342,7 @@ def _mask_iter_compute(
     )
     # tl.debug_barrier()
 
-def mask_iter(
+def masking_iteration(
     # input matrices
     queries: Tensor, keys: Tensor, mask: Tensor, t_mask: Tensor, scores: Tensor, 
     # temp vectors
@@ -352,7 +354,7 @@ def mask_iter(
 ):
     grid = (N, T_DST)
     
-    _mask_iter_compute[grid](
+    _masking_iteration_compute[grid](
         # input matrices
         queries, queries.stride(0), queries.stride(1), queries.stride(2),
         keys, keys.stride(0), keys.stride(1), keys.stride(2),
@@ -831,7 +833,7 @@ def attention_matrix(
     
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
-        mask_iter(
+        masking_iteration(
             # input matrices
             queries, keys, mask, tmask, scores, 
             # temp vectors
@@ -1394,5 +1396,5 @@ def main_latency_benchmark():
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    # main_debug()
-    main_latency_benchmark()
+    main_debug()
+    # main_latency_benchmark()

@@ -23,13 +23,21 @@ if __name__ == '__main__':
     config._attn_implementation = config.attn_implementation = 'sdpa'
     
     peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        inference_mode=True,
-        r=32,
-        lora_alpha=32, 
-        lora_dropout=0.1,
-        modules_to_save=['tree_avgpool_scaler']
-    )
+            task_type=TaskType.CAUSAL_LM,
+            inference_mode=False,
+            r=32,
+            lora_alpha=32, 
+            lora_dropout=0.1,
+            target_modules=[
+                'q_proj', 'k_proj', 'v_proj', 'o_proj', 
+                'gate_proj', 'up_proj', 'down_proj', 
+                # 'input_layernorm', 'post_attention_layernorm'
+            ],
+            modules_to_save=[
+                'tree_avgpool_scaler',
+                'input_layernorm', 'post_attention_layernorm'
+            ]
+        )
     
     model = LlamaForCausalLM.from_pretrained(
         model_id,
@@ -86,7 +94,7 @@ if __name__ == '__main__':
 
     nlls = []
     prev_end_loc = 0
-    for begin_loc in tqdm(range(0, seq_len, stride)[:10]):
+    for begin_loc in tqdm(range(0, seq_len, stride)[:500]):
         end_loc = min(begin_loc + max_length, seq_len)
         trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
         input_ids = encodings[:, begin_loc:end_loc].to(device)

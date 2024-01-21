@@ -311,6 +311,7 @@ if __name__ == "__main__":
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
+    parser.add_argument('--lr', default=-1, type=float)
     args = parser.parse_args()
     
     train_config = TrainConfig(
@@ -321,5 +322,7 @@ if __name__ == "__main__":
         train_config.accumulation_steps = args.gradient_accumulation_steps
     if args.lora_r > 0:
         train_config.lora_r = args.lora_r
+    if args.lr > 0:
+        train_config.lr = args.lr
     
     main(train_config)
