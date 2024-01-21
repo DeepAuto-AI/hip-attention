@@ -263,6 +263,7 @@ def main(config: TrainConfig):
         dirpath=config.model_checkpoint_dir,
         filename=f"llama32k-wikitext2-{config.seq_len}-{{epoch:02d}}-{{step}}",
         every_n_train_steps=25,
+        enable_version_counter=False,
     )
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = '-'
     checkpoint_callback.FILE_EXTENSION = '.pth'
