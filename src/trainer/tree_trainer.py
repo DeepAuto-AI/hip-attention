@@ -126,6 +126,11 @@ def load_model(
             r=train_config.lora_r,
             lora_alpha=32, 
             lora_dropout=0.1,
+            target_modules=[
+                'q_proj', 'k_proj', 'v_proj', 'o_proj', 
+                'gate_proj', 'up_proj', 'down_proj', 
+                'input_layernorm', 'post_attention_layernorm'
+            ],
             modules_to_save=['tree_avgpool_scaler']
         )
         
