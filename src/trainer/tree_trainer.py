@@ -310,6 +310,7 @@ if __name__ == "__main__":
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
+    parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
     parser.add_argument('--lr', default=-1, type=float)
     args = parser.parse_args()
@@ -324,5 +325,7 @@ if __name__ == "__main__":
         train_config.lora_r = args.lora_r
     if args.lr > 0:
         train_config.lr = args.lr
+    if args.batch_size > 0:
+        train_config.batch_size = args.batch_size
     
     main(train_config)
