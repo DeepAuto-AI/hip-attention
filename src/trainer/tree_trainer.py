@@ -29,6 +29,7 @@ torch.set_float32_matmul_precision('high')
 
 @dataclass
 class TrainConfig:
+    disable_kd: bool = False
     using_fsdp: bool = False
     lr: float = 5e-5
     batch_size: int = 1
@@ -180,17 +181,20 @@ class LabModule(pl.LightningModule):
         #     loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
         # loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
         
-        loss_kd_logits = torch.nn.functional.kl_div(
-            output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
-            output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
-            reduction='batchmean',
-        )
+        loss_kd_logits = 0
+        if not self.config.disable_kd:
+            loss_kd_logits = torch.nn.functional.kl_div(
+                output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
+                output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
+                reduction='batchmean',
+            )
         
         loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.1
         
         self.log("training/loss_model", loss_model.item())
-        # self.log("training/loss_kd_hidden", loss_kd_hidden.item())
-        self.log("training/loss_kd_logits", loss_kd_logits.item())
+        if not self.config.disable_kd:
+            # self.log("training/loss_kd_hidden", loss_kd_hidden.item())
+            self.log("training/loss_kd_logits", loss_kd_logits.item())
         self.log("training/loss", loss.item())
         
         return loss
@@ -296,12 +300,14 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--using_fsdp', action='store_true')
+    parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
     args = parser.parse_args()
     
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
+        disable_kd=args.disable_kd,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
