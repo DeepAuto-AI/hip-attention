@@ -295,10 +295,13 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--using_fsdp', action='store_true')
+    parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     args = parser.parse_args()
     
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
     )
+    if args.gradient_accumulation_steps > 0:
+        train_config.accumulation_steps = args.gradient_accumulation_steps
     
     main(train_config)
