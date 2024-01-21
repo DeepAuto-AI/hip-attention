@@ -59,5 +59,50 @@ def test_sparse_attention():
     assert loss.item() < 0.01
     print('[pass] test_sparse_attention')
 
+def test_attention_mask():
+    q, k, v, out = load_checkouts()
+    
+    w_start = 512
+    n_patches = 128
+    mask_k = 256
+    scale_up = 2
+    
+    if q.dtype != torch.float32:
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        warnings.warn("tree attention does not support 32 bits right now.")
+    
+    q = nn.Parameter(q)
+    k = nn.Parameter(k)
+    
+    # exam GD
+    for i in range(1000):
+        indices, ks, probs = attention_matrix(
+            q,
+            k,
+            
+            w_start,
+            n_patches,
+            mask_k,
+            scale_up,
+        )
+        
+        loss = probs.std() * 1000
+        loss.backward()
+        
+        # print(q.grad.abs().sum())
+        q.data -= 0.1 * q.grad
+        k.data -= 0.1 * k.grad
+        
+        q.grad = None
+        k.grad = None
+        
+        # print(loss.item())
+    
+    assert loss.item() < 3.5
+    print('[pass] test_attention_mask')
+
 if __name__ == '__main__':
     test_sparse_attention()
+    test_attention_mask()
