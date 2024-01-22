@@ -1299,7 +1299,7 @@ def tree_attention(
     
     return context, (indices, ks, probs)
 
-def load_checkouts(idx = 24, window = 1):
+def load_checkouts(idx = 24, window = 1, seq_len=2048):
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
@@ -1310,10 +1310,10 @@ def load_checkouts(idx = 24, window = 1):
         out = state['out']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        q = q.view(N*H, T_DST, HID)[idx:idx+window].contiguous()
-        k = k.view(N*H, T_SRC, HID)[idx:idx+window].contiguous()
-        v = v.view(N*H, T_SRC, HID)[idx:idx+window].contiguous()
-        out = out.view(N*H, T_DST, HID)[idx:idx+window].contiguous()
+        q = q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
+        k = k.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
+        v = v.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
+        out = out.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
     else:
         q = torch.randn((1, 64, 4))
         k = torch.randn((1, 64, 4))
@@ -1373,7 +1373,7 @@ def main_latency_benchmark():
     get_bench().synchronize = True
     get_bench().traced_callstack = True
     
-    q, k, v, out = load_checkouts(idx=0, window=40)
+    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=1024)
     
     BSIZE = 32
     DUPS = 1
