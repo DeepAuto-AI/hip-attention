@@ -24,11 +24,15 @@ class LabDataset(Dataset):
         block_size: int = 4096, 
         download: bool = True,
         tokenizer: AutoTokenizer = None,
+        dataset: str = 'wikitext103',
     ) -> None:
         super().__init__()
         
+        self.dataset = dataset
         os.makedirs('./cache/wikitext2', exist_ok=True)
         cache_path = './cache/wikitext2/tokenized.pth'
+        if self.dataset != 'wikitext103':
+            cache_path = f'./cache/wikitext2/tokenized_{self.dataset}.pth'
         if os.path.exists(cache_path):
             data = torch.load(cache_path)
         else:
@@ -58,11 +62,10 @@ class LabDataset(Dataset):
         target = self.data[(start + 1) : (end + 1)]  # noqa: E203
         return inputs, target
 
-    @staticmethod
-    def download(destination: Path) -> None:
+    def download(self, destination: Path) -> None:
         os.makedirs(destination.parent, exist_ok=True)
         
-        dataset = 'wikitext103'
+        dataset = self.dataset
         if dataset == 'wikitext2':
             url = "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt"
             if os.path.exists(destination):

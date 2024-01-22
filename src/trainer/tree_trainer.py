@@ -38,6 +38,7 @@ class TrainConfig:
     seq_len: int = 4096
     max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
+    dataset: str = 'wikitext103'
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -64,7 +65,8 @@ class LabDataModule(pl.LightningDataModule):
             data_dir=self.data_dir,
             block_size=self.block_size,
             download=self.download,
-            tokenizer=self.tokenizer
+            tokenizer=self.tokenizer,
+            dataset=self.config.dataset,
         )
     
     def setup(self, stage: str):
@@ -315,12 +317,14 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
     parser.add_argument('--lr', default=-1, type=float)
-    parser.add_argument('--max_steps', default=-1, type=float)
+    parser.add_argument('--max_steps', default=-1, type=int)
+    parser.add_argument('--dataset', default='wikitext103', type=str)
     args = parser.parse_args()
     
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
         disable_kd=args.disable_kd,
+        dataset=args.dataset,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps

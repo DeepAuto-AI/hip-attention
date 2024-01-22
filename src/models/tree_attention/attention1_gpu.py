@@ -47,6 +47,10 @@ from torch.autograd import Function
 import triton
 import triton.language as tl
 
+from src.utils import get_bench
+
+timer = lambda x: get_bench().region(x)
+
 @triton.jit
 def _triton_kth_large(
     scores: tl.tensor, k: tl.tensor,
@@ -378,6 +382,8 @@ def masking_iteration(
         triton.next_power_of_2(t_mask.shape[-1]),
         triton.next_power_of_2(math.ceil(scale_up)),
         triton.next_power_of_2(HID),
+        
+        num_warps=8,
     )
 
 @triton.jit
@@ -833,16 +839,17 @@ def attention_matrix(
     
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
-        masking_iteration(
-            # input matrices
-            queries, keys, mask, tmask, scores, 
-            # temp vectors
-            ws, ks, tsrcs, 
-            # operator variables
-            scale_up, n_patches, mask_k, 
-            # input constant
-            N, T_DST, T_SRC, HID
-        )
+        with timer(f'iteration_{w_curr}'):
+            masking_iteration(
+                # input matrices
+                queries, keys, mask, tmask, scores, 
+                # temp vectors
+                ws, ks, tsrcs, 
+                # operator variables
+                scale_up, n_patches, mask_k, 
+                # input constant
+                N, T_DST, T_SRC, HID
+            )
         w_curr = round(w_curr * scale_up)
         
         if DEBUG:
@@ -1150,6 +1157,8 @@ class SparseAttentionAutoGradFn(Function):
             # blocks
             BLOCK_K,
             BLOCK_HID,
+            
+            num_warps=16,
         )
         
         return context
@@ -1258,23 +1267,25 @@ def tree_attention(
         v = v.to(torch.float32)
         warnings.warn("tree attention does not support 32 bits right now.")
     
-    with torch.autocast('cuda', torch.float32):
-        indices, ks, probs = attention_matrix(
-            q,
-            k,
-            
-            w_start,
-            n_patches,
-            mask_k,
-            scale_up,
-        )
-    
-    context = sparse_attention(
-        v,
-        indices,
-        ks,
-        probs,
-    )
+    with timer('tree_attention'):
+        with timer('attention_matrix'):
+            indices, ks, probs = attention_matrix(
+                q,
+                k,
+                
+                w_start,
+                n_patches,
+                mask_k,
+                scale_up,
+            )
+        
+        with timer('sparse_attention'):
+            context = sparse_attention(
+                v,
+                indices,
+                ks,
+                probs,
+            )
     
     # context_avg = v.cumsum(1) / torch.arange(0, v.shape[1], device=v.device)[None, :, None]
     # context_avg = context_avg[:, T_SRC-T_DST:, :]
@@ -1288,7 +1299,7 @@ def tree_attention(
     
     return context, (indices, ks, probs)
 
-def load_checkouts():
+def load_checkouts(idx = 24, window = 1):
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
@@ -1299,21 +1310,21 @@ def load_checkouts():
         out = state['out']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        idx = 24
-        q = q.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
-        k = k.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
-        v = v.view(N*H, T_SRC, HID)[idx:idx+1].contiguous()
-        out = out.view(N*H, T_DST, HID)[idx:idx+1].contiguous()
+        q = q.view(N*H, T_DST, HID)[idx:idx+window].contiguous()
+        k = k.view(N*H, T_SRC, HID)[idx:idx+window].contiguous()
+        v = v.view(N*H, T_SRC, HID)[idx:idx+window].contiguous()
+        out = out.view(N*H, T_DST, HID)[idx:idx+window].contiguous()
     else:
         q = torch.randn((1, 64, 4))
         k = torch.randn((1, 64, 4))
         v = k.clone()
         out = q.clone()
     
-    q = q.to(device, dtype=torch.float32)
-    k = k.to(device, dtype=torch.float32)
-    v = v.to(device, dtype=torch.float32)
-    out = out.to(device, dtype=torch.float32)
+    dtype = torch.float32
+    q = q.to(device, dtype=dtype)
+    k = k.to(device, dtype=dtype)
+    v = v.to(device, dtype=dtype)
+    out = out.to(device, dtype=dtype)
     
     return q, k, v, out
 
@@ -1332,6 +1343,9 @@ def main_debug():
         # mask_k=128,
         # scale_up=2,
     )
+    
+    if TRACE:
+        print(get_bench().format_tracetree())
     
     stderr = (out - context).abs().mean().item()
     stdcontext = torch.std_mean(context)[0].item()
@@ -1353,11 +1367,16 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor):
 def main_latency_benchmark():
     global DEBUG
     DEBUG = False
+    TRACE = False
     
-    q, k, v, out = load_checkouts()
+    get_bench().disabled = not TRACE
+    get_bench().synchronize = True
+    get_bench().traced_callstack = True
     
-    BSIZE = 512*8
-    DUPS = 2
+    q, k, v, out = load_checkouts(idx=0, window=40)
+    
+    BSIZE = 32
+    DUPS = 1
     QUERY_SIZE = 1
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
@@ -1392,9 +1411,12 @@ def main_latency_benchmark():
         if i > 100:
             samples.append(elapsed)
     
+    if TRACE:
+        print(get_bench().format_tracetree())
+    
     samples = np.array(samples)
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    main_debug()
-    # main_latency_benchmark()
+    # main_debug()
+    main_latency_benchmark()
