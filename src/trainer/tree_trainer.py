@@ -36,6 +36,7 @@ class TrainConfig:
     accumulation_steps: int = 16
     lora_r: int = 32
     seq_len: int = 4096
+    max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
 
 class LabDataModule(pl.LightningDataModule):
@@ -289,6 +290,7 @@ def main(config: TrainConfig):
         default_root_dir=config.model_checkpoint_dir,
         accumulate_grad_batches=config.accumulation_steps,
         max_epochs=20,
+        max_steps=config.max_steps,
         logger=WandbLogger(
             save_dir="saves/dev/wandb", 
             project="tree-attention"
@@ -313,6 +315,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
     parser.add_argument('--lr', default=-1, type=float)
+    parser.add_argument('--max_steps', default=-1, type=float)
     args = parser.parse_args()
     
     train_config = TrainConfig(
@@ -327,5 +330,7 @@ if __name__ == "__main__":
         train_config.lr = args.lr
     if args.batch_size > 0:
         train_config.batch_size = args.batch_size
+    if args.max_steps > 0:
+        train_config.max_steps = args.max_steps
     
     main(train_config)
