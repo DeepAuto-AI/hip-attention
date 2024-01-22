@@ -13,6 +13,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='none')
     parser.add_argument('--stride', type=int, default=-1)
+    parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
     args = parser.parse_args()
     
@@ -25,7 +26,7 @@ if __name__ == '__main__':
     peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=32,
+            r=args.lora_r,
             lora_alpha=32, 
             lora_dropout=0.1,
             target_modules=[
