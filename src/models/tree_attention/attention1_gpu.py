@@ -870,12 +870,13 @@ def attention_matrix(
     # NOTE: Calc. Prob.
     indices = torch.round(mask * ws.unsqueeze(-1)).to(torch.int32)
     indices = torch.clamp(indices, 0, T_SRC - 1)
-    # NOTE: are you sure this function is the only thing can differentiate?
-    probs = calc_score_return_prob(
-        queries=queries, keys=keys,
-        indices=indices, ks=ks, 
-        scores=scores,
-    )
+    with timer('calc_score_return_prob'):
+        # NOTE: are you sure this function is the only thing can differentiate?
+        probs = calc_score_return_prob(
+            queries=queries, keys=keys,
+            indices=indices, ks=ks, 
+            scores=scores,
+        )
     
     if DEBUG:
         x = to_dense(
@@ -1367,17 +1368,16 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor):
 def main_latency_benchmark():
     global DEBUG
     DEBUG = False
-    TRACE = False
+    TRACE = True
     
     get_bench().disabled = not TRACE
     get_bench().synchronize = True
-    get_bench().traced_callstack = True
     
     q, k, v, out = load_checkouts(idx=0, window=40, seq_len=1024)
     
-    BSIZE = 32
+    BSIZE = 256
     DUPS = 1
-    QUERY_SIZE = 1
+    QUERY_SIZE = 8
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
@@ -1387,7 +1387,8 @@ def main_latency_benchmark():
     # METHOD = 'flash'
     
     samples = []
-    for i in tqdm.tqdm(range(1000)):
+    n_samples = 200
+    for i in tqdm.tqdm(range(n_samples)):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -1408,7 +1409,7 @@ def main_latency_benchmark():
         torch.cuda.synchronize()
         elapsed = start.elapsed_time(end)
         
-        if i > 100:
+        if i > n_samples * 0.1:
             samples.append(elapsed)
     
     if TRACE:
