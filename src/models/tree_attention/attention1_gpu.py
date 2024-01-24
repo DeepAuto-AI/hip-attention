@@ -47,7 +47,7 @@ from torch.autograd import Function
 import triton
 import triton.language as tl
 
-from src.utils import get_bench
+from src.utils import get_bench, seed
 
 timer = lambda x: get_bench().region(x)
 
@@ -255,7 +255,7 @@ def _masking_iteration_compute(
         # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
         # 1x128 @ 128x512 512x128 @ 128x1
         scores = -tl.sum(
-            vec_q.to(tl.float32) * vec_k.to(tl.float32), 
+            vec_q * vec_k, 
             axis=0,
         )
         # tl.debug_barrier()
@@ -356,7 +356,22 @@ def masking_iteration(
     # input constant
     N: int, T_DST: int, T_SRC: int, HID: int,
 ):
+    global DEBUG
+    
     grid = (N, T_DST)
+    
+    if DEBUG:
+        K = mask.shape[-1]
+        assert t_srcs.min() > 0
+        assert t_srcs.max() <= T_SRC
+        assert ks.min() >= 0
+        assert ks.max() < K
+        assert keys.shape[1] == T_SRC
+        assert queries.shape[1] == T_DST
+        assert mask.min() >= 0
+        assert mask.max() < 1
+        assert t_mask.min() >= 0
+        assert t_mask.max() < 1
     
     _masking_iteration_compute[grid](
         # input matrices
@@ -834,6 +849,7 @@ def attention_matrix(
     
     # matrices
     mask = (torch.arange(mask_k, device=device).view(1, 1, mask_k) / ks.unsqueeze(-1)).to(dtype)
+    mask.clamp_(0, (mask_k - 1) / mask_k)
     tmask = torch.zeros((N, T_DST, mask_k * math.ceil(scale_up)), dtype=dtype, device=device)
     scores = torch.ones_like(mask)
     
@@ -865,11 +881,11 @@ def attention_matrix(
             plt.imshow(x)
             path = f'saves/models/tree_attention/hello_{w_curr}.png'
             print('saved', path)
-            plt.savefig(path, dpi=200)
+            plt.savefig(path, dpi=200, bbox_inches='tight')
     
     # NOTE: Calc. Prob.
     indices = torch.round(mask * ws.unsqueeze(-1)).to(torch.int32)
-    indices = torch.clamp(indices, 0, T_SRC - 1)
+    indices.clamp_(0, T_SRC - 1)
     with timer('calc_score_return_prob'):
         # NOTE: are you sure this function is the only thing can differentiate?
         probs = calc_score_return_prob(
@@ -927,19 +943,20 @@ def _sdbmm_compute(
 ):
     idx_n = tl.program_id(0)
     idx_tdst = tl.program_id(1)
+    tl.device_assert(idx_n < N)
+    tl.device_assert(idx_tdst < TDST)
     
     idx_k = tl.arange(0, BLOCK_K)
-    mask_k = idx_k < K
-    
-    idx_hid = tl.arange(0, BLOCK_HID)
-    mask_hid = idx_hid < HID
     
     n_k = tl.load(
         ks +\
             idx_n * stride_ks_n+\
             idx_tdst * stride_ks_tdst,
     )
-    mask_k = mask_k & (tl.arange(0, BLOCK_K) < n_k)
+    mask_k = (idx_k < K) & (idx_k < n_k)
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
     
     # atten_indices: [BLOCK_K]
     atten_indices = tl.load(
@@ -947,8 +964,11 @@ def _sdbmm_compute(
             idx_n * stride_indices_n +\
             idx_tdst * stride_indices_tdst +\
             idx_k * stride_indices_k,
-        mask = mask_k
+        mask = mask_k,
+        other = 0,
     )
+    tl.device_assert(tl.max(atten_indices) < TSRC, "should be index < TSRC")
+    tl.device_assert(tl.min(atten_indices) >= 0, "should be index >= 0")
     
     # atten_probs: [BLOCK_K]
     atten_probs = tl.load(
@@ -956,20 +976,22 @@ def _sdbmm_compute(
             idx_n * stride_probs_n +\
             idx_tdst * stride_probs_tdst +\
             idx_k * stride_probs_k,
-        mask = mask_k
+        mask = mask_k,
+        other = 0,
     )
     
     # value: [BLOCK_K, BLOCK_HID]
     value = tl.load(
         values +\
             idx_n * stride_values_n +\
-            atten_indices[:, None] * stride_values_tsrc +\
-            idx_hid[None, :] * stride_values_hid,
-        mask = mask_k[:, None] & mask_hid[None, :]
+            atten_indices[None, :] * stride_values_tsrc +\
+            idx_hid[:, None] * stride_values_hid,
+        mask = mask_k[None, :] & mask_hid[:, None],
+        other = 0,
     )
     
     # output: [BLOCK_HID] <- atten_probs[1, BLOCK_K] @ value[BLOCK_K, BLOCK_HID]
-    output = tl.sum(atten_probs[:, None] * value, axis=0)
+    output = tl.sum(atten_probs[None, :] * value, axis=1)
     tl.store(
         context +\
             idx_n * stride_context_n +\
@@ -1127,8 +1149,11 @@ class SparseAttentionAutoGradFn(Function):
         ks: Tensor,
         probs: Tensor,
     ):
+        global DEBUG
+        
         N, T_SRC, HID = values.shape
-        _, T_DST, K = indices.shape
+        _N, T_DST, K = indices.shape
+        assert N == _N
         assert ks.shape == (N, T_DST)
         assert probs.shape == indices.shape
         
@@ -1141,6 +1166,16 @@ class SparseAttentionAutoGradFn(Function):
         BLOCK_HID = triton.next_power_of_2(HID)
         
         # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
+        if DEBUG:
+            assert indices.max() < T_SRC
+            assert indices.min() >= 0
+            assert indices.is_contiguous()
+            assert ks.is_contiguous()
+            assert probs.is_contiguous()
+            assert values.is_contiguous()
+            assert context.is_contiguous()
+            torch.cuda.synchronize()
+            
         
         _sdbmm_compute[grid](
             # inputs
@@ -1245,14 +1280,20 @@ def tree_attention(
     k: Tensor, 
     v: Tensor,
     
-    w_start: int = 512,
-    n_patches: int = 128,
+    w_start: int = None,
+    n_patches: int = None,
     mask_k: int = 256,
     scale_up: float = 2,
     
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
 ):
+    if w_start is None:
+        w_start = math.ceil(mask_k * scale_up)
+        # w_start = mask_k
+    if n_patches is None:
+        n_patches = math.ceil(mask_k / scale_up)
+    
     assert q.ndim == 3
     assert k.ndim == 3
     assert v.ndim == 3
@@ -1267,6 +1308,13 @@ def tree_attention(
         k = k.to(torch.float32)
         v = v.to(torch.float32)
         warnings.warn("tree attention does not support 32 bits right now.")
+    
+    if not q.is_contiguous():
+        q = q.contiguous()
+    if not k.is_contiguous():
+        k = k.contiguous()
+    if not v.is_contiguous():
+        v = v.contiguous()
     
     with timer('tree_attention'):
         with timer('attention_matrix'):
@@ -1345,9 +1393,6 @@ def main_debug():
         # scale_up=2,
     )
     
-    if TRACE:
-        print(get_bench().format_tracetree())
-    
     stderr = (out - context).abs().mean().item()
     stdcontext = torch.std_mean(context)[0].item()
     
@@ -1367,24 +1412,35 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor):
 
 def main_latency_benchmark():
     global DEBUG
-    DEBUG = False
-    TRACE = True
+    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--dups', type=int, default=2)
+    parser.add_argument('--query_size', type=int, default=1)
+    parser.add_argument('--method', type=str, default='tree')
+    args = parser.parse_args()
+    
+    DEBUG = args.debug
+    TRACE = args.trace
+    BSIZE = args.batch_size
+    DUPS = args.dups
+    QUERY_SIZE = args.query_size
+    METHOD = args.method
+    
+    if DEBUG:
+        seed()
     
     get_bench().disabled = not TRACE
     get_bench().synchronize = True
     
     q, k, v, out = load_checkouts(idx=0, window=40, seq_len=1024)
     
-    BSIZE = 256
-    DUPS = 1
-    QUERY_SIZE = 8
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
-    
-    METHOD = 'tree'
-    # METHOD = 'torch'
-    # METHOD = 'flash'
     
     samples = []
     n_samples = 200
