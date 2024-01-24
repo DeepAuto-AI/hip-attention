@@ -219,51 +219,58 @@ def _masking_iteration_compute(
                     score = torch.dot(vec_q, vec_k)
                     scores[i, j, k] = -score # NOTE: store negative store
                 """
-                hid_range = tl.arange(0, BLOCK_HID)
-                hid_mask = hid_range < HID
-                vec_q = tl.load(
-                    queries +\
-                        idx_n * stride_queries_n +\
-                        idx_tdst * stride_queries_tdst +\
-                        hid_range * stride_queries_hid,
-                    mask = hid_mask,
-                    other = 0,
-                )[:, None]
+                scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
+                for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
+                    hid_range = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
+                    hid_mask = hid_range < HID
+                    vec_q = tl.load(
+                        queries +\
+                            idx_n * stride_queries_n +\
+                            idx_tdst * stride_queries_tdst +\
+                            (hid_range[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
+                        mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
+                        other = 0,
+                    )
+                    # tl.debug_barrier()
+                    
+                    num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
+                    num_pixels_mask = num_pixels_range < num_pixels_scalar
+                    loc_k_vec = tl.load(
+                        tmask +\
+                            idx_n * stride_tmask_n +\
+                            idx_tdst * stride_tmask_tdst +\
+                            num_pixels_range * stride_tmask_k,
+                        mask = num_pixels_mask,
+                        other = 0,
+                    )
+                    # tl.debug_barrier()
+                    # NOTE: random key selection with in the block
+                    # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
+                    loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+                    vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
+                    vec_k = tl.load(
+                        keys +\
+                            idx_n * stride_keys_n +\
+                            loc_k_vec[None, :] * stride_keys_tsrc + \
+                            hid_range[:, None] * stride_keys_hid,
+                        mask = vec_k_mask,
+                        other = 0,
+                    )
+                    # tl.debug_barrier()
+                    
+                    # TODO: support tensorCore
+                    # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
+                    # 1x128 @ 128x512 512x128 @ 128x1
+                    # scores = -tl.sum(
+                    #     vec_q * vec_k, 
+                    #     axis=0,
+                    # )
+                    scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
+                    scores_partial = tl.sum(scores_partial, axis=0)
+                    scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                    scores += scores_partial
                 # tl.debug_barrier()
-                
-                num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
-                num_pixels_mask = num_pixels_range < num_pixels_scalar
-                loc_k_vec = tl.load(
-                    tmask +\
-                        idx_n * stride_tmask_n +\
-                        idx_tdst * stride_tmask_tdst +\
-                        num_pixels_range * stride_tmask_k,
-                    mask = num_pixels_mask,
-                    other = 0,
-                )
-                # tl.debug_barrier()
-                # NOTE: random key selection with in the block
-                # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
-                vec_k = tl.load(
-                    keys +\
-                        idx_n * stride_keys_n +\
-                        loc_k_vec[None, :] * stride_keys_tsrc + \
-                        hid_range[:, None] * stride_keys_hid,
-                    mask = vec_k_mask,
-                    other = 0,
-                )
-                # tl.debug_barrier()
-                
-                # TODO: support tensorCore
-                # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
-                # 1x128 @ 128x512 512x128 @ 128x1
-                scores = -tl.sum(
-                    vec_q * vec_k, 
-                    axis=0,
-                )
-                # tl.debug_barrier()
+                # scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
                 
                 """
                 _, topk_indices = torch.topk(scores[i, j, :num_pixels], k=k_new, largest=False)
@@ -272,7 +279,8 @@ def _masking_iteration_compute(
                 """
                 
                 # select min-k from negative scores -> select top-k
-                masked_scores = scores + (~num_pixels_mask) * 32000.0
+                # masked_scores = scores + (~num_pixels_mask) * 32000.0
+                masked_scores = scores
                 # tl.debug_barrier()
                 scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
                 # tl.debug_barrier()
@@ -379,6 +387,8 @@ def masking_iteration(
         assert t_mask.min() >= 0
         assert t_mask.max() < 1
     
+    BLOCK_HID = 32
+    
     _masking_iteration_compute[grid](
         # input matrices
         queries, queries.stride(0), queries.stride(1), queries.stride(2),
@@ -403,9 +413,10 @@ def masking_iteration(
         triton.next_power_of_2(mask.shape[-1]),
         triton.next_power_of_2(t_mask.shape[-1]),
         triton.next_power_of_2(math.ceil(scale_up)),
-        triton.next_power_of_2(HID),
+        BLOCK_HID,
         
         num_warps=8,
+        num_stages=2,
     )
 
 @triton.jit
@@ -1310,8 +1321,8 @@ def tree_attention(
     # heuristics: mask_k == w_start * scale_up
 ):
     if w_start is None:
-        # w_start = math.ceil(mask_k * scale_up)
-        w_start = mask_k
+        w_start = math.ceil(mask_k * scale_up)
+        # w_start = mask_k
     if n_patches is None:
         n_patches = math.ceil(mask_k / scale_up)
     
@@ -1442,6 +1453,7 @@ def main_latency_benchmark():
     parser.add_argument('--dups', type=int, default=2)
     parser.add_argument('--query_size', type=int, default=1)
     parser.add_argument('--method', type=str, default='tree')
+    parser.add_argument('--samples', type=int, default=200)
     args = parser.parse_args()
     
     DEBUG = args.debug
@@ -1450,6 +1462,7 @@ def main_latency_benchmark():
     DUPS = args.dups
     QUERY_SIZE = args.query_size
     METHOD = args.method
+    n_samples = args.samples
     
     if DEBUG:
         seed()
@@ -1464,7 +1477,6 @@ def main_latency_benchmark():
     v = v.repeat(BSIZE, DUPS, 1)
     
     samples = []
-    n_samples = 200
     for i in tqdm.tqdm(range(n_samples)):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
