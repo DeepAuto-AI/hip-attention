@@ -48,6 +48,7 @@ import triton
 import triton.language as tl
 
 from src.utils import get_bench, seed
+from src.models.tree_attention.common import load_checkouts
 
 timer = lambda x: get_bench().region(x)
 
@@ -83,6 +84,7 @@ def _masking_iteration_compute(
     
     # block constant
     GROUP_N,
+    GROUP_TDST,
     BLOCK_MASK_K: tl.constexpr, 
     BLOCK_TMASK_K: tl.constexpr, 
     BLOCK_MAX_DUP: tl.constexpr,
@@ -93,271 +95,271 @@ def _masking_iteration_compute(
     pid_n = tl.program_id(0)
     for _idx_n in range(GROUP_N):
         idx_n = _idx_n + GROUP_N * pid_n
-        mask_n = idx_n < N
-        idx_tdst = tl.program_id(1)
-        
-        """
-        # for each query
-        w_old = ws[i, j, 0]
-        t_src = t_srcs[i, j, 0]
-        w_new = min(torch.round(w_old * scale_up), t_src)
-        """
-        
-        w_old = tl.load(
-            ws + \
-                idx_n * stride_ws_n + \
-                idx_tdst * stride_ws_tdst,
-            mask = mask_n
-        )
-        
-        t_src = tl.load(
-            tsrcs + \
-                idx_n * stride_tsrcs_n + \
-                idx_tdst * stride_tsrcs_tdst,
-            mask = mask_n
-        )
-        
-        w_new = tl.minimum(
-            tl.math.round(w_old.to(tl.float32) * scale_up.to(tl.float32)).to(tl.float32), 
-            t_src
-        ).to(tl.int64)
-        
-        """
-        if w_old != w_new:
-        """
-        if w_old != w_new & mask_n:
-            # return
+        if idx_n < N:
+            pid_tdst = tl.program_id(1)
+            for _idx_tdst in range(GROUP_TDST):
+                idx_tdst = pid_tdst * GROUP_TDST + _idx_tdst
+                if idx_tdst < T_DST:
+                    """
+                    # for each query
+                    w_old = ws[i, j, 0]
+                    t_src = t_srcs[i, j, 0]
+                    w_new = min(torch.round(w_old * scale_up), t_src)
+                    """
+                    
+                    w_old = tl.load(
+                        ws + \
+                            idx_n * stride_ws_n + \
+                            idx_tdst * stride_ws_tdst,
+                    )
+                    
+                    t_src = tl.load(
+                        tsrcs + \
+                            idx_n * stride_tsrcs_n + \
+                            idx_tdst * stride_tsrcs_tdst,
+                    )
+                    
+                    w_new = tl.minimum(
+                        tl.math.round(w_old.to(tl.float32) * scale_up.to(tl.float32)).to(tl.float32), 
+                        t_src
+                    ).to(tl.int64)
+                    
+                    """
+                    if w_old != w_new:
+                    """
+                    if w_old != w_new:
+                        # return
 
-            """
-            k_old = ks[i, j, 0]
-            k_new = max(n_patches, int(min(mask_k / t_src, 1.0) * w_new))
-            k_new = min(t_src, max(n_patches, k_new))
-            """
-            
-            k_old = tl.load(
-                ks + \
-                    idx_n * stride_ks_n +\
-                    idx_tdst * stride_ks_tdst,
-            ).to(tl.int64)
-            k_new = tl.maximum(
-                n_patches, 
-                (
-                    tl.minimum(
-                        mask_k.to(tl.float64) / t_src.to(tl.float64), 
-                        1.0
-                    ) * w_new.to(tl.float64)
-                ).to(tl.int64)
-            )
-            k_new = tl.minimum(t_src, tl.maximum(n_patches, k_new))
-            
-            """
-            # mask -> t_mask
-            num_pixels = 0
-            for k in range(k_old):
-                loc = mask[i, j, k]
-                loc_idx_start = int(loc * w_old)
-                loc_idx_end = loc_idx_start + 1
-                loc_idx_start = int(loc_idx_start / w_old * w_new)
-                loc_idx_end = int(loc_idx_end / w_old * w_new)
-                dup_pixels = loc_idx_end - loc_idx_start
-                for l in range(dup_pixels):
-                    t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
-                num_pixels += dup_pixels
-            """
-            
-            k_old_range = tl.arange(0, BLOCK_MASK_K)
-            k_old_mask = k_old_range < k_old
-            loc_vec = tl.load(
-                mask +\
-                    idx_n * stride_mask_n +\
-                    idx_tdst * stride_mask_tdst +\
-                    k_old_range * stride_mask_k,
-                mask = k_old_mask,
-                other = 0
-            )
-            
-            loc_idx_start_vec = (loc_vec * w_old).to(tl.int64)
-            loc_idx_end_vec = loc_idx_start_vec + 1
-            loc_idx_start_vec = (loc_idx_start_vec.to(tl.float64) / w_old.to(tl.float64) * w_new.to(tl.float64)).to(tl.int64)
-            loc_idx_end_vec = (loc_idx_end_vec.to(tl.float64) / w_old.to(tl.float64) * w_new.to(tl.float64)).to(tl.int64)
-            
-            dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
-            dup_pixels_vec = dup_pixels_vec * k_old_mask
-            num_pixels_vec = tl.cumsum(dup_pixels_vec)
-            dup_pixels_first = tl.min(num_pixels_vec)
-            num_pixels_scalar = tl.max(num_pixels_vec)
-            
-            dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)
-            dup_pixels_mask = (dup_pixels_range[None, :] <= dup_pixels_vec[:, None]) & k_old_mask[:, None]
-            # tl.debug_barrier()
-            tl.store(
-                tmask + \
-                    idx_n * stride_tmask_n +\
-                    idx_tdst * stride_tmask_tdst +\
-                    ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
-                mask=dup_pixels_mask,
-                value=(
-                    (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
-                )
-                # value = num_pixels_scalar=
-            )
-            # tl.debug_barrier()
-            
-            """
-            # t_mask -> mask (using scores)
-            if k_new < num_pixels:
-            """
-            if k_new < num_pixels_scalar and True:
-                """
-                # need top_k, so compute scores
-                vec_q = queries[i, j, :]
-                for k in range(num_pixels):
-                    # NOTE: nearest
-                    loc = t_mask[i, j, k]
-                    vec_k = keys[i, int(loc * t_src), :]
-                    
-                    score = torch.dot(vec_q, vec_k)
-                    scores[i, j, k] = -score # NOTE: store negative store
-                """
-                scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
-                for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
-                    hid_range = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
-                    hid_mask = hid_range < HID
-                    vec_q = tl.load(
-                        queries +\
-                            idx_n * stride_queries_n +\
-                            idx_tdst * stride_queries_tdst +\
-                            (hid_range[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
-                        mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
-                        other = 0,
-                    )
-                    # tl.debug_barrier()
-                    
-                    num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
-                    num_pixels_mask = num_pixels_range < num_pixels_scalar
-                    loc_k_vec = tl.load(
-                        tmask +\
-                            idx_n * stride_tmask_n +\
-                            idx_tdst * stride_tmask_tdst +\
-                            num_pixels_range * stride_tmask_k,
-                        mask = num_pixels_mask,
-                        other = 0,
-                    )
-                    # tl.debug_barrier()
-                    # NOTE: random key selection with in the block
-                    # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                    loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                    vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
-                    vec_k = tl.load(
-                        keys +\
-                            idx_n * stride_keys_n +\
-                            loc_k_vec[None, :] * stride_keys_tsrc + \
-                            hid_range[:, None] * stride_keys_hid,
-                        mask = vec_k_mask,
-                        other = 0,
-                    )
-                    # tl.debug_barrier()
-                    
-                    # TODO: support tensorCore
-                    # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
-                    # 1x128 @ 128x512 512x128 @ 128x1
-                    # scores = -tl.sum(
-                    #     vec_q * vec_k, 
-                    #     axis=0,
-                    # )
-                    scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
-                    scores_partial = tl.sum(scores_partial, axis=0)
-                    scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
-                    scores += scores_partial
-                # tl.debug_barrier()
-                # scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
-                
-                """
-                _, topk_indices = torch.topk(scores[i, j, :num_pixels], k=k_new, largest=False)
-                for k in range(k_new):
-                    mask[i, j, k] = t_mask[i, j, topk_indices[k]]
-                """
-                
-                # select min-k from negative scores -> select top-k
-                # masked_scores = scores + (~num_pixels_mask) * 32000.0
-                masked_scores = scores
-                # tl.debug_barrier()
-                scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
-                # tl.debug_barrier()
-                topk_mask = masked_scores <= scores_kth_large
-                topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
-                # tl.debug_barrier()
-                topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, k_new - 1)
-                # tl.debug_barrier()
-                
-                temp_range = tl.arange(0, BLOCK_TMASK_K)
-                temp_mask = temp_range < num_pixels_scalar
-                temp = tl.load(
-                    tmask +\
-                        idx_n * stride_tmask_n +\
-                        idx_tdst * stride_tmask_tdst +\
-                        temp_range * stride_tmask_k,
-                    mask=temp_mask,
-                    other=42
-                )
-                # tl.debug_barrier()
-                tl.store(
-                    mask +\
-                        idx_n * stride_mask_n +\
-                        idx_tdst * stride_mask_tdst +\
-                        topk_range * stride_mask_k,
-                    mask=topk_mask & temp_mask,
-                    value=temp,
-                    # value=0.1,
-                )
-                # tl.debug_barrier()
-            else:
-                """
-                else:
-                    mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
-                """
-                temp1_range = tl.arange(0, BLOCK_MASK_K)
-                temp1_mask = temp1_range < num_pixels_scalar
-                # tl.debug_barrier()
-                temp1 = tl.load(
-                    tmask +\
-                        idx_n * stride_tmask_n +\
-                        idx_tdst * stride_tmask_tdst +\
-                        temp1_range * stride_tmask_k,
-                    mask=temp1_mask,
-                )
-                
-                # tl.debug_barrier()
-                tl.store(
-                    mask +\
-                        idx_n * stride_mask_n +\
-                        idx_tdst * stride_mask_tdst +\
-                        temp1_range * stride_mask_k,
-                    mask=temp1_mask,
-                    value=temp1,
-                )
-                # tl.debug_barrier()
-                # del temp1, temp1_range, temp1_mask
-            
-            """
-            ws[i, j, 0] = w_new
-            ks[i, j, 0] = min(k_new, num_pixels)
-            """
-            # tl.debug_barrier()
-            tl.store(
-                ws +\
-                    idx_n * stride_ws_n +\
-                    idx_tdst * stride_ws_tdst,
-                value = w_new
-            )
-            # tl.debug_barrier()
-            tl.store(
-                ks +\
-                    idx_n * stride_ks_n +\
-                    idx_tdst * stride_ks_tdst,
-                value = tl.minimum(k_new, num_pixels_scalar)
-            )
-            # tl.debug_barrier()
+                        """
+                        k_old = ks[i, j, 0]
+                        k_new = max(n_patches, int(min(mask_k / t_src, 1.0) * w_new))
+                        k_new = min(t_src, max(n_patches, k_new))
+                        """
+                        
+                        k_old = tl.load(
+                            ks + \
+                                idx_n * stride_ks_n +\
+                                idx_tdst * stride_ks_tdst,
+                        ).to(tl.int64)
+                        k_new = tl.maximum(
+                            n_patches, 
+                            (
+                                tl.minimum(
+                                    mask_k.to(tl.float32) / t_src.to(tl.float32), 
+                                    1.0
+                                ) * w_new.to(tl.float32)
+                            ).to(tl.int64)
+                        )
+                        k_new = tl.minimum(t_src, tl.maximum(n_patches, k_new))
+                        
+                        """
+                        # mask -> t_mask
+                        num_pixels = 0
+                        for k in range(k_old):
+                            loc = mask[i, j, k]
+                            loc_idx_start = int(loc * w_old)
+                            loc_idx_end = loc_idx_start + 1
+                            loc_idx_start = int(loc_idx_start / w_old * w_new)
+                            loc_idx_end = int(loc_idx_end / w_old * w_new)
+                            dup_pixels = loc_idx_end - loc_idx_start
+                            for l in range(dup_pixels):
+                                t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
+                            num_pixels += dup_pixels
+                        """
+                        
+                        k_old_range = tl.arange(0, BLOCK_MASK_K)
+                        k_old_mask = k_old_range < k_old
+                        loc_vec = tl.load(
+                            mask +\
+                                idx_n * stride_mask_n +\
+                                idx_tdst * stride_mask_tdst +\
+                                k_old_range * stride_mask_k,
+                            mask = k_old_mask,
+                            other = 0
+                        )
+                        
+                        loc_idx_start_vec = (loc_vec * w_old).to(tl.int64)
+                        loc_idx_end_vec = loc_idx_start_vec + 1
+                        loc_idx_start_vec = (loc_idx_start_vec.to(tl.float32) / w_old.to(tl.float32) * w_new.to(tl.float32)).to(tl.int64)
+                        loc_idx_end_vec = (loc_idx_end_vec.to(tl.float32) / w_old.to(tl.float32) * w_new.to(tl.float32)).to(tl.int64)
+                        
+                        dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
+                        dup_pixels_vec = dup_pixels_vec * k_old_mask
+                        num_pixels_vec = tl.cumsum(dup_pixels_vec)
+                        dup_pixels_first = tl.min(num_pixels_vec)
+                        num_pixels_scalar = tl.max(num_pixels_vec)
+                        
+                        dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)
+                        dup_pixels_mask = (dup_pixels_range[None, :] <= dup_pixels_vec[:, None]) & k_old_mask[:, None]
+                        # tl.debug_barrier()
+                        tl.store(
+                            tmask + \
+                                idx_n * stride_tmask_n +\
+                                idx_tdst * stride_tmask_tdst +\
+                                ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
+                            mask=dup_pixels_mask,
+                            value=(
+                                (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
+                            )
+                            # value = num_pixels_scalar=
+                        )
+                        # tl.debug_barrier()
+                        
+                        """
+                        # t_mask -> mask (using scores)
+                        if k_new < num_pixels:
+                        """
+                        if k_new < num_pixels_scalar and True:
+                            """
+                            # need top_k, so compute scores
+                            vec_q = queries[i, j, :]
+                            for k in range(num_pixels):
+                                # NOTE: nearest
+                                loc = t_mask[i, j, k]
+                                vec_k = keys[i, int(loc * t_src), :]
+                                
+                                score = torch.dot(vec_q, vec_k)
+                                scores[i, j, k] = -score # NOTE: store negative store
+                            """
+                            scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
+                            for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
+                                hid_range = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
+                                hid_mask = hid_range < HID
+                                vec_q = tl.load(
+                                    queries +\
+                                        idx_n * stride_queries_n +\
+                                        idx_tdst * stride_queries_tdst +\
+                                        (hid_range[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
+                                    mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
+                                    other = 0,
+                                )
+                                # tl.debug_barrier()
+                                
+                                num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
+                                num_pixels_mask = num_pixels_range < num_pixels_scalar
+                                loc_k_vec = tl.load(
+                                    tmask +\
+                                        idx_n * stride_tmask_n +\
+                                        idx_tdst * stride_tmask_tdst +\
+                                        num_pixels_range * stride_tmask_k,
+                                    mask = num_pixels_mask,
+                                    other = 0,
+                                )
+                                # tl.debug_barrier()
+                                # NOTE: random key selection with in the block
+                                # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
+                                loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+                                vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
+                                vec_k = tl.load(
+                                    keys +\
+                                        idx_n * stride_keys_n +\
+                                        loc_k_vec[None, :] * stride_keys_tsrc + \
+                                        hid_range[:, None] * stride_keys_hid,
+                                    mask = vec_k_mask,
+                                    other = 0,
+                                )
+                                # tl.debug_barrier()
+                                
+                                # TODO: support tensorCore
+                                # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
+                                # 1x128 @ 128x512 512x128 @ 128x1
+                                # scores = -tl.sum(
+                                #     vec_q * vec_k, 
+                                #     axis=0,
+                                # )
+                                scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
+                                scores_partial = tl.sum(scores_partial, axis=0)
+                                scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                                scores += scores_partial.to(scores.dtype)
+                            # tl.debug_barrier()
+                            # scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
+                            
+                            """
+                            _, topk_indices = torch.topk(scores[i, j, :num_pixels], k=k_new, largest=False)
+                            for k in range(k_new):
+                                mask[i, j, k] = t_mask[i, j, topk_indices[k]]
+                            """
+                            
+                            # select min-k from negative scores -> select top-k
+                            # masked_scores = scores + (~num_pixels_mask) * 32000.0
+                            masked_scores = scores
+                            # tl.debug_barrier()
+                            scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
+                            # tl.debug_barrier()
+                            topk_mask = masked_scores <= scores_kth_large
+                            topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
+                            # tl.debug_barrier()
+                            topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, k_new - 1)
+                            # tl.debug_barrier()
+                            
+                            temp_range = tl.arange(0, BLOCK_TMASK_K)
+                            temp_mask = temp_range < num_pixels_scalar
+                            temp = tl.load(
+                                tmask +\
+                                    idx_n * stride_tmask_n +\
+                                    idx_tdst * stride_tmask_tdst +\
+                                    temp_range * stride_tmask_k,
+                                mask=temp_mask,
+                                other=0
+                            )
+                            # tl.debug_barrier()
+                            tl.store(
+                                mask +\
+                                    idx_n * stride_mask_n +\
+                                    idx_tdst * stride_mask_tdst +\
+                                    topk_range * stride_mask_k,
+                                mask=topk_mask & temp_mask,
+                                value=temp,
+                                # value=0.1,
+                            )
+                            # tl.debug_barrier()
+                        else:
+                            """
+                            else:
+                                mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
+                            """
+                            temp1_range = tl.arange(0, BLOCK_MASK_K)
+                            temp1_mask = temp1_range < num_pixels_scalar
+                            # tl.debug_barrier()
+                            temp1 = tl.load(
+                                tmask +\
+                                    idx_n * stride_tmask_n +\
+                                    idx_tdst * stride_tmask_tdst +\
+                                    temp1_range * stride_tmask_k,
+                                mask=temp1_mask,
+                            )
+                            
+                            # tl.debug_barrier()
+                            tl.store(
+                                mask +\
+                                    idx_n * stride_mask_n +\
+                                    idx_tdst * stride_mask_tdst +\
+                                    temp1_range * stride_mask_k,
+                                mask=temp1_mask,
+                                value=temp1,
+                            )
+                            # tl.debug_barrier()
+                            # del temp1, temp1_range, temp1_mask
+                        
+                        """
+                        ws[i, j, 0] = w_new
+                        ks[i, j, 0] = min(k_new, num_pixels)
+                        """
+                        # tl.debug_barrier()
+                        tl.store(
+                            ws +\
+                                idx_n * stride_ws_n +\
+                                idx_tdst * stride_ws_tdst,
+                            value = w_new
+                        )
+                        # tl.debug_barrier()
+                        tl.store(
+                            ks +\
+                                idx_n * stride_ks_n +\
+                                idx_tdst * stride_ks_tdst,
+                            value = tl.minimum(k_new, num_pixels_scalar)
+                        )
+                        # tl.debug_barrier()
 
 def masking_iteration(
     # input matrices
@@ -370,10 +372,6 @@ def masking_iteration(
     N: int, T_DST: int, T_SRC: int, HID: int,
 ):
     global DEBUG
-    
-    GROUP_N = 4
-    grid = (triton.cdiv(N, GROUP_N), T_DST)
-    
     if DEBUG:
         K = mask.shape[-1]
         assert t_srcs.min() > 0
@@ -387,7 +385,10 @@ def masking_iteration(
         assert t_mask.min() >= 0
         assert t_mask.max() < 1
     
-    BLOCK_HID = 32
+    GROUP_N = 1
+    GROUP_TDST = 4
+    BLOCK_HID = 64
+    grid = (triton.cdiv(N, GROUP_N), triton.cdiv(T_DST, GROUP_TDST))
     
     _masking_iteration_compute[grid](
         # input matrices
@@ -410,13 +411,15 @@ def masking_iteration(
         
         # block constant
         GROUP_N,
+        GROUP_TDST,
         triton.next_power_of_2(mask.shape[-1]),
         triton.next_power_of_2(t_mask.shape[-1]),
         triton.next_power_of_2(math.ceil(scale_up)),
         BLOCK_HID,
         
-        num_warps=8,
+        num_warps=4,
         num_stages=2,
+        enable_warp_specialization=True,
     )
 
 @triton.jit
@@ -819,7 +822,7 @@ def to_dense(
 ):
     # print('convert to dense')
     dense = np.zeros((N, T_DST, T_SRC))
-    for i in range(N):
+    for i in range(1):
         for j in range(T_DST):
             nonzero_k = ks[i, j].item()
             for k in range(nonzero_k):
@@ -867,9 +870,10 @@ def attention_matrix(
         ks = ws.clone()
         
         # matrices
-        mask = (torch.arange(mask_k, device=device).view(1, 1, mask_k) / ks.unsqueeze(-1)).to(dtype)
-        tmask = torch.zeros((N, T_DST, mask_k * math.ceil(scale_up)), dtype=dtype, device=device)
-        scores = torch.ones_like(mask)
+        # NOTE: float16 -> int32 seems not possible
+        mask = (torch.arange(mask_k, device=device).view(1, 1, mask_k) / ks.unsqueeze(-1)).to(torch.float32)
+        tmask = torch.zeros((N, T_DST, mask_k * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+        scores = torch.ones_like(mask, dtype=dtype)
     
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
@@ -1004,8 +1008,8 @@ def _sdbmm_compute(
                 probs +\
                     idx_n * stride_probs_n +\
                     idx_tdst * stride_probs_tdst +\
-                    idx_k * stride_probs_k,
-                mask = mask_k,
+                    (idx_k[None, :] + tl.arange(0, 16)[:, None]) * stride_probs_k,
+                mask = mask_k[None, :] & (tl.arange(0, 16)[:, None] < 1),
                 other = 0,
             )
             
@@ -1013,14 +1017,17 @@ def _sdbmm_compute(
             value = tl.load(
                 values +\
                     idx_n * stride_values_n +\
-                    atten_indices[None, :] * stride_values_tsrc +\
-                    idx_hid[:, None] * stride_values_hid,
-                mask = mask_k[None, :] & mask_hid[:, None],
+                    atten_indices[:, None] * stride_values_tsrc +\
+                    idx_hid[None, :] * stride_values_hid,
+                mask = mask_k[:, None] & mask_hid[None, :],
                 other = 0,
             )
             
             # output: [BLOCK_HID] <- atten_probs[1, BLOCK_K] @ value[BLOCK_K, BLOCK_HID]
-            output = tl.sum(atten_probs[None, :] * value, axis=1)
+            # output = tl.sum(atten_probs[None, :] * value, axis=1)
+            output = tl.dot(atten_probs.to(value.dtype), value, allow_tf32=True)
+            output = tl.sum(output, axis=0)
+            
             tl.store(
                 context +\
                     idx_n * stride_context_n +\
@@ -1190,10 +1197,10 @@ class SparseAttentionAutoGradFn(Function):
         
         context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
         
-        GROUP_N = 4
+        GROUP_N = 1
         BLOCK_K = triton.next_power_of_2(K)
         # BLOCK_HID = triton.next_power_of_2(HID)
-        BLOCK_HID = 32
+        BLOCK_HID = 64
         grid = (triton.cdiv(N, GROUP_N), T_DST, triton.cdiv(HID, BLOCK_HID))
         
         # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
@@ -1226,7 +1233,7 @@ class SparseAttentionAutoGradFn(Function):
             BLOCK_K,
             BLOCK_HID,
             
-            num_warps=8,
+            num_warps=4,
         )
         
         return context
@@ -1335,11 +1342,8 @@ def tree_attention(
     assert N == _N
     assert HID == _HID
     
-    if q.dtype != torch.float32:
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
-        warnings.warn("tree attention does not support 32 bits right now.")
+    assert q.dtype == k.dtype
+    assert q.dtype == v.dtype
     
     if not q.is_contiguous():
         q = q.contiguous()
@@ -1380,40 +1384,20 @@ def tree_attention(
     
     return context, (indices, ks, probs)
 
-def load_checkouts(idx = 24, window = 1, seq_len=2048):
-    data_source = 'llama'
-    device = 0
-    if data_source == 'llama':
-        state = torch.load('./cache/llama/qkvout.pth', map_location='cpu')
-        q = state['q'] / (state['q'].shape[-1] ** 0.5)
-        k = state['k']
-        v = state['v']
-        out = state['out']
-        N, H, T_DST, HID = q.shape
-        N, H, T_SRC, HID = k.shape
-        q = q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
-        k = k.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
-        v = v.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
-        out = out.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
-    else:
-        q = torch.randn((1, 64, 4))
-        k = torch.randn((1, 64, 4))
-        v = k.clone()
-        out = q.clone()
-    
-    dtype = torch.float32
-    q = q.to(device, dtype=dtype)
-    k = k.to(device, dtype=dtype)
-    v = v.to(device, dtype=dtype)
-    out = out.to(device, dtype=dtype)
-    
-    return q, k, v, out
-
 def main_debug():
     global DEBUG
     DEBUG = True
     
-    q, k, v, out = load_checkouts()
+    q, k, v, out = load_checkouts(window=1)
+    
+    # bsize = 64
+    # dups = 4
+    # q = q.repeat(bsize, dups, 1)
+    # k = k.repeat(bsize, dups, 1)
+    # v = v.repeat(bsize, dups, 1)
+    # skip = 7500
+    # out = out[:, skip:, :]
+    # q = q[:, skip:, :]
     
     context, (atten_indices, atten_ks, atten_probs) = tree_attention(
         q,
@@ -1475,6 +1459,7 @@ def main_latency_benchmark():
     q = q.repeat(BSIZE, DUPS, 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
+    started = False
     
     samples = []
     for i in tqdm.tqdm(range(n_samples)):
@@ -1499,6 +1484,10 @@ def main_latency_benchmark():
         elapsed = start.elapsed_time(end)
         
         if i > n_samples * 0.1:
+            if not started:
+                get_bench().reset_measures()
+                get_bench().reset_trace()
+                started = True
             samples.append(elapsed)
     
     if TRACE:
@@ -1508,5 +1497,5 @@ def main_latency_benchmark():
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    # main_debug()
-    main_latency_benchmark()
+    main_debug()
+    # main_latency_benchmark()
