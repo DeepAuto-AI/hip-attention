@@ -604,11 +604,14 @@ def _calc_score_compute(
             idx_k * stride_indices_k,
     )
     
-    idx_tsrc = idx_tsrc + tl.arange(0, BLOCK_SIZE_PADDED)
-    mask_tsrc = idx_tsrc < TSRC
+    idx_block = tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_block = idx_block < BLOCK_SIZE
     
-    idx_tdst = idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
-    mask_tdst = idx_tdst < TDST
+    idx_tsrc = idx_tsrc + idx_block
+    mask_tsrc = (idx_tsrc < TSRC) & mask_block
+    
+    idx_tdst = idx_bdst * BLOCK_SIZE + idx_block
+    mask_tdst = (idx_tdst < TDST) & mask_block
     
     scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_SIZE_PADDED), dtype=tl.float32)
     for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
@@ -638,8 +641,8 @@ def _calc_score_compute(
         scores_mini = tl.dot(queries, keys)
         scores += scores_mini.to(scores.dtype)
     
-    idx_scorek = (idx_k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
-    mask_scorek = idx_scorek < (K * BLOCK_SIZE)
+    idx_scorek = (idx_k * BLOCK_SIZE + idx_block)
+    mask_scorek = (idx_scorek < (K * BLOCK_SIZE)) & mask_block
     
     tl.store(
         SCORES +\
@@ -911,6 +914,8 @@ class CalcScoreAutoGradFn(Function):
 
     @staticmethod
     def backward(ctx, grad_scores):
+        ENABLED = True
+        
         queries, keys, indices, ks = ctx.saved_tensors
         BLOCK_SIZE = ctx.BLOCK_SIZE
         grad_queries = grad_keys = None
@@ -928,21 +933,22 @@ class CalcScoreAutoGradFn(Function):
             
             grad_queries = torch.zeros_like(queries)
             
-            _calc_score_compute_bwd_queries[grid](
-                ks, ks.stride(0), ks.stride(1),
-                indices, indices.stride(0), indices.stride(1), indices.stride(2), 
-                keys, keys.stride(0), keys.stride(1), keys.stride(2),
-                
-                grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
-                
-                grad_queries, grad_queries.stride(0), grad_queries.stride(1), grad_queries.stride(2),
-                
-                N, T_DST, T_SRC, HID, BK, K,
-                
-                BLOCK_SIZE,
-                next_multiple_of(BLOCK_SIZE, 16),
-                BLOCK_HID,
-            )
+            if ENABLED:
+                _calc_score_compute_bwd_queries[grid](
+                    ks, ks.stride(0), ks.stride(1),
+                    indices, indices.stride(0), indices.stride(1), indices.stride(2), 
+                    keys, keys.stride(0), keys.stride(1), keys.stride(2),
+                    
+                    grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
+                    
+                    grad_queries, grad_queries.stride(0), grad_queries.stride(1), grad_queries.stride(2),
+                    
+                    N, T_DST, T_SRC, HID, BK, K,
+                    
+                    BLOCK_SIZE,
+                    next_multiple_of(BLOCK_SIZE, 16),
+                    BLOCK_HID,
+                )
         
         # for keys
         if ctx.needs_input_grad[1]:
@@ -951,21 +957,22 @@ class CalcScoreAutoGradFn(Function):
             
             grad_keys = torch.zeros_like(keys)
             
-            _calc_score_compute_bwd_keys[grid](
-                ks, ks.stride(0), ks.stride(1),
-                indices, indices.stride(0), indices.stride(1), indices.stride(2), 
-                queries, queries.stride(0), queries.stride(1), queries.stride(2),
-                
-                grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
-                
-                grad_keys, grad_keys.stride(0), grad_keys.stride(1), grad_keys.stride(2),
-                
-                N, T_DST, T_SRC, HID, BK, K,
-                
-                BLOCK_SIZE,
-                next_multiple_of(BLOCK_SIZE, 16),
-                BLOCK_HID,
-            )
+            if ENABLED:
+                _calc_score_compute_bwd_keys[grid](
+                    ks, ks.stride(0), ks.stride(1),
+                    indices, indices.stride(0), indices.stride(1), indices.stride(2), 
+                    queries, queries.stride(0), queries.stride(1), queries.stride(2),
+                    
+                    grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
+                    
+                    grad_keys, grad_keys.stride(0), grad_keys.stride(1), grad_keys.stride(2),
+                    
+                    N, T_DST, T_SRC, HID, BK, K,
+                    
+                    BLOCK_SIZE,
+                    next_multiple_of(BLOCK_SIZE, 16),
+                    BLOCK_HID,
+                )
         
         return (
             grad_queries, 
@@ -1187,9 +1194,12 @@ def _sdbmm_compute(
 ):
     idx_n = tl.program_id(0)
     
+    idx_block = tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_block = idx_block < BLOCK_SIZE
+    
     idx_bdst = tl.program_id(1)
-    idx_tdst = idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
-    mask_tdst = idx_tdst < TDST
+    idx_tdst = idx_bdst * BLOCK_SIZE + idx_block
+    mask_tdst = (idx_tdst < TDST) & mask_block
     
     pid_hid = tl.program_id(2)
     idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
@@ -1210,12 +1220,12 @@ def _sdbmm_compute(
                 idx_bk * stride_indices_bk,
         )
         # atten_indices: [BLOCK_SIZE_PADDED]
-        atten_indices = atten_block_indices + tl.arange(0, BLOCK_SIZE_PADDED)
-        mask_atten_indices = atten_indices < TSRC
+        atten_indices = atten_block_indices + idx_block
+        mask_atten_indices = (atten_indices < TSRC) & mask_block
         
         # atten_probs: [BLOCK_SIZE_PADDED, BLOCK_SIZE_PADDED]
-        idx_prob_k = (idx_bk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
-        mask_prob_k = idx_prob_k < BK * BLOCK_SIZE
+        idx_prob_k = (idx_bk * BLOCK_SIZE + idx_block)
+        mask_prob_k = (idx_prob_k < (BK * BLOCK_SIZE)) & mask_block
         atten_probs = tl.load(
             probs +\
                 idx_n * stride_probs_n +\
@@ -1490,6 +1500,8 @@ class SparseAttentionAutoGradFn(Function):
     
     @staticmethod
     def backward(ctx, grad_context):
+        ENABLED = True
+        
         values, indices, ks, probs = ctx.saved_tensors
         BLOCK_SIZE = ctx.BLOCK_SIZE
         grad_values = grad_probs = None
@@ -1512,20 +1524,21 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=values.dtype,
             )
             
-            _sdbmm_compute_bwd_values[grid](
-                probs, probs.stride(0), probs.stride(1), probs.stride(2),
-                indices, indices.stride(0), indices.stride(1), indices.stride(2),
-                
-                grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
-                
-                grad_values, grad_values.stride(0), grad_values.stride(1), grad_values.stride(2),
-                
-                N, T_DST, T_SRC, HID, BK, K,
-                
-                BLOCK_SIZE,
-                next_multiple_of(BLOCK_SIZE, 16),
-                BLOCK_HID,
-            )
+            if ENABLED:
+                _sdbmm_compute_bwd_values[grid](
+                    probs, probs.stride(0), probs.stride(1), probs.stride(2),
+                    indices, indices.stride(0), indices.stride(1), indices.stride(2),
+                    
+                    grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
+                    
+                    grad_values, grad_values.stride(0), grad_values.stride(1), grad_values.stride(2),
+                    
+                    N, T_DST, T_SRC, HID, BK, K,
+                    
+                    BLOCK_SIZE,
+                    next_multiple_of(BLOCK_SIZE, 16),
+                    BLOCK_HID,
+                )
             
             # print(grad_values.abs().sum())
         
@@ -1540,20 +1553,21 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=probs.dtype,
             )
             
-            _sdbmm_compute_bwd_probs[grid](
-                indices, indices.stride(0), indices.stride(1), indices.stride(2),
-                values, values.stride(0), values.stride(1), values.stride(2), 
-                
-                grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
-                
-                grad_probs, grad_probs.stride(0), grad_probs.stride(1), grad_probs.stride(2),
-                
-                N, T_DST, T_SRC, HID, BK, K,
-                
-                BLOCK_SIZE,
-                next_multiple_of(BLOCK_SIZE, 16),
-                BLOCK_HID,
-            )
+            if ENABLED:
+                _sdbmm_compute_bwd_probs[grid](
+                    indices, indices.stride(0), indices.stride(1), indices.stride(2),
+                    values, values.stride(0), values.stride(1), values.stride(2), 
+                    
+                    grad_context, grad_context.stride(0), grad_context.stride(1), grad_context.stride(2),
+                    
+                    grad_probs, grad_probs.stride(0), grad_probs.stride(1), grad_probs.stride(2),
+                    
+                    N, T_DST, T_SRC, HID, BK, K,
+                    
+                    BLOCK_SIZE,
+                    next_multiple_of(BLOCK_SIZE, 16),
+                    BLOCK_HID,
+                )
 
         return (
             grad_values, 
