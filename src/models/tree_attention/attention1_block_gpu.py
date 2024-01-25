@@ -1587,7 +1587,7 @@ def tree_attention(
     
     w_start: int = None,
     n_patches: int = None,
-    mask_k: int = 256,
+    mask_k: int = 1024,
     scale_up: float = 2,
     
     # heuristics: mask_k == n_patches * scale_up
