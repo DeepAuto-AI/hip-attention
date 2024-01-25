@@ -472,7 +472,7 @@ def masking_iteration(
     assert GROUP_BDST == 1
     
     # HID cannot be chunked if use reduce
-    if REDUCE_METHOD == 'max':
+    if REDUCE_METHOD in ['max', 'sum']:
         assert HID <= BLOCK_HID
     assert REDUCE_METHOD in ['max', 'sum', 'first']
     
@@ -747,7 +747,7 @@ def attention_matrix(
     # NOTE: float16 -> int32 seems not possible
     mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE)
     mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
-    tmask = torch.zeros((mask.shape[1], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+    tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
     
     B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE)
     B_DST = triton.cdiv(T_DST, BLOCK_SIZE)
@@ -774,7 +774,7 @@ def attention_matrix(
         value: np.ndarray,
         N, T_DST, T_SRC, BLOCK_SIZE
     ):
-        print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
+        # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
         out = np.zeros((N, T_DST, T_SRC))
         for idx_n in range(1):
             for idx_bdst in range(indices.shape[1]):
@@ -872,7 +872,7 @@ def attention_matrix(
         path = 'saves/models/tree_attention/block_truth.png'
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
-        print(ks)
+        # print(ks)
     
     return indices, ks, probs
 
@@ -966,27 +966,30 @@ def sparse_attention(
     indices: Tensor,
     ks: Tensor,
     probs: Tensor,
+    
+    BLOCK_SIZE: int,
 ):
     global DEBUG
     
-    N, T_SRC, HID = values.shape
-    _N, T_DST, K = indices.shape
+    N, TSRC, HID = values.shape
+    _N, BDST, BK = indices.shape
+    __N, TDST, K = probs.shape
     assert N == _N
-    assert ks.shape == (N, T_DST)
-    assert probs.shape == indices.shape
+    assert N == __N
+    assert ks.shape == (N, BDST)
     
-    context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
+    BSRC = triton.cdiv(TSRC, BLOCK_SIZE)
     
-    GROUP_N = 1
-    BLOCK_K = triton.next_power_of_2(K)
-    # BLOCK_HID = triton.next_power_of_2(HID)
+    context = torch.zeros((N, TDST, HID), dtype=values.dtype, device=values.device)
+    
+    BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
     BLOCK_HID = 64
-    grid = (triton.cdiv(N, GROUP_N), T_DST, triton.cdiv(HID, BLOCK_HID))
+    grid = (N, BDST, triton.cdiv(HID, BLOCK_HID))
     
     # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
     if DEBUG:
         # print('sdbmm', grid, BLOCK_K, BLOCK_HID)
-        assert indices.max() < T_SRC
+        assert indices.max() < TSRC
         assert indices.min() >= 0
         assert indices.is_contiguous()
         assert ks.is_contiguous()
@@ -1006,11 +1009,11 @@ def sparse_attention(
         context, context.stride(0), context.stride(1), context.stride(2),
         
         # input variables
-        N, T_SRC, T_DST, HID, K,
+        N, TSRC, TDST, HID, BK, BSRC, BDST,
         
         # blocks
-        GROUP_N,
-        BLOCK_K,
+        BLOCK_SIZE,
+        BLOCK_SIZE_PADDED,
         BLOCK_HID,
         
         num_warps=4,
@@ -1031,7 +1034,7 @@ def tree_attention(
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
     
-    block_size: int = 8,
+    block_size: int = 16,
 ):
     if w_start is None:
         w_start = math.ceil(mask_k * scale_up)
@@ -1077,6 +1080,7 @@ def tree_attention(
                 indices,
                 ks,
                 probs,
+                block_size,
             )
     
     return context, (indices, ks, probs)
@@ -1086,10 +1090,10 @@ def main():
     DEBUG = True
     
     q, k, v, out = load_checkouts(dtype=torch.float32, seq_len=1024 * 4)
-    print(q.shape)
-    print(k.shape)
-    print(v.shape)
-    print(out.shape)
+    print('q', q.shape)
+    print('k', k.shape)
+    print('v', v.shape)
+    print('out', out.shape)
     
     context, (atten_indices, atten_ks, atten_probs) = tree_attention(
         q,
