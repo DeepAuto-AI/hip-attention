@@ -28,8 +28,6 @@ import os
 import math
 from src.models.tree_attention.common import load_checkouts
 
-BLOCK_SIZE = 8
-
 @triton.jit
 def _triton_kth_large(
     scores: tl.tensor, k: tl.tensor,
@@ -264,6 +262,9 @@ def _masking_iteration_compute(
                 scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                scores_partial = scores_partial +\
+                    ((idx_bdst * BLOCK_SIZE) < loc_k_vec) * 32000.0
+                
                 scores += scores_partial.to(scores.dtype)
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
             # NOTE: init scores
@@ -315,6 +316,10 @@ def _masking_iteration_compute(
                 # [BLOCK_SIZE_PADDED, BLOCK_TMASK_K]
                 scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                scores_partial = scores_partial + (
+                    (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None]) <\
+                    (loc_k_vec[None, :] + _idx_block)
+                ) * 32000.0
                 
                 # NOTE: reduce
                 if REDUCE_METHOD == 'max':
@@ -429,7 +434,7 @@ def masking_iteration(
     # input matrices
     queries: Tensor, keys: Tensor,
     # input metrices (blocked) 
-    mask: Tensor, t_mask: Tensor, scores: Tensor, 
+    mask: Tensor, t_mask: Tensor, 
     # temp vectors (blocked)
     ws: Tensor, ks: Tensor, t_srcs: Tensor, 
     # operator variables
@@ -438,7 +443,7 @@ def masking_iteration(
     N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int,
     # kernel constant
     BLOCK_SIZE: int, 
-    REDUCE_METHOD: str = 'sum',
+    REDUCE_METHOD: str = 'max',
 ):
     global DEBUG
     if DEBUG:
@@ -552,16 +557,158 @@ def safe_indices(indices):
     
     return indices
 
+@triton.jit
+def _calc_score_compute(
+    # input matrix
+    QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid,
+    KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    
+    # block indices
+    INDICES, stride_indices_n, stride_indices_bdst, stride_indices_k,
+    KS, stride_ks_n, stride_ks_bdst,
+    
+    # out matrix
+    SCORES, stride_scores_n, stride_scores_tdst, stride_scores_k,
+    
+    # input variables
+    N, TDST, TSRC, HID, K, BDST, BSRC,
+    
+    # kernel constatnts
+    BLOCK_SIZE,
+    BLOCK_SIZE_PADDED: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    idx_n = tl.program_id(0)
+    idx_bdst = tl.program_id(1)
+    idx_k = tl.program_id(2)
+    
+    ks = tl.load(
+        KS +\
+            idx_n * stride_ks_n +\
+            idx_bdst * stride_ks_bdst,
+    )
+    
+    if idx_k >= ks:
+        return
+    
+    idx_tsrc = tl.load(
+        INDICES +\
+            idx_n * stride_indices_n +\
+            idx_bdst * stride_indices_bdst +\
+            idx_k * stride_indices_k,
+    )
+    
+    idx_tsrc = idx_tsrc + tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_tsrc = idx_tsrc < TSRC
+    
+    idx_tdst = idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_tdst = idx_tdst < TDST
+    
+    scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_SIZE_PADDED), dtype=tl.float32)
+    for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
+        idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
+        mask_hid = idx_hid < HID
+        
+        # [BLOCK_SIZE_PADDED, BLOCK_HID]
+        queries = tl.load(
+            QUERIES +\
+                idx_n * stride_queries_n +\
+                idx_tdst[:, None] * stride_queries_tdst +\
+                idx_hid[None, :] * stride_queries_hid,
+            mask = mask_tdst[:, None] & mask_hid[None, :],
+            other = 0
+        )
+        
+        # [BLOCK_HID, BLOCK_SIZE_PADDED]
+        keys = tl.load(
+            KEYS +\
+                idx_n * stride_keys_n +\
+                idx_tsrc[None, :] * stride_keys_tsrc +\
+                idx_hid[:, None] * stride_queries_hid,
+            mask = mask_tsrc[None, :] & mask_hid[:, None],
+            other = 0
+        )
+        
+        scores_mini = tl.dot(queries, keys, allow_tf32=True)
+        scores += scores_mini.to(scores.dtype)
+    
+    idx_scorek = (idx_k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
+    mask_scorek = idx_scorek < (K * BLOCK_SIZE)
+    
+    tl.store(
+        SCORES +\
+            idx_n * stride_scores_n +\
+            idx_tdst[:, None] * stride_scores_tdst +\
+            idx_scorek[None, :] * stride_scores_k,
+        mask = mask_tdst[:, None] & mask_scorek[None, :] & (idx_tdst[:, None] >= idx_tsrc[None, :]),
+        value = scores,
+    )
+
+def calc_score_return_prob(
+    queries: Tensor, keys: Tensor, 
+    indices: Tensor, ks: Tensor,
+    
+    BLOCK_SIZE: int
+):
+    N, TDST, HID = queries.shape
+    _, TSRC, _ = keys.shape
+    _, _, K = indices.shape
+    
+    BDST = triton.cdiv(TDST, BLOCK_SIZE)
+    BSRC = triton.cdiv(TSRC, BLOCK_SIZE)
+    
+    assert keys.shape == (N, TSRC, HID)
+    assert indices.shape == (N, BDST, K)
+    assert ks.shape == (N, BDST)
+    
+    scores = torch.full(
+        (N, TDST, K * BLOCK_SIZE), 
+        torch.finfo(queries.dtype).min,
+        device=queries.device, 
+        dtype=queries.dtype
+    )
+    
+    BLOCK_HID = 32
+    BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
+    grid = (N, BDST, K)
+    
+    assert queries.ndim == 3
+    assert keys.ndim == 3
+    assert indices.ndim == 3
+    assert ks.ndim == 2
+    assert scores.ndim == 3
+    _calc_score_compute[grid](
+        queries, *queries.stride(),
+        keys, *keys.stride(),
+        
+        indices, *indices.stride(),
+        ks, *ks.stride(),
+        
+        scores, *scores.stride(),
+        
+        N, TDST, TSRC, HID, K, BDST, BSRC,
+        
+        BLOCK_SIZE,
+        BLOCK_SIZE_PADDED,
+        BLOCK_HID
+    )
+    
+    # print(scores[0, 300, :])
+    
+    probs = scores.softmax(-1)
+    
+    return scores, probs
+
 def attention_matrix(
     queries: Tensor, 
-    keys: Tensor, 
+    keys: Tensor,
     
     w_start: int,
     n_patches: int,
     mask_k: int,
     scale_up: int,
     
-    BLOCK_SIZE: int = BLOCK_SIZE,
+    BLOCK_SIZE: int = 16,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -597,12 +744,11 @@ def attention_matrix(
     mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE)
     mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
     tmask = torch.zeros((mask.shape[1], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
-    scores = torch.ones_like(mask, dtype=dtype)
     
     B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE)
     B_DST = triton.cdiv(T_DST, BLOCK_SIZE)
     
-    def to_dense(
+    def to_dense_blocked(
         indices: np.ndarray, 
         ks: np.ndarray, 
         value,
@@ -617,12 +763,36 @@ def attention_matrix(
                         assert out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]] == 0, f"{out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]]}, {ks[idx_n, idx_bdst]}, {indices[idx_n, idx_bdst, :]}, {mask[idx_n, idx_bdst, :]}"
                         out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]] = 1
         return out
+
+    def to_dense(
+        indices: np.ndarray, 
+        ks: np.ndarray, 
+        value: np.ndarray,
+        N, T_DST, T_SRC, BLOCK_SIZE
+    ):
+        print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
+        out = np.zeros((N, T_DST, T_SRC))
+        for idx_n in range(1):
+            for idx_bdst in range(indices.shape[1]):
+                for idx_k in range(indices.shape[2]):
+                    if idx_k < ks[idx_n, idx_bdst]:
+                        idx_tsrc = indices[idx_n, idx_bdst, idx_k]
+                        out[
+                            idx_n, 
+                            idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
+                            idx_tsrc: idx_tsrc + BLOCK_SIZE
+                        ] = value[
+                            idx_n,
+                            idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
+                            idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
+                        ]
+        return out
     
     def debug_print():
         indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE).to(torch.int32)
         indices = safe_indices(indices)
         indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
-        x = to_dense(
+        x = to_dense_blocked(
             indices.cpu().numpy(),
             ks.cpu().unsqueeze(-1).numpy(), 
             None,
@@ -645,7 +815,7 @@ def attention_matrix(
             # input matrices
             queries, keys,
             # input metrices (blocked) 
-            mask, tmask, scores, 
+            mask, tmask, 
             # temp vectors (blocked)
             ws, ks, tsrcs, 
             # operator variables
@@ -667,43 +837,43 @@ def attention_matrix(
     indices = indices * BLOCK_SIZE
     
     # # NOTE: are you sure this function is the only thing can differentiate?
-    # probs = calc_score_return_prob(
-    #     queries=queries, keys=keys,
-    #     indices=indices, ks=ks, 
-    #     scores=scores,
-    # )
+    scores, probs = calc_score_return_prob(
+        queries=queries, keys=keys,
+        indices=indices, ks=ks,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
     
-    # if DEBUG:
-    #     x = to_dense(
-    #         indices.cpu().numpy(),
-    #         ks.cpu().unsqueeze(-1).numpy(),
-    #         probs.cpu().numpy(),
-    #         N, T_DST, T_SRC
-    #     )[0]
-    #     x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
-    #     plt.imshow(x)
-    #     path = 'saves/models/tree_attention/hello_est.png'
-    #     print('saved', path)
-    #     plt.savefig(path, dpi=200, bbox_inches='tight')
+    if DEBUG:
+        x = to_dense(
+            indices.cpu().numpy(),
+            ks.cpu().numpy(),
+            probs.cpu().numpy(),
+            N, T_DST, T_SRC, BLOCK_SIZE,
+        )[0]
+        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        plt.imshow(x)
+        path = 'saves/models/tree_attention/block_est.png'
+        print('saved', path)
+        plt.savefig(path, dpi=200, bbox_inches='tight')
         
-    #     x = np.matmul(
-    #         queries[0].cpu().numpy(), 
-    #         keys[0].cpu().numpy().transpose((-1, -2))
-    #     )
-    #     x = x + (1 - np.tri(*x.shape)) * (-32000)
-    #     x = np.exp(x - x.max(-1, keepdims=True))
-    #     x = x / x.sum(-1, keepdims=True)
-    #     x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
-    #     plt.imshow(x)
-    #     path = 'saves/models/tree_attention/hello_truth.png'
-    #     print('saved', path)
-    #     plt.savefig(path, dpi=200, bbox_inches='tight')
-    #     print(ks)
+        x = np.matmul(
+            queries[0].cpu().numpy(), 
+            keys[0].cpu().numpy().transpose((-1, -2))
+        )
+        x = x + (1 - np.tri(*x.shape)) * (-32000)
+        x = np.exp(x - x.max(-1, keepdims=True))
+        x = x / x.sum(-1, keepdims=True)
+        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        plt.imshow(x)
+        path = 'saves/models/tree_attention/block_truth.png'
+        print('saved', path)
+        plt.savefig(path, dpi=200, bbox_inches='tight')
+        print(ks)
     
     # return indices, ks, probs
 
 def main():
-    q, k, v, out = load_checkouts(dtype=torch.float32, seq_len=4096)
+    q, k, v, out = load_checkouts(dtype=torch.float32, seq_len=1024 * 4)
     print(q.shape)
     print(k.shape)
     print(v.shape)
@@ -715,7 +885,6 @@ def main():
         128,
         256,
         2,
-        BLOCK_SIZE
     )
 
 if __name__ == '__main__':
