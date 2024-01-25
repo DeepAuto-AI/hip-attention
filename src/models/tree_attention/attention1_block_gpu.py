@@ -27,6 +27,7 @@ import triton.language as tl
 from typing import Tuple, List
 import os
 import math
+from torch.autograd import Function
 
 from src.utils import get_bench, seed
 from src.models.tree_attention.common import load_checkouts
@@ -428,7 +429,7 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = True
+DEBUG = False
 
 def next_multiple_of(x: int, multiple_by: int = 16):
     if (x % multiple_by) == 0:
@@ -649,59 +650,348 @@ def _calc_score_compute(
         value = scores,
     )
 
+@triton.jit
+def _calc_score_compute_bwd_queries(
+    # input matrices
+    ks, stride_ks_n, stride_ks_bdst,
+    indices, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    keys, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    # grad output (read)
+    grad_scores, stride_grad_scores_n, stride_grad_scores_tdst, stride_grad_scores_k,
+    # grad input (write)
+    grad_queries, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
+    # input variables
+    N, TDST, TSRC, HID, BK, K,
+    # block constant
+    BLOCK_SIZE,
+    BLOCK_SIZE_PADDED: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    """
+    ks: int[N, TDST]
+    indices: int[N, TDST, K]
+    keys: fp[N, TSRC, HID]
+    grad_scores: fp[N, TDST, K]
+    grad_queries: fp[N, TDST, HID]
+    -----
+    foreach n in [..N]
+    foreach tdst in [..TDST]
+    
+    scalar_ks = ks[n, tdst]
+    
+    acc = zeros(HID)
+    for k in [..K]:
+        idx_tsrc = indices[n, tdst, k]
+        mask_tsrc = idx_tsrc < T_SRC & k < scalar_ks
+        acc += grad_scores[n, tdst, k] * keys[n, idx_tsrc, :]
+    grad_queries[n, tdst, :] = acc
+    """
+    
+    idx_n = tl.program_id(0)
+    idx_bdst = tl.program_id(1)
+    
+    scalar_ks = tl.load(
+        ks +\
+            idx_n * stride_ks_n +\
+            idx_bdst * stride_ks_bdst
+    )
+    
+    mask_block = tl.arange(0, BLOCK_SIZE_PADDED) < BLOCK_SIZE
+    
+    idx_tdst = (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
+    mask_tdst = (idx_tdst < TDST) & mask_block
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
+    
+    accumulator = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_HID,), dtype=tl.float32)
+    for idx_bk in range(BK):
+        idx_tsrc = tl.load(
+            indices + \
+                idx_n * stride_indices_n + \
+                idx_bdst * stride_indices_bdst + \
+                idx_bk * stride_indices_bk,
+        )
+        
+        idx_tsrc = idx_tsrc + tl.arange(0, BLOCK_SIZE_PADDED)
+        mask_tsrc = (idx_tsrc < TSRC) & mask_block
+        
+        idx_k = idx_bk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
+        mask_k = (idx_k < K) & mask_block
+        
+        # [BLOCK_SIZE_PADDED: tdst, BLOCK_SIZE_PADDED: score]
+        grad_score = tl.load(
+            grad_scores +\
+                idx_n * stride_grad_scores_n +\
+                idx_tdst[:, None] * stride_grad_scores_tdst + \
+                idx_k[None, :] * stride_grad_scores_k,
+            mask = mask_tdst[:, None] & (mask_tsrc & mask_k)[None, :],
+            other = 0,
+        )
+        
+        # [BLOCK_SIZE_PADDED: score, BLOCK_HID: hid]
+        key = tl.load(
+            keys +\
+                idx_n * stride_keys_n +\
+                idx_tsrc[:, None] * stride_keys_tsrc +\
+                idx_hid[None, :] * stride_keys_hid,
+            mask = mask_hid[None, :] & (mask_tsrc & mask_k)[:, None],
+            other = 0
+        )
+        
+        # tl.device_print("", idx_tsrc)
+        accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
+    
+    tl.store(
+        grad_queries +\
+            idx_n * stride_grad_queries_n +\
+            idx_tdst[:, None] * stride_grad_queries_tdst +\
+            idx_hid[None, :] * stride_grad_queries_hid,
+        mask = mask_hid[None, :] & mask_tdst[:, None],
+        value = accumulator
+    )
+
+@triton.jit
+def _calc_score_compute_bwd_keys(
+    # input matrices
+    ks, stride_ks_n, stride_ks_bdst,
+    indices, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    queries, stride_queries_n, stride_queries_tdst, stride_queries_hid,
+    # grad output (read)
+    grad_scores, stride_grad_scores_n, stride_grad_scores_tdst, stride_grad_scores_k,
+    # grad input (write)
+    grad_keys, stride_grad_keys_n, stride_grad_keys_tsrc, stride_grad_keys_hid,
+    # input variables
+    N, TDST, TSRC, HID, BK, K,
+    # block constant
+    BLOCK_SIZE,
+    BLOCK_SIZE_PADDED: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    """
+    indices: int[N, TDST, K]
+    ks: int[N, TDST, K]
+    queries: int[N, TDST, HID]
+    grad_scores: fp[N, TDST, K]
+    grad_keys: fp[N, TSRC, HID]
+    -----
+    foreach n in [..N]
+    foreach tdst in [..TDST]
+    foreach k in [..K]
+    
+    scalar_ks = ks[n, tdst]
+    if k >= scalar_ks: return
+    
+    grad_keys[n, indices[n, tdst, k], hid] +=(atomic)
+        grad_scores[n, tdst, k] * queries[n, tdst, :]
+    """
+    idx_n = tl.program_id(0)
+    idx_bdst = tl.program_id(1)
+    idx_bk = tl.program_id(2)
+    
+    scalar_ks = tl.load(
+        ks +\
+            idx_n * stride_ks_n +\
+            idx_bdst * stride_ks_bdst,
+    )
+    # mask_job = idx_bk < scalar_ks
+    if idx_bk >= scalar_ks: return
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = (idx_hid < HID)
+    
+    idx_block = tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_block = idx_block < BLOCK_SIZE
+    
+    idx_tdst = idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_tdst = (idx_tdst < TDST) & mask_block
+    
+    idx_k = idx_bk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_k = (idx_k < K) & mask_block
+    
+    # [BLOCK_SIZE_PADDED: tsrc, BLOCK_SIZE_PADDED: tdst]
+    grad_score = tl.load(
+        grad_scores +\
+            idx_n * stride_grad_scores_n +\
+            idx_tdst[None, :] * stride_grad_scores_tdst +\
+            idx_k[:, None] * stride_grad_scores_k,
+        mask = mask_tdst[None, :] & mask_k[:, None],
+        other = 0
+    )
+    # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+    query = tl.load(
+        queries +\
+            idx_n * stride_queries_n +\
+            idx_tdst[:, None] * stride_queries_tdst +\
+            idx_hid[None, :] * stride_queries_hid,
+        mask = mask_tdst[:, None] & mask_hid[None, :],
+        other = 0,
+    )
+    # [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
+    scores = tl.dot(grad_score, query)
+    
+    idx_tsrc = tl.load(
+        indices +\
+            idx_n * stride_indices_n +\
+            idx_bdst * stride_indices_bdst +\
+            idx_bk * stride_indices_bk,
+    )
+    idx_tsrc = idx_tsrc + idx_block
+    mask_tsrc = (idx_tsrc < TSRC) & mask_block
+    tl.atomic_add(
+        grad_keys +\
+            idx_n * stride_grad_keys_n +\
+            idx_tsrc[:, None] * stride_grad_keys_tsrc +\
+            idx_hid[None, :] * stride_grad_keys_hid,
+        val = scores,
+        mask = mask_tsrc[:, None] & mask_hid[None, :]
+    )
+
+# NOTE: you have to perform softmax after this
+class CalcScoreAutoGradFn(Function):
+    @staticmethod
+    # ctx is the first argument to forward
+    def forward(
+        ctx, 
+        # matrices
+        queries: Tensor, keys: Tensor,
+        # indices matrices
+        indices: Tensor, ks: Tensor,
+        # block constant
+        BLOCK_SIZE: int,
+    ):
+        ctx.save_for_backward(queries, keys, indices, ks)
+        ctx.BLOCK_SIZE = BLOCK_SIZE
+        
+        N, TDST, HID = queries.shape
+        _, TSRC, _ = keys.shape
+        _, _, K = indices.shape
+        
+        BDST = triton.cdiv(TDST, BLOCK_SIZE)
+        BSRC = triton.cdiv(TSRC, BLOCK_SIZE)
+        
+        assert keys.shape == (N, TSRC, HID)
+        assert indices.shape == (N, BDST, K)
+        assert ks.shape == (N, BDST)
+        
+        scores = torch.full(
+            (N, TDST, K * BLOCK_SIZE), 
+            torch.finfo(queries.dtype).min,
+            device=queries.device, 
+            dtype=queries.dtype
+        )
+        
+        BLOCK_HID = 32
+        BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
+        grid = (N, BDST, K)
+        
+        assert queries.ndim == 3
+        assert keys.ndim == 3
+        assert indices.ndim == 3
+        assert ks.ndim == 2
+        assert scores.ndim == 3
+        _calc_score_compute[grid](
+            queries, *queries.stride(),
+            keys, *keys.stride(),
+            
+            indices, *indices.stride(),
+            ks, *ks.stride(),
+            
+            scores, *scores.stride(),
+            
+            N, TDST, TSRC, HID, K, BDST, BSRC,
+            
+            BLOCK_SIZE,
+            BLOCK_SIZE_PADDED,
+            BLOCK_HID
+        )
+        
+        # print(scores[0, 300, :])
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_scores):
+        queries, keys, indices, ks = ctx.saved_tensors
+        BLOCK_SIZE = ctx.BLOCK_SIZE
+        grad_queries = grad_keys = None
+        
+        N, T_DST, HID = queries.shape
+        _, T_SRC, _HID = keys.shape
+        assert HID == _HID
+        _, _, BK = indices.shape
+        _, _, K = grad_scores.shape
+
+        # for queries
+        if ctx.needs_input_grad[0]:
+            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE))
+            BLOCK_HID = triton.next_power_of_2(HID)
+            
+            grad_queries = torch.zeros_like(queries)
+            
+            _calc_score_compute_bwd_queries[grid](
+                ks, ks.stride(0), ks.stride(1),
+                indices, indices.stride(0), indices.stride(1), indices.stride(2), 
+                keys, keys.stride(0), keys.stride(1), keys.stride(2),
+                
+                grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
+                
+                grad_queries, grad_queries.stride(0), grad_queries.stride(1), grad_queries.stride(2),
+                
+                N, T_DST, T_SRC, HID, BK, K,
+                
+                BLOCK_SIZE,
+                next_multiple_of(BLOCK_SIZE, 16),
+                BLOCK_HID,
+                
+                num_warps=1,
+            )
+        
+        # for keys
+        if ctx.needs_input_grad[1]:
+            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE), BK)
+            BLOCK_HID = triton.next_power_of_2(HID)
+            
+            grad_keys = torch.zeros_like(keys)
+            
+            _calc_score_compute_bwd_keys[grid](
+                ks, ks.stride(0), ks.stride(1),
+                indices, indices.stride(0), indices.stride(1), indices.stride(2), 
+                queries, queries.stride(0), queries.stride(1), queries.stride(2),
+                
+                grad_scores, grad_scores.stride(0), grad_scores.stride(1), grad_scores.stride(2),
+                
+                grad_keys, grad_keys.stride(0), grad_keys.stride(1), grad_keys.stride(2),
+                
+                N, T_DST, T_SRC, HID, BK, K,
+                
+                BLOCK_SIZE,
+                next_multiple_of(BLOCK_SIZE, 16),
+                BLOCK_HID,
+            )
+        
+        return (
+            grad_queries, 
+            grad_keys, 
+            None, 
+            None, 
+            None,
+            None,
+        )
+
 def calc_score_return_prob(
     queries: Tensor, keys: Tensor, 
     indices: Tensor, ks: Tensor,
     
     BLOCK_SIZE: int
 ):
-    N, TDST, HID = queries.shape
-    _, TSRC, _ = keys.shape
-    _, _, K = indices.shape
-    
-    BDST = triton.cdiv(TDST, BLOCK_SIZE)
-    BSRC = triton.cdiv(TSRC, BLOCK_SIZE)
-    
-    assert keys.shape == (N, TSRC, HID)
-    assert indices.shape == (N, BDST, K)
-    assert ks.shape == (N, BDST)
-    
-    scores = torch.full(
-        (N, TDST, K * BLOCK_SIZE), 
-        torch.finfo(queries.dtype).min,
-        device=queries.device, 
-        dtype=queries.dtype
-    )
-    
-    BLOCK_HID = 32
-    BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
-    grid = (N, BDST, K)
-    
-    assert queries.ndim == 3
-    assert keys.ndim == 3
-    assert indices.ndim == 3
-    assert ks.ndim == 2
-    assert scores.ndim == 3
-    _calc_score_compute[grid](
-        queries, *queries.stride(),
-        keys, *keys.stride(),
-        
-        indices, *indices.stride(),
-        ks, *ks.stride(),
-        
-        scores, *scores.stride(),
-        
-        N, TDST, TSRC, HID, K, BDST, BSRC,
+    scores = CalcScoreAutoGradFn.apply(
+        queries, keys,
+        indices, ks,
         
         BLOCK_SIZE,
-        BLOCK_SIZE_PADDED,
-        BLOCK_HID
     )
     
-    # print(scores[0, 300, :])
-    
-    probs = scores.softmax(-1)
-    
+    probs = scores.softmax(-1)    
     return scores, probs
 
 def attention_matrix(
@@ -852,7 +1142,7 @@ def attention_matrix(
         x = to_dense(
             indices.cpu().numpy(),
             ks.cpu().numpy(),
-            probs.cpu().numpy(),
+            probs.detach().cpu().numpy(),
             N, T_DST, T_SRC, BLOCK_SIZE,
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1

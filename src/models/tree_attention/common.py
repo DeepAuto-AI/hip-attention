@@ -1,6 +1,6 @@
 import torch
 
-def load_checkouts(idx = 24, window = 1, seq_len = 2048, dtype = torch.float16):
+def load_checkouts(idx = 24, window = 1, seq_len = 4096, dtype = torch.float16):
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
