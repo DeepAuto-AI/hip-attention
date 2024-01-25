@@ -387,7 +387,7 @@ def masking_iteration(
     
     GROUP_N = 1
     GROUP_TDST = 4
-    BLOCK_HID = 64
+    BLOCK_HID = 16
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(T_DST, GROUP_TDST))
     
     _masking_iteration_compute[grid](
@@ -418,7 +418,7 @@ def masking_iteration(
         BLOCK_HID,
         
         num_warps=4,
-        num_stages=2,
+        num_stages=1,
         enable_warp_specialization=True,
     )
 

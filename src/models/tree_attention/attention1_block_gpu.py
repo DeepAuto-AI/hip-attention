@@ -263,7 +263,7 @@ def _masking_iteration_compute(
                 #     vec_q * vec_k, 
                 #     axis=0,
                 # )
-                scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
+                scores_partial = -tl.dot(vec_q, vec_k)
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
                 scores_partial = scores_partial +\
@@ -318,7 +318,7 @@ def _masking_iteration_compute(
                 )
                 
                 # [BLOCK_SIZE_PADDED, BLOCK_TMASK_K]
-                scores_partial = -tl.dot(vec_q, vec_k, allow_tf32=True)
+                scores_partial = -tl.dot(vec_q, vec_k)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
                 scores_partial = scores_partial + (
                     (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None]) <\
@@ -633,7 +633,7 @@ def _calc_score_compute(
             other = 0
         )
         
-        scores_mini = tl.dot(queries, keys, allow_tf32=True)
+        scores_mini = tl.dot(queries, keys)
         scores += scores_mini.to(scores.dtype)
     
     idx_scorek = (idx_k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
@@ -880,8 +880,8 @@ def attention_matrix(
 @triton.jit
 def _sdbmm_compute(
     # inputs
-    indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
-    ks, stride_ks_n, stride_ks_tdst, 
+    indices, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    ks, stride_ks_n, stride_ks_bdst, 
     probs, stride_probs_n, stride_probs_tdst, stride_probs_k,
     values, stride_values_n, stride_values_tsrc, stride_values_hid,
     
@@ -889,80 +889,74 @@ def _sdbmm_compute(
     context, stride_context_n, stride_context_tdst, stride_context_hid,
     
     # variables
-    N, TSRC, TDST, HID, K,
+    N, TSRC, TDST, HID, BK, BSRC, BDST,
     
     # kernel blocks
-    GROUP_N,
-    BLOCK_K: tl.constexpr,
+    BLOCK_SIZE,
+    BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
-    pid_n = tl.program_id(0)
+    idx_n = tl.program_id(0)
     
-    for _idx_n in range(GROUP_N):
-        idx_n = _idx_n + pid_n * GROUP_N
-        if idx_n < N:
-            idx_tdst = tl.program_id(1)
-            tl.device_assert(idx_n < N)
-            tl.device_assert(idx_tdst < TDST)
-            
-            idx_k = tl.arange(0, BLOCK_K)
-            
-            n_k = tl.load(
-                ks +\
-                    idx_n * stride_ks_n+\
-                    idx_tdst * stride_ks_tdst,
-            )
-            mask_k = (idx_k < K) & (idx_k < n_k)
-            
-            pid_hid = tl.program_id(2)
-            idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
-            mask_hid = idx_hid < HID
-            
-            # atten_indices: [BLOCK_K]
-            atten_indices = tl.load(
-                indices +\
-                    idx_n * stride_indices_n +\
-                    idx_tdst * stride_indices_tdst +\
-                    idx_k * stride_indices_k,
-                mask = mask_k,
-                other = 0,
-            )
-            tl.device_assert(tl.max(atten_indices) < TSRC, "should be index < TSRC")
-            tl.device_assert(tl.min(atten_indices) >= 0, "should be index >= 0")
-            
-            # atten_probs: [BLOCK_K]
-            atten_probs = tl.load(
-                probs +\
-                    idx_n * stride_probs_n +\
-                    idx_tdst * stride_probs_tdst +\
-                    (idx_k[None, :] + tl.arange(0, 16)[:, None]) * stride_probs_k,
-                mask = mask_k[None, :] & (tl.arange(0, 16)[:, None] < 1),
-                other = 0,
-            )
-            
-            # value: [BLOCK_K, BLOCK_HID]
-            value = tl.load(
-                values +\
-                    idx_n * stride_values_n +\
-                    atten_indices[:, None] * stride_values_tsrc +\
-                    idx_hid[None, :] * stride_values_hid,
-                mask = mask_k[:, None] & mask_hid[None, :],
-                other = 0,
-            )
-            
-            # output: [BLOCK_HID] <- atten_probs[1, BLOCK_K] @ value[BLOCK_K, BLOCK_HID]
-            # output = tl.sum(atten_probs[None, :] * value, axis=1)
-            output = tl.dot(atten_probs.to(value.dtype), value, allow_tf32=True)
-            output = tl.sum(output, axis=0)
-            
-            tl.store(
-                context +\
-                    idx_n * stride_context_n +\
-                    idx_tdst * stride_context_tdst +\
-                    idx_hid * stride_context_hid,
-                mask = mask_hid,
-                value = output
-            )
+    idx_bdst = tl.program_id(1)
+    idx_tdst = idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_tdst = idx_tdst < TDST
+    
+    pid_hid = tl.program_id(2)
+    idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
+    mask_hid = idx_hid < HID
+    
+    n_bk = tl.load(
+        ks +\
+            idx_n * stride_ks_n+\
+            idx_bdst * stride_ks_bdst,
+    )
+    
+    scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_HID), dtype=tl.float32)
+    for idx_bk in range(n_bk):
+        atten_block_indices = tl.load(
+            indices +\
+                idx_n * stride_indices_n +\
+                idx_bdst * stride_indices_bdst +\
+                idx_bk * stride_indices_bk,
+        )
+        # atten_indices: [BLOCK_SIZE_PADDED]
+        atten_indices = atten_block_indices + tl.arange(0, BLOCK_SIZE_PADDED)
+        mask_atten_indices = atten_indices < TSRC
+        
+        # atten_probs: [BLOCK_SIZE_PADDED, BLOCK_SIZE_PADDED]
+        idx_prob_k = (idx_bk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED))
+        mask_prob_k = idx_prob_k < BK * BLOCK_SIZE
+        atten_probs = tl.load(
+            probs +\
+                idx_n * stride_probs_n +\
+                idx_tdst[:, None] * stride_probs_tdst +\
+                idx_prob_k[None, :] * stride_probs_k,
+            mask = mask_tdst[None, :] & mask_prob_k[:, None],
+            other = 0,
+        )
+        
+        # value: [BLOCK_SIZE_PADDED, BLOCK_HID]
+        value = tl.load(
+            values +\
+                idx_n * stride_values_n +\
+                atten_indices[:, None] * stride_values_tsrc +\
+                idx_hid[None, :] * stride_values_hid,
+            mask = mask_atten_indices[:, None] & mask_hid[None, :],
+            other = 0,
+        )
+        
+        prod = tl.dot(atten_probs.to(value.dtype), value)
+        scores += prod
+    
+    tl.store(
+        context +\
+            idx_n * stride_context_n +\
+            idx_tdst[:, None] * stride_context_tdst +\
+            idx_hid[None, :] * stride_context_hid,
+        mask = mask_tdst[:, None] & mask_hid[None, :],
+        value = scores
+    )
 
 def sparse_attention(
     # attention values
