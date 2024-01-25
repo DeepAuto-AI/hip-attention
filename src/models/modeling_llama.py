@@ -647,7 +647,9 @@ class LlamaFlashAttention2(LlamaAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-from src.models.tree_attention.attention1_gpu import tree_attention, flash_attention
+from src.models.tree_attention.attention1_gpu import flash_attention
+# from src.models.tree_attention.attention1_gpu import tree_attention
+from src.models.tree_attention.attention1_block_gpu import tree_attention
 
 class LlamaCustomAttention(LlamaAttention):
     def __init__(self, config: LlamaConfig, layer_idx = None):

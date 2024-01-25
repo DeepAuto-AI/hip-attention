@@ -1670,6 +1670,7 @@ def main_latency_benchmark():
     parser.add_argument('--query_size', type=int, default=1)
     parser.add_argument('--method', type=str, default='tree')
     parser.add_argument('--samples', type=int, default=200)
+    parser.add_argument('--block_size', type=int, default=16)
     args = parser.parse_args()
     
     DEBUG = args.debug
@@ -1708,6 +1709,7 @@ def main_latency_benchmark():
                     q,
                     k,
                     v,
+                    block_size=args.block_size
                 )
             else:
                 raise Exception()
