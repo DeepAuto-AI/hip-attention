@@ -1313,7 +1313,6 @@ def sparse_attention(
         values, indices, ks, probs,
     )
 
-@torch.no_grad()
 def tree_attention(
     q: Tensor, 
     k: Tensor, 

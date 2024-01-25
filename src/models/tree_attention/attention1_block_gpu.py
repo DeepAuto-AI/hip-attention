@@ -26,7 +26,11 @@ import triton.language as tl
 from typing import Tuple, List
 import os
 import math
+
+from src.utils import get_bench, seed
 from src.models.tree_attention.common import load_checkouts
+
+timer = lambda x: get_bench().region(x)
 
 @triton.jit
 def _triton_kth_large(
@@ -870,22 +874,239 @@ def attention_matrix(
         plt.savefig(path, dpi=200, bbox_inches='tight')
         print(ks)
     
-    # return indices, ks, probs
+    return indices, ks, probs
+
+
+@triton.jit
+def _sdbmm_compute(
+    # inputs
+    indices, stride_indices_n, stride_indices_tdst, stride_indices_k,
+    ks, stride_ks_n, stride_ks_tdst, 
+    probs, stride_probs_n, stride_probs_tdst, stride_probs_k,
+    values, stride_values_n, stride_values_tsrc, stride_values_hid,
+    
+    # output
+    context, stride_context_n, stride_context_tdst, stride_context_hid,
+    
+    # variables
+    N, TSRC, TDST, HID, K,
+    
+    # kernel blocks
+    GROUP_N,
+    BLOCK_K: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    
+    for _idx_n in range(GROUP_N):
+        idx_n = _idx_n + pid_n * GROUP_N
+        if idx_n < N:
+            idx_tdst = tl.program_id(1)
+            tl.device_assert(idx_n < N)
+            tl.device_assert(idx_tdst < TDST)
+            
+            idx_k = tl.arange(0, BLOCK_K)
+            
+            n_k = tl.load(
+                ks +\
+                    idx_n * stride_ks_n+\
+                    idx_tdst * stride_ks_tdst,
+            )
+            mask_k = (idx_k < K) & (idx_k < n_k)
+            
+            pid_hid = tl.program_id(2)
+            idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
+            mask_hid = idx_hid < HID
+            
+            # atten_indices: [BLOCK_K]
+            atten_indices = tl.load(
+                indices +\
+                    idx_n * stride_indices_n +\
+                    idx_tdst * stride_indices_tdst +\
+                    idx_k * stride_indices_k,
+                mask = mask_k,
+                other = 0,
+            )
+            tl.device_assert(tl.max(atten_indices) < TSRC, "should be index < TSRC")
+            tl.device_assert(tl.min(atten_indices) >= 0, "should be index >= 0")
+            
+            # atten_probs: [BLOCK_K]
+            atten_probs = tl.load(
+                probs +\
+                    idx_n * stride_probs_n +\
+                    idx_tdst * stride_probs_tdst +\
+                    (idx_k[None, :] + tl.arange(0, 16)[:, None]) * stride_probs_k,
+                mask = mask_k[None, :] & (tl.arange(0, 16)[:, None] < 1),
+                other = 0,
+            )
+            
+            # value: [BLOCK_K, BLOCK_HID]
+            value = tl.load(
+                values +\
+                    idx_n * stride_values_n +\
+                    atten_indices[:, None] * stride_values_tsrc +\
+                    idx_hid[None, :] * stride_values_hid,
+                mask = mask_k[:, None] & mask_hid[None, :],
+                other = 0,
+            )
+            
+            # output: [BLOCK_HID] <- atten_probs[1, BLOCK_K] @ value[BLOCK_K, BLOCK_HID]
+            # output = tl.sum(atten_probs[None, :] * value, axis=1)
+            output = tl.dot(atten_probs.to(value.dtype), value, allow_tf32=True)
+            output = tl.sum(output, axis=0)
+            
+            tl.store(
+                context +\
+                    idx_n * stride_context_n +\
+                    idx_tdst * stride_context_tdst +\
+                    idx_hid * stride_context_hid,
+                mask = mask_hid,
+                value = output
+            )
+
+def sparse_attention(
+    # attention values
+    values: Tensor,
+    
+    # attention matrix
+    indices: Tensor,
+    ks: Tensor,
+    probs: Tensor,
+):
+    global DEBUG
+    
+    N, T_SRC, HID = values.shape
+    _N, T_DST, K = indices.shape
+    assert N == _N
+    assert ks.shape == (N, T_DST)
+    assert probs.shape == indices.shape
+    
+    context = torch.zeros((N, T_DST, HID), dtype=values.dtype, device=values.device)
+    
+    GROUP_N = 1
+    BLOCK_K = triton.next_power_of_2(K)
+    # BLOCK_HID = triton.next_power_of_2(HID)
+    BLOCK_HID = 64
+    grid = (triton.cdiv(N, GROUP_N), T_DST, triton.cdiv(HID, BLOCK_HID))
+    
+    # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
+    if DEBUG:
+        # print('sdbmm', grid, BLOCK_K, BLOCK_HID)
+        assert indices.max() < T_SRC
+        assert indices.min() >= 0
+        assert indices.is_contiguous()
+        assert ks.is_contiguous()
+        assert probs.is_contiguous()
+        assert values.is_contiguous()
+        assert context.is_contiguous()
+        torch.cuda.synchronize()
+    
+    _sdbmm_compute[grid](
+        # inputs
+        indices, indices.stride(0), indices.stride(1), indices.stride(2),
+        ks, ks.stride(0), ks.stride(1),
+        probs, probs.stride(0), probs.stride(1), probs.stride(2),
+        values, values.stride(0), values.stride(1), values.stride(2),
+        
+        # output
+        context, context.stride(0), context.stride(1), context.stride(2),
+        
+        # input variables
+        N, T_SRC, T_DST, HID, K,
+        
+        # blocks
+        GROUP_N,
+        BLOCK_K,
+        BLOCK_HID,
+        
+        num_warps=4,
+    )
+    
+    return context
+
+def tree_attention(
+    q: Tensor, 
+    k: Tensor, 
+    v: Tensor,
+    
+    w_start: int = None,
+    n_patches: int = None,
+    mask_k: int = 256,
+    scale_up: float = 2,
+    
+    # heuristics: mask_k == n_patches * scale_up
+    # heuristics: mask_k == w_start * scale_up
+    
+    block_size: int = 8,
+):
+    if w_start is None:
+        w_start = math.ceil(mask_k * scale_up)
+        # w_start = mask_k
+    if n_patches is None:
+        n_patches = math.ceil(mask_k / scale_up)
+    
+    assert q.ndim == 3
+    assert k.ndim == 3
+    assert v.ndim == 3
+    N, T_DST, HID = q.shape
+    _N, T_SRC, _HID = k.shape
+    assert k.shape[:-1] == v.shape[:-1]
+    assert N == _N
+    assert HID == _HID
+    
+    assert q.dtype == k.dtype
+    assert q.dtype == v.dtype
+    
+    if not q.is_contiguous():
+        q = q.contiguous()
+    if not k.is_contiguous():
+        k = k.contiguous()
+    if not v.is_contiguous():
+        v = v.contiguous()
+    
+    with timer('tree_attention'):
+        with timer('attention_matrix'):
+            indices, ks, probs = attention_matrix(
+                q,
+                k,
+                
+                w_start,
+                n_patches,
+                mask_k,
+                scale_up,
+                block_size,
+            )
+        
+        with timer('sparse_attention'):
+            context = sparse_attention(
+                v,
+                indices,
+                ks,
+                probs,
+            )
+    
+    return context, (indices, ks, probs)
 
 def main():
+    global DEBUG
+    DEBUG = True
+    
     q, k, v, out = load_checkouts(dtype=torch.float32, seq_len=1024 * 4)
     print(q.shape)
     print(k.shape)
     print(v.shape)
     print(out.shape)
-    attention_matrix(
-        q, 
+    
+    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+        q,
         k,
-        512,
-        128,
-        256,
-        2,
+        v,
     )
+    
+    stderr = (out - context).abs().mean().item()
+    stdcontext = torch.std_mean(context)[0].item()
+    
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
 
 if __name__ == '__main__':
     main()
