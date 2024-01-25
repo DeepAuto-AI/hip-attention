@@ -33,3 +33,5 @@ torch                   9.093
 4096
 
 7*256
+
+ CUDA_VISIBLE_DEVICES=0 python src/trainer/tree_trainer.py --batch_size 1 --gradient_accumulation_steps 4 --dataset wikitext2 --lora_r 32 --max_steps 500
