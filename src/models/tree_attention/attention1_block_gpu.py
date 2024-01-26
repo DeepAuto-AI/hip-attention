@@ -72,7 +72,7 @@ def _masking_iteration_compute(
     BLOCK_TMASK_K: tl.constexpr, 
     BLOCK_MAX_DUP: tl.constexpr,
     BLOCK_HID: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_SIZE,
     BLOCK_SIZE_PADDED: tl.constexpr,
 ):
     idx_n = tl.program_id(0)
@@ -156,6 +156,7 @@ def _masking_iteration_compute(
         mask = k_old_mask,
         other = 0
     )
+    k_old_mask = k_old_mask & (loc_vec < 1.0)
     
     b_old_fp = tl.cdiv(w_old, BLOCK_SIZE).to(tl.float32)
     b_new_fp = tl.cdiv(w_new, BLOCK_SIZE).to(tl.float32)
@@ -200,6 +201,9 @@ def _masking_iteration_compute(
                 (loc_idx_start_vec + _idx).to(tl.float32) / tl.cdiv(w_new, BLOCK_SIZE).to(tl.float32)
             )
         )
+    
+    idx_block = tl.arange(0, BLOCK_SIZE_PADDED)
+    mask_block = idx_block < BLOCK_SIZE
     
     """
     # t_mask -> mask (using scores)
@@ -287,9 +291,9 @@ def _masking_iteration_compute(
                 vec_q = tl.load(
                     QUERIES +\
                         idx_n * stride_queries_n +\
-                        (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None]) * stride_queries_tdst +\
+                        (idx_bdst * BLOCK_SIZE + idx_block[:, None]) * stride_queries_tdst +\
                         hid_range[None, :] * stride_queries_hid,
-                    mask = (hid_mask[None, :] & (tl.arange(0, BLOCK_SIZE_PADDED)[:, None] < BLOCK_SIZE)),
+                    mask = (hid_mask[None, :] & mask_block[:, None]),
                     other = 0,
                 )
                 # tl.debug_barrier()
@@ -308,7 +312,6 @@ def _masking_iteration_compute(
                 # NOTE: random key selection with in the block
                 # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
                 loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
                 
                 # [BLOCK_HID, BLOCK_TMASK_K]
                 vec_k = tl.load(
@@ -316,23 +319,27 @@ def _masking_iteration_compute(
                         idx_n * stride_keys_n +\
                         (loc_k_vec[None, :] + _idx_block) * stride_keys_tsrc + \
                         hid_range[:, None] * stride_keys_hid,
-                    mask = vec_k_mask,
+                    mask = num_pixels_mask[None, :] & hid_mask[:, None] & ((loc_k_vec[None, :] + _idx_block) < T_SRC),
                     other = 0,
                 )
                 
-                # [BLOCK_SIZE_PADDED, BLOCK_TMASK_K]
+                # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
                 scores_partial = -tl.dot(vec_q, vec_k)
-                scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
-                scores_partial = scores_partial + ((
-                    (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None] + (T_SRC - T_DST)) <\
-                    (loc_k_vec[None, :] + _idx_block)
-                ) & (tl.arange(0, BLOCK_SIZE_PADDED)[:, None] < BLOCK_SIZE)) * 10000.0
+                scores_partial_mask = (
+                    (~num_pixels_mask[None, :]) &\
+                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None] + (T_SRC - T_DST)) < (loc_k_vec[None, :] + _idx_block)) &\
+                    (~mask_block[:, None]) &\
+                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None]) >= T_DST) & 
+                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC)
+                )
                 
                 # NOTE: reduce
                 if REDUCE_METHOD == 'max':
+                    scores_partial = scores_partial + scores_partial_mask * 32000.0
                     scores_partial = tl.min(scores_partial, axis=0)
                     scores = tl.minimum(scores, scores_partial)
                 elif REDUCE_METHOD == 'sum':
+                    scores_partial = scores_partial * (~scores_partial_mask)
                     scores_partial = tl.sum(scores_partial, axis=0)
                     scores = scores + scores_partial
         else:
@@ -394,6 +401,7 @@ def _masking_iteration_compute(
                 idx_bdst * stride_tmask_bdst +\
                 temp1_range * stride_tmask_k,
             mask=temp1_mask,
+            other=0,
         )
         
         # tl.debug_barrier()
@@ -430,7 +438,7 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = True
+DEBUG = False
 
 def next_multiple_of(x: int, multiple_by: int = 16):
     if (x % multiple_by) == 0:
@@ -557,7 +565,7 @@ def _safe_indices_compute(
                 idx_k * stride_indices_k,
             mask = mask_n,
             other = 0,
-        )
+        ).to(tl.int64)
         col = tl.maximum(last_col + 1, col)
         tl.store(
             INDICES +\
@@ -566,6 +574,7 @@ def _safe_indices_compute(
             value = col,
             mask = mask_n
         )
+        tl.debug_barrier()
         last_col = col
 
 def safe_indices(indices):
@@ -1089,8 +1098,10 @@ def attention_matrix(
             for idx_bdst in range(out.shape[1]):
                 for k in range(indices.shape[2]):
                     if k < ks[idx_n, idx_bdst]:
-                        assert out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]] == 0, f"{out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]]}, {ks[idx_n, idx_bdst]}, {indices[idx_n, idx_bdst, :]}, {mask[idx_n, idx_bdst, :]}"
-                        out[idx_n, idx_bdst, indices[idx_n, idx_bdst, k]] = 1
+                        idx_bsrc = indices[idx_n, idx_bdst, k]
+                        if idx_bsrc < out.shape[2]:
+                            assert out[idx_n, idx_bdst, idx_bsrc] == 0, f"{out[idx_n, idx_bdst, idx_bsrc]}, {ks[idx_n, idx_bdst]}, {idx_bsrc}, {mask[idx_n, idx_bdst, :]}"
+                            out[idx_n, idx_bdst, idx_bsrc] = 1
         return out
 
     def to_dense(
@@ -1106,22 +1117,23 @@ def attention_matrix(
                 for idx_k in range(indices.shape[2]):
                     if idx_k < ks[idx_n, idx_bdst]:
                         idx_tsrc = indices[idx_n, idx_bdst, idx_k]
-                        out[
-                            idx_n, 
-                            idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                            idx_tsrc: idx_tsrc + BLOCK_SIZE
-                        ] = value[
-                            idx_n,
-                            idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                            idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
-                        ]
+                        if idx_tsrc < T_SRC:
+                            out[
+                                idx_n, 
+                                idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
+                                idx_tsrc: idx_tsrc + BLOCK_SIZE
+                            ] = value[
+                                idx_n,
+                                idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
+                                idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
+                            ]
         return out
     
     def debug_print():
         plt.clf()
         indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE).to(torch.int32)
         indices = safe_indices(indices)
-        indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
+        # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
         x = to_dense_blocked(
             indices.cpu().numpy(),
             ks.cpu().unsqueeze(-1).numpy(), 
@@ -1162,7 +1174,7 @@ def attention_matrix(
     # NOTE: align with blocks
     indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE).to(torch.int32)
     indices = safe_indices(indices)
-    indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
+    # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
     indices = indices * BLOCK_SIZE
     
     # # NOTE: are you sure this function is the only thing can differentiate?
@@ -1511,7 +1523,7 @@ class SparseAttentionAutoGradFn(Function):
         # NOTE: I have no idea what this sprase matrix format LOL, but for temporary
         if DEBUG:
             # print('sdbmm', grid, BLOCK_K, BLOCK_HID)
-            assert indices.max() < TSRC
+            # assert indices.max() < TSRC
             assert indices.min() >= 0
             assert indices.is_contiguous()
             assert ks.is_contiguous()
@@ -1657,7 +1669,7 @@ def tree_attention(
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
     
-    block_size: int = 8,
+    block_size: int = 16,
 ):
     global DEBUG
     
