@@ -24,7 +24,7 @@ def test_sparse_attention():
         warnings.warn("tree attention does not support 32 bits right now.")
     
     with torch.autocast('cuda', torch.float32):
-        indices, ks, probs = attention_matrix(
+        indices, ks, probs, scores = attention_matrix(
             q,
             k,
             
@@ -48,18 +48,18 @@ def test_sparse_attention():
             block_size,
         )
         
-        loss = context.square().sum()
+        loss = context.square().sum() * 0.01
         loss.backward()
         
-        v.data -= 0.0001 * v.grad
-        probs.data -= 0.001 * probs.grad
+        v.data -= 0.1 * v.grad
+        probs.data -= 0.1 * probs.grad
         
         v.grad = None
         probs.grad = None
         
         # print(loss.item())
     
-    assert loss.item() < 30.0
+    assert loss.item() < 0.2
     print('[pass] test_sparse_attention')
 
 def test_attention_mask():
@@ -82,7 +82,7 @@ def test_attention_mask():
     
     # exam GD
     for i in range(1000):
-        indices, ks, probs = attention_matrix(
+        indices, ks, probs, scores = attention_matrix(
             q,
             k,
             

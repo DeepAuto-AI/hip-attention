@@ -48,11 +48,11 @@ if __name__ == '__main__':
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.float32,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         ),
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
         trust_remote_code=True,
     )
     
@@ -95,14 +95,14 @@ if __name__ == '__main__':
 
     nlls = []
     prev_end_loc = 0
-    for begin_loc in tqdm(range(0, seq_len, stride)[:500]):
+    for begin_loc in tqdm(range(0, seq_len, stride)[:10]):
         end_loc = min(begin_loc + max_length, seq_len)
         trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
         input_ids = encodings[:, begin_loc:end_loc].to(device)
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100
 
-        with torch.no_grad(), torch.autocast('cuda', torch.float16):
+        with torch.no_grad(), torch.autocast('cuda', torch.float32):
             outputs = model(input_ids, labels=target_ids)
             neg_log_likelihood = outputs.loss
 
