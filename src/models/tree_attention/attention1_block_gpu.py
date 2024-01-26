@@ -270,7 +270,7 @@ def _masking_iteration_compute(
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
                 scores_partial = scores_partial +\
-                    ((idx_bdst * BLOCK_SIZE) < loc_k_vec) * 32000.0
+                    ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 32000.0
                 
                 scores += scores_partial.to(scores.dtype)
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
@@ -322,11 +322,11 @@ def _masking_iteration_compute(
                 
                 # [BLOCK_SIZE_PADDED, BLOCK_TMASK_K]
                 scores_partial = -tl.dot(vec_q, vec_k)
-                scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
-                scores_partial = scores_partial + (
-                    (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None]) <\
+                scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
+                scores_partial = scores_partial + ((
+                    (idx_bdst * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE_PADDED)[:, None] + (T_SRC - T_DST)) <\
                     (loc_k_vec[None, :] + _idx_block)
-                ) * 32000.0
+                ) & (tl.arange(0, BLOCK_SIZE_PADDED)[:, None] < BLOCK_SIZE)) * 10000.0
                 
                 # NOTE: reduce
                 if REDUCE_METHOD == 'max':
@@ -430,7 +430,7 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = True
+DEBUG = False
 
 def next_multiple_of(x: int, multiple_by: int = 16):
     if (x % multiple_by) == 0:
@@ -1135,7 +1135,6 @@ def attention_matrix(
         # path = f'saves/models/tree_attention/block.png'
         print('saved', path)
         plt.savefig(path, dpi=96, bbox_inches='tight')
-        input('>>>')
     
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
@@ -1190,7 +1189,7 @@ def attention_matrix(
             queries[0].cpu().numpy(), 
             keys[0].cpu().numpy().transpose((-1, -2))
         )
-        x = x + (1 - np.tri(*x.shape)) * (-32000)
+        x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-32000)
         x = np.exp(x - x.max(-1, keepdims=True))
         x = x / x.sum(-1, keepdims=True)
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
@@ -1199,6 +1198,7 @@ def attention_matrix(
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         # print(ks)
+        input('>>>')
     
     return indices, ks, probs, scores
 
