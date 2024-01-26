@@ -520,10 +520,18 @@ def masking_iteration(
         assert t_mask.min() >= 0
         assert t_mask.max() < 1
     
+    BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
     GROUP_N = 1
     GROUP_BDST = 1
-    # BLOCK_HID = triton.next_power_of_2(HID)
-    BLOCK_HID = 32
+    BLOCK_HID = triton.next_power_of_2(HID)
+    if BLOCK_TMASK_K > 1024:
+        BLOCK_HID = min(BLOCK_HID, 16)
+    elif BLOCK_TMASK_K > 512:
+        BLOCK_HID = min(BLOCK_HID, 32)
+    elif BLOCK_TMASK_K > 256:
+        BLOCK_HID = min(BLOCK_HID, 64)
+    elif BLOCK_TMASK_K > 128:
+        BLOCK_HID = min(BLOCK_HID, 128)
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
@@ -557,7 +565,7 @@ def masking_iteration(
         # block constant
         REDUCE_METHOD,
         triton.next_power_of_2(mask.shape[-1]),
-        triton.next_power_of_2(t_mask.shape[-1]),
+        BLOCK_TMASK_K,
         triton.next_power_of_2(math.ceil(scale_up)),
         int(BLOCK_HID),
         int(BLOCK_SIZE),
@@ -952,7 +960,7 @@ class CalcScoreAutoGradFn(Function):
             dtype=queries.dtype
         )
         
-        BLOCK_HID = 32
+        BLOCK_HID = triton.next_power_of_2(HID)
         BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
         grid = (N, BDST, BK)
         
@@ -976,7 +984,7 @@ class CalcScoreAutoGradFn(Function):
             BLOCK_SIZE_PADDED,
             BLOCK_HID,
             
-            num_warps=4,
+            num_warps=BLOCK_HID//32,
         )
         
         # print(scores[0, 300, :])
@@ -1549,7 +1557,7 @@ class SparseAttentionAutoGradFn(Function):
         context = torch.zeros((N, TDST, HID), dtype=values.dtype, device=values.device)
         
         BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
-        BLOCK_HID = 32
+        BLOCK_HID = triton.next_power_of_2(HID)
         grid = (N, BDST, triton.cdiv(HID, BLOCK_HID))
         # grid = (1, 1, 1)
         
@@ -1588,7 +1596,7 @@ class SparseAttentionAutoGradFn(Function):
             BLOCK_SIZE_PADDED,
             BLOCK_HID,
             
-            num_warps=4,
+            num_warps=BLOCK_HID//32,
         )
         
         return context
