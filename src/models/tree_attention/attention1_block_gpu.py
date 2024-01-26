@@ -1702,7 +1702,7 @@ def tree_attention(
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
     
-    block_size: int = 4,
+    block_size: int = 8,
 ):
     global DEBUG
     
