@@ -43,7 +43,7 @@ def _triton_kth_large(
     sorted_score = tl.sort(scores)
     # tl.debug_barrier()
     sorted_score_mask = tl.arange(0, BLOCK_SCORES) < k
-    return tl.max(sorted_score * sorted_score_mask + (-32000.0) * (~sorted_score_mask))
+    return tl.max(sorted_score * sorted_score_mask + (-10000.0) * (~sorted_score_mask))
 
 @triton.jit
 def _masking_iteration_compute(
@@ -72,7 +72,7 @@ def _masking_iteration_compute(
     BLOCK_TMASK_K: tl.constexpr, 
     BLOCK_MAX_DUP: tl.constexpr,
     BLOCK_HID: tl.constexpr,
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
 ):
@@ -183,7 +183,7 @@ def _masking_iteration_compute(
             idx_n * stride_tmask_n +\
             idx_bdst * stride_tmask_bdst +\
             ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
-        # mask=dup_pixels_mask,
+        mask=dup_pixels_mask,
         value=(
             (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
         )
@@ -211,7 +211,7 @@ def _masking_iteration_compute(
     if k_new < num_pixels:
     """
     if k_new < num_pixels_scalar and True:
-    # if False:
+    # if True:
         """
         # need top_k, so compute scores
         vec_q = queries[i, j, :]
@@ -227,13 +227,13 @@ def _masking_iteration_compute(
         
         if REDUCE_METHOD == 'first':
             for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
-                hid_range = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
-                hid_mask = hid_range < HID
+                idx_hid = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
+                hid_mask = idx_hid < HID
                 vec_q = tl.load(
                     QUERIES +\
                         idx_n * stride_queries_n +\
                         (idx_bdst * BLOCK_SIZE) * stride_queries_tdst +\
-                        (hid_range[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
+                        (idx_hid[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
                     mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
                     other = 0,
                 )
@@ -258,7 +258,7 @@ def _masking_iteration_compute(
                     KEYS +\
                         idx_n * stride_keys_n +\
                         loc_k_vec[None, :] * stride_keys_tsrc + \
-                        hid_range[:, None] * stride_keys_hid,
+                        idx_hid[:, None] * stride_keys_hid,
                     mask = vec_k_mask,
                     other = 0,
                 )
@@ -273,32 +273,24 @@ def _masking_iteration_compute(
                 # )
                 scores_partial = -tl.dot(vec_q, vec_k).to(scores.dtype)
                 scores_partial = tl.sum(scores_partial, axis=0)
-                scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
                 scores_partial = scores_partial +\
-                    ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 32000.0
+                    ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 10000.0
                 
                 scores += scores_partial
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
             # NOTE: init scores
             if REDUCE_METHOD == 'max':
-                scores += 32000.0
+                scores += 10000.0
             elif REDUCE_METHOD == 'sum':
                 scores *= 0.0
             
             for _idx_block in range(BLOCK_SIZE):
-                hid_range = tl.arange(0, BLOCK_HID)
-                hid_mask = hid_range < HID
-                # [BLOCK_SIZE_PADDED, BLOCK_HID]
-                mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
-                vec_q = tl.load(
-                    QUERIES +\
-                        idx_n * stride_queries_n +\
-                        (idx_bdst * BLOCK_SIZE + idx_block[:, None]) * stride_queries_tdst +\
-                        hid_range[None, :] * stride_queries_hid,
-                    mask = (hid_mask[None, :] & mask_block[:, None] & mask_strided_block[:, None]),
-                    other = 0,
-                )
-                # tl.debug_barrier()
+                
+                scores_partial = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
+                
+                idx_tdst = (idx_bdst * BLOCK_SIZE + idx_block)
+                mask_tdst = (idx_tdst < T_DST) & mask_block
                 
                 num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
                 num_pixels_mask = num_pixels_range < num_pixels_scalar
@@ -316,33 +308,63 @@ def _masking_iteration_compute(
                 loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
                 
                 # [BLOCK_HID, BLOCK_TMASK_K]
-                vec_k = tl.load(
-                    KEYS +\
-                        idx_n * stride_keys_n +\
-                        (loc_k_vec[None, :] + _idx_block) * stride_keys_tsrc + \
-                        hid_range[:, None] * stride_keys_hid,
-                    mask = num_pixels_mask[None, :] & hid_mask[:, None] & ((loc_k_vec[None, :] + _idx_block) < T_SRC),
-                    other = 0,
+                idx_tsrc = (loc_k_vec + _idx_block)
+                mask_tsrc = idx_tsrc < T_SRC
+                
+                mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
+                for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
+                    idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
+                    hid_mask = idx_hid < HID
+                    # [BLOCK_SIZE_PADDED, BLOCK_HID]
+                    vec_q = tl.load(
+                        QUERIES +\
+                            idx_n * stride_queries_n +\
+                            idx_tdst[:, None] * stride_queries_tdst +\
+                            idx_hid[None, :] * stride_queries_hid,
+                        mask = (hid_mask[None, :] & mask_tdst[:, None] & mask_block[:, None] & mask_strided_block[:, None]),
+                        other = 0,
+                    )
+                    # tl.debug_barrier()
+                    
+                    vec_k = tl.load(
+                        KEYS +\
+                            idx_n * stride_keys_n +\
+                            idx_tsrc[None, :] * stride_keys_tsrc + \
+                            idx_hid[:, None] * stride_keys_hid,
+                        mask = num_pixels_mask[None, :] & hid_mask[:, None] & mask_tsrc[None, :] & (_idx_block < BLOCK_SIZE),
+                        other = 0,
+                    )
+                    
+                    # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+                    scores_micro = -tl.dot(vec_q, vec_k)
+                    scores_partial += scores_micro.to(scores_partial.dtype)
+                scores_partial_mask = (
+                    ~(mask_tdst[:, None] & mask_tsrc[None, :]) |
+                    (idx_tdst[:, None] < mask_tsrc[None, :]) |
+                    (scores_partial == 0) |
+                    (~num_pixels_mask[None, :]) |
+                    (~mask_block[:, None]) |
+                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None]) >= T_DST) |
+                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC) |
+                    (~mask_strided_block[:, None])
                 )
                 
-                # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-                scores_partial = -tl.dot(vec_q, vec_k)
-                scores_partial_mask = (
+                """
                     (~num_pixels_mask[None, :]) &
                     ((idx_bdst * BLOCK_SIZE + idx_block[:, None] + (T_SRC - T_DST)) < (loc_k_vec[None, :] + _idx_block)) &
                     (~mask_block[:, None]) &
                     ((idx_bdst * BLOCK_SIZE + idx_block[:, None]) >= T_DST) & 
                     ((loc_k_vec[None, :] + _idx_block) >= T_SRC) &
                     mask_strided_block[:, None]
-                )
+                """
                 
                 # NOTE: reduce
                 if REDUCE_METHOD == 'max':
-                    scores_partial = scores_partial + scores_partial_mask * 32000.0
+                    scores_partial = scores_partial + (scores_partial_mask) * 10000.0
                     scores_partial = tl.min(scores_partial, axis=0)
                     scores = tl.minimum(scores, scores_partial)
                 elif REDUCE_METHOD == 'sum':
-                    scores_partial = scores_partial * (~scores_partial_mask)
+                    scores_partial = scores_partial + scores_partial_mask * 10000.0
                     scores_partial = tl.sum(scores_partial, axis=0)
                     scores = scores + scores_partial
         else:
@@ -356,8 +378,10 @@ def _masking_iteration_compute(
             mask[i, j, k] = t_mask[i, j, topk_indices[k]]
         """
         
+        # tl.device_print("", scores)
+        
         # select min-k from negative scores -> select top-k
-        # masked_scores = scores + (~num_pixels_mask) * 32000.0
+        # masked_scores = scores + (~num_pixels_mask) * 10000.0
         masked_scores = scores
         # tl.debug_barrier()
         scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
@@ -444,9 +468,10 @@ def _masking_iteration_compute(
 DEBUG = False
 
 def next_multiple_of(x: int, multiple_by: int = 16):
-    if (x % multiple_by) == 0:
-        return x
-    return x + multiple_by - (x % multiple_by)
+    # if (x % multiple_by) == 0:
+    #     return x
+    # return x + multiple_by - (x % multiple_by)
+    return triton.next_power_of_2(max(x, multiple_by))
 
 def masking_iteration(
     # input matrices
@@ -497,15 +522,16 @@ def masking_iteration(
     
     GROUP_N = 1
     GROUP_BDST = 1
-    BLOCK_HID = triton.next_power_of_2(HID)
+    # BLOCK_HID = triton.next_power_of_2(HID)
+    BLOCK_HID = 32
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
     assert GROUP_BDST == 1
     
     # HID cannot be chunked if use reduce
-    if REDUCE_METHOD in ['max', 'sum']:
-        assert HID <= BLOCK_HID
+    # if REDUCE_METHOD in ['max', 'sum']:
+    #     assert HID <= BLOCK_HID
     assert REDUCE_METHOD in ['max', 'sum', 'first']
     
     _masking_iteration_compute[grid](
@@ -1155,6 +1181,9 @@ def attention_matrix(
         print('saved', path)
         plt.savefig(path, dpi=96, bbox_inches='tight')
     
+    if DEBUG:
+        debug_print()
+        
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
         tmask.fill_(0)
@@ -1206,20 +1235,20 @@ def attention_matrix(
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         
-        x = np.matmul(
-            queries[0].cpu().numpy(), 
-            keys[0].cpu().numpy().transpose((-1, -2))
-        )
-        x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-32000)
-        x = np.exp(x - x.max(-1, keepdims=True))
-        x = x / x.sum(-1, keepdims=True)
-        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-        plt.imshow(x)
-        path = 'saves/models/tree_attention/block_truth.png'
-        print('saved', path)
-        plt.savefig(path, dpi=200, bbox_inches='tight')
-        # print(ks)
-        input('>>>')
+        # x = np.matmul(
+        #     queries[0].cpu().numpy(), 
+        #     keys[0].cpu().numpy().transpose((-1, -2))
+        # )
+        # x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+        # x = np.exp(x - x.max(-1, keepdims=True))
+        # x = x / x.sum(-1, keepdims=True)
+        # x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        # plt.imshow(x)
+        # path = 'saves/models/tree_attention/block_truth.png'
+        # print('saved', path)
+        # plt.savefig(path, dpi=200, bbox_inches='tight')
+        # # print(ks)
+        # input('>>>')
     
     return indices, ks, probs, scores
 
@@ -1262,7 +1291,6 @@ def _sdbmm_compute(
             idx_bdst * stride_ks_bdst,
     )
     
-    prob_sum = tl.zeros((BLOCK_SIZE_PADDED, ), dtype=tl.float32)
     scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_HID), dtype=tl.float32)
     for idx_bk in range(BK):
         mask_bk = idx_bk < n_bk
@@ -1306,13 +1334,9 @@ def _sdbmm_compute(
         )
         
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
-        scores_mini = tl.dot(atten_probs, value).to(scores.dtype)
-        scores += scores_mini
+        scores_mini = tl.dot(atten_probs, value)
+        scores += scores_mini.to(scores.dtype)
         
-        prob_sum += tl.sum(atten_probs, axis=1)
-    
-    # tl.device_print("", tl.sum(prob_sum))
-    
     tl.store(
         context +\
             idx_n * stride_context_n +\
@@ -1672,21 +1696,24 @@ def tree_attention(
     
     w_start: int = None,
     n_patches: int = None,
-    mask_k: int = 1024,
+    mask_k: int = 512,
     scale_up: float = 2,
     
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
     
-    block_size: int = 16,
+    block_size: int = 4,
 ):
     global DEBUG
     
     if w_start is None:
         w_start = math.ceil(mask_k * scale_up)
+        # w_start = math.ceil(mask_k * scale_up * scale_up)
         # w_start = math.ceil(mask_k / scale_up)
+        # w_start = mask_k
     if n_patches is None:
         n_patches = math.ceil(mask_k / scale_up)
+        # n_patches = mask_k
     
     assert q.ndim == 3
     assert k.ndim == 3
@@ -1845,10 +1872,13 @@ def main_debug():
     )
     
     stderr = (out - context).abs().mean().item()
-    stdcontext = torch.std_mean(context)[0].item()
+    stdcontext = torch.std_mean(out)[0].item()
     
-    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
 
 if __name__ == '__main__':
-    # main_debug()
-    main_latency_benchmark()
+    import sys
+    if sys.argv[-1] == 'debug':
+        main_debug()
+    else:
+        main_latency_benchmark()

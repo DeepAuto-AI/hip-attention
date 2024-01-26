@@ -8,13 +8,17 @@ import argparse
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from src.utils import seed
 
 if __name__ == '__main__':
+    seed()
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='none')
     parser.add_argument('--stride', type=int, default=-1)
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
+    parser.add_argument('--count', type=int, default=100)
     args = parser.parse_args()
     
     device = 'cuda:0'
@@ -95,7 +99,7 @@ if __name__ == '__main__':
 
     nlls = []
     prev_end_loc = 0
-    for begin_loc in tqdm(range(0, seq_len, stride)[:100]):
+    for begin_loc in tqdm(range(0, seq_len, stride)[:args.count]):
         end_loc = min(begin_loc + max_length, seq_len)
         trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
         input_ids = encodings[:, begin_loc:end_loc].to(device)
