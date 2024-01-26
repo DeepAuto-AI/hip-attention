@@ -266,13 +266,13 @@ def _masking_iteration_compute(
                 #     vec_q * vec_k, 
                 #     axis=0,
                 # )
-                scores_partial = -tl.dot(vec_q, vec_k)
+                scores_partial = -tl.dot(vec_q, vec_k).to(scores.dtype)
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
                 scores_partial = scores_partial +\
                     ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 32000.0
                 
-                scores += scores_partial.to(scores.dtype)
+                scores += scores_partial
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
             # NOTE: init scores
             if REDUCE_METHOD == 'max':
@@ -430,7 +430,7 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = False
+DEBUG = True
 
 def next_multiple_of(x: int, multiple_by: int = 16):
     if (x % multiple_by) == 0:
@@ -1272,7 +1272,7 @@ def _sdbmm_compute(
             other = 0,
         )
         # tl.device_print("", K)
-        tl.device_assert(tl.max(idx_tsrc) < TSRC, "TSRC")
+        tl.device_assert(tl.max(idx_tsrc * mask_tsrc) < TSRC, "TSRC")
         # tl.device_print("", stride_values_tsrc)
         # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
         value = tl.load(
@@ -1657,7 +1657,7 @@ def tree_attention(
     # heuristics: mask_k == n_patches * scale_up
     # heuristics: mask_k == w_start * scale_up
     
-    block_size: int = 16,
+    block_size: int = 8,
 ):
     global DEBUG
     
