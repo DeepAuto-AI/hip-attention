@@ -35,6 +35,7 @@ class TrainConfig:
     batch_size: int = 1
     accumulation_steps: int = 16
     lora_r: int = 32
+    save_steps: int = 25
     seq_len: int = 4096
     max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
@@ -277,7 +278,7 @@ def main(config: TrainConfig):
         mode="max",
         dirpath=config.model_checkpoint_dir,
         filename=f"llama32k-wikitext2-{config.seq_len}-{{epoch:02d}}-{{step}}",
-        every_n_train_steps=25,
+        every_n_train_steps=config.save_steps,
         enable_version_counter=False,
     )
     checkpoint_callback.CHECKPOINT_EQUALS_CHAR = '-'
@@ -319,6 +320,8 @@ if __name__ == "__main__":
     parser.add_argument('--lr', default=-1, type=float)
     parser.add_argument('--max_steps', default=-1, type=int)
     parser.add_argument('--dataset', default='wikitext103', type=str)
+    parser.add_argument('--seq_len', default=-1, type=int)
+    parser.add_argument('--save_steps', default=-1, type=int)
     args = parser.parse_args()
     
     train_config = TrainConfig(
@@ -336,5 +339,9 @@ if __name__ == "__main__":
         train_config.batch_size = args.batch_size
     if args.max_steps > 0:
         train_config.max_steps = args.max_steps
+    if args.seq_len > 0:
+        train_config.seq_len = args.seq_len
+    if args.save_steps > 0:
+        train_config.save_steps = args.save_steps
     
     main(train_config)

@@ -74,6 +74,7 @@ def _masking_iteration_compute(
     BLOCK_HID: tl.constexpr,
     BLOCK_SIZE,
     BLOCK_SIZE_PADDED: tl.constexpr,
+    REDUCE_STRDIE: tl.constexpr,
 ):
     idx_n = tl.program_id(0)
     idx_bdst = tl.program_id(1)
@@ -288,12 +289,13 @@ def _masking_iteration_compute(
                 hid_range = tl.arange(0, BLOCK_HID)
                 hid_mask = hid_range < HID
                 # [BLOCK_SIZE_PADDED, BLOCK_HID]
+                mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
                 vec_q = tl.load(
                     QUERIES +\
                         idx_n * stride_queries_n +\
                         (idx_bdst * BLOCK_SIZE + idx_block[:, None]) * stride_queries_tdst +\
                         hid_range[None, :] * stride_queries_hid,
-                    mask = (hid_mask[None, :] & mask_block[:, None]),
+                    mask = (hid_mask[None, :] & mask_block[:, None] & mask_strided_block[:, None]),
                     other = 0,
                 )
                 # tl.debug_barrier()
@@ -326,11 +328,12 @@ def _masking_iteration_compute(
                 # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
                 scores_partial = -tl.dot(vec_q, vec_k)
                 scores_partial_mask = (
-                    (~num_pixels_mask[None, :]) &\
-                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None] + (T_SRC - T_DST)) < (loc_k_vec[None, :] + _idx_block)) &\
-                    (~mask_block[:, None]) &\
+                    (~num_pixels_mask[None, :]) &
+                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None] + (T_SRC - T_DST)) < (loc_k_vec[None, :] + _idx_block)) &
+                    (~mask_block[:, None]) &
                     ((idx_bdst * BLOCK_SIZE + idx_block[:, None]) >= T_DST) & 
-                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC)
+                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC) &
+                    mask_strided_block[:, None]
                 )
                 
                 # NOTE: reduce
@@ -459,12 +462,13 @@ def masking_iteration(
     # kernel constant
     BLOCK_SIZE: int, 
     REDUCE_METHOD: str = 'max',
+    REDUCE_STRIDE: int = 1,
 ):
     global DEBUG
     if DEBUG:
         # print(ws)
-        print(ks[0, 10])
-        print(mask[0, 10])
+        # print(ks[0, 10])
+        # print(mask[0, 10])
         # print(t_srcs)
         print(
             'masking_iteration', 
@@ -532,17 +536,18 @@ def masking_iteration(
         int(BLOCK_HID),
         int(BLOCK_SIZE),
         next_multiple_of(BLOCK_SIZE, 16),
+        REDUCE_STRIDE,
         
-        num_warps=8,
+        num_warps=4,
         num_stages=2,
         enable_warp_specialization=False,
     )
     
-    if DEBUG:
-        print('after')
-        print(ks[0, 10])
-        print(mask[0, 10])
-        print('after')
+    # if DEBUG:
+    #     print('after')
+    #     print(ks[0, 10])
+    #     print(mask[0, 10])
+    #     print('after')
 
 def torch_cdiv(a, b):
     return torch.floor(a / b) + torch.ceil((a / b) - torch.floor(a / b))
@@ -943,7 +948,9 @@ class CalcScoreAutoGradFn(Function):
             
             BLOCK_SIZE,
             BLOCK_SIZE_PADDED,
-            BLOCK_HID
+            BLOCK_HID,
+            
+            num_warps=4,
         )
         
         # print(scores[0, 300, :])
@@ -1152,20 +1159,21 @@ def attention_matrix(
     while w_curr < T_SRC:
         tmask.fill_(0)
         mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE) - 1) / triton.cdiv(w_curr, BLOCK_SIZE))
-        masking_iteration(
-            # input matrices
-            queries, keys,
-            # input metrices (blocked) 
-            mask, tmask, 
-            # temp vectors (blocked)
-            ws, ks, tsrcs, 
-            # operator variables
-            scale_up, triton.cdiv(n_patches, BLOCK_SIZE), triton.cdiv(mask_k, BLOCK_SIZE), 
-            # input constant
-            N, T_DST, T_SRC, B_DST, B_SRC, HID,
-            # kernel constant
-            BLOCK_SIZE
-        )
+        with timer(f"iteration_{w_curr}"):
+            masking_iteration(
+                # input matrices
+                queries, keys,
+                # input metrices (blocked) 
+                mask, tmask, 
+                # temp vectors (blocked)
+                ws, ks, tsrcs, 
+                # operator variables
+                scale_up, triton.cdiv(n_patches, BLOCK_SIZE), triton.cdiv(mask_k, BLOCK_SIZE), 
+                # input constant
+                N, T_DST, T_SRC, B_DST, B_SRC, HID,
+                # kernel constant
+                BLOCK_SIZE
+            )
         w_curr = round(w_curr * scale_up)
         
         if DEBUG:
@@ -1178,11 +1186,12 @@ def attention_matrix(
     indices = indices * BLOCK_SIZE
     
     # # NOTE: are you sure this function is the only thing can differentiate?
-    scores, probs = calc_score_return_prob(
-        queries=queries, keys=keys,
-        indices=indices, ks=ks,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+    with timer("score"):
+        scores, probs = calc_score_return_prob(
+            queries=queries, keys=keys,
+            indices=indices, ks=ks,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
     
     if DEBUG:
         x = to_dense(
@@ -1663,7 +1672,7 @@ def tree_attention(
     
     w_start: int = None,
     n_patches: int = None,
-    mask_k: int = 512,
+    mask_k: int = 1024,
     scale_up: float = 2,
     
     # heuristics: mask_k == n_patches * scale_up
@@ -1691,17 +1700,17 @@ def tree_attention(
     assert q.dtype == k.dtype
     assert q.dtype == v.dtype
     
-    if not q.is_contiguous():
-        q = q.contiguous()
-    if not k.is_contiguous():
-        k = k.contiguous()
-    if not v.is_contiguous():
-        v = v.contiguous()
+    # if not q.is_contiguous():
+    #     q = q.contiguous()
+    # if not k.is_contiguous():
+    #     k = k.contiguous()
+    # if not v.is_contiguous():
+    #     v = v.contiguous()
     
-    if q.dtype != torch.float32:
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
+    # if q.dtype != torch.float32:
+    #     q = q.to(torch.float32)
+    #     k = k.to(torch.float32)
+    #     v = v.to(torch.float32)
     
     if DEBUG:
         torch.cuda.synchronize()
@@ -1841,5 +1850,5 @@ def main_debug():
     print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
 
 if __name__ == '__main__':
-    main_debug()
-    # main_latency_benchmark()
+    # main_debug()
+    main_latency_benchmark()
