@@ -52,11 +52,11 @@ if __name__ == '__main__':
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],
-            bnb_4bit_compute_dtype=torch.float32,
+            bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         ),
-        torch_dtype=torch.float32,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
     
@@ -106,7 +106,7 @@ if __name__ == '__main__':
         target_ids = input_ids.clone()
         target_ids[:, :-trg_len] = -100
 
-        with torch.no_grad(), torch.autocast('cuda', torch.float32):
+        with torch.no_grad():
             outputs = model(input_ids, labels=target_ids)
             neg_log_likelihood = outputs.loss
 
