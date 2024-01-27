@@ -42,7 +42,7 @@ def imsave(im: Tensor, name: str, gamma: float = 0.2, idx_batch: int = -1):
     print('saved', path)
 
 def main():
-    q, k, v, out = load_checkouts(idx=4, window=4, seq_len=4096, dtype=torch.float16)
+    q, k, v, out = load_checkouts(idx=5, window=4, seq_len=4096, dtype=torch.float16)
     
     q = q[:, 2048:, :].contiguous()
     
@@ -52,8 +52,8 @@ def main():
     
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
-    BLOCKSIZE = 4
-    mask_k = 256
+    BLOCKSIZE = 8
+    mask_k = 512
     scale_up = 2
     w_start = mask_k * scale_up
     n_patches = mask_k / scale_up

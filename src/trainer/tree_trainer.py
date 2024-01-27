@@ -40,6 +40,7 @@ class TrainConfig:
     max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
     dataset: str = 'wikitext103'
+    load_from_checkpoint: str = None
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -306,7 +307,13 @@ def main(config: TrainConfig):
     
     datamodule = LabDataModule(config=config)
     model = LabModule(config=config)
-    trainer.fit(model=model, datamodule=datamodule) 
+    kwargs = dict(
+        model=model,
+        datamodule=datamodule, 
+    )
+    if config.load_from_checkpoint is not None:
+        kwargs['ckpt_path'] = config.load_from_checkpoint
+    trainer.fit(**kwargs)
 
 if __name__ == "__main__":
     import argparse
@@ -322,12 +329,14 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', default='wikitext103', type=str)
     parser.add_argument('--seq_len', default=-1, type=int)
     parser.add_argument('--save_steps', default=-1, type=int)
+    parser.add_argument('--checkpoint', default=None, type=str)
     args = parser.parse_args()
     
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
         disable_kd=args.disable_kd,
         dataset=args.dataset,
+        load_from_checkpoint=args.checkpoint,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
