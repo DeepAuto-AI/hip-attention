@@ -25,7 +25,7 @@ from torch import Tensor
 import tqdm
 import triton
 import triton.language as tl
-from typing import Tuple, List
+from typing import Literal, Tuple, List
 import os
 import math
 from torch.autograd import Function
@@ -72,7 +72,7 @@ def _masking_iteration_compute(
     BLOCK_TMASK_K: tl.constexpr, 
     BLOCK_MAX_DUP: tl.constexpr,
     BLOCK_HID: tl.constexpr,
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
 ):
@@ -183,7 +183,7 @@ def _masking_iteration_compute(
             idx_n * stride_tmask_n +\
             idx_bdst * stride_tmask_bdst +\
             ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
-        # mask=dup_pixels_mask,
+        mask=dup_pixels_mask,
         value=(
             (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
         )
@@ -227,13 +227,13 @@ def _masking_iteration_compute(
         
         if REDUCE_METHOD == 'first':
             for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
-                hid_range = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
-                hid_mask = hid_range < HID
+                idx_hid = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
+                hid_mask = idx_hid < HID
                 vec_q = tl.load(
                     QUERIES +\
                         idx_n * stride_queries_n +\
                         (idx_bdst * BLOCK_SIZE) * stride_queries_tdst +\
-                        (hid_range[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
+                        (idx_hid[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
                     mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
                     other = 0,
                 )
@@ -258,7 +258,7 @@ def _masking_iteration_compute(
                     KEYS +\
                         idx_n * stride_keys_n +\
                         loc_k_vec[None, :] * stride_keys_tsrc + \
-                        hid_range[:, None] * stride_keys_hid,
+                        idx_hid[:, None] * stride_keys_hid,
                     mask = vec_k_mask,
                     other = 0,
                 )
@@ -273,9 +273,9 @@ def _masking_iteration_compute(
                 # )
                 scores_partial = -tl.dot(vec_q, vec_k).to(scores.dtype)
                 scores_partial = tl.sum(scores_partial, axis=0)
-                scores_partial = scores_partial + (~num_pixels_mask) * 32000.0
+                scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
                 scores_partial = scores_partial +\
-                    ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 32000.0
+                    ((idx_bdst * BLOCK_SIZE + T_SRC - T_DST) < loc_k_vec) * 10000.0
                 
                 scores += scores_partial
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
@@ -285,64 +285,104 @@ def _masking_iteration_compute(
             elif REDUCE_METHOD == 'sum':
                 scores *= 0.0
             
+            idx_tdst = (idx_bdst * BLOCK_SIZE + idx_block)
+            mask_tdst = (idx_tdst < T_DST) & mask_block
+            
+            num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
+            num_pixels_mask = num_pixels_range < num_pixels_scalar
+            loc_k_vec = tl.load(
+                TMASK +\
+                    idx_n * stride_tmask_n +\
+                    idx_bdst * stride_tmask_bdst +\
+                    num_pixels_range * stride_tmask_k,
+                mask = num_pixels_mask,
+                other = 0,
+            )
+            # tl.debug_barrier()
+            # NOTE: random key selection with in the block
+            # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
+            loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+            
             for _idx_block in range(BLOCK_SIZE):
-                hid_range = tl.arange(0, BLOCK_HID)
-                hid_mask = hid_range < HID
-                # [BLOCK_SIZE_PADDED, BLOCK_HID]
-                mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
-                vec_q = tl.load(
-                    QUERIES +\
-                        idx_n * stride_queries_n +\
-                        (idx_bdst * BLOCK_SIZE + idx_block[:, None]) * stride_queries_tdst +\
-                        hid_range[None, :] * stride_queries_hid,
-                    mask = (hid_mask[None, :] & mask_block[:, None] & mask_strided_block[:, None]),
-                    other = 0,
-                )
-                # tl.debug_barrier()
+                scores_partial = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
                 
-                num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
-                num_pixels_mask = num_pixels_range < num_pixels_scalar
-                loc_k_vec = tl.load(
-                    TMASK +\
-                        idx_n * stride_tmask_n +\
-                        idx_bdst * stride_tmask_bdst +\
-                        num_pixels_range * stride_tmask_k,
-                    mask = num_pixels_mask,
-                    other = 0,
-                )
-                # tl.debug_barrier()
-                # NOTE: random key selection with in the block
-                # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
                 
                 # [BLOCK_HID, BLOCK_TMASK_K]
-                vec_k = tl.load(
-                    KEYS +\
-                        idx_n * stride_keys_n +\
-                        (loc_k_vec[None, :] + _idx_block) * stride_keys_tsrc + \
-                        hid_range[:, None] * stride_keys_hid,
-                    mask = num_pixels_mask[None, :] & hid_mask[:, None] & ((loc_k_vec[None, :] + _idx_block) < T_SRC),
-                    other = 0,
-                )
+                idx_tsrc = (loc_k_vec + _idx_block)
+                mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block < BLOCK_SIZE) & ((_idx_block % REDUCE_STRDIE) == 0)
+                
+                mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
+                for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
+                    idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
+                    hid_mask = idx_hid < HID
+                    # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+                    vec_q = tl.load(
+                        QUERIES +\
+                            idx_n * stride_queries_n +\
+                            idx_tdst[:, None] * stride_queries_tdst +\
+                            idx_hid[None, :] * stride_queries_hid,
+                        mask = hid_mask[None, :] & mask_tdst[:, None] & mask_block[:, None] & mask_strided_block[:, None],
+                        other = 0,
+                    )
+                    # tl.debug_barrier()
+                    
+                    # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                    vec_k = tl.load(
+                        KEYS +\
+                            idx_n * stride_keys_n +\
+                            idx_tsrc[None, :] * stride_keys_tsrc + \
+                            idx_hid[:, None] * stride_keys_hid,
+                        mask = num_pixels_mask[None, :] & hid_mask[:, None] & mask_tsrc[None, :],
+                        other = 0,
+                    )
+                    
+                    # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+                    scores_micro = -tl.dot(vec_q, vec_k)
+                    scores_partial += scores_micro.to(scores_partial.dtype)
                 
                 # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-                scores_partial = -tl.dot(vec_q, vec_k)
-                scores_partial_mask = (
-                    (~num_pixels_mask[None, :]) &
-                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None] + (T_SRC - T_DST)) < (loc_k_vec[None, :] + _idx_block)) &
-                    (~mask_block[:, None]) &
-                    ((idx_bdst * BLOCK_SIZE + idx_block[:, None]) >= T_DST) & 
-                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC) &
-                    mask_strided_block[:, None]
+                scores_partial_ignore_mask = (
+                    (~num_pixels_mask[None, :]) |
+                    ~(mask_tdst[:, None] & mask_tsrc[None, :]) |
+                    (~mask_block[:, None]) |
+                    ((idx_bdst[:, None] * BLOCK_SIZE + idx_block[:, None]) >= T_DST) |
+                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC) |
+                    (~mask_strided_block[:, None]) |
+                    (scores_partial == 0) |
+                    ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
+                    False
                 )
+                
+                # NOTE: owo powerful dark magic. select first / last block always. testing sink attention.
+                # scores_partial_force_mask = (
+                #     (
+                #         (idx_tsrc[None, :] == 0) | 
+                #         (num_pixels_range[None, :] >= (num_pixels_scalar - 1)) |
+                #         # ((idx_tdst[:, None]) <= idx_tsrc[None, :]) |
+                #         False
+                #     ) &
+                #     ((idx_tdst[:, None] + T_SRC - T_DST) >= idx_tsrc[None, :]) &
+                #     (mask_tsrc[None, :] & mask_tdst[:, None]) &
+                #     (scores_partial != 0) &
+                #     True
+                # )
+                scores_partial_force_mask = False
+                
+                # tl.device_print("", idx_tdst)
+                # tl.device_print("", idx_tsrc)
+                
+                scores_partial_ignore_mask = scores_partial_ignore_mask & (~scores_partial_force_mask)
                 
                 # NOTE: reduce
                 if REDUCE_METHOD == 'max':
-                    scores_partial = scores_partial + scores_partial_mask * 32000.0
+                    scores_partial = scores_partial + scores_partial_ignore_mask * 32000.0
+                    scores_partial = scores_partial + scores_partial_force_mask * (-32000.0)
+                    # scores_partial = scores_partial * (~scores_partial_force_mask)
                     scores_partial = tl.min(scores_partial, axis=0)
                     scores = tl.minimum(scores, scores_partial)
                 elif REDUCE_METHOD == 'sum':
-                    scores_partial = scores_partial * (~scores_partial_mask)
+                    scores_partial = scores_partial + scores_partial_ignore_mask * 10000.0
+                    scores_partial = scores_partial + scores_partial_force_mask * (-10000.0)
                     scores_partial = tl.sum(scores_partial, axis=0)
                     scores = scores + scores_partial
         else:
@@ -441,12 +481,13 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = False
+DEBUG = os.environ.get('TREE_DEBUG', '0') == '1'
 
 def next_multiple_of(x: int, multiple_by: int = 16):
-    if (x % multiple_by) == 0:
-        return x
-    return x + multiple_by - (x % multiple_by)
+    # if (x % multiple_by) == 0:
+    #     return x
+    # return x + multiple_by - (x % multiple_by)
+    return triton.next_power_of_2(max(x, multiple_by))
 
 def masking_iteration(
     # input matrices
@@ -461,8 +502,8 @@ def masking_iteration(
     N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int,
     # kernel constant
     BLOCK_SIZE: int, 
-    REDUCE_METHOD: str = 'max',
-    REDUCE_STRIDE: int = 1,
+    REDUCE_METHOD: str,
+    REDUCE_STRIDE: int,
 ):
     global DEBUG
     if DEBUG:
@@ -495,17 +536,26 @@ def masking_iteration(
         assert t_mask.min() >= 0
         assert t_mask.max() < 1
     
+    BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
     GROUP_N = 1
     GROUP_BDST = 1
     BLOCK_HID = triton.next_power_of_2(HID)
+    if BLOCK_TMASK_K > 1024:
+        BLOCK_HID = min(BLOCK_HID, 16)
+    elif BLOCK_TMASK_K > 512:
+        BLOCK_HID = min(BLOCK_HID, 32)
+    elif BLOCK_TMASK_K > 256:
+        BLOCK_HID = min(BLOCK_HID, 64)
+    elif BLOCK_TMASK_K > 128:
+        BLOCK_HID = min(BLOCK_HID, 128)
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
     assert GROUP_BDST == 1
     
     # HID cannot be chunked if use reduce
-    if REDUCE_METHOD in ['max', 'sum']:
-        assert HID <= BLOCK_HID
+    # if REDUCE_METHOD in ['max', 'sum']:
+    #     assert HID <= BLOCK_HID
     assert REDUCE_METHOD in ['max', 'sum', 'first']
     
     _masking_iteration_compute[grid](
@@ -531,7 +581,7 @@ def masking_iteration(
         # block constant
         REDUCE_METHOD,
         triton.next_power_of_2(mask.shape[-1]),
-        triton.next_power_of_2(t_mask.shape[-1]),
+        BLOCK_TMASK_K,
         triton.next_power_of_2(math.ceil(scale_up)),
         int(BLOCK_HID),
         int(BLOCK_SIZE),
@@ -618,7 +668,7 @@ def _calc_score_compute(
     N, TDST, TSRC, HID, BK, K, BDST, BSRC,
     
     # kernel constatnts
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -707,7 +757,7 @@ def _calc_score_compute_bwd_queries(
     # input variables
     N, TDST, TSRC, HID, BK, K,
     # block constant
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -808,7 +858,7 @@ def _calc_score_compute_bwd_keys(
     # input variables
     N, TDST, TSRC, HID, BK, K,
     # block constant
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -926,8 +976,9 @@ class CalcScoreAutoGradFn(Function):
             dtype=queries.dtype
         )
         
-        BLOCK_HID = 32
+        BLOCK_HID = triton.next_power_of_2(HID)
         BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
+        BLOCK_HID = BLOCK_SIZE_PADDED
         grid = (N, BDST, BK)
         
         assert queries.ndim == 3
@@ -950,7 +1001,7 @@ class CalcScoreAutoGradFn(Function):
             BLOCK_SIZE_PADDED,
             BLOCK_HID,
             
-            num_warps=4,
+            num_warps=BLOCK_HID//16,
         )
         
         # print(scores[0, 300, :])
@@ -1040,7 +1091,8 @@ def calc_score_return_prob(
         BLOCK_SIZE,
     )
     
-    probs = scores.softmax(-1)    
+    with timer("calc_score_return_prob.softmax"):
+        probs = scores.softmax(-1)
     return scores, probs
 
 def attention_matrix(
@@ -1053,6 +1105,8 @@ def attention_matrix(
     scale_up: int,
     
     BLOCK_SIZE: int = 16,
+    REDUCE_METHOD: Literal['first', 'max', 'sum'] = 'max',
+    REDUCE_STRIDE: int = 1,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -1069,6 +1123,7 @@ def attention_matrix(
     assert T_DST <= T_SRC
     
     # NOTE: width of last query
+    # w_curr = w_start
     w_curr = round(w_start / scale_up)
         
     # vectors
@@ -1155,6 +1210,9 @@ def attention_matrix(
         print('saved', path)
         plt.savefig(path, dpi=96, bbox_inches='tight')
     
+    if DEBUG:
+        debug_print()
+        
     # NOTE: Calc. Mask
     while w_curr < T_SRC:
         tmask.fill_(0)
@@ -1172,7 +1230,9 @@ def attention_matrix(
                 # input constant
                 N, T_DST, T_SRC, B_DST, B_SRC, HID,
                 # kernel constant
-                BLOCK_SIZE
+                BLOCK_SIZE,
+                REDUCE_METHOD,
+                REDUCE_STRIDE,
             )
         w_curr = round(w_curr * scale_up)
         
@@ -1206,20 +1266,20 @@ def attention_matrix(
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         
-        x = np.matmul(
-            queries[0].cpu().numpy(), 
-            keys[0].cpu().numpy().transpose((-1, -2))
-        )
-        x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-32000)
-        x = np.exp(x - x.max(-1, keepdims=True))
-        x = x / x.sum(-1, keepdims=True)
-        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-        plt.imshow(x)
-        path = 'saves/models/tree_attention/block_truth.png'
-        print('saved', path)
-        plt.savefig(path, dpi=200, bbox_inches='tight')
-        # print(ks)
-        input('>>>')
+        # x = np.matmul(
+        #     queries[0].cpu().numpy(), 
+        #     keys[0].cpu().numpy().transpose((-1, -2))
+        # )
+        # x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+        # x = np.exp(x - x.max(-1, keepdims=True))
+        # x = x / x.sum(-1, keepdims=True)
+        # x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        # plt.imshow(x)
+        # path = 'saves/models/tree_attention/block_truth.png'
+        # print('saved', path)
+        # plt.savefig(path, dpi=200, bbox_inches='tight')
+        # # print(ks)
+        # input('>>>')
     
     return indices, ks, probs, scores
 
@@ -1239,7 +1299,7 @@ def _sdbmm_compute(
     N, TSRC, TDST, HID, K, BK, BSRC, BDST,
     
     # kernel blocks
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -1262,7 +1322,6 @@ def _sdbmm_compute(
             idx_bdst * stride_ks_bdst,
     )
     
-    prob_sum = tl.zeros((BLOCK_SIZE_PADDED, ), dtype=tl.float32)
     scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_HID), dtype=tl.float32)
     for idx_bk in range(BK):
         mask_bk = idx_bk < n_bk
@@ -1306,13 +1365,9 @@ def _sdbmm_compute(
         )
         
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
-        scores_mini = tl.dot(atten_probs, value).to(scores.dtype)
-        scores += scores_mini
+        scores_mini = tl.dot(atten_probs, value)
+        scores += scores_mini.to(scores.dtype)
         
-        prob_sum += tl.sum(atten_probs, axis=1)
-    
-    # tl.device_print("", tl.sum(prob_sum))
-    
     tl.store(
         context +\
             idx_n * stride_context_n +\
@@ -1335,7 +1390,7 @@ def _sdbmm_compute_bwd_values(
     # input variables
     N, TDST, TSRC, HID, BK, K,
     # block constant
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -1375,7 +1430,7 @@ def _sdbmm_compute_bwd_values(
             idx_bdst * stride_indices_bdst +\
             idx_bk * stride_indices_bk
     )
-    idx_tsrc = idx_tsrc * BLOCK_SIZE + idx_block
+    idx_tsrc = idx_tsrc + idx_block
     mask_tsrc = (idx_tsrc < TSRC) & mask_block
     
     # [BLOCK_SIZE_PADDED: tsrc, BLOCK_SIZE_PADDED: tdst]
@@ -1420,7 +1475,7 @@ def _sdbmm_compute_bwd_probs(
     # input variables
     N, TDST, TSRC, HID, BK, K,
     # blcok constant
-    BLOCK_SIZE,
+    BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
@@ -1525,7 +1580,7 @@ class SparseAttentionAutoGradFn(Function):
         context = torch.zeros((N, TDST, HID), dtype=values.dtype, device=values.device)
         
         BLOCK_SIZE_PADDED = next_multiple_of(BLOCK_SIZE, 16)
-        BLOCK_HID = 32
+        BLOCK_HID = triton.next_power_of_2(HID)
         grid = (N, BDST, triton.cdiv(HID, BLOCK_HID))
         # grid = (1, 1, 1)
         
@@ -1564,14 +1619,15 @@ class SparseAttentionAutoGradFn(Function):
             BLOCK_SIZE_PADDED,
             BLOCK_HID,
             
-            num_warps=4,
+            num_warps=BLOCK_HID//32,
         )
         
         return context
     
     @staticmethod
     def backward(ctx, grad_context):
-        ENABLED = True
+        ENABLED_VALUES = True
+        ENABLED_PROBS = True
         
         values, indices, ks, probs = ctx.saved_tensors
         BLOCK_SIZE = ctx.BLOCK_SIZE
@@ -1586,7 +1642,7 @@ class SparseAttentionAutoGradFn(Function):
 
         # for values
         if ctx.needs_input_grad[0]:
-            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE), BK)
+            grid = (N, B_DST, BK)
             BLOCK_HID = triton.next_power_of_2(HID)
 
             grad_values = torch.zeros(
@@ -1595,7 +1651,7 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=values.dtype,
             )
             
-            if ENABLED:
+            if ENABLED_VALUES:
                 _sdbmm_compute_bwd_values[grid](
                     probs, probs.stride(0), probs.stride(1), probs.stride(2),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
@@ -1624,7 +1680,7 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=probs.dtype,
             )
             
-            if ENABLED:
+            if ENABLED_PROBS:
                 _sdbmm_compute_bwd_probs[grid](
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
                     values, values.stride(0), values.stride(1), values.stride(2), 
@@ -1670,23 +1726,27 @@ def tree_attention(
     k: Tensor, 
     v: Tensor,
     
+    # heuristics: w_start == mask_k * scale_up
     w_start: int = None,
+    # heuristics: n_patches == mask_k // scale_up
     n_patches: int = None,
-    mask_k: int = 1024,
+    mask_k: int = 512,
     scale_up: float = 2,
     
-    # heuristics: mask_k == n_patches * scale_up
-    # heuristics: mask_k == w_start * scale_up
-    
-    block_size: int = 16,
+    block_size: int = 8,
+    reduce_method: str = 'max',
+    reduce_stride: int = 1,
 ):
     global DEBUG
     
     if w_start is None:
         w_start = math.ceil(mask_k * scale_up)
+        # w_start = math.ceil(mask_k * scale_up * scale_up)
         # w_start = math.ceil(mask_k / scale_up)
+        # w_start = mask_k
     if n_patches is None:
         n_patches = math.ceil(mask_k / scale_up)
+        # n_patches = mask_k
     
     assert q.ndim == 3
     assert k.ndim == 3
@@ -1729,6 +1789,8 @@ def tree_attention(
                 mask_k,
                 scale_up,
                 block_size,
+                reduce_method,
+                reduce_stride,
             )
         
         with timer('sparse_attention'):
@@ -1768,7 +1830,8 @@ def main_latency_benchmark():
     parser.add_argument('--query_size', type=int, default=1)
     parser.add_argument('--method', type=str, default='tree')
     parser.add_argument('--samples', type=int, default=200)
-    parser.add_argument('--block_size', type=int, default=16)
+    parser.add_argument('--block_size', type=int, default=8)
+    parser.add_argument('--k', type=int, default=512)
     args = parser.parse_args()
     
     DEBUG = args.debug
@@ -1807,6 +1870,7 @@ def main_latency_benchmark():
                     q,
                     k,
                     v,
+                    mask_k=args.k,
                     block_size=args.block_size
                 )
             else:
@@ -1832,7 +1896,11 @@ def main_debug():
     global DEBUG
     DEBUG = True
     
-    q, k, v, out = load_checkouts(dtype=torch.float16, seq_len=1024 * 4)
+    q, k, v, out = load_checkouts(dtype=torch.float16, seq_len=1024 * 4, idx=26, window=1)
+    
+    q = q[:, 1024 * 2:, :]
+    out = out[:, 1024 * 2:, :]
+    
     print('q', q.shape)
     print('k', k.shape)
     print('v', v.shape)
@@ -1845,10 +1913,13 @@ def main_debug():
     )
     
     stderr = (out - context).abs().mean().item()
-    stdcontext = torch.std_mean(context)[0].item()
+    stdcontext = torch.std_mean(out)[0].item()
     
-    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
 
 if __name__ == '__main__':
-    # main_debug()
-    main_latency_benchmark()
+    import sys
+    if sys.argv[-1] == 'debug':
+        main_debug()
+    else:
+        main_latency_benchmark()
