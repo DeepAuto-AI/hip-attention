@@ -1106,7 +1106,7 @@ def attention_matrix(
     
     BLOCK_SIZE: int = 16,
     REDUCE_METHOD: Literal['first', 'max', 'sum'] = 'max',
-    REDUCE_STRIDE: int = 2,
+    REDUCE_STRIDE: int = 1,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -1430,7 +1430,7 @@ def _sdbmm_compute_bwd_values(
             idx_bdst * stride_indices_bdst +\
             idx_bk * stride_indices_bk
     )
-    idx_tsrc = idx_tsrc * BLOCK_SIZE + idx_block
+    idx_tsrc = idx_tsrc + idx_block
     mask_tsrc = (idx_tsrc < TSRC) & mask_block
     
     # [BLOCK_SIZE_PADDED: tsrc, BLOCK_SIZE_PADDED: tdst]
@@ -1642,7 +1642,7 @@ class SparseAttentionAutoGradFn(Function):
 
         # for values
         if ctx.needs_input_grad[0]:
-            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE), BK)
+            grid = (N, B_DST, BK)
             BLOCK_HID = triton.next_power_of_2(HID)
 
             grad_values = torch.zeros(
