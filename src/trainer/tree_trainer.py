@@ -22,6 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.utils import seed
 from src.dataset.labdataset import LabDataset
 from torch.utils.data import DataLoader, random_split
 
@@ -316,6 +317,8 @@ def main(config: TrainConfig):
     trainer.fit(**kwargs)
 
 if __name__ == "__main__":
+    seed()
+    
     import argparse
     
     parser = argparse.ArgumentParser()
