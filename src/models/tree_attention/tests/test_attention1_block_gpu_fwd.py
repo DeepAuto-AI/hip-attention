@@ -29,8 +29,8 @@ def to_dense(
                     ]
     return out
 
-def imsave(im: Tensor, name: str, gamma: float = 0.2):
-    im = im[-1].cpu().detach().numpy() ** gamma
+def imsave(im: Tensor, name: str, gamma: float = 0.2, idx_batch: int = -1):
+    im = im[idx_batch].cpu().detach().numpy() ** gamma
     plt.clf()
     plt.title(name)
     plt.imshow(im)
@@ -42,9 +42,7 @@ def imsave(im: Tensor, name: str, gamma: float = 0.2):
     print('saved', path)
 
 def main():
-    print('hello')
-    
-    q, k, v, out = load_checkouts(idx=4, window=4, seq_len=4096, dtype=torch.float32)
+    q, k, v, out = load_checkouts(idx=4, window=4, seq_len=4096, dtype=torch.float16)
     
     q = q[:, 2048:, :].contiguous()
     
@@ -54,7 +52,7 @@ def main():
     
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
-    BLOCKSIZE = 32
+    BLOCKSIZE = 4
     mask_k = 256
     scale_up = 2
     w_start = mask_k * scale_up
@@ -102,16 +100,16 @@ def main():
     imsave(probs_truth, 'probs_truth')
     imsave(probs_dense, 'probs_dense')
     imsave(probs_error_map, 'probs_error_map')
-    imsave(scores_truth.abs(), 'scores_truth')
-    imsave(scores_dense.abs(), 'scores_dense')
-    imsave(scores_error_map, 'scores_error_map')
+    imsave(scores_truth.abs(), 'scores_truth', gamma=1.0)
+    imsave(scores_dense.abs(), 'scores_dense', gamma=1.0)
+    imsave(scores_error_map, 'scores_error_map', gamma=1.0)
     print('scores_error', scores_error)
     print('probs_error', probs_error)
     
     context_dense = sparse_attention(
         v.contiguous(), indices, ks, probs, BLOCKSIZE
     )
-    context_truth = torch.bmm(probs_truth, v)
+    context_truth = torch.bmm(probs_dense, v)
     
     context_error_map = (context_dense - context_truth).abs()
     # print(context_error_map)
@@ -119,7 +117,7 @@ def main():
     context_error = context_error_map.max()
     context_error_loc = (context_error_map == context_error).nonzero()
     
-    imsave(context_error_map, 'context_error_map', gamma=0)
+    imsave(context_error_map, 'context_error_map', gamma=1.0, idx_batch=2)
     print(torch.std_mean(context_dense), torch.std_mean(context_truth))
     print(context_error, context_error_loc)
     
@@ -145,7 +143,7 @@ def main():
     imsave(probs_dense_tree, 'probs_dense_tree')
 
 if __name__ == '__main__':
-    for i in range(3):
+    for i in range(1):
         print('='*80)
         main()
         print('='*80)
