@@ -30,6 +30,7 @@ def to_dense(
     return out
 
 def imsave(im: Tensor, name: str, gamma: float = 0.2, idx_batch: int = -1):
+    return
     im = im[idx_batch].cpu().detach().numpy() ** gamma
     plt.clf()
     plt.title(name)
@@ -42,7 +43,7 @@ def imsave(im: Tensor, name: str, gamma: float = 0.2, idx_batch: int = -1):
     print('saved', path)
 
 def main():
-    q, k, v, out = load_checkouts(idx=5, window=4, seq_len=4096, dtype=torch.float16)
+    q, k, v, out = load_checkouts(idx=5, window=4, seq_len=4096, dtype=torch.float32)
     
     q = q[:, 2048:, :].contiguous()
     
@@ -134,7 +135,7 @@ def main():
     print((q - q_backup).abs().sum())
     print((k - k_backup).abs().sum())
     print((v - v_backup).abs().sum())
-    print('cte', context_tree_error)
+    print('error between treen', context_tree_error)
     
     probs_dense_tree = to_dense(
         indices_tree.cpu(), ks_tree.cpu(), probs_tree.cpu(), 
