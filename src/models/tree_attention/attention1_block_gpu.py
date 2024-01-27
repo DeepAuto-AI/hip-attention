@@ -43,7 +43,7 @@ def _triton_kth_large(
     sorted_score = tl.sort(scores)
     # tl.debug_barrier()
     sorted_score_mask = tl.arange(0, BLOCK_SCORES) < k
-    return tl.max(sorted_score * sorted_score_mask + (-10000.0) * (~sorted_score_mask))
+    return tl.max(sorted_score * sorted_score_mask + (-32000.0) * (~sorted_score_mask))
 
 @triton.jit
 def _masking_iteration_compute(
@@ -119,7 +119,7 @@ def _masking_iteration_compute(
             idx_n * stride_ks_n +\
             idx_bdst * stride_ks_bdst,
     ).to(tl.int64)
-    """
+    # """
     k_new = tl.maximum(
         N_PATCHES,
         (
@@ -129,14 +129,14 @@ def _masking_iteration_compute(
             ) * tl.cdiv(w_new, BLOCK_SIZE)
         ).to(tl.int64),
     )
-    """
-    k_new = tl.maximum(
-        N_PATCHES,
-        tl.cdiv(
-            (tl.minimum((MASK_K * BLOCK_SIZE).to(tl.float32) / t_src.to(tl.float32), 1.0) * w_new.to(tl.float32)).to(tl.int64),
-            BLOCK_SIZE
-        ),
-    )
+    # """
+        # k_new = tl.maximum(
+        #     N_PATCHES,
+        #     tl.cdiv(
+        #         (tl.minimum((MASK_K * BLOCK_SIZE).to(tl.float32) / t_src.to(tl.float32), 1.0) * w_new.to(tl.float32)).to(tl.int64),
+        #         BLOCK_SIZE
+        #     ),
+        # )
     # tl.device_print("before", t_src)
     k_new = tl.minimum(tl.cdiv(t_src, BLOCK_SIZE), tl.maximum(N_PATCHES, k_new))
     
@@ -168,14 +168,14 @@ def _masking_iteration_compute(
     )
     k_old_mask = k_old_mask & (loc_vec < 1.0)
     
-    w_old_fp = w_old.to(tl.float32)
-    w_new_fp = w_new.to(tl.float32)
+    # w_old_fp = w_old.to(tl.float32)
+    # w_new_fp = w_new.to(tl.float32)
     b_old_fp = tl.cdiv(w_old, BLOCK_SIZE).to(tl.float32)
     b_new_fp = tl.cdiv(w_new, BLOCK_SIZE).to(tl.float32)
     loc_idx_start_vec = (loc_vec * b_old_fp).to(tl.int64)
     loc_idx_end_vec = loc_idx_start_vec + 1
-    loc_idx_start_vec = tl.math.round(loc_idx_start_vec.to(tl.float32) * (w_new_fp / w_old_fp)).to(tl.int64)
-    loc_idx_end_vec = tl.math.round(loc_idx_end_vec.to(tl.float32) * (w_new_fp / w_old_fp)).to(tl.int64)
+    loc_idx_start_vec = (loc_idx_start_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
+    loc_idx_end_vec = (loc_idx_end_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
     
     dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
     dup_pixels_vec = dup_pixels_vec * k_old_mask
@@ -209,11 +209,9 @@ def _masking_iteration_compute(
                 idx_n * stride_tmask_n +\
                 idx_bdst * stride_tmask_bdst +\
                 ((num_pixels_vec - dup_pixels_first) + _idx) * stride_tmask_k,
-            mask=((loc_idx_start_vec + _idx) <= loc_idx_end_vec) & k_old_mask,
-            # mask=(_idx < dup_pixels_vec) & k_old_mask,
-            # mask=k_old_mask,
+            mask=(_idx <= dup_pixels_vec) & k_old_mask,
             value=(
-                (loc_idx_start_vec + _idx).to(tl.float32) / b_new_fp
+                (loc_idx_start_vec + _idx).to(tl.float32) / tl.cdiv(w_new, BLOCK_SIZE).to(tl.float32)
             )
         )
     
@@ -225,7 +223,6 @@ def _masking_iteration_compute(
     if k_new < num_pixels:
     """
     if k_new < num_pixels_scalar and True:
-    # if True:
         """
         # need top_k, so compute scores
         vec_q = queries[i, j, :]
@@ -412,7 +409,7 @@ def _masking_iteration_compute(
         # tl.device_print("", scores)
         
         # select min-k from negative scores -> select top-k
-        # masked_scores = scores + (~num_pixels_mask) * 10000.0
+        # masked_scores = scores + (~num_pixels_mask) * 32000.0
         masked_scores = scores
         # tl.debug_barrier()
         scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
