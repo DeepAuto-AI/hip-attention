@@ -52,8 +52,8 @@ def main():
     
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
-    BLOCKSIZE = 4
-    mask_k = 256
+    BLOCKSIZE = 8
+    mask_k = 512
     scale_up = 2
     w_start = mask_k * scale_up
     n_patches = mask_k / scale_up
@@ -134,7 +134,7 @@ def main():
     print((q - q_backup).abs().sum())
     print((k - k_backup).abs().sum())
     print((v - v_backup).abs().sum())
-    print('cte', context_tree_error)
+    print('error between treen', context_tree_error)
     
     probs_dense_tree = to_dense(
         indices_tree.cpu(), ks_tree.cpu(), probs_tree.cpu(), 
