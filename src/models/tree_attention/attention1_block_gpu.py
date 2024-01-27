@@ -1626,7 +1626,8 @@ class SparseAttentionAutoGradFn(Function):
     
     @staticmethod
     def backward(ctx, grad_context):
-        ENABLED = True
+        ENABLED_VALUES = True
+        ENABLED_PROBS = True
         
         values, indices, ks, probs = ctx.saved_tensors
         BLOCK_SIZE = ctx.BLOCK_SIZE
@@ -1650,7 +1651,7 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=values.dtype,
             )
             
-            if ENABLED:
+            if ENABLED_VALUES:
                 _sdbmm_compute_bwd_values[grid](
                     probs, probs.stride(0), probs.stride(1), probs.stride(2),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
@@ -1679,7 +1680,7 @@ class SparseAttentionAutoGradFn(Function):
                 dtype=probs.dtype,
             )
             
-            if ENABLED:
+            if ENABLED_PROBS:
                 _sdbmm_compute_bwd_probs[grid](
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
                     values, values.stride(0), values.stride(1), values.stride(2), 
