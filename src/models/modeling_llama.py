@@ -656,6 +656,8 @@ class LlamaCustomAttention(LlamaAttention):
         super().__init__(config, layer_idx)
         
         self.attention_method = 'none'
+        self.tree_k = 512
+        self.tree_block_size = 8
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
             nn.ReLU(),
@@ -753,7 +755,9 @@ class LlamaCustomAttention(LlamaAttention):
                 attn_output_tree, _ = tree_attention(
                     q[:, DENSE_QUERIES:, :].contiguous(),
                     k,
-                    v
+                    v,
+                    mask_k=self.tree_k,
+                    block_size=self.tree_block_size,
                 )
                 
                 context_avg = v.cumsum(-2, dtype=torch.float32) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]

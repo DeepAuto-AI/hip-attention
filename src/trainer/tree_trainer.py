@@ -42,6 +42,8 @@ class TrainConfig:
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
     dataset: str = 'wikitext103'
     load_from_checkpoint: str = None
+    k: int = 512
+    block_size: int = 8
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -124,6 +126,8 @@ def load_model(
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = method
+            m.tree_k = train_config.k
+            m.tree_block_size = train_config.block_size
     
     if method != 'none':
         peft_config = LoraConfig(
@@ -279,7 +283,7 @@ def main(config: TrainConfig):
         monitor="step",
         mode="max",
         dirpath=config.model_checkpoint_dir,
-        filename=f"llama32k-wikitext2-{config.seq_len}-{{epoch:02d}}-{{step}}",
+        filename=f"llama32k-{config.dataset}-{config.seq_len}-block{config.block_size}-k{config.k}-{{epoch:02d}}-{{step}}",
         every_n_train_steps=config.save_steps,
         enable_version_counter=False,
     )
@@ -333,6 +337,8 @@ if __name__ == "__main__":
     parser.add_argument('--seq_len', default=-1, type=int)
     parser.add_argument('--save_steps', default=-1, type=int)
     parser.add_argument('--checkpoint', default=None, type=str)
+    parser.add_argument('--k', default=512, type=int)
+    parser.add_argument('--block_size', default=8, type=int)
     args = parser.parse_args()
     
     train_config = TrainConfig(
@@ -340,6 +346,8 @@ if __name__ == "__main__":
         disable_kd=args.disable_kd,
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
+        k=args.k,
+        block_size=args.block_size,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
