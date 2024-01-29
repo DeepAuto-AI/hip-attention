@@ -648,7 +648,9 @@ class LlamaFlashAttention2(LlamaAttention):
         )
 
 from src.models.tree_attention.attention1_gpu import flash_attention
+# NOTE: element-wise implementation
 # from src.models.tree_attention.attention1_gpu import tree_attention
+# NOTE: block-wise implementation. more efficient
 from src.models.tree_attention.attention1_block_gpu import tree_attention
 
 class LlamaCustomAttention(LlamaAttention):
@@ -738,17 +740,13 @@ class LlamaCustomAttention(LlamaAttention):
             N, H, TDST, HID = q.shape
             _, _, TSRC, _ = k.shape
             assert k.shape == v.shape
-            DENSE_QUERIES = 2048 - TSRC + TDST
+            TARGET_DENSE_QUERIES = 2048
+            DENSE_QUERIES = TARGET_DENSE_QUERIES - TSRC + TDST
             assert TDST == TSRC
             
             q = q.view(N*H, TDST, HID).contiguous()
             k = k.view(N*H, TSRC, HID).contiguous()
             v = v.view(N*H, TSRC, HID).contiguous()
-            
-            # if self.training:
-            q = q.to(torch.float32)
-            k = k.to(torch.float32)
-            v = v.to(torch.float32)
             
             attn_outputs = []
             
@@ -771,7 +769,8 @@ class LlamaCustomAttention(LlamaAttention):
                     block_size=self.tree_block_size,
                 )
                 
-                context_avg = v.cumsum(-2, dtype=torch.float32) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
+                # NOTE: accumulation should be done with fp32
+                context_avg = v.cumsum(-2, dtype=torch.float32).to(v.dtype) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
                 context_avg = context_avg[:, TSRC-TDST+DENSE_QUERIES:, :]
                 # N, H, TDST
                 scale_avg = torch.sigmoid(
