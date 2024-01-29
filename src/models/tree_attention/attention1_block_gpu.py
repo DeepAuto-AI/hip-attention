@@ -596,14 +596,15 @@ def masking_iteration(
     GROUP_N = 1
     GROUP_BDST = 1
     BLOCK_HID = triton.next_power_of_2(HID)
-    if BLOCK_TMASK_K > 1024:
+    if BLOCK_TMASK_K >= 1024:
         BLOCK_HID = min(BLOCK_HID, 16)
-    elif BLOCK_TMASK_K > 512:
+    elif BLOCK_TMASK_K >= 512:
         BLOCK_HID = min(BLOCK_HID, 32)
-    elif BLOCK_TMASK_K > 256:
+    elif BLOCK_TMASK_K >= 256:
         BLOCK_HID = min(BLOCK_HID, 64)
-    elif BLOCK_TMASK_K > 128:
+    elif BLOCK_TMASK_K >= 128:
         BLOCK_HID = min(BLOCK_HID, 128)
+    # print(BLOCK_HID, BLOCK_TMASK_K)
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
