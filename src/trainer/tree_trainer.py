@@ -17,9 +17,12 @@ from pytorch_lightning.profilers import PyTorchProfiler
 from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
 import torch.utils.checkpoint
-from deepspeed.ops.adam import FusedAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 import deepspeed.checkpoint
 import deepspeed
+import torch.autograd
+
+# torch.autograd.set_detect_anomaly(True)
 
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
 
@@ -38,7 +41,7 @@ class TrainConfig:
     batch_size: int = 1
     accumulation_steps: int = 2
     lora_r: int = 32
-    save_steps: int = 25
+    save_steps: int = 100
     seq_len: int = 4096
     max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
@@ -143,9 +146,11 @@ def load_model(
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
-        device_map={"" : device},
+        device_map={"" : device} if device != 'cpu' else 'cpu',
+        load_in_4bit=quant_config is not None,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
     
@@ -157,7 +162,8 @@ def load_model(
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
-                m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
+                # m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
+                m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
     
@@ -179,7 +185,7 @@ def load_model(
             ]
         )
         
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
         
@@ -206,8 +212,10 @@ class LabModule(pl.LightningModule):
         super().__init__()
         
         self.model = load_model(train_config=config, method=config.method)
-        if config.disable_kd:
+        if not config.disable_kd:
             self.teacher = load_model(train_config=config, method='none')
+        else:
+            self.teacher = None
         
         self.validation_preds = []
         self.validation_targets = []
@@ -222,15 +230,17 @@ class LabModule(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        self.teacher.eval()
+        if self.teacher is not None:
+            self.teacher.eval()
         self.model.train()
         
         inputs, target = batch
         
-        with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
-            output_teacher = self.teacher(inputs, output_hidden_states=False)
-        with torch.autocast('cuda', torch.bfloat16):
-            output = self(inputs, target, output_hidden_states=False)
+        if not self.config.disable_kd:
+            with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
+                output_teacher = self.teacher(inputs, output_hidden_states=False)
+        # with torch.autocast('cuda', torch.bfloat16):
+        output = self(inputs, target, output_hidden_states=False)
         logits = output.logits
         
         loss_model = torch.nn.functional.cross_entropy(
@@ -265,7 +275,8 @@ class LabModule(pl.LightningModule):
         self.model.eval()
         
         inputs, target = batch
-        with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
+        with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
+            # print('asdfasdf', inputs.shape, target.shape, flush=True)
             output = self(inputs, target).logits
             loss = torch.nn.functional.cross_entropy(
                 output.view(-1, output.shape[-1]), 
@@ -278,10 +289,14 @@ class LabModule(pl.LightningModule):
     
     def on_validation_epoch_end(self):
         from torchmetrics.text.perplexity import Perplexity
-        calculator = Perplexity(ignore_index=-100)
-        for preds, target in zip(self.validation_preds, self.validation_targets):
-            calculator.update(preds, target)
-        ppl = calculator.compute()
+        with torch.no_grad():
+            device = 'cpu'
+            if self.config.using_fsdp:
+                device = 'cuda'
+            calculator = Perplexity(ignore_index=-100).to(device)
+            for preds, target in zip(self.validation_preds, self.validation_targets):
+                calculator.update(preds.to(device), target.to(device))
+            ppl = calculator.compute()
         ppl = ppl.item()
         print('val/ppl', ppl)
         self.log("val/ppl", ppl)
@@ -296,7 +311,8 @@ class LabModule(pl.LightningModule):
             if p.requires_grad:
                 params.append(p)
         if self.config.using_fsdp:
-            return FusedAdam(params, lr=self.config.lr)
+            return DeepSpeedCPUAdam(params, lr=self.config.lr)
+        # return DeepSpeedCPUAdam(params, lr=self.config.lr)
         return torch.optim.AdamW(params, lr=self.config.lr)
 
 from lightning.pytorch.strategies import FSDPStrategy
@@ -324,9 +340,9 @@ def main(config: TrainConfig):
                 "max_live_parameters": 5e8,
                 "max_reuse_distance": 1e8,
                 "contiguous_gradients": True,
-                "overlap_comm": True, 
-                "allgather_bucket_size": 1e8,
-                "reduce_bucket_size": 1e8,
+                "overlap_comm": False, 
+                "allgather_bucket_size": 1e7,
+                "reduce_bucket_size": 1e7,
             },
         }
         strategy = DeepSpeedStrategy(config=deepspeed_config)

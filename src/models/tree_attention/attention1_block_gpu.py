@@ -655,7 +655,7 @@ def masking_iteration(
         
         num_warps=4,
         num_stages=2,
-        enable_warp_specialization=False,
+        # enable_warp_specialization=False,
     )
     
     # if DEBUG:
@@ -1182,8 +1182,8 @@ def calc_score_return_prob(
     
     N, TDST, K = scores.shape
     _, TSRC = attention_mask.shape
-    # probs = probs * attention_mask[:, TSRC-TDST:, None]
-    probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
+    probs = probs * attention_mask[:, TSRC-TDST:, None]
+    # probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
     
     return scores, probs
 

@@ -1496,5 +1496,8 @@ def main_latency_benchmark():
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    main_debug()
-    # main_latency_benchmark()
+    import sys
+    if sys.argv[-1] == 'debug':
+        main_debug()
+    else:
+        main_latency_benchmark()
