@@ -321,11 +321,12 @@ def main(config: TrainConfig):
                 "stage": 3,
                 "offload_param": {"device": "cpu"},
                 "offload_optimizer": {"device": "cpu"},
-                "max_live_parameters": 2e7,
+                "max_live_parameters": 5e8,
+                "max_reuse_distance": 1e8,
                 "contiguous_gradients": True,
                 "overlap_comm": True, 
-                "allgather_bucket_size": 1e6,
-                "reduce_bucket_size": 1e6,
+                "allgather_bucket_size": 1e8,
+                "reduce_bucket_size": 1e8,
             },
         }
         strategy = DeepSpeedStrategy(config=deepspeed_config)
