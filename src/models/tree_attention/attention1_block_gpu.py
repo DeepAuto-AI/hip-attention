@@ -15,6 +15,7 @@ w_start = 512 (32 block)
 4096: 256 block
 """
 
+import random
 import gc
 from matplotlib import pyplot as plt
 import numpy as np
@@ -50,6 +51,7 @@ def _masking_iteration_compute(
     # input matrices
     QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid,
     KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
     
     # input metrices (blocked)
     MASK, stride_mask_n, stride_mask_bdst, stride_mask_k,
@@ -239,13 +241,13 @@ def _masking_iteration_compute(
         if REDUCE_METHOD == 'first':
             for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
                 idx_hid = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
-                hid_mask = idx_hid < HID
+                mask_hid = idx_hid < HID
                 vec_q = tl.load(
                     QUERIES +\
                         idx_n * stride_queries_n +\
                         (idx_bdst * BLOCK_SIZE) * stride_queries_tdst +\
                         (idx_hid[None, :] + tl.arange(0, 16)[:, None]) * stride_queries_hid,
-                    mask = (hid_mask[None, :] & (tl.arange(0, 16)[:, None] < 1)),
+                    mask = (mask_hid[None, :] & (tl.arange(0, 16)[:, None] < 1)),
                     other = 0,
                 )
                 # tl.debug_barrier()
@@ -264,7 +266,17 @@ def _masking_iteration_compute(
                 # NOTE: random key selection with in the block
                 # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
                 loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                vec_k_mask = num_pixels_mask[None, :] & hid_mask[:, None]
+                vec_k_mask = num_pixels_mask[None, :] & mask_hid[:, None]
+                
+                key_mask = tl.load(
+                    ATTEN_MASK +\
+                        idx_n * stride_atten_mask_n +\
+                        loc_k_vec * stride_atten_mask_tsrc,
+                    mask = mask_tsrc,
+                    other = False,
+                ).to(tl.int1)
+                vec_k_mask = vec_k_mask & key_mask[None, :]
+                
                 vec_k = tl.load(
                     KEYS +\
                         idx_n * stride_keys_n +\
@@ -299,6 +311,15 @@ def _masking_iteration_compute(
             idx_tdst = (idx_bdst * BLOCK_SIZE + idx_block)
             mask_tdst = (idx_tdst < T_DST) & mask_block
             
+            query_mask = tl.load(
+                ATTEN_MASK +\
+                    idx_n * stride_atten_mask_n +\
+                    (idx_tdst + T_SRC - T_DST) * stride_atten_mask_tsrc,
+                mask = mask_tdst,
+                other = False
+            ).to(tl.int1)
+            # mask_tdst = mask_tdst & query_mask
+            
             num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
             num_pixels_mask = num_pixels_range < num_pixels_scalar
             loc_k_vec = tl.load(
@@ -321,17 +342,33 @@ def _masking_iteration_compute(
                 idx_tsrc = (loc_k_vec + _idx_block)
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block < BLOCK_SIZE) & ((_idx_block % REDUCE_STRDIE) == 0)
                 
+                key_mask = tl.load(
+                    ATTEN_MASK +\
+                        idx_n * stride_atten_mask_n +\
+                        idx_tsrc * stride_atten_mask_tsrc,
+                    mask = mask_tsrc,
+                    other = False,
+                ).to(tl.int1)
+                # mask_tsrc = mask_tsrc & key_mask
+                
                 mask_strided_block = (idx_block % REDUCE_STRDIE) == 0
                 for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
                     idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
-                    hid_mask = idx_hid < HID
+                    mask_hid = idx_hid < HID
                     # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
                     vec_q = tl.load(
                         QUERIES +\
                             idx_n * stride_queries_n +\
                             idx_tdst[:, None] * stride_queries_tdst +\
                             idx_hid[None, :] * stride_queries_hid,
-                        mask = hid_mask[None, :] & mask_tdst[:, None] & mask_block[:, None] & mask_strided_block[:, None],
+                        mask = (
+                            mask_hid[None, :] &
+                            mask_tdst[:, None] &
+                            mask_block[:, None] &
+                            mask_strided_block[:, None] &
+                            query_mask[:, None] &
+                            True
+                        ),
                         other = 0,
                     )
                     # tl.debug_barrier()
@@ -342,7 +379,13 @@ def _masking_iteration_compute(
                             idx_n * stride_keys_n +\
                             idx_tsrc[None, :] * stride_keys_tsrc + \
                             idx_hid[:, None] * stride_keys_hid,
-                        mask = num_pixels_mask[None, :] & hid_mask[:, None] & mask_tsrc[None, :],
+                        mask = (
+                            num_pixels_mask[None, :] &
+                            mask_hid[:, None] &
+                            mask_tsrc[None, :] &
+                            # key_mask[None, :] &
+                            True
+                        ),
                         other = 0,
                     )
                     
@@ -353,13 +396,14 @@ def _masking_iteration_compute(
                 # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
                 scores_partial_ignore_mask = (
                     (~num_pixels_mask[None, :]) |
-                    ~(mask_tdst[:, None] & mask_tsrc[None, :]) |
+                    (~mask_tdst[:, None]) |
+                    (~mask_tsrc[None, :]) |
                     (~mask_block[:, None]) |
-                    ((idx_bdst[:, None] * BLOCK_SIZE + idx_block[:, None]) >= T_DST) |
-                    ((loc_k_vec[None, :] + _idx_block) >= T_SRC) |
                     (~mask_strided_block[:, None]) |
                     (scores_partial == 0) |
                     ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
+                    (~key_mask[None, :]) |
+                    (~query_mask[:, None]) |
                     False
                 )
                 
@@ -503,7 +547,7 @@ def next_multiple_of(x: int, multiple_by: int = 16):
 
 def masking_iteration(
     # input matrices
-    queries: Tensor, keys: Tensor,
+    queries: Tensor, keys: Tensor, attention_mask: Tensor,
     # input metrices (blocked) 
     mask: Tensor, t_mask: Tensor, 
     # temp vectors (blocked)
@@ -570,19 +614,28 @@ def masking_iteration(
     #     assert HID <= BLOCK_HID
     assert REDUCE_METHOD in ['max', 'sum', 'first']
     
+    assert queries.ndim == 3
+    assert keys.ndim == 3
+    assert attention_mask.ndim == 2
+    assert mask.ndim == 3
+    assert t_mask.ndim == 3
+    assert ws.ndim == 2
+    assert ks.ndim == 2
+    assert t_srcs.ndim == 2
     _masking_iteration_compute[grid](
         # input matrices
-        queries, queries.stride(0), queries.stride(1), queries.stride(2),
-        keys, keys.stride(0), keys.stride(1), keys.stride(2),
+        queries, *queries.stride(),
+        keys, *keys.stride(),
+        attention_mask, *attention_mask.stride(),
         
         # input matrices (blocked)
-        mask, mask.stride(0), mask.stride(1), mask.stride(2),
-        t_mask, t_mask.stride(0), t_mask.stride(1), t_mask.stride(2),
+        mask, *mask.stride(),
+        t_mask, *t_mask.stride(),
         
         # temp vectors (blocked)
-        ws, ws.stride(0), ws.stride(1),
-        ks, ks.stride(0), ks.stride(1),
-        t_srcs, t_srcs.stride(0), t_srcs.stride(1),
+        ws, *ws.stride(),
+        ks, *ks.stride(),
+        t_srcs, *t_srcs.stride(),
         
         # operation variables
         float(scale_up), int(n_patches), int(mask_k),
@@ -668,6 +721,7 @@ def _calc_score_compute(
     # input matrix
     QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid,
     KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
     
     # block indices
     INDICES, stride_indices_n, stride_indices_bdst, stride_indices_bk,
@@ -709,8 +763,25 @@ def _calc_score_compute(
     idx_tsrc = idx_tsrc + idx_block
     mask_tsrc = (idx_tsrc < TSRC) & mask_block
     
+    key_mask = tl.load(
+        ATTEN_MASK +\
+            idx_n * stride_atten_mask_n +\
+            idx_tsrc * stride_atten_mask_tsrc,
+        mask = mask_tsrc,
+        other = False,
+    ).to(tl.int1)
+    mask_tsrc = mask_tsrc & key_mask
+    
     idx_tdst = idx_bdst * BLOCK_SIZE + idx_block
     mask_tdst = (idx_tdst < TDST) & mask_block
+    query_mask = tl.load(
+        ATTEN_MASK +\
+            idx_n * stride_atten_mask_n +\
+            (idx_tdst + TSRC - TDST) * stride_atten_mask_tsrc,
+        mask = mask_tdst,
+        other = False,
+    ).to(tl.int1)
+    mask_tdst = mask_tdst & query_mask
     
     # [BLOCK_SIZE_PADDED: tdst, BLOCK_SIZE_PADDED: tsrc]
     scores = tl.zeros((BLOCK_SIZE_PADDED, BLOCK_SIZE_PADDED), dtype=tl.float32)
@@ -960,7 +1031,7 @@ class CalcScoreAutoGradFn(Function):
     def forward(
         ctx, 
         # matrices
-        queries: Tensor, keys: Tensor,
+        queries: Tensor, keys: Tensor, attention_mask: Tensor,
         # indices matrices
         indices: Tensor, ks: Tensor,
         # block constant
@@ -995,12 +1066,15 @@ class CalcScoreAutoGradFn(Function):
         
         assert queries.ndim == 3
         assert keys.ndim == 3
+        assert attention_mask.ndim == 2
+        assert attention_mask.dtype == torch.bool
         assert indices.ndim == 3
         assert ks.ndim == 2
         assert scores.ndim == 3
         _calc_score_compute[grid](
             queries, *queries.stride(),
             keys, *keys.stride(),
+            attention_mask, *attention_mask.stride(),
             
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -1091,13 +1165,13 @@ class CalcScoreAutoGradFn(Function):
         )
 
 def calc_score_return_prob(
-    queries: Tensor, keys: Tensor, 
+    queries: Tensor, keys: Tensor, attention_mask: Tensor,
     indices: Tensor, ks: Tensor,
     
     BLOCK_SIZE: int
 ):
     scores = CalcScoreAutoGradFn.apply(
-        queries, keys,
+        queries, keys, attention_mask,
         indices, ks,
         
         BLOCK_SIZE,
@@ -1105,11 +1179,17 @@ def calc_score_return_prob(
     
     with timer("calc_score_return_prob.softmax"):
         probs = scores.softmax(-1)
+    
+    N, TDST, K = scores.shape
+    _, TSRC = attention_mask.shape
+    probs = probs * attention_mask[:, TSRC-TDST:, None]
+    
     return scores, probs
 
 def attention_matrix(
     queries: Tensor, 
     keys: Tensor,
+    attention_mask: Tensor,
     
     w_start: int,
     n_patches: int,
@@ -1133,6 +1213,9 @@ def attention_matrix(
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
     assert T_DST <= T_SRC
+    
+    assert attention_mask.shape == (N, T_SRC)
+    assert attention_mask.dtype == torch.bool
     
     # NOTE: width of last query
     # w_curr = w_start
@@ -1232,7 +1315,7 @@ def attention_matrix(
         with timer(f"iteration_{w_curr}"):
             masking_iteration(
                 # input matrices
-                queries, keys,
+                queries, keys, attention_mask,
                 # input metrices (blocked) 
                 mask, tmask, 
                 # temp vectors (blocked)
@@ -1260,7 +1343,7 @@ def attention_matrix(
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score"):
         scores, probs = calc_score_return_prob(
-            queries=queries, keys=keys,
+            queries=queries, keys=keys, attention_mask=attention_mask,
             indices=indices, ks=ks,
             BLOCK_SIZE=BLOCK_SIZE,
         )
@@ -1282,15 +1365,16 @@ def attention_matrix(
         #     queries[0].cpu().numpy(), 
         #     keys[0].cpu().numpy().transpose((-1, -2))
         # )
-        # x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
-        # x = np.exp(x - x.max(-1, keepdims=True))
-        # x = x / x.sum(-1, keepdims=True)
-        # x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-        # plt.imshow(x)
-        # path = 'saves/models/tree_attention/block_truth.png'
-        # print('saved', path)
-        # plt.savefig(path, dpi=200, bbox_inches='tight')
-        # # print(ks)
+        x = (queries[0] @ keys[0].transpose(-1, -2)).detach().cpu().numpy()
+        x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+        x = np.exp(x - x.max(-1, keepdims=True))
+        x = x / x.sum(-1, keepdims=True)
+        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        plt.imshow(x)
+        path = 'saves/models/tree_attention/block_truth.png'
+        print('saved', path)
+        plt.savefig(path, dpi=200, bbox_inches='tight')
+        # print(ks)
         # input('>>>')
     
     return indices, ks, probs, scores
@@ -1737,6 +1821,8 @@ def tree_attention(
     q: Tensor, 
     k: Tensor, 
     v: Tensor,
+    # optional mask
+    attention_mask: Tensor = None,
     
     # heuristics: w_start == mask_k * scale_up
     w_start: int = None,
@@ -1772,17 +1858,12 @@ def tree_attention(
     assert q.dtype == k.dtype
     assert q.dtype == v.dtype
     
-    # if not q.is_contiguous():
-    #     q = q.contiguous()
-    # if not k.is_contiguous():
-    #     k = k.contiguous()
-    # if not v.is_contiguous():
-    #     v = v.contiguous()
-    
-    # if q.dtype != torch.float32:
-    #     q = q.to(torch.float32)
-    #     k = k.to(torch.float32)
-    #     v = v.to(torch.float32)
+    if attention_mask is None:
+        attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
+    if attention_mask.dtype != torch.bool:
+        # mask should mark alive token as True
+        attention_mask = attention_mask > 0.5
+    assert attention_mask.dtype == torch.bool
     
     if DEBUG:
         torch.cuda.synchronize()
@@ -1795,6 +1876,7 @@ def tree_attention(
             indices, ks, probs, scores = attention_matrix(
                 q,
                 k,
+                attention_mask,
                 
                 w_start,
                 n_patches,
@@ -1929,9 +2011,38 @@ def main_debug():
     
     print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
 
+def main_debug_mask():
+    global DEBUG
+    DEBUG = True
+    
+    seed()
+    q, k, v, out = load_checkouts(dtype=torch.float16, seq_len=1024 * 2, idx=24, window=1)
+    
+    q = q[:, 512:, :]
+    out = out[:, 512:, :]
+    
+    N, TSRC, HID = k.shape
+    mask = torch.full((N, TSRC), 1, dtype=torch.float32, device=k.device)
+    for i in range(N):
+        mask[i, :1024] = 0
+    
+    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+        q,
+        k,
+        v,
+        attention_mask=mask,
+    )
+    
+    stderr = (out - context).abs().mean().item()
+    stdcontext = torch.std_mean(out)[0].item()
+    
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
+
 if __name__ == '__main__':
     import sys
     if sys.argv[-1] == 'debug':
         main_debug()
+    elif sys.argv[-1] == 'debug_mask':
+        main_debug_mask()
     else:
         main_latency_benchmark()

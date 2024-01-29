@@ -19,6 +19,8 @@ if __name__ == '__main__':
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--count', type=int, default=100)
+    parser.add_argument('--block_size', type=int, default=8)
+    parser.add_argument('--k', type=int, default=512)
     args = parser.parse_args()
     
     device = 'cuda:0'
@@ -63,6 +65,8 @@ if __name__ == '__main__':
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = args.method
+            m.tree_k = args.k
+            m.tree_block_size = args.block_size
         
         if hasattr(m, 'gradient_checkpointing'):
             import torch.utils.checkpoint
