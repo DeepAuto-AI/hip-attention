@@ -731,8 +731,6 @@ class LlamaCustomAttention(LlamaAttention):
                 }, './cache/llama/qkvout.pth')
                 input('stored. press enter to continue >>> ')
         elif self.attention_method == 'tree':
-            DENSE_QUERIES = 2048
-            
             q = query_states / (query_states.shape[-1] ** 0.5)
             k = key_states
             v = value_states
@@ -740,16 +738,29 @@ class LlamaCustomAttention(LlamaAttention):
             N, H, TDST, HID = q.shape
             _, _, TSRC, _ = k.shape
             assert k.shape == v.shape
+            DENSE_QUERIES = 2048 - TSRC + TDST
+            assert TDST == TSRC
             
-            q = q.view(N*H, TDST, HID).contiguous().to(torch.float32)
-            k = k.view(N*H, TSRC, HID).contiguous().to(torch.float32)
-            v = v.view(N*H, TSRC, HID).contiguous().to(torch.float32)
+            q = q.view(N*H, TDST, HID).contiguous()
+            k = k.view(N*H, TSRC, HID).contiguous()
+            v = v.view(N*H, TSRC, HID).contiguous()
             
-            attn_output_flash, _ = flash_attention(
-                q[:, :DENSE_QUERIES, :],
-                k[:, :DENSE_QUERIES, :],
-                v[:, :DENSE_QUERIES, :]
-            )
+            # if self.training:
+            q = q.to(torch.float32)
+            k = k.to(torch.float32)
+            v = v.to(torch.float32)
+            
+            attn_outputs = []
+            
+            if DENSE_QUERIES > 0:
+                attn_output_flash, _ = flash_attention(
+                    q[:, :DENSE_QUERIES, :],
+                    k[:, :DENSE_QUERIES, :],
+                    v[:, :DENSE_QUERIES, :]
+                )
+                attn_outputs.append(attn_output_flash)
+            else:
+                DENSE_QUERIES = 0
             
             if q.shape[1] > DENSE_QUERIES:
                 attn_output_tree, _ = tree_attention(
@@ -770,12 +781,9 @@ class LlamaCustomAttention(LlamaAttention):
                 # NOTE: 256 is top-k value
                 attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
                 
-                attn_output = torch.cat([
-                    attn_output_flash, 
-                    attn_output_tree
-                ], dim=-2)
-            else:
-                attn_output = attn_output_flash
+                attn_outputs.append(attn_output_tree)
+                
+            attn_output = torch.cat(attn_outputs, dim=-2)
             
             attn_output = attn_output.view(N, H, TDST, HID).to(hidden_states.dtype)
         else:
