@@ -3,27 +3,29 @@ import os
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
+from dataclasses import dataclass, field
 
-# import mlflow
 import torch
 import torch.onnx
 import lightning as pl
+import transformers
 from lightning import Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.profilers import PyTorchProfiler
-
-import transformers
+from torch.utils.data import Subset
+from sklearn.model_selection import train_test_split
+import torch.utils.checkpoint
+from deepspeed.ops.adam import FusedAdam
+import deepspeed.checkpoint
+import deepspeed
 
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
 
-import os
-from dataclasses import dataclass, field
-from pathlib import Path
-
 from src.utils import seed
 from src.dataset.labdataset import LabDataset
+from src.dataset.booksum import BookSumDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')
@@ -34,7 +36,7 @@ class TrainConfig:
     using_fsdp: bool = False
     lr: float = 5e-5
     batch_size: int = 1
-    accumulation_steps: int = 16
+    accumulation_steps: int = 2
     lora_r: int = 32
     save_steps: int = 25
     seq_len: int = 4096
@@ -44,6 +46,8 @@ class TrainConfig:
     load_from_checkpoint: str = None
     k: int = 512
     block_size: int = 8
+    init_from_checkpoint: str = None
+    method: str = 'tree'
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -66,21 +70,41 @@ class LabDataModule(pl.LightningDataModule):
         self.bsize = config.batch_size
     
     def prepare_data(self):
-        self.dataset = LabDataset(
-            data_dir=self.data_dir,
-            block_size=self.block_size,
-            download=self.download,
-            tokenizer=self.tokenizer,
-            dataset=self.config.dataset,
-        )
+        if self.config.dataset in ['wikitext2', 'wikitext103']:
+            self.dataset = LabDataset(
+                data_dir=self.data_dir,
+                block_size=self.block_size,
+                download=self.download,
+                tokenizer=self.tokenizer,
+                dataset=self.config.dataset,
+            )
+        elif self.config.dataset in ['booksum']:
+            self.dataset = BookSumDataset(
+                tokenizer=self.tokenizer,
+            )
+        else:
+            raise Exception()
     
     def setup(self, stage: str):
-        if stage == "fit" or stage is None:
-            test_size = min(100, len(self.dataset) * (1 - self.train_size))
-            train_size = int(len(self.dataset) - test_size)
-            self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
-        if stage == "test" or stage is None:
-            self.test_data = self.val_data
+        if self.config.dataset in ['wikitext2', 'wikitext103']:
+            if stage == "fit" or stage is None:
+                test_size = min(100, len(self.dataset) * (1 - self.train_size))
+                train_size = int(len(self.dataset) - test_size)
+                self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
+            if stage == "test" or stage is None:
+                self.test_data = self.val_data
+        elif self.config.dataset in ['booksum']:
+            if stage == "fit" or stage is None:
+                def train_val_dataset(dataset, val_split=0.05):
+                    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
+                    train = Subset(dataset, train_idx)
+                    valid = Subset(dataset, val_idx)
+                    return train, valid
+                self.train_data, self.val_data = train_val_dataset(self.dataset)
+            if stage == "test" or stage is None:
+                self.test_data = self.val_data
+        else:
+            raise Exception()
 
     def train_dataloader(self):
         return DataLoader(self.train_data, num_workers=self.num_workers, batch_size=self.bsize)
@@ -100,6 +124,9 @@ def load_model(
     device = 'cuda:0',
     model_id = 'togethercomputer/LLaMA-2-7B-32K',
 ):
+    if train_config.using_fsdp:
+        device = 'cpu'
+    
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
     
@@ -116,7 +143,6 @@ def load_model(
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
-        load_in_4bit=True,
         device_map={"" : device},
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
@@ -128,6 +154,12 @@ def load_model(
             m.attention_method = method
             m.tree_k = train_config.k
             m.tree_block_size = train_config.block_size
+        if hasattr(m, 'gradient_checkpointing'):
+            m.gradient_checkpointing = True
+            if train_config.using_fsdp:
+                m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
+            else:
+                m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
     
     if method != 'none':
         peft_config = LoraConfig(
@@ -147,9 +179,20 @@ def load_model(
             ]
         )
         
-        model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
+        
+        if train_config.init_from_checkpoint is not None:
+            print('loading from', train_config.init_from_checkpoint)
+            state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')['state_dict']
+            keys = list(state_dict.keys())
+            for key in keys:
+                x = state_dict[key]
+                state_dict[key.strip('model.')] = x
+                del state_dict[key]
+            model.load_state_dict(state_dict)
+            print('lora checkpoint loaded from', train_config.init_from_checkpoint)
     
     return model
 
@@ -162,8 +205,9 @@ class LabModule(pl.LightningModule):
     def __init__(self, config: TrainConfig):
         super().__init__()
         
-        self.model = load_model(train_config=config)
-        self.teacher = load_model(train_config=config, method='none')
+        self.model = load_model(train_config=config, method=config.method)
+        if config.disable_kd:
+            self.teacher = load_model(train_config=config, method='none')
         
         self.validation_preds = []
         self.validation_targets = []
@@ -251,32 +295,43 @@ class LabModule(pl.LightningModule):
             print(name, p.requires_grad, p.shape, p.dtype)
             if p.requires_grad:
                 params.append(p)
+        if self.config.using_fsdp:
+            return FusedAdam(params, lr=self.config.lr)
         return torch.optim.AdamW(params, lr=self.config.lr)
 
 from lightning.pytorch.strategies import FSDPStrategy
+from lightning.pytorch.strategies import DeepSpeedStrategy
 
 def main(config: TrainConfig):
     os.makedirs('./saves/dev/wandb', exist_ok=True)
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
     
     if config.using_fsdp:
-        policy = {LlamaDecoderLayer}
-        devices = "auto"
-        strategy = FSDPStrategy(
-            auto_wrap_policy=policy,
-            activation_checkpointing_policy=policy,
-            cpu_offload=True,
-        )
-    else:
         devices = "1"
-        strategy = "auto"
-        
-        # policy = {LlamaDecoderLayer}
+        policy = {LlamaDecoderLayer}
         # strategy = FSDPStrategy(
         #     auto_wrap_policy=policy,
         #     activation_checkpointing_policy=policy,
-        #     # cpu_offload=True,
+        #     cpu_offload=True,
         # )
+        # strategy = 'deepspeed_stage_3'
+        deepspeed_config = {
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 3,
+                "offload_param": {"device": "cpu"},
+                "offload_optimizer": {"device": "cpu"},
+                "max_live_parameters": 2e7,
+                "contiguous_gradients": True,
+                "overlap_comm": True, 
+                "allgather_bucket_size": 1e6,
+                "reduce_bucket_size": 1e6,
+            },
+        }
+        strategy = DeepSpeedStrategy(config=deepspeed_config)
+    else:
+        devices = "1"
+        strategy = "auto"
     
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
@@ -326,6 +381,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser()
+    
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -336,9 +392,12 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', default='wikitext103', type=str)
     parser.add_argument('--seq_len', default=-1, type=int)
     parser.add_argument('--save_steps', default=-1, type=int)
+    parser.add_argument('--init_checkpoint', default=None, type=str)
     parser.add_argument('--checkpoint', default=None, type=str)
     parser.add_argument('--k', default=512, type=int)
     parser.add_argument('--block_size', default=8, type=int)
+    parser.add_argument('--method', default='tree', type=str)
+    
     args = parser.parse_args()
     
     train_config = TrainConfig(
@@ -348,6 +407,7 @@ if __name__ == "__main__":
         load_from_checkpoint=args.checkpoint,
         k=args.k,
         block_size=args.block_size,
+        method=args.method,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps

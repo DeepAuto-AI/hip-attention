@@ -1175,14 +1175,15 @@ def calc_score_return_prob(
         indices, ks,
         
         BLOCK_SIZE,
-    )
+    ) # type: Tensor
     
     with timer("calc_score_return_prob.softmax"):
         probs = scores.softmax(-1)
     
     N, TDST, K = scores.shape
     _, TSRC = attention_mask.shape
-    probs = probs * attention_mask[:, TSRC-TDST:, None]
+    # probs = probs * attention_mask[:, TSRC-TDST:, None]
+    probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
     
     return scores, probs
 
