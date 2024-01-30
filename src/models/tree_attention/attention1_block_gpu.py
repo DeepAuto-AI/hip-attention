@@ -596,14 +596,15 @@ def masking_iteration(
     GROUP_N = 1
     GROUP_BDST = 1
     BLOCK_HID = triton.next_power_of_2(HID)
-    if BLOCK_TMASK_K > 1024:
+    if BLOCK_TMASK_K >= 1024:
         BLOCK_HID = min(BLOCK_HID, 16)
-    elif BLOCK_TMASK_K > 512:
+    elif BLOCK_TMASK_K >= 512:
         BLOCK_HID = min(BLOCK_HID, 32)
-    elif BLOCK_TMASK_K > 256:
+    elif BLOCK_TMASK_K >= 256:
         BLOCK_HID = min(BLOCK_HID, 64)
-    elif BLOCK_TMASK_K > 128:
+    elif BLOCK_TMASK_K >= 128:
         BLOCK_HID = min(BLOCK_HID, 128)
+    # print(BLOCK_HID, BLOCK_TMASK_K)
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
@@ -655,7 +656,7 @@ def masking_iteration(
         
         num_warps=4,
         num_stages=2,
-        enable_warp_specialization=False,
+        # enable_warp_specialization=False,
     )
     
     # if DEBUG:
@@ -1175,7 +1176,7 @@ def calc_score_return_prob(
         indices, ks,
         
         BLOCK_SIZE,
-    )
+    ) # type: Tensor
     
     with timer("calc_score_return_prob.softmax"):
         probs = scores.softmax(-1)
@@ -1183,6 +1184,7 @@ def calc_score_return_prob(
     N, TDST, K = scores.shape
     _, TSRC = attention_mask.shape
     probs = probs * attention_mask[:, TSRC-TDST:, None]
+    # probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
     
     return scores, probs
 
@@ -1282,7 +1284,7 @@ def attention_matrix(
                             ] = value[
                                 idx_n,
                                 idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                                idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
+                                idx_k * BLOCK_SIZE: idx_k * BLOCK_SIZE + min(BLOCK_SIZE, out.shape[-1] - idx_tsrc)
                             ]
         return out
     

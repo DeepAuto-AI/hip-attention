@@ -1419,9 +1419,9 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     context = torch.bmm(probs, v)
     return context, probs
 
-def flash_attention(q: Tensor, k: Tensor, v: Tensor):
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, attention_mask: Tensor = None):
     context = F.scaled_dot_product_attention(
-        q, k, v, is_causal=True, scale=1.0,
+        q, k, v, is_causal=attention_mask is None, scale=1.0, attn_mask=attention_mask,
     )
     return context, None
 
@@ -1496,5 +1496,8 @@ def main_latency_benchmark():
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
 
 if __name__ == '__main__':
-    main_debug()
-    # main_latency_benchmark()
+    import sys
+    if sys.argv[-1] == 'debug':
+        main_debug()
+    else:
+        main_latency_benchmark()
