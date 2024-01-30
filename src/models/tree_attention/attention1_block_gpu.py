@@ -1284,7 +1284,7 @@ def attention_matrix(
                             ] = value[
                                 idx_n,
                                 idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                                idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
+                                idx_k * BLOCK_SIZE: idx_k * BLOCK_SIZE + min(BLOCK_SIZE, out.shape[-1] - idx_tsrc)
                             ]
         return out
     

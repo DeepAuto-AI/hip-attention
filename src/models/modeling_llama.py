@@ -741,20 +741,31 @@ class LlamaCustomAttention(LlamaAttention):
             _, _, TSRC, _ = k.shape
             assert k.shape == v.shape
             TARGET_DENSE_QUERIES = 2048
-            DENSE_QUERIES = TARGET_DENSE_QUERIES - TSRC + TDST
-            assert TDST == TSRC
+            current_query_index = TSRC - TDST
+            DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
+            # assert TDST == TSRC
             
-            q = q.view(N*H, TDST, HID).contiguous()
-            k = k.view(N*H, TSRC, HID).contiguous()
-            v = v.view(N*H, TSRC, HID).contiguous()
+            q = q.view(N*H, TDST, HID) #.contiguous()
+            k = k.view(N*H, TSRC, HID) #.contiguous()
+            v = v.view(N*H, TSRC, HID) #.contiguous()
             
             attn_outputs = []
             
+            if DENSE_QUERIES == 0:
+                print("converted to TREE")
+            
             if DENSE_QUERIES > 0:
+                if min(DENSE_QUERIES, TDST) != min(TSRC, DENSE_QUERIES):
+                    flash_attention_mask = torch.ones((N*H, min(DENSE_QUERIES, TDST), min(TSRC, DENSE_QUERIES)), device=q.device, dtype=q.dtype)
+                    flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index)
+                    flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
+                else:
+                    flash_attention_mask = None
                 attn_output_flash, _ = flash_attention(
-                    q[:, :DENSE_QUERIES, :],
-                    k[:, :DENSE_QUERIES, :],
-                    v[:, :DENSE_QUERIES, :]
+                    q[:, :min(DENSE_QUERIES, TDST), :],
+                    k[:, :min(TSRC, DENSE_QUERIES), :],
+                    v[:, :min(TSRC, DENSE_QUERIES), :],
+                    flash_attention_mask,
                 )
                 attn_outputs.append(attn_output_flash)
             else:
@@ -769,6 +780,20 @@ class LlamaCustomAttention(LlamaAttention):
                     block_size=self.tree_block_size,
                 )
                 
+                # flash_attention_mask = torch.ones((N*H, TDST-DENSE_QUERIES, TSRC), device=q.device, dtype=q.dtype)
+                # flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index+DENSE_QUERIES)
+                # flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
+                # # print(q.shape, flash_attention_mask, TSRC-current_query_index)
+                # attn_output_tree_truth, _ = flash_attention(
+                #     # q[:, min(DENSE_QUERIES, TDST):, :],
+                #     q,
+                #     k,
+                #     v,
+                #     flash_attention_mask,
+                # )
+                # attn_output_tree = attn_output_tree_truth
+                
+                # """
                 # NOTE: accumulation should be done with fp32
                 context_avg = v.cumsum(-2, dtype=torch.float32).to(v.dtype) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
                 context_avg = context_avg[:, TSRC-TDST+DENSE_QUERIES:, :]
@@ -779,6 +804,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # NOTE: 0.25 is just heuristic
                 # NOTE: 256 is top-k value
                 attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
+                # """
                 
                 attn_outputs.append(attn_output_tree)
                 

@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import transformers
 from datasets import load_dataset
@@ -55,12 +56,23 @@ def job_ppl(args, model, tokenizer, device):
 
 def job_stream(args, model, tokenizer, device):
     while True:
+        model.eval()
+        
         input_text = input('>>>')
         
-        inputs = tokenizer([input_text], return_tensors='pt').to(device)
+        inputs = tokenizer([tokenizer.bos_token + input_text], return_tensors='pt').to(device)
+        
+        print('input_ids', len(input_text), inputs.input_ids.shape)
 
         streamer = TextStreamer(tokenizer, skip_prompt=True)
-        model.generate(**inputs, streamer=streamer, max_new_tokens=256)
+        t = time.time()
+        with torch.no_grad():
+            try:
+                model.generate(**inputs, streamer=streamer, max_new_tokens=256)
+            except KeyboardInterrupt:
+                print('Interrupted')
+        elapsed = time.time() - t
+        print(f'elapsed {elapsed:.4f} sec')
 
 def main():
     seed()
