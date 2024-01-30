@@ -794,31 +794,31 @@ class LlamaCustomAttention(LlamaAttention):
                 # )
                 # attn_output_tree = attn_output_tree_truth
                 
-                """
+                # """
                 # NOTE: accumulation should be done with fp32
                 
                 last_cumsum = None
                 if past_key_value is not None:
                     if not hasattr(past_key_value, "cumsum"):
-                        print('cache init')
-                        past_key_value.cumsum = [None, ] * len(past_key_value.key_cache)
+                        # print('cache init')
+                        past_key_value.cumsum = [None, ] * 100
                     last_cumsum = past_key_value.cumsum[self.layer_idx]
                 
                 if last_cumsum is None:
-                    print('cache miss')
+                    # print('cache miss')
                     last_cumsum = v.cumsum(-2, dtype=torch.float32)
                     last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:, :]
                 else:
-                    print('cache hit')
-                    curr_v = v[:, -q_tree.shape[1]:, :]
+                    # print('cache hit')
+                    curr_v = v[:, -q_tree.shape[-2]:, :]
                     curr_v = curr_v.cumsum(-2, dtype=torch.float32)
                     last_cumsum = curr_v + last_cumsum[:, -1:, :]
 
                 context_avg = last_cumsum / torch.arange(
-                    current_query_index+1+DENSE_QUERIES, 
-                    current_query_index+1+DENSE_QUERIES+q_tree.shape[1],
+                    current_query_index+DENSE_QUERIES+1, 
+                    current_query_index+DENSE_QUERIES+1+q_tree.shape[1],
                     device=v.device
-                )
+                )[None, :, None]
                 context_avg = context_avg.to(v.dtype)
                 
                 # N, H, TDST
@@ -828,7 +828,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # NOTE: 0.25 is just heuristic
                 # NOTE: 256 is top-k value
                 attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
-                """
+                # """
                 
                 attn_outputs.append(attn_output_tree)
                 
