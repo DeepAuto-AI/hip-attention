@@ -794,7 +794,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # )
                 # attn_output_tree = attn_output_tree_truth
                 
-                # """
+                """
                 # NOTE: accumulation should be done with fp32
                 
                 last_cumsum = None
@@ -828,7 +828,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # NOTE: 0.25 is just heuristic
                 # NOTE: 256 is top-k value
                 attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
-                # """
+                """
                 
                 attn_outputs.append(attn_output_tree)
                 
