@@ -793,7 +793,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # )
                 # attn_output_tree = attn_output_tree_truth
                 
-                # """
+                """
                 # NOTE: accumulation should be done with fp32
                 context_avg = v.cumsum(-2, dtype=torch.float32).to(v.dtype) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
                 context_avg = context_avg[:, TSRC-TDST+DENSE_QUERIES:, :]
@@ -804,7 +804,7 @@ class LlamaCustomAttention(LlamaAttention):
                 # NOTE: 0.25 is just heuristic
                 # NOTE: 256 is top-k value
                 attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg.to(attn_output_tree.dtype) * scale_avg
-                # """
+                """
                 
                 attn_outputs.append(attn_output_tree)
                 

@@ -58,7 +58,12 @@ def job_stream(args, model, tokenizer, device):
     while True:
         model.eval()
         
-        input_text = input('>>>')
+        input_text = input('>>>').strip()
+        
+        if os.path.exists(input_text):
+            print('loaded', input_text)
+            with open(input_text, 'r') as f:
+                input_text = f.read()
         
         inputs = tokenizer([tokenizer.bos_token + input_text], return_tensors='pt').to(device)
         
@@ -68,7 +73,15 @@ def job_stream(args, model, tokenizer, device):
         t = time.time()
         with torch.no_grad():
             try:
-                model.generate(**inputs, streamer=streamer, max_new_tokens=256)
+                model.generate(
+                    **inputs, 
+                    streamer=streamer, 
+                    do_sample=True,
+                    max_new_tokens=256,
+                    temperature=0.7,
+                    top_p=0.3,
+                    top_k=10,
+                )
             except KeyboardInterrupt:
                 print('Interrupted')
         elapsed = time.time() - t
