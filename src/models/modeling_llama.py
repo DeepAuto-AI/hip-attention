@@ -773,7 +773,7 @@ class LlamaCustomAttention(LlamaAttention):
             
             if q.shape[1] > DENSE_QUERIES:
                 attn_output_tree, _ = tree_attention(
-                    q[:, DENSE_QUERIES:, :].contiguous(),
+                    q[:, min(DENSE_QUERIES, TDST):, :],
                     k,
                     v,
                     mask_k=self.tree_k,
@@ -785,8 +785,8 @@ class LlamaCustomAttention(LlamaAttention):
                 # flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
                 # # print(q.shape, flash_attention_mask, TSRC-current_query_index)
                 # attn_output_tree_truth, _ = flash_attention(
-                #     # q[:, min(DENSE_QUERIES, TDST):, :],
-                #     q,
+                #     q[:, min(DENSE_QUERIES, TDST):, :],
+                #     # q,
                 #     k,
                 #     v,
                 #     flash_attention_mask,
