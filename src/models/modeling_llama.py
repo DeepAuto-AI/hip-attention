@@ -772,8 +772,9 @@ class LlamaCustomAttention(LlamaAttention):
                 DENSE_QUERIES = 0
             
             if q.shape[1] > DENSE_QUERIES:
+                q_tree = q[:, min(DENSE_QUERIES, TDST):, :]
                 attn_output_tree, _ = tree_attention(
-                    q[:, min(DENSE_QUERIES, TDST):, :],
+                    q_tree,
                     k,
                     v,
                     mask_k=self.tree_k,
@@ -795,8 +796,31 @@ class LlamaCustomAttention(LlamaAttention):
                 
                 # """
                 # NOTE: accumulation should be done with fp32
-                context_avg = v.cumsum(-2, dtype=torch.float32).to(v.dtype) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
-                context_avg = context_avg[:, TSRC-TDST+DENSE_QUERIES:, :]
+                
+                last_cumsum = None
+                if past_key_value is not None:
+                    if not hasattr(past_key_value, "cumsum"):
+                        print('cache init')
+                        past_key_value.cumsum = [None, ] * len(past_key_value.key_cache)
+                    last_cumsum = past_key_value.cumsum[self.layer_idx]
+                
+                if last_cumsum is None:
+                    print('cache miss')
+                    last_cumsum = v.cumsum(-2, dtype=torch.float32)
+                    last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:, :]
+                else:
+                    print('cache hit')
+                    curr_v = v[:, -q_tree.shape[1]:, :]
+                    curr_v = curr_v.cumsum(-2, dtype=torch.float32)
+                    last_cumsum = curr_v + last_cumsum[:, -1:, :]
+
+                context_avg = last_cumsum / torch.arange(
+                    current_query_index+1+DENSE_QUERIES, 
+                    current_query_index+1+DENSE_QUERIES+q_tree.shape[1],
+                    device=v.device
+                )
+                context_avg = context_avg.to(v.dtype)
+                
                 # N, H, TDST
                 scale_avg = torch.sigmoid(
                     self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:, :]).transpose(-1, -2).reshape(N*H, TDST-DENSE_QUERIES, 1)
