@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 import torch
 import transformers
 from datasets import load_dataset
@@ -10,7 +11,7 @@ from transformers import TextStreamer
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from src.utils import seed
+from src.utils import seed, get_bench
 
 def job_ppl(args, model, tokenizer, device):
     os.makedirs('./cache', exist_ok=True)
@@ -54,9 +55,16 @@ def job_ppl(args, model, tokenizer, device):
 
     print('PPL:', ppl)
 
+class BatchedStreamer(TextStreamer):
+    def put(self, value):
+        return super().put(value[:1])
+
 def job_stream(args, model, tokenizer, device):
     while True:
         model.eval()
+        get_bench().reset_trace()
+        get_bench().reset_measures()
+        get_bench().disabled = False
         
         input_text = input('>>>').strip()
         
@@ -65,11 +73,11 @@ def job_stream(args, model, tokenizer, device):
             with open(input_text, 'r') as f:
                 input_text = f.read()
         
-        inputs = tokenizer([tokenizer.bos_token + input_text], return_tensors='pt').to(device)
+        inputs = tokenizer([tokenizer.bos_token + input_text, ] * args.batch_size, return_tensors='pt').to(device)
         
         print('input_ids', len(input_text), inputs.input_ids.shape)
 
-        streamer = TextStreamer(tokenizer, skip_prompt=True)
+        streamer = BatchedStreamer(tokenizer, skip_prompt=True)
         t = time.time()
         with torch.no_grad():
             try:
@@ -83,8 +91,10 @@ def job_stream(args, model, tokenizer, device):
                     top_k=10,
                 )
             except KeyboardInterrupt:
+                traceback.print_exc()
                 print('Interrupted')
         elapsed = time.time() - t
+        print(get_bench().format_tracetree())
         print(f'elapsed {elapsed:.4f} sec')
 
 def main():
@@ -98,6 +108,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--count', type=int, default=100)
     parser.add_argument('--block_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     args = parser.parse_args()
     
@@ -132,7 +143,7 @@ def main():
             m.tree_k = args.k
             m.tree_block_size = args.block_size
     
-    if args.method != 'none':
+    if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=True,
@@ -154,16 +165,16 @@ def main():
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
         
-        if args.checkpoint is not None:
-            state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
-            keys = list(state_dict.keys())
-            for key in keys:
-                x = state_dict[key]
-                state_dict[key.strip('model.')] = x
-                del state_dict[key]
-            model.load_state_dict(state_dict)
-            print('lora checkpoint loaded from', args.checkpoint)
+        state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
+        keys = list(state_dict.keys())
+        for key in keys:
+            x = state_dict[key]
+            state_dict[key.strip('model.')] = x
+            del state_dict[key]
+        model.load_state_dict(state_dict)
+        print('lora checkpoint loaded from', args.checkpoint)
     
+    model = model.to(infer_dtype)
     model = model.eval()
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
