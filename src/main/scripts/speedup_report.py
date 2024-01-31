@@ -3,6 +3,7 @@ import math
 import sys, subprocess, os, itertools, tqdm
 import seaborn as sns
 sns.set_style('whitegrid')
+import pypareto
 import matplotlib.pyplot as plt
 
 os.environ['PYTHONPATH'] = './'
@@ -57,18 +58,18 @@ def samples():
             'method': 'none'
         }
     
-    os.makedirs('./cache/speedup_report', exist_ok=True)
-    path = './cache/speedup_report/result.json'
+    os.makedirs('./saves/speedup_report', exist_ok=True)
+    path = './saves/speedup_report/result.json'
     with open(path, 'w') as f:
         json.dump(results, f, indent=2)
     print('saved', path)
 
 def plot():
-    path = './cache/speedup_report/result.json'
+    path = './saves/speedup_report/result.json'
     with open(path, 'r') as f:
         data = json.load(f)
     
-    plt.clf()
+    plt.figure(figsize=(5, 4))
     
     for query_size in query_sizes:
         xs = []
@@ -87,22 +88,78 @@ def plot():
     plt.ylabel('Speedup')
     plt.axhline(1.0, color='lightgray', linestyle='--', linewidth=1)
     
-    plt.savefig('./cache/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight')
-    plt.savefig('./cache/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight')
-    print('saved', './cache/speedup_report/plot_speedup_report.png')
+    plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight')
+    plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight')
+    print('saved', './saves/speedup_report/plot_speedup_report.png')
 
-def plot_ppl():
-    path = './cache/speedup_report/result.json'
+def by_value(a, b):
+    if isinstance(a, (tuple, list)):
+        return pypareto.Domination.EQUAL
+
+    if a > b:
+        return pypareto.Domination.GREATER
+    elif a < b:
+        return pypareto.Domination.LESS
+    else:
+        return pypareto.Domination.EQUAL
+
+def plot_ppl(query_size=1):
+    path = './saves/speedup_report/result.json'
     with open(path, 'r') as f:
         data_latency = json.load(f)
     
-    path = './cache/ppl_report/report.json'
+    path = './saves/ppl_report/report.json'
     with open(path, 'r') as f:
         data_ppl = json.load(f)
+    
+    xs = []
+    ys = []
+    entries = []
+    for entry_ppl in data_ppl.values():
+        ys.append(entry_ppl['ppl'])
+        k = entry_ppl["k"]
+        block_size = entry_ppl["block_size"]
+        latency_tree = data_latency[f'tree_q{query_size}_b{block_size}_k{k}']['latency']
+        latency_base = data_latency[f'none_q{query_size}']['latency']
+        entries.append({
+            'k': k,
+            'block_size': block_size,
+        })
+        xs.append(latency_base / latency_tree)
+    
+    pts = list(zip(xs, ys, map(lambda x: (x,), range(len(data_ppl)))))
+    chain = pypareto.Comparison(by_value, pypareto.MaxMinList(pypareto.MaxMin.MAX, pypareto.MaxMin.MIN, pypareto.MaxMin.MIN)).as_chain()
+    pts = chain.split_by_pareto(pts)[0]
+    xs_front = [pt[0] for pt in pts]
+    ys_front = [pt[1] for pt in pts]
+    idxs_front = [pt[2][0] for pt in pts]
+    
+    plt.figure(figsize=(5, 4))
+    
+    plt.title(f'Perplexity / Speedup (#Query: {query_size})')
+    plt.ylabel('PPL. (w/o train)')
+    plt.xlabel('Speedup')
+    sns.scatterplot(x=xs, y=ys)
+    sns.lineplot(x=xs_front, y=ys_front)
+    for idx in range(len(idxs_front)):
+        plt.annotate(
+            f'k:{entries[idxs_front[idx]]["k"]}, b:{entries[idxs_front[idx]]["block_size"]}', 
+            (xs_front[idx], ys_front[idx] + 0.2),
+            horizontalalignment='center',
+            verticalalignment='bottom',
+            fontsize=9,
+        )
+    
+    plt.axhline(5.59, color='lightgray', linestyle='--', linewidth=1)
+    
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight')
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight')
+    print('saved', f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png')
 
 def main():
-    samples()
+    # samples()
     plot()
+    for q in query_sizes: plot_ppl(q)
 
 if __name__ == '__main__':
     main()

@@ -104,10 +104,16 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
     EXAM_ERROR = False
     PROMPT_ALWAYS_FLASH = False
     
-    token_a = tokenizer.convert_tokens_to_ids("A")
-    token_b = tokenizer.convert_tokens_to_ids("B")
-    token_c = tokenizer.convert_tokens_to_ids("C")
-    token_d = tokenizer.convert_tokens_to_ids("D")
+    def gather_token_ids(candidates):
+        ids = []
+        for cand in candidates:
+            ids.append(tokenizer(cand).input_ids[-1])
+        return ids
+    
+    tokens_a = gather_token_ids(['A', ':A', ': A', ':  A', 'a', ':a', ': a', ':  a'])
+    tokens_b = gather_token_ids(['B', ':B', ': B', ':  B', 'b', ':b', ': b', ':  b'])
+    tokens_c = gather_token_ids(['C', ':C', ': C', ':  C', 'c', ':c', ': c', ':  c'])
+    tokens_d = gather_token_ids(['D', ':D', ': D', ':  D', 'd', ':d', ': d', ':  d'])
     
     inputs = tokenizer([text], return_tensors='pt')
     # print(inputs.input_ids.shape)
@@ -131,10 +137,10 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
                 if hasattr(m, 'attention_method'):
                     m.attention_method = previous_method
     
-    prob_a = output[0, -1, token_a].item()
-    prob_b = output[0, -1, token_b].item()
-    prob_c = output[0, -1, token_c].item()
-    prob_d = output[0, -1, token_d].item()
+    prob_a = max([output[0, -1, token].item() for token in tokens_a])
+    prob_b = max([output[0, -1, token].item() for token in tokens_b])
+    prob_c = max([output[0, -1, token].item() for token in tokens_c])
+    prob_d = max([output[0, -1, token].item() for token in tokens_d])
     probs = [('A', prob_a), ('B', prob_b), ('C', prob_c), ('D', prob_d)]
     probs = list(sorted(probs, key=lambda x: x[1], reverse=True))
     return probs, seq_len
@@ -171,7 +177,7 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             n_correct += 1
         seq_len_sum += seq_len
         results.append({
-            'text': text,
+            # 'text': text,
             'truth': truth,
             'estimations': estimations,
             'estimation': estimation,
@@ -186,6 +192,9 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
     
     os.makedirs('./saves/llama_eval/mmlu/', exist_ok=True)
     json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.method}.json'
+    if args.method == 'tree':
+        json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.method}_b{args.block_size}_k{args.k}.json'
+        
     with open(json_path, 'w') as f:
         json.dump({
             'accuracy': accuracy,
