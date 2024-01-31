@@ -29,6 +29,7 @@ from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecode
 from src.utils import seed
 from src.dataset.labdataset import LabDataset
 from src.dataset.booksum import BookSumDataset
+from src.dataset.alpaca import AlpacaDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')
@@ -42,6 +43,7 @@ class TrainConfig:
     accumulation_steps: int = 2
     lora_r: int = 32
     save_steps: int = 100
+    dense_queries: int = None
     seq_len: int = 4096
     max_steps: int = -1
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
@@ -81,6 +83,10 @@ class LabDataModule(pl.LightningDataModule):
                 tokenizer=self.tokenizer,
                 dataset=self.config.dataset,
             )
+        elif self.config.dataset in ['alpaca']:
+            self.dataset = AlpacaDataset(
+                tokenizer=self.tokenizer,
+            )
         elif self.config.dataset in ['booksum']:
             self.dataset = BookSumDataset(
                 tokenizer=self.tokenizer,
@@ -96,7 +102,7 @@ class LabDataModule(pl.LightningDataModule):
                 self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
             if stage == "test" or stage is None:
                 self.test_data = self.val_data
-        elif self.config.dataset in ['booksum']:
+        elif self.config.dataset in ['booksum', 'alpaca']:
             if stage == "fit" or stage is None:
                 def train_val_dataset(dataset, val_split=0.05):
                     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
@@ -159,6 +165,9 @@ def load_model(
             m.attention_method = method
             m.tree_k = train_config.k
             m.tree_block_size = train_config.block_size
+            if train_config.dense_queries is None:
+                train_config.dense_queries = train_config.k
+            m.tree_dense_queries = train_config.dense_queries
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
@@ -172,7 +181,7 @@ def load_model(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
             r=train_config.lora_r,
-            lora_alpha=32, 
+            lora_alpha=train_config.lora_r//2, 
             lora_dropout=0.05,
             target_modules=[
                 'q_proj', 'k_proj', 'v_proj', 'o_proj', 
@@ -265,8 +274,10 @@ class LabModule(pl.LightningModule):
         
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:
-            # self.log("training/loss_kd_hidden", loss_kd_hidden.item())
-            self.log("training/loss_kd_logits", loss_kd_logits.item())
+            if loss_kd_hidden > 0:
+                self.log("training/loss_kd_hidden", loss_kd_hidden.item())
+            if loss_kd_logits > 0:
+                self.log("training/loss_kd_logits", loss_kd_logits.item())
         self.log("training/loss", loss.item())
         
         return loss
@@ -307,7 +318,7 @@ class LabModule(pl.LightningModule):
     def configure_optimizers(self):
         params = []
         for name, p in self.model.named_parameters():
-            print(name, p.requires_grad, p.shape, p.dtype)
+            # print(name, p.requires_grad, p.shape, p.dtype)
             if p.requires_grad:
                 params.append(p)
         if self.config.using_fsdp:

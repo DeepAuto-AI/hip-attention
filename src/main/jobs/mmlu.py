@@ -1,9 +1,11 @@
 import json
 import os
+import time
 import torch
 import transformers
 from datasets import load_dataset
 import tqdm
+import numpy as np
 
 from src.utils import seed, get_bench
 
@@ -16,10 +18,9 @@ B. {choice_b}
 C. {choice_c}
 D. {choice_d}
 
-Answer: """
+Answer:"""
 
 MMLU_SUBJECTS = [
-    'high_school_european_history', 
     'business_ethics', 
     'clinical_knowledge', 
     'medical_genetics', 
@@ -49,6 +50,7 @@ MMLU_SUBJECTS = [
     'college_chemistry', 
     'logical_fallacies', 
     'high_school_geography', 
+    'high_school_european_history', # 9600
     'elementary_mathematics', 
     'human_aging', 
     'college_mathematics', 
@@ -99,6 +101,9 @@ def format_mmlu(question, number, subject_name):
     )
 
 def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
+    EXAM_ERROR = False
+    PROMPT_ALWAYS_FLASH = False
+    
     token_a = tokenizer.convert_tokens_to_ids("A")
     token_b = tokenizer.convert_tokens_to_ids("B")
     token_c = tokenizer.convert_tokens_to_ids("C")
@@ -108,7 +113,24 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
     # print(inputs.input_ids.shape)
     seq_len = inputs.input_ids.shape[-1]
     with torch.no_grad():
+        if PROMPT_ALWAYS_FLASH:
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    m.tree_dense_queries = seq_len - 1
+        
         output = model(**inputs).logits
+        
+        if EXAM_ERROR:
+            previous_method = None
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    previous_method = m.attention_method
+                    m.attention_method = 'none'
+            
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    m.attention_method = previous_method
+    
     prob_a = output[0, -1, token_a].item()
     prob_b = output[0, -1, token_b].item()
     prob_c = output[0, -1, token_c].item()
@@ -131,11 +153,13 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
         choice = question['target']
         text += choice
         few_shots.append(text)
+    few_shots = few_shots[:20]
     
+    t_start = time.time()
     results = []
     n_correct = 0
     seq_len_sum = 0
-    for question in tqdm.tqdm(dataset['test'], dynamic_ncols=True, leave=False, desc=subject_name):
+    for question in tqdm.tqdm(dataset['test'], dynamic_ncols=True, leave=True, desc=subject_name):
         text = format_mmlu(question, len(few_shots) + 1, subject_name)
         truth = question['target']
         text = "\n\n".join(few_shots + [text,])
@@ -154,26 +178,38 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             'correct': correct,
             'seq_len': seq_len,
         })
+    elapsed = time.time() - t_start
     
     accuracy = (n_correct / len(results)) * 100
-    print(f'{subject_name} = {accuracy:.4f} %')
-    print(f'avg_seq_len: {seq_len_sum / len(results)}')
+    avg_seq_len = seq_len_sum / len(results)
+    print(f'{subject_name} = Accuracy: {accuracy:.4f} %, avg_seq_len: {avg_seq_len:.2f}. elapsed: {elapsed:.1f} s')
     
     os.makedirs('./saves/llama_eval/mmlu/', exist_ok=True)
     json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.method}.json'
     with open(json_path, 'w') as f:
         json.dump({
             'accuracy': accuracy,
+            'avg_seq_len': avg_seq_len,
+            'elapsed': elapsed,
             'k': args.k,
             'block_size': args.block_size,
             'dense_queries': args.dense_queries,
             'results': results,
         }, f, indent=2)
         print('dumped', json_path)
+    
+    return accuracy
 
 def job_mmlu(args, model, tokenizer, device):
     seed()
     
-    evaluate_mmlu(args, model, tokenizer, 'anatomy')
-    # for subjects in MMLU_SUBJECTS:
-    #     evaluate_mmlu(args, model, tokenizer, subjects)
+    # evaluate_mmlu(args, model, tokenizer, 'anatomy')
+    # return
+    
+    accuracies = []
+    for subjects in MMLU_SUBJECTS:
+        acc = evaluate_mmlu(args, model, tokenizer, subjects)
+        accuracies.append(acc)
+    
+    accuracy = np.array(accuracies).mean()
+    print(f'MMLU AVG. ACC: {accuracy}')

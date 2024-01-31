@@ -21,6 +21,7 @@ from src.main.jobs.mmlu import job_mmlu
 def load_model(args):
     device = 'cuda:0'
     model_id = 'togethercomputer/LLaMA-2-7B-32K'
+    # model_id = 'togethercomputer/Llama-2-7B-32K-Instruct'
     
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
@@ -55,7 +56,7 @@ def load_model(args):
             task_type=TaskType.CAUSAL_LM,
             inference_mode=True,
             r=args.lora_r,
-            lora_alpha=32, 
+            lora_alpha=args.lora_r//2, 
             lora_dropout=0.0,
             target_modules=[
                 'q_proj', 'k_proj', 'v_proj', 'o_proj', 

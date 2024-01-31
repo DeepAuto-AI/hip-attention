@@ -755,15 +755,23 @@ class LlamaCustomAttention(LlamaAttention):
                     N, H, TDST, HID = q.shape
                     _, _, TSRC, _ = k.shape
                     assert k.shape == v.shape
-                    TARGET_DENSE_QUERIES = self.tree_dense_queries
-                    current_query_index = TSRC - TDST
-                    DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
-                    # assert TDST == TSRC
                     
                     q = q.reshape(N*H, TDST, HID) #.contiguous()
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
                     
+                TARGET_DENSE_QUERIES = self.tree_dense_queries
+                current_query_index = TSRC - TDST
+                DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
+                LAST_DENSE_QUERIES = None
+                
+                if LAST_DENSE_QUERIES == 0:
+                    LAST_DENSE_QUERIES = None
+                if isinstance(LAST_DENSE_QUERIES, int):
+                    assert LAST_DENSE_QUERIES < 0
+                else:
+                    assert LAST_DENSE_QUERIES == None
+                
                 attn_outputs = []
                 
                 # if DENSE_QUERIES == 0:
@@ -791,12 +799,12 @@ class LlamaCustomAttention(LlamaAttention):
                     # print(q.dtype)
                     # input()
                     
-                    q_tree = q[:, min(DENSE_QUERIES, TDST):, :]
+                    q_tree = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
                     with timer("layer.tree"):
                         attn_output_tree, _ = tree_attention(
                             q_tree,
-                            k,
-                            v,
+                            k[:, :LAST_DENSE_QUERIES, :],
+                            v[:, :LAST_DENSE_QUERIES, :],
                             mask_k=self.tree_k,
                             block_size=self.tree_block_size,
                         )
@@ -828,10 +836,10 @@ class LlamaCustomAttention(LlamaAttention):
                             if last_cumsum is None:
                                 # print('cache miss')
                                 last_cumsum = v.cumsum(-2, dtype=torch.float32)
-                                last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:, :]
+                                last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:LAST_DENSE_QUERIES, :]
                             else:
                                 # print('cache hit')
-                                curr_v = v[:, -q_tree.shape[-2]:, :]
+                                curr_v = v[:, -q_tree.shape[-2]:LAST_DENSE_QUERIES, :]
                                 curr_v = curr_v.cumsum(-2, dtype=torch.float32)
                                 last_cumsum = curr_v + last_cumsum[:, -1:, :]
 
@@ -849,8 +857,8 @@ class LlamaCustomAttention(LlamaAttention):
                             # N, H, TDST
                             # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
                             scale_avg = torch.sigmoid(
-                                self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:, :]).transpose(-1, -2).reshape(N*H, TDST-DENSE_QUERIES, 1)
-                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC, device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
+                                self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1, -2).reshape(N*H, -1, 1)
+                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_tree.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
                             # NOTE: 0.25 is just heuristic
                             # NOTE: 256 is top-k value
                             attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
@@ -859,6 +867,16 @@ class LlamaCustomAttention(LlamaAttention):
                         # assert attn_output_tree.dtype == torch.bfloat16
                     attn_outputs.append(attn_output_tree)
                     
+                if LAST_DENSE_QUERIES is not None:
+                    flash_attention_mask = torch.zeros((N*H, abs(LAST_DENSE_QUERIES), TSRC), dtype=q.dtype, device=q.device)
+                    attn_output_last_flash, _ = flash_attention(
+                        q[:, LAST_DENSE_QUERIES:, :],
+                        k[:, :, :],
+                        v[:, :, :],
+                        flash_attention_mask,
+                    )
+                    attn_outputs.append(attn_output_last_flash)
+                
                 if len(attn_outputs) > 1:
                     attn_output = torch.cat(attn_outputs, dim=-2)
                 else:
