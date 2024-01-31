@@ -15,6 +15,7 @@ w_start = 512 (32 block)
 4096: 256 block
 """
 
+import json
 import random
 import gc
 from matplotlib import pyplot as plt
@@ -1987,6 +1988,16 @@ def main_latency_benchmark():
     
     samples = np.array(samples)
     print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
+    
+    os.makedirs('./cache/attention1_block_gpu/', exist_ok=True)
+    with open('./cache/attention1_block_gpu/result.json', 'w') as f:
+        json.dump({
+            'method': METHOD,
+            'mean': np.mean(samples),
+            'std': np.std(samples),
+            'query_length': q.shape[-2],
+            'keyvalue_length': k.shape[-2],
+        }, f, indent=2)
 
 def main_debug():
     global DEBUG

@@ -5,7 +5,7 @@ import torch
 import transformers
 from datasets import load_dataset
 from tqdm import tqdm
-import argparse
+import argparse, json
 from transformers import TextStreamer
 
 from peft import LoraConfig, TaskType
@@ -52,5 +52,9 @@ def job_ppl(args, model, tokenizer, device):
                 break
 
     ppl = torch.exp(torch.stack(nlls).mean()).item()
+    
+    os.makedirs('./cache/llama_eval/', exist_ok=True)
+    with open('./cache/llama_eval/ppl.json', 'w') as f:
+        json.dump({'ppl': ppl}, f)
 
     print('PPL:', ppl)

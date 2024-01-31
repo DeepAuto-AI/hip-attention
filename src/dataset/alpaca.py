@@ -53,7 +53,7 @@ class AlpacaDataset(Dataset):
             })
     
     def __len__(self):
-        return 1000
+        return len(self.entries) // self.n_questions
     
     def __getitem__(self, index):
         res = HEADER

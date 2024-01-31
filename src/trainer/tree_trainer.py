@@ -30,6 +30,7 @@ from src.utils import seed
 from src.dataset.labdataset import LabDataset
 from src.dataset.booksum import BookSumDataset
 from src.dataset.alpaca import AlpacaDataset
+from src.dataset.openwebtext import OpenWebTextDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')
@@ -91,6 +92,11 @@ class LabDataModule(pl.LightningDataModule):
             self.dataset = BookSumDataset(
                 tokenizer=self.tokenizer,
             )
+        elif self.config.dataset in ['openwebtext']:
+            self.dataset = OpenWebTextDataset(
+                tokenizer=self.tokenizer,
+                stride=self.block_size,
+            )
         else:
             raise Exception()
     
@@ -102,7 +108,7 @@ class LabDataModule(pl.LightningDataModule):
                 self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
             if stage == "test" or stage is None:
                 self.test_data = self.val_data
-        elif self.config.dataset in ['booksum', 'alpaca']:
+        elif self.config.dataset in ['booksum', 'alpaca', 'openwebtext']:
             if stage == "fit" or stage is None:
                 def train_val_dataset(dataset, val_split=0.05):
                     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
@@ -270,7 +276,7 @@ class LabModule(pl.LightningModule):
                 reduction='batchmean',
             )
         
-        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.5
+        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 2.5
         
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:
