@@ -249,19 +249,19 @@ class LabModule(pl.LightningModule):
         )
         
         loss_kd_hidden = 0
-        # for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
-        #     loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
-        # loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
-        
         loss_kd_logits = 0
         if not self.config.disable_kd:
+            for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
+                loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
+            loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
+            
             loss_kd_logits = torch.nn.functional.kl_div(
                 output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
                 output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
                 reduction='batchmean',
             )
         
-        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.1
+        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 0.5
         
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:

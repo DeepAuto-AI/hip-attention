@@ -665,6 +665,9 @@ class LlamaCustomAttention(LlamaAttention):
         self.attention_method = 'none'
         self.tree_k = 512
         self.tree_block_size = 8
+        self.tree_using_context_avg = True
+        self.tree_dense_queries = 2048
+        
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
             nn.ReLU(),
@@ -752,7 +755,7 @@ class LlamaCustomAttention(LlamaAttention):
                     N, H, TDST, HID = q.shape
                     _, _, TSRC, _ = k.shape
                     assert k.shape == v.shape
-                    TARGET_DENSE_QUERIES = 2048
+                    TARGET_DENSE_QUERIES = self.tree_dense_queries
                     current_query_index = TSRC - TDST
                     DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
                     # assert TDST == TSRC
@@ -816,44 +819,45 @@ class LlamaCustomAttention(LlamaAttention):
                     # NOTE: accumulation should be done with fp32
                     
                     with timer("layer.tree.after"):
-                        last_cumsum = None
-                        if past_key_value is not None:
-                            assert hasattr(past_key_value, "cumsum")
-                            last_cumsum = past_key_value.get_cumsum(self.layer_idx)
-                        
-                        if last_cumsum is None:
-                            # print('cache miss')
-                            last_cumsum = v.cumsum(-2, dtype=torch.float32)
-                            last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:, :]
-                        else:
-                            # print('cache hit')
-                            curr_v = v[:, -q_tree.shape[-2]:, :]
-                            curr_v = curr_v.cumsum(-2, dtype=torch.float32)
-                            last_cumsum = curr_v + last_cumsum[:, -1:, :]
+                        if self.tree_using_context_avg:
+                            last_cumsum = None
+                            if past_key_value is not None:
+                                assert hasattr(past_key_value, "cumsum")
+                                last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+                            
+                            if last_cumsum is None:
+                                # print('cache miss')
+                                last_cumsum = v.cumsum(-2, dtype=torch.float32)
+                                last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:, :]
+                            else:
+                                # print('cache hit')
+                                curr_v = v[:, -q_tree.shape[-2]:, :]
+                                curr_v = curr_v.cumsum(-2, dtype=torch.float32)
+                                last_cumsum = curr_v + last_cumsum[:, -1:, :]
 
-                        if past_key_value is not None:  
-                            past_key_value.update_cumsum(last_cumsum, self.layer_idx)
-                        
-                        context_avg = last_cumsum / torch.arange(
-                            current_query_index+DENSE_QUERIES+1, 
-                            current_query_index+DENSE_QUERIES+1+q_tree.shape[1],
-                            device=v.device
-                        )[None, :, None]
-                        context_avg = context_avg.to(v.dtype)
-                        # assert context_avg.dtype == torch.bfloat16
-                        
-                        # N, H, TDST
-                        # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
-                        scale_avg = torch.sigmoid(
-                            self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:, :]).transpose(-1, -2).reshape(N*H, TDST-DENSE_QUERIES, 1)
-                        ) * 0.25 * torch.clamp(1.0 - (256 / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC, device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
-                        # NOTE: 0.25 is just heuristic
-                        # NOTE: 256 is top-k value
-                        attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
-                        # """
+                            if past_key_value is not None:  
+                                past_key_value.update_cumsum(last_cumsum, self.layer_idx)
+                            
+                            context_avg = last_cumsum / torch.arange(
+                                current_query_index+DENSE_QUERIES+1, 
+                                current_query_index+DENSE_QUERIES+1+q_tree.shape[1],
+                                device=v.device
+                            )[None, :, None]
+                            context_avg = context_avg.to(v.dtype)
+                            # assert context_avg.dtype == torch.bfloat16
+                            
+                            # N, H, TDST
+                            # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
+                            scale_avg = torch.sigmoid(
+                                self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:, :]).transpose(-1, -2).reshape(N*H, TDST-DENSE_QUERIES, 1)
+                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC, device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
+                            # NOTE: 0.25 is just heuristic
+                            # NOTE: 256 is top-k value
+                            attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
+                            # """
                         # assert scale_avg.dtype == torch.bfloat16
                         # assert attn_output_tree.dtype == torch.bfloat16
-                        attn_outputs.append(attn_output_tree)
+                    attn_outputs.append(attn_output_tree)
                     
                 if len(attn_outputs) > 1:
                     attn_output = torch.cat(attn_outputs, dim=-2)

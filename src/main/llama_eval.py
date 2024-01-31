@@ -13,107 +13,12 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from src.utils import seed, get_bench
 
-def job_ppl(args, model, tokenizer, device):
-    os.makedirs('./cache', exist_ok=True)
-    cache_path = './cache/llama_eval.pth'
-    if not os.path.exists(cache_path):
-        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt").input_ids
-        torch.save(encodings, cache_path)
-    else:
-        encodings = torch.load(cache_path)
+from src.main.jobs.bench_single_layer import job_bench_single_layer
+from src.main.jobs.ppl import job_ppl
+from src.main.jobs.stream import job_stream
+from src.main.jobs.mmlu import job_mmlu
 
-    max_length = model.config.max_position_embeddings
-    max_length = stride = args.stride if args.stride > 0 else model.config.max_position_embeddings
-    seq_len = encodings.size(1)
-
-    nlls = []
-    prev_end_loc = 0
-    with tqdm(range(0, seq_len, stride)[:args.count]) as pbar:
-        for begin_loc in pbar:
-            end_loc = min(begin_loc + max_length, seq_len)
-            trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
-            input_ids = encodings[:, begin_loc:end_loc].to(device)
-            target_ids = input_ids.clone()
-            target_ids[:, :-trg_len] = -100
-
-            with torch.no_grad():
-                outputs = model(input_ids, labels=target_ids)
-                neg_log_likelihood = outputs.loss
-
-            nlls.append(neg_log_likelihood.cpu())
-
-            prev_end_loc = end_loc
-            
-            ppl = torch.exp(torch.stack(nlls).mean()).item()
-            pbar.set_description(f"ppl: {ppl:.3f}")
-            
-            if end_loc == seq_len:
-                break
-
-    ppl = torch.exp(torch.stack(nlls).mean()).item()
-
-    print('PPL:', ppl)
-
-class BatchedStreamer(TextStreamer):
-    def put(self, value):
-        return super().put(value[:1])
-
-def job_stream(args, model, tokenizer, device):
-    while True:
-        model.eval()
-        get_bench().reset_trace()
-        get_bench().reset_measures()
-        get_bench().disabled = False
-        
-        input_text = input('>>>').strip()
-        
-        if os.path.exists(input_text):
-            print('loaded', input_text)
-            with open(input_text, 'r') as f:
-                input_text = f.read()
-        
-        inputs = tokenizer([tokenizer.bos_token + input_text, ] * args.batch_size, return_tensors='pt').to(device)
-        
-        print('input_ids', len(input_text), inputs.input_ids.shape)
-
-        streamer = BatchedStreamer(tokenizer, skip_prompt=True)
-        t = time.time()
-        with torch.no_grad():
-            try:
-                model.generate(
-                    **inputs, 
-                    streamer=streamer, 
-                    do_sample=True,
-                    max_new_tokens=256,
-                    temperature=0.7,
-                    top_p=0.3,
-                    top_k=10,
-                )
-            except KeyboardInterrupt:
-                traceback.print_exc()
-                print('Interrupted')
-        elapsed = time.time() - t
-        print(get_bench().format_tracetree())
-        print(f'elapsed {elapsed:.4f} sec')
-
-def main():
-    seed()
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--job', type=str, default='ppl')
-    parser.add_argument('--method', type=str, default='none')
-    parser.add_argument('--stride', type=int, default=-1)
-    parser.add_argument('--lora_r', type=int, default=32)
-    parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--count', type=int, default=100)
-    parser.add_argument('--block_size', type=int, default=8)
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--k', type=int, default=512)
-    args = parser.parse_args()
-    
-    assert args.job in ['ppl', 'stream']
-    
+def load_model(args):
     device = 'cuda:0'
     model_id = 'togethercomputer/LLaMA-2-7B-32K'
     
@@ -142,6 +47,8 @@ def main():
             m.attention_method = args.method
             m.tree_k = args.k
             m.tree_block_size = args.block_size
+            m.tree_using_context_avg = True
+            m.tree_dense_queries = args.dense_queries
     
     if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(
@@ -172,17 +79,47 @@ def main():
             state_dict[key.strip('model.')] = x
             del state_dict[key]
         model.load_state_dict(state_dict)
+        model = model.to(infer_dtype)
         print('lora checkpoint loaded from', args.checkpoint)
+    elif args.method != 'none':
+        for m in model.modules():
+            if hasattr(m, 'attention_method'):
+                m.tree_using_context_avg = False
     
-    model = model.to(infer_dtype)
     model = model.eval()
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    
+    return model, tokenizer, device
+
+def main():
+    seed()
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--job', type=str, default='ppl')
+    parser.add_argument('--method', type=str, default='none')
+    parser.add_argument('--stride', type=int, default=-1)
+    parser.add_argument('--lora_r', type=int, default=32)
+    parser.add_argument('--checkpoint', type=str, default=None)
+    parser.add_argument('--count', type=int, default=100)
+    parser.add_argument('--block_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--k', type=int, default=512)
+    parser.add_argument('--dense_queries', type=int, default=2048)
+    args = parser.parse_args()
+    
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer']
+    
+    model, tokenizer, device = load_model(args)
 
     if args.job == 'ppl':
         job_ppl(args, model, tokenizer, device)
     elif args.job == 'stream':
         job_stream(args, model, tokenizer, device)
+    elif args.job == 'mmlu':
+        job_mmlu(args, model, tokenizer, device)
+    elif args.job == 'bench_single_layer':
+        job_bench_single_layer(args, model, tokenizer, device)
     else:
         raise Exception()
 
