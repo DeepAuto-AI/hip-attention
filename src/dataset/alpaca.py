@@ -6,15 +6,12 @@ from torch.utils.data import Dataset
 import tqdm
 import transformers
 
-HEADER = """
-Below are instructions that describes tasks. Write responses that appropriately completes each request.
+HEADER = """Below are instructions that describes tasks. Write responses that appropriately completes each request.
 """
 
 QUESTION_FORMAT = """
-===
 # Question {question_id}
 {content}
----
 """
 
 ALPACA_FORMAT = """### Instruction
@@ -27,10 +24,8 @@ ALPACA_FORMAT_INPUT = """### Instruction
 {input}"""
 
 ANSWER_FORMAT = """
-===
 # Answer {question_id}
 {content}
----
 """
 
 class AlpacaDataset(Dataset):
