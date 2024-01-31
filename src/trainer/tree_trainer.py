@@ -238,9 +238,9 @@ class LabModule(pl.LightningModule):
         
         if not self.config.disable_kd:
             with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
-                output_teacher = self.teacher(inputs, output_hidden_states=False)
+                output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
         # with torch.autocast('cuda', torch.bfloat16):
-        output = self(inputs, target, output_hidden_states=False)
+        output = self(inputs, target, output_hidden_states=not self.config.disable_kd)
         logits = output.logits
         
         loss_model = torch.nn.functional.cross_entropy(
