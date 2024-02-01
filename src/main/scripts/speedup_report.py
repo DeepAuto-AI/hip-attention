@@ -86,7 +86,7 @@ def plot():
     plt.title('Speedup / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('Speedup')
-    plt.axhline(1.0, color='lightgray', linestyle='--', linewidth=1)
+    plt.axhline(1.0, color='#555', linestyle='--', linewidth=1)
     
     plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight')
     plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight')
@@ -150,7 +150,8 @@ def plot_ppl(query_size=1):
             fontsize=9,
         )
     
-    plt.axhline(5.59, color='lightgray', linestyle='--', linewidth=1)
+    plt.axhline(5.59, color='#555', linestyle='--', linewidth=1)
+    plt.axvline(1.0, color='#555', linestyle='--', linewidth=1)
     
     plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight')
     plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight')

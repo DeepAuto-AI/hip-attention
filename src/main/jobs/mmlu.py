@@ -125,6 +125,7 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
                     m.tree_dense_queries = seq_len - 1
         
         output = model(**inputs).logits
+        output = torch.softmax(output, dim=-1)
         
         if EXAM_ERROR:
             previous_method = None

@@ -81,7 +81,7 @@ def plots():
             fontsize=9,
         )
     
-    plt.axhline(baseline_ppl, color='lightgray', linestyle='--', linewidth=1)
+    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=1)
     sns.scatterplot(x=xs, y=ys)
     
     plt.title('Perplexity / Num. Blocks')
@@ -93,7 +93,7 @@ def plots():
     print('saved', './saves/ppl_report/plot_ppl_report.png')
 
 def main():
-    # samples()
+    samples()
     plots()
 
 if __name__ == '__main__':
