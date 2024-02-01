@@ -9,6 +9,7 @@ def main():
     header = ['config',] + MMLU_SUBJECTS + ['avg',]
     lines = [','.join(header)]
     seq_len = {}
+    data_len = {}
     for config in configs:
         row = [config]
         acc_len = acc_sum = 0
@@ -20,10 +21,13 @@ def main():
                 acc_sum += data['accuracy']
                 acc_len += 1
                 seq_len[subject] = data['avg_seq_len']
+                data_len[subject] = len(data['results'])
         row.append(str(acc_sum / acc_len))
         lines.append(','.join(row))
     seq_len = ['seq_len'] + [str(seq_len[subject]) for subject in MMLU_SUBJECTS] + [str(sum(seq_len.values()) / len(seq_len))]
+    data_len = ['data_len'] + [str(data_len[subject]) for subject in MMLU_SUBJECTS] + [str(sum(data_len.values()) / len(data_len))]
     lines.append(','.join(seq_len))
+    lines.append(','.join(data_len))
     csv = '\n'.join(lines)
 
     with open('./saves/mmlu_report/report.csv', 'w') as f:

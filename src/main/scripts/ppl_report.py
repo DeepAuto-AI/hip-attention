@@ -17,6 +17,7 @@ def samples():
         list(itertools.product(block_sizes, ks)), 
         desc='exam', dynamic_ncols=True
     ):
+        print(f'ppl measure b{block_size}, k{k}')
         subprocess.call([
             'python', 'src/main/llama_eval.py', 
             '--method', 'tree',
@@ -26,6 +27,7 @@ def samples():
         ])
         with open('./cache/llama_eval/ppl.json', 'r') as f:
             ppl = json.load(f)['ppl']
+        print(f'ppl measured {ppl} (b{block_size}, k{k})')
         results[f'b{block_size}_k{k}'] = {
             'block_size': block_size,
             'k': k,
@@ -93,7 +95,7 @@ def plots():
     print('saved', './saves/ppl_report/plot_ppl_report.png')
 
 def main():
-    samples()
+    # samples()
     plots()
 
 if __name__ == '__main__':
