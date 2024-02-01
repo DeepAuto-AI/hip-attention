@@ -276,7 +276,7 @@ class LabModule(pl.LightningModule):
                 reduction='batchmean',
             )
         
-        loss = loss_model + (loss_kd_hidden + loss_kd_logits) * 2.5
+        loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
         
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:
