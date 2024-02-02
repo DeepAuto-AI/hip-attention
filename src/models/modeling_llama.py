@@ -684,16 +684,17 @@ class LlamaCustomAttention(LlamaAttention):
         )
         
         from performer_pytorch import FastAttention
-        dim_heads = config.hidden_size // config.num_attention_heads
-        default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float32)
-        self.tree_performer = FastAttention(
-            dim_heads=dim_heads,
-            nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
-            # nb_features=dim_heads,
-            causal=True,
-        )
-        torch.set_default_dtype(default_dtype)
+        if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
+            dim_heads = config.hidden_size // config.num_attention_heads
+            default_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(torch.float32)
+            self.tree_performer = FastAttention(
+                dim_heads=dim_heads,
+                nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
+                # nb_features=dim_heads,
+                causal=True,
+            )
+            torch.set_default_dtype(default_dtype)
     
     # Adapted from LlamaAttention.forward
     def forward(
