@@ -45,7 +45,7 @@ def job_stream(args, model, tokenizer, device):
                     do_sample=True,
                     max_new_tokens=256,
                     temperature=0.7,
-                    top_p=0.3,
+                    top_p=0.8,
                     top_k=10,
                 )
             except KeyboardInterrupt:
