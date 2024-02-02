@@ -10,11 +10,21 @@ from transformers import TextStreamer
 
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
+from transformers.models.auto import AutoTokenizer
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from src.utils import seed, get_bench
 
 class BatchedStreamer(TextStreamer):
+    def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):
+        super().__init__(tokenizer, skip_prompt, **decode_kwargs)
+        self.idx = 0
+    
     def put(self, value):
+        if self.idx == 1:
+            print('prompt trace', get_bench().format_tracetree())
+            get_bench().reset_trace()
+            get_bench().reset_measures()
+        self.idx += 1
         return super().put(value[:1])
 
 def job_stream(args, model, tokenizer, device):

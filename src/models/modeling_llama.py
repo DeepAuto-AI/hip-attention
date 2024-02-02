@@ -1112,38 +1112,43 @@ class LlamaDecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+        
+        with timer("decoder_layer"):
+            residual = hidden_states
 
-        residual = hidden_states
+            with timer("decoder_layer.input_layernorm"):
+                hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.input_layernorm(hidden_states)
+            with timer("decoder_layer.self_attn"):
+                # Self Attention
+                hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    **kwargs,
+                )
+                hidden_states = residual + hidden_states
 
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            **kwargs,
-        )
-        hidden_states = residual + hidden_states
+            # Fully Connected
+            with timer("decoder_layer.post_attention_layernorm"):
+                residual = hidden_states
+                hidden_states = self.post_attention_layernorm(hidden_states)
+            with timer("decoder_layer.mlp"):
+                hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
 
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+            outputs = (hidden_states,)
 
-        outputs = (hidden_states,)
+            if output_attentions:
+                outputs += (self_attn_weights,)
 
-        if output_attentions:
-            outputs += (self_attn_weights,)
+            if use_cache:
+                outputs += (present_key_value,)
 
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
+            return outputs
 
 
 LLAMA_START_DOCSTRING = r"""
