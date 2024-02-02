@@ -44,7 +44,7 @@ def job_stream(args, model, tokenizer, device):
                     streamer=streamer, 
                     do_sample=True,
                     max_new_tokens=256,
-                    temperature=2.0,
+                    temperature=0.5,
                     top_p=0.8,
                     top_k=1000,
                 )
