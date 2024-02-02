@@ -27,6 +27,7 @@ def load_model(args):
     config._attn_implementation = config.attn_implementation = 'sdpa'
     
     infer_dtype = torch.bfloat16
+    # infer_dtype = torch.float32
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
@@ -79,7 +80,8 @@ def load_model(args):
             x = state_dict[key]
             state_dict[key.strip('model.')] = x
             del state_dict[key]
-        model.load_state_dict(state_dict)
+        result = model.load_state_dict(state_dict, strict=False)
+        print('load result', result)
         model = model.to(infer_dtype)
         print('lora checkpoint loaded from', args.checkpoint)
     elif args.method != 'none':

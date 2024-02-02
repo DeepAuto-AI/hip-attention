@@ -667,6 +667,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_block_size = 8
         self.tree_using_context_avg = True
         self.tree_dense_queries = 2048
+        self.tree_last_dense_queries = None
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -808,7 +809,7 @@ class LlamaCustomAttention(LlamaAttention):
                 TARGET_DENSE_QUERIES = self.tree_dense_queries
                 current_query_index = TSRC - TDST
                 DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
-                LAST_DENSE_QUERIES = None
+                LAST_DENSE_QUERIES = self.tree_last_dense_queries
                 
                 if LAST_DENSE_QUERIES == 0:
                     LAST_DENSE_QUERIES = None

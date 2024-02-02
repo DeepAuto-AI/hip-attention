@@ -101,8 +101,8 @@ def format_mmlu(question, number, subject_name):
     )
 
 def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
-    EXAM_ERROR = False
-    PROMPT_ALWAYS_FLASH = False
+    PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
+    LAST_DENSE = os.environ.get('LAST_DENSE', '0') == '1'
     
     def gather_token_ids(candidates):
         ids = []
@@ -123,20 +123,13 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
             for m in model.modules():
                 if hasattr(m, 'attention_method'):
                     m.tree_dense_queries = seq_len - 1
+        if LAST_DENSE:
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    m.tree_last_dense_queries = -1
         
         output = model(**inputs).logits
         output = torch.softmax(output, dim=-1)
-        
-        if EXAM_ERROR:
-            previous_method = None
-            for m in model.modules():
-                if hasattr(m, 'attention_method'):
-                    previous_method = m.attention_method
-                    m.attention_method = 'none'
-            
-            for m in model.modules():
-                if hasattr(m, 'attention_method'):
-                    m.attention_method = previous_method
     
     prob_a = max([output[0, -1, token].item() for token in tokens_a])
     prob_b = max([output[0, -1, token].item() for token in tokens_b])
