@@ -83,7 +83,7 @@ def plot():
             ys.append(speedup)
         sns.scatterplot(x=xs, y=ys, label=f'Query Length: {query_size}')
     
-    plt.title('Speedup / Num. Blocks')
+    plt.title('Single Query Speedup / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('Speedup')
     plt.axhline(1.0, color='#555', linestyle='--', linewidth=1)

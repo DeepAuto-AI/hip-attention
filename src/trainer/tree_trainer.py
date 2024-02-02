@@ -275,8 +275,11 @@ class LabModule(pl.LightningModule):
                 output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
                 reduction='batchmean',
             )
-        
-        loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
+
+        if not self.config.disable_kd:
+            loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
+        else:
+            loss = loss_model
         
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:
@@ -367,12 +370,23 @@ def main(config: TrainConfig):
         devices = "1"
         strategy = "auto"
     
+    if config.method == 'tree':
+        filename = f'llama32k-{config.dataset}-{config.seq_len}-block{config.block_size}-k{config.k}-{{epoch:02d}}-{{step}}'
+    elif config.method == 'none':
+        filename = f'llama32k-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+    elif config.method == 'reformer':
+        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}-{{epoch:02d}}-{{step}}'
+    elif config.method == 'performer':
+        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+    else:
+        raise Exception()
+    
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
         monitor="step",
         mode="max",
         dirpath=config.model_checkpoint_dir,
-        filename=f"llama32k-{config.dataset}-{config.seq_len}-block{config.block_size}-k{config.k}-{{epoch:02d}}-{{step}}",
+        filename=filename,
         every_n_train_steps=config.save_steps,
         enable_version_counter=False,
     )

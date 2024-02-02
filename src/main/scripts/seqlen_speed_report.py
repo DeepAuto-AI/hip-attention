@@ -1,6 +1,12 @@
 import subprocess
 import os, json
 
+from matplotlib import pyplot as plt
+import seaborn as sns
+sns.set_style('whitegrid')
+
+dups = range(1, 17)
+
 def samples():
     block_size = 4
     query_size = 1
@@ -24,7 +30,6 @@ def samples():
     
     batch_size = batch_sizes[1]
     results = {}
-    dups = range(1, 17)
     for dup in dups:
         if dup in batch_sizes:
             batch_size = batch_sizes[dup]
@@ -77,9 +82,49 @@ def plot():
     path = './saves/seqlen_speed_report/result.json'
     with open(path, 'r') as f:
         data = json.load(f)
+    
+    xs = []
+    ys_base = []
+    ys_tree = []
+    ys_speedup = []
+    
+    for dup in dups:
+        entry = data[f's{dup * 1024}']
+        xs.append(entry['seq_len'])
+        ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
+        ys_tree.append(entry['latency_tree'] / entry['batch_size'] * 1000)
+        ys_speedup.append(entry['speedup'])
+    
+    plt.figure(figsize=(5,4))
+    
+    sns.lineplot(x=xs, y=ys_base, label='baseline')
+    sns.lineplot(x=xs, y=ys_tree, label='timber')
+    plt.legend()
+    plt.title('Single Query Latency')
+    plt.xlabel('Seq. Length')
+    plt.ylabel('Latency (us)')
+    plt.xlim(2048, 16*1024)
+    
+    fig_path = './saves/seqlen_speed_report/plot_seqlen_latency'
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    print(f'saved {fig_path}.png')
+    
+    plt.figure(figsize=(5,4))
+    
+    plt.title('Single Query Speedup (k=512, b=4)')
+    sns.lineplot(x=xs, y=ys_speedup, label='speedup')
+    plt.xlabel('Seq. Length')
+    plt.ylabel('Speedup')
+    plt.xlim(2048, 16*1024)
+    
+    fig_path = './saves/seqlen_speed_report/plot_seqlen_speedup'
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    print(f'saved {fig_path}.png')
 
 def main():
-    samples()
+    # samples()
     plot()
 
 if __name__ == '__main__':

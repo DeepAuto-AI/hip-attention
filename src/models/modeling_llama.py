@@ -673,6 +673,26 @@ class LlamaCustomAttention(LlamaAttention):
             nn.ReLU(),
             nn.Linear(config.hidden_size // 4,  config.num_attention_heads)
         )
+        
+        from reformer_pytorch import LSHAttention
+        self.tree_reformer = LSHAttention(
+            dropout=config.attention_dropout,
+            bucket_size=self.tree_k,
+            n_hashes=8,
+            causal=True,
+        )
+        
+        from performer_pytorch import FastAttention
+        dim_heads = config.hidden_size // config.num_attention_heads
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.tree_performer = FastAttention(
+            dim_heads=dim_heads,
+            nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
+            # nb_features=dim_heads,
+            causal=True,
+        )
+        torch.set_default_dtype(default_dtype)
     
     # Adapted from LlamaAttention.forward
     def forward(
@@ -746,6 +766,31 @@ class LlamaCustomAttention(LlamaAttention):
                         'out': attn_output,
                     }, './cache/llama/qkvout.pth')
                     input('stored. press enter to continue >>> ')
+            elif self.attention_method == 'reformer':
+                q = query_states # / (query_states.shape[-1] ** 0.5)
+                k = key_states
+                v = value_states
+                
+                N, H, TDST, HID = q.shape
+                _, _, TSRC, _ = k.shape
+                assert k.shape == v.shape
+                
+                q = q.reshape(N*H, TDST, HID) #.contiguous()
+                # k = k.reshape(N*H, TSRC, HID) #.contiguous()
+                v = v.reshape(N*H, TSRC, HID) #.contiguous()
+                
+                self.tree_reformer.bucket_size = self.tree_k
+                
+                attn_output, attn, buckets = self.tree_reformer(q, v) # (10, 1024, 128)
+                attn_output = attn_output.view(N, H, TDST, HID)#.to(hidden_states.dtype)
+            elif self.attention_method == 'performer':
+                q = query_states # / (query_states.shape[-1] ** 0.5)
+                k = key_states
+                v = value_states
+                
+                with torch.autocast('cuda', enabled=False):
+                    attn_output = self.tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
+                attn_output = attn_output.to(q.dtype)                
             elif self.attention_method == 'tree':
                 with timer("layer.tree.prepare"):
                     q = query_states / (query_states.shape[-1] ** 0.5)
