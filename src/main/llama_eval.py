@@ -20,8 +20,12 @@ from src.main.jobs.mmlu import job_mmlu
 
 def load_model(args):
     device = 'cuda:0'
-    model_id = 'togethercomputer/LLaMA-2-7B-32K'
-    # model_id = 'togethercomputer/Llama-2-7B-32K-Instruct'
+    MODELS = {
+        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'llama13b': 'meta-llama/Llama-2-13b-hf',
+    }
+    assert args.model in MODELS, MODELS.keys()
+    model_id = MODELS[args.model]
     
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
@@ -99,17 +103,20 @@ def main():
     seed()
     
     parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='llama32k')
     parser.add_argument('--job', type=str, default='ppl')
     parser.add_argument('--method', type=str, default='none')
     parser.add_argument('--stride', type=int, default=-1)
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--count', type=int, default=100)
-    parser.add_argument('--block_size', type=int, default=8)
+    parser.add_argument('--block_size', type=int, default=4)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--dense_queries', type=int, default=2048)
     args = parser.parse_args()
+    
+    print(args)
     
     assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer']
     

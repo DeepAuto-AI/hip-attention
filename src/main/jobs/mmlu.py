@@ -115,7 +115,17 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
     tokens_c = gather_token_ids(['C', ':C', ': C', ':  C', 'c', ':c', ': c', ':  c'])
     tokens_d = gather_token_ids(['D', ':D', ': D', ':  D', 'd', ':d', ': d', ':  d'])
     
-    inputs = tokenizer([text], return_tensors='pt')
+    tokenizer.truncation_side = 'left'
+    
+    assert hasattr(model, 'config')
+    assert hasattr(model.config, 'max_position_embeddings')
+    
+    inputs = tokenizer(
+        [text], 
+        return_tensors='pt', 
+        max_length=model.config.max_position_embeddings, 
+        truncation=True
+    )
     # print(inputs.input_ids.shape)
     seq_len = inputs.input_ids.shape[-1]
     with torch.no_grad():
