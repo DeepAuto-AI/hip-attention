@@ -55,6 +55,7 @@ class TrainConfig:
     block_size_k: int = 8
     init_from_checkpoint: str = None
     method: str = 'tree'
+    model: str = 'llama32k'
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -138,10 +139,16 @@ def load_model(
     train_config: TrainConfig = None, 
     method = 'tree', 
     device = 'cuda:0',
-    model_id = 'togethercomputer/LLaMA-2-7B-32K',
 ):
     if train_config.using_fsdp:
         device = 'cpu'
+    
+    MODELS = {
+        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'llama13b': 'meta-llama/Llama-2-13b-hf',
+    }
+    assert train_config.model in MODELS, MODELS.keys()
+    model_id = MODELS[train_config.model]
     
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
@@ -432,6 +439,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     
+    parser.add_argument('--model', default='llama32k', type=str)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -460,6 +468,7 @@ if __name__ == "__main__":
         block_size_q=args.block_size_q,
         block_size_k=args.block_size_k,
         method=args.method,
+        model=args.model,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
