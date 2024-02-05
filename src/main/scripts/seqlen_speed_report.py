@@ -8,7 +8,8 @@ sns.set_style('whitegrid')
 dups = range(1, 17)
 
 def samples():
-    block_size = 4
+    block_size = 16
+    block_size_k = 2
     query_size = 1
     k = 512
     batch_sizes = {
@@ -37,7 +38,8 @@ def samples():
         subprocess.call([
             'python', 'src/models/tree_attention/attention1_block_gpu.py',
             '--method', 'tree',
-            '--block_size', str(block_size),
+            '--block_size_q', str(block_size),
+            '--block_size_k', str(block_size_k),
             '--k', str(k),
             '--query_size', str(query_size),
             '--dups', str(dup),
@@ -124,7 +126,7 @@ def plot():
     print(f'saved {fig_path}.png')
 
 def main():
-    # samples()
+    samples()
     plot()
 
 if __name__ == '__main__':

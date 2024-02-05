@@ -9,6 +9,7 @@ import pypareto
 os.environ['PYTHONPATH'] = './'
 
 block_sizes = [1, 2, 4, 8, 16]
+block_size_k = 4
 ks = [128, 256, 512, 1024]
 
 def samples():
@@ -22,7 +23,8 @@ def samples():
             'python', 'src/main/llama_eval.py', 
             '--method', 'tree',
             '--stride', '4096',
-            '--block_size', str(block_size),
+            '--block_size_q', str(block_size),
+            '--block_size_k', str(block_size_k),
             '--k', str(k),
         ])
         with open('./cache/llama_eval/ppl.json', 'r') as f:
@@ -30,6 +32,7 @@ def samples():
         print(f'ppl measured {ppl} (b{block_size}, k{k})')
         results[f'b{block_size}_k{k}'] = {
             'block_size': block_size,
+            'block_size_k': block_size_k,
             'k': k,
             'num_blocks': math.ceil(k / block_size),
             'ppl': ppl,
@@ -96,7 +99,7 @@ def plots():
     print('saved', './saves/ppl_report/plot_ppl_report.png')
 
 def main():
-    # samples()
+    samples()
     plots()
 
 if __name__ == '__main__':
