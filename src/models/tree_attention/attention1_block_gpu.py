@@ -746,6 +746,7 @@ def _calc_score_compute(
     N, TDST, TSRC, HID, BK, K, BDST, BSRC,
     
     # kernel constatnts
+    BLOCK_BK: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_Q_PADDED: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -754,7 +755,7 @@ def _calc_score_compute(
 ):
     idx_n = tl.program_id(0)
     idx_bdst = tl.program_id(1)
-    idx_bk = tl.program_id(2)
+    pid_bk = tl.program_id(2)
     
     ks = tl.load(
         KS +\
@@ -762,8 +763,10 @@ def _calc_score_compute(
             idx_bdst * stride_ks_bdst,
     )
     
-    if idx_bk >= ks:
-        return
+    # if idx_bk >= ks:
+    #     return
+    idx_bk = tl.arange(0, BLOCK_BK) + pid_bk * BLOCK_BK
+    mask_bk = idx_bk < ks
     
     idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED)
     mask_block_q = idx_block_q < BLOCK_SIZE_Q
@@ -775,10 +778,13 @@ def _calc_score_compute(
             idx_n * stride_indices_n +\
             idx_bdst * stride_indices_bdst +\
             idx_bk * stride_indices_bk,
+        mask = mask_bk,
     )
-    idx_tsrc = idx_tsrc + idx_block_k
-    mask_tsrc = (idx_tsrc < TSRC) & mask_block_k
+    # [BLOCK_BK: bk, BLOCK_SIZE_K_PADDED]
+    idx_tsrc = idx_tsrc[:, None] + idx_block_k[None, :]
+    mask_tsrc = (idx_tsrc < TSRC) & mask_block_k[None, :] & mask_bk[:, None]
     
+    # [BLOCK_BK: bk, BLOCK_SIZE_K_PADDED]
     key_mask = tl.load(
         ATTEN_MASK +\
             idx_n * stride_atten_mask_n +\
@@ -799,8 +805,8 @@ def _calc_score_compute(
     ).to(tl.int1)
     mask_tdst = mask_tdst & query_mask
     
-    # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: tsrc]
-    scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED), dtype=tl.float32)
+    # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_BK * BLOCK_SIZE_K_PADDED: tsrc]
+    scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K_PADDED), dtype=tl.float32)
     for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
         idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
         mask_hid = idx_hid < HID
@@ -815,15 +821,17 @@ def _calc_score_compute(
             other = 0
         )
         
-        # [BLOCK_HID: hid, BLOCK_SIZE_K_PADDED: tsrc]
+        # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
         keys = tl.load(
             KEYS +\
                 idx_n * stride_keys_n +\
-                idx_tsrc[None, :] * stride_keys_tsrc +\
-                idx_hid[:, None] * stride_keys_hid,
-            mask = mask_tsrc[None, :] & mask_hid[:, None],
+                idx_tsrc[None, :, :] * stride_keys_tsrc +\
+                idx_hid[:, None, None] * stride_keys_hid,
+            mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
             other = 0
         )
+        
+        # TOOD: WIP
         
         scores_mini = tl.dot(queries, keys)
         scores += scores_mini.to(scores.dtype)
@@ -1099,27 +1107,28 @@ class CalcScoreAutoGradFn(Function):
         assert indices.ndim == 3
         assert ks.ndim == 2
         assert scores.ndim == 3
-        _calc_score_compute[grid](
-            queries, *queries.stride(),
-            keys, *keys.stride(),
-            attention_mask, *attention_mask.stride(),
+        with timer("_calc_score_compute"):
+            _calc_score_compute[grid](
+                queries, *queries.stride(),
+                keys, *keys.stride(),
+                attention_mask, *attention_mask.stride(),
+                
+                indices, *indices.stride(),
+                ks, *ks.stride(),
+                
+                scores, *scores.stride(),
+                
+                N, TDST, TSRC, HID, BK, K, BDST, BSRC,
+                
+                BLOCK_SIZE_Q,
+                BLOCK_SIZE_Q_PADDED,
+                BLOCK_SIZE_K,
+                BLOCK_SIZE_K_PADDED,
+                BLOCK_HID,
+                
+                num_warps=BLOCK_HID//16,
+            )
             
-            indices, *indices.stride(),
-            ks, *ks.stride(),
-            
-            scores, *scores.stride(),
-            
-            N, TDST, TSRC, HID, BK, K, BDST, BSRC,
-            
-            BLOCK_SIZE_Q,
-            BLOCK_SIZE_Q_PADDED,
-            BLOCK_SIZE_K,
-            BLOCK_SIZE_K_PADDED,
-            BLOCK_HID,
-            
-            num_warps=BLOCK_HID//16,
-        )
-        
         # print(scores[0, 300, :])
         return scores
 
