@@ -52,7 +52,8 @@ def load_model(args):
         if hasattr(m, 'attention_method'):
             m.attention_method = args.method
             m.tree_k = args.k
-            m.tree_block_size = args.block_size
+            m.tree_block_size_q = args.block_size_q
+            m.tree_block_size_k = args.block_size_k
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
     
@@ -110,7 +111,8 @@ def main():
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--count', type=int, default=100)
-    parser.add_argument('--block_size', type=int, default=4)
+    parser.add_argument('--block_size_q', type=int, default=4)
+    parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--dense_queries', type=int, default=2048)

@@ -664,7 +664,8 @@ class LlamaCustomAttention(LlamaAttention):
         
         self.attention_method = 'none'
         self.tree_k = 512
-        self.tree_block_size = 8
+        self.tree_block_size_q = 8
+        self.tree_block_size_k = 1
         self.tree_using_context_avg = True
         self.tree_dense_queries = 2048
         self.tree_last_dense_queries = None
@@ -853,7 +854,8 @@ class LlamaCustomAttention(LlamaAttention):
                             k[:, :LAST_DENSE_QUERIES, :],
                             v[:, :LAST_DENSE_QUERIES, :],
                             mask_k=self.tree_k,
-                            block_size=self.tree_block_size,
+                            block_size_q=self.tree_block_size_q,
+                            block_size_k=self.tree_block_size_k,
                         )
                         # assert attn_output_tree.dtype == torch.bfloat16
                     

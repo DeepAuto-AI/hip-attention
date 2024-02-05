@@ -57,4 +57,4 @@ def job_ppl(args, model, tokenizer, device):
     with open('./cache/llama_eval/ppl.json', 'w') as f:
         json.dump({'ppl': ppl}, f)
 
-    print('PPL:', ppl)
+    print(f'PPL: {ppl:.4f}')

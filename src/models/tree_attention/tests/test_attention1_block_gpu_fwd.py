@@ -9,7 +9,7 @@ def to_dense(
     indices: np.ndarray, 
     ks: np.ndarray, 
     value: np.ndarray,
-    N, T_DST, T_SRC, BLOCK_SIZE
+    N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
     out = torch.zeros((N, T_DST, T_SRC), device=indices.device, dtype=value.dtype)
@@ -20,12 +20,12 @@ def to_dense(
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
                     out[
                         idx_n, 
-                        idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                        idx_tsrc: idx_tsrc + BLOCK_SIZE
+                        idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
+                        idx_tsrc: idx_tsrc + BLOCK_SIZE_K
                     ] = value[
                         idx_n,
-                        idx_bdst * BLOCK_SIZE: (idx_bdst + 1) * BLOCK_SIZE, 
-                        idx_k * BLOCK_SIZE: (idx_k + 1) * BLOCK_SIZE
+                        idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
+                        idx_k * BLOCK_SIZE_K: (idx_k + 1) * BLOCK_SIZE_K
                     ]
     return out
 
@@ -52,19 +52,21 @@ def main():
     
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
-    BLOCKSIZE = 8
+    BLOCKSIZE_Q = 16
+    BLOCKSIZE_K = 1
     mask_k = 512
     scale_up = 2
     w_start = mask_k * scale_up
     n_patches = mask_k / scale_up
     
     indices, ks, probs, scores = attention_matrix(
-        q, k, 
+        q, k, torch.ones((N, TSRC), dtype=torch.bool, device=q.device),
         w_start,
         n_patches,
         mask_k,
         scale_up,
-        BLOCK_SIZE=BLOCKSIZE
+        BLOCK_SIZE_Q=BLOCKSIZE_Q,
+        BLOCK_SIZE_K=BLOCKSIZE_K,
     )
     
     print(q.shape, indices.shape, ks.shape, probs.shape, scores.shape)
@@ -72,12 +74,12 @@ def main():
     
     probs_dense = to_dense(
         indices.cpu(), ks.cpu(), probs.cpu(), 
-        N, TDST, TSRC, BLOCKSIZE
+        N, TDST, TSRC, BLOCKSIZE_Q, BLOCKSIZE_K,
     ).to(indices.device)
     
     scores_dense = to_dense(
         indices.cpu(), ks.cpu(), scores.cpu(),
-        N, TDST, TSRC, BLOCKSIZE,
+        N, TDST, TSRC, BLOCKSIZE_Q, BLOCKSIZE_K,
     ).to(indices.device)
     
     mask_dense = probs_dense <= 1e-7
@@ -107,7 +109,7 @@ def main():
     print('probs_error', probs_error)
     
     context_dense = sparse_attention(
-        v.contiguous(), indices, ks, probs, BLOCKSIZE
+        v.contiguous(), indices, ks, probs, BLOCKSIZE_Q, BLOCKSIZE_K,
     )
     context_truth = torch.bmm(probs_dense, v)
     
@@ -118,8 +120,8 @@ def main():
     context_error_loc = (context_error_map == context_error).nonzero()
     
     imsave(context_error_map, 'context_error_map', gamma=1.0, idx_batch=2)
-    print(torch.std_mean(context_dense), torch.std_mean(context_truth))
-    print(context_error, context_error_loc)
+    print('std_mean context_dense, context_truth', torch.std_mean(context_dense), torch.std_mean(context_truth))
+    print('cte', context_error, context_error_loc)
     
     # print(context_error_map[1, 2, :])
     # print(context_dense[1, 2, :])
@@ -127,18 +129,19 @@ def main():
     
     for i in range(3):
         context_tree, (indices_tree, ks_tree, probs_tree) = tree_attention(
-            q, k, v, w_start, n_patches, mask_k, scale_up, BLOCKSIZE
+            q, k, v, torch.ones((N, TSRC), dtype=torch.bool, device=q.device),
+            w_start, n_patches, mask_k, scale_up, BLOCKSIZE_Q, BLOCKSIZE_K,
         )
     context_tree_error_map = (context_tree - context_dense).abs()
     context_tree_error = context_tree_error_map.max()
     print((q - q_backup).abs().sum())
     print((k - k_backup).abs().sum())
     print((v - v_backup).abs().sum())
-    print('error between treen', context_tree_error)
+    print('error between tree', context_tree_error)
     
     probs_dense_tree = to_dense(
         indices_tree.cpu(), ks_tree.cpu(), probs_tree.cpu(), 
-        N, TDST, TSRC, BLOCKSIZE
+        N, TDST, TSRC, BLOCKSIZE_Q, BLOCKSIZE_K
     ).to(indices.device)
     imsave(probs_dense_tree, 'probs_dense_tree')
 
