@@ -1275,7 +1275,7 @@ def attention_matrix(
         .expand(N, T_DST)\
         .contiguous()[:, ::BLOCK_SIZE_Q]\
         .contiguous()
-    tsrcs += BLOCK_SIZE_Q - 1 # - BLOCK_SIZE_K // 2
+    tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
     tsrcs.clamp_max_(T_SRC)
     ws = torch.clamp(tsrcs, 0, w_curr).to(torch.int64) # NOTE: store non blocked width
     ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64) # NOTE: store num blocks
