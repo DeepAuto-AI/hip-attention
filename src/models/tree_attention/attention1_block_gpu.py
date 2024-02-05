@@ -665,7 +665,7 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         
-        num_warps=4,
+        num_warps=8,
         num_stages=2,
         # enable_warp_specialization=False,
     )
@@ -1286,7 +1286,9 @@ def attention_matrix(
     # NOTE: width of last query
     # w_curr = w_start
     w_curr = round(w_start / scale_up)
-        
+    # w_curr = w_start
+    assert w_curr <= mask_k
+    
     # vectors
     tsrcs = torch.arange( # NOTE: store non blocked tsrc
         T_SRC-T_DST+1, T_SRC+1, 1, 
@@ -1386,31 +1388,32 @@ def attention_matrix(
         debug_print()
         
     # NOTE: Calc. Mask
-    while w_curr < T_SRC:
-        tmask.fill_(0)
-        mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE_K) - 1) / triton.cdiv(w_curr, BLOCK_SIZE_K))
-        with timer(f"iteration_{w_curr}"):
-            masking_iteration(
-                # input matrices
-                queries, keys, attention_mask,
-                # input metrices (blocked) 
-                mask, tmask, 
-                # temp vectors (blocked)
-                ws, ks, tsrcs, 
-                # operator variables
-                scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), 
-                # input constant
-                N, T_DST, T_SRC, B_DST, B_SRC, HID,
-                # kernel constant
-                BLOCK_SIZE_Q,
-                BLOCK_SIZE_K,
-                REDUCE_METHOD,
-                REDUCE_STRIDE,
-            )
-        w_curr = round(w_curr * scale_up)
-        
-        if DEBUG:
-            debug_print()
+    with timer("iterations"):
+        while w_curr < T_SRC:
+            tmask.fill_(0)
+            mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE_K) - 1) / triton.cdiv(w_curr, BLOCK_SIZE_K))
+            with timer(f"iteration_{w_curr}"):
+                masking_iteration(
+                    # input matrices
+                    queries, keys, attention_mask,
+                    # input metrices (blocked) 
+                    mask, tmask, 
+                    # temp vectors (blocked)
+                    ws, ks, tsrcs, 
+                    # operator variables
+                    scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), 
+                    # input constant
+                    N, T_DST, T_SRC, B_DST, B_SRC, HID,
+                    # kernel constant
+                    BLOCK_SIZE_Q,
+                    BLOCK_SIZE_K,
+                    REDUCE_METHOD,
+                    REDUCE_STRIDE,
+                )
+            w_curr = round(w_curr * scale_up)
+            
+            if DEBUG:
+                debug_print()
     
     # NOTE: align with blocks
     indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
@@ -1979,7 +1982,7 @@ def tree_attention(
         # w_start = mask_k
     if n_patches is None:
         n_patches = math.ceil(mask_k / scale_up)
-        # n_patches = mask_k
+        # n_patches = mask_k / scale_up
     
     assert q.ndim == 3
     assert k.ndim == 3
