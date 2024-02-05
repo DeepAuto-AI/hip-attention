@@ -805,8 +805,8 @@ def _calc_score_compute(
     ).to(tl.int1)
     mask_tdst = mask_tdst & query_mask
     
-    # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_BK * BLOCK_SIZE_K_PADDED: tsrc]
-    scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K_PADDED), dtype=tl.float32)
+    # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
+    scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK, BLOCK_SIZE_K_PADDED), dtype=tl.float32)
     for pid_hid in range(tl.cdiv(HID, BLOCK_HID)):
         idx_hid = tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID
         mask_hid = idx_hid < HID
@@ -830,24 +830,27 @@ def _calc_score_compute(
             mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
             other = 0
         )
+        keys = tl.reshape(keys, (BLOCK_HID, BLOCK_BK * BLOCK_SIZE_K_PADDED))
         
         # TOOD: WIP
         
         scores_mini = tl.dot(queries, keys)
+        scores_mini = tl.reshape(scores_mini, (BLOCK_SIZE_Q_PADDED, BLOCK_BK, BLOCK_SIZE_K_PADDED))
+        
         scores += scores_mini.to(scores.dtype)
     
-    idx_scorek = (idx_bk * BLOCK_SIZE_K + idx_block_k)
-    mask_scorek = (idx_scorek < K) & mask_block_k
+    idx_scorek = (idx_bk[:, None] * BLOCK_SIZE_K + idx_block_k[None, :])
+    mask_scorek = (idx_scorek < K) & mask_block_k[None, :] & mask_bk[:, None]
     
     tl.store(
         SCORES +\
             idx_n * stride_scores_n +\
-            idx_tdst[:, None] * stride_scores_tdst +\
-            idx_scorek[None, :] * stride_scores_k,
+            idx_tdst[:, None, None] * stride_scores_tdst +\
+            idx_scorek[None, :, :] * stride_scores_k,
         mask = \
-            (mask_tdst[:, None] & mask_tsrc[None, :]) &\
+            (mask_tdst[:, None, None] & mask_tsrc[None, :, :]) &\
             mask_scorek[None, :] &\
-            ((idx_tdst[:, None] + (TSRC-TDST)) >= idx_tsrc[None, :]),
+            ((idx_tdst[:, None, None] + (TSRC-TDST)) >= idx_tsrc[None, :, :]),
         value = scores,
     )
 
@@ -920,7 +923,7 @@ def _calc_score_compute_bwd_queries(
         )
         
         idx_tsrc = idx_tsrc + idx_block_k
-        mask_tsrc = (idx_tsrc < TSRC) & mask_block_k
+        mask_tsrc = (idx_tsrc < TSRC) & mask_block_k & (idx_tsrc < scalar_ks)
         
         idx_k = idx_bk * BLOCK_SIZE_K + idx_block_k
         mask_k = (idx_k < K) & mask_block_k
@@ -1096,7 +1099,8 @@ class CalcScoreAutoGradFn(Function):
         
         BLOCK_HID = triton.next_power_of_2(HID)
         BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
-        BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 16)
+        BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 1)
+        BLOCK_BK = next_multiple_of(32 // BLOCK_SIZE_K_PADDED, 1)
         BLOCK_HID = max(BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED)
         grid = (N, BDST, BK)
         
@@ -1120,13 +1124,14 @@ class CalcScoreAutoGradFn(Function):
                 
                 N, TDST, TSRC, HID, BK, K, BDST, BSRC,
                 
+                BLOCK_BK,
                 BLOCK_SIZE_Q,
                 BLOCK_SIZE_Q_PADDED,
                 BLOCK_SIZE_K,
                 BLOCK_SIZE_K_PADDED,
                 BLOCK_HID,
                 
-                num_warps=BLOCK_HID//16,
+                num_warps=BLOCK_HID//8,
             )
             
         # print(scores[0, 300, :])

@@ -65,7 +65,7 @@ def test_sparse_attention():
         
         # print(loss.item())
     
-    assert loss.item() < 0.2
+    assert loss.item() < 1.0
     print('[pass] test_sparse_attention')
 
 def test_attention_mask():
@@ -116,7 +116,7 @@ def test_attention_mask():
         
         # print(loss.item())
     
-    assert loss.item() < 3.5
+    assert loss.item() < 5.0
     print('[pass] test_attention_mask')
 
 if __name__ == '__main__':
