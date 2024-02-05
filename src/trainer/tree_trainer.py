@@ -51,7 +51,8 @@ class TrainConfig:
     dataset: str = 'wikitext103'
     load_from_checkpoint: str = None
     k: int = 512
-    block_size: int = 8
+    block_size_q: int = 8
+    block_size_k: int = 8
     init_from_checkpoint: str = None
     method: str = 'tree'
 
@@ -170,7 +171,8 @@ def load_model(
         if hasattr(m, 'attention_method'):
             m.attention_method = method
             m.tree_k = train_config.k
-            m.tree_block_size = train_config.block_size
+            m.tree_block_size_q = train_config.block_size_q
+            m.tree_block_size_k = train_config.block_size_k
             if train_config.dense_queries is None:
                 train_config.dense_queries = train_config.k
             m.tree_dense_queries = train_config.dense_queries
@@ -371,7 +373,7 @@ def main(config: TrainConfig):
         strategy = "auto"
     
     if config.method == 'tree':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-block{config.block_size}-k{config.k}-{{epoch:02d}}-{{step}}'
+        filename = f'llama32k-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-{{epoch:02d}}-{{step}}'
     elif config.method == 'none':
         filename = f'llama32k-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
     elif config.method == 'reformer':
@@ -443,7 +445,8 @@ if __name__ == "__main__":
     parser.add_argument('--init_checkpoint', default=None, type=str)
     parser.add_argument('--checkpoint', default=None, type=str)
     parser.add_argument('--k', default=512, type=int)
-    parser.add_argument('--block_size', default=8, type=int)
+    parser.add_argument('--block_size_q', default=16, type=int)
+    parser.add_argument('--block_size_k', default=2, type=int)
     parser.add_argument('--method', default='tree', type=str)
     
     args = parser.parse_args()
@@ -454,7 +457,8 @@ if __name__ == "__main__":
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
         k=args.k,
-        block_size=args.block_size,
+        block_size_q=args.block_size_q,
+        block_size_k=args.block_size_k,
         method=args.method,
     )
     if args.gradient_accumulation_steps > 0:

@@ -1978,6 +1978,12 @@ def tree_attention(
         attention_mask = attention_mask > 0.5
     assert attention_mask.dtype == torch.bool
     
+    assert isinstance(block_size_q, int)
+    assert isinstance(block_size_k, int)
+    
+    block_size_q = min(block_size_q, triton.next_power_of_2(T_DST))
+    block_size_k = min(block_size_k, triton.next_power_of_2(T_SRC))
+    
     if DEBUG:
         torch.cuda.synchronize()
         gc.collect()

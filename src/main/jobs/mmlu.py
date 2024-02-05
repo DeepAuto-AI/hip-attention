@@ -195,9 +195,9 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
     print(f'{subject_name} = Accuracy: {accuracy:.4f} %, avg_seq_len: {avg_seq_len:.2f}. elapsed: {elapsed:.1f} s')
     
     os.makedirs('./saves/llama_eval/mmlu/', exist_ok=True)
-    json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.method}.json'
+    json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}.json'
     if args.method == 'tree':
-        json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.method}_b{args.block_size}_k{args.k}.json'
+        json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
         
     with open(json_path, 'w') as f:
         json.dump({
@@ -205,7 +205,9 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             'avg_seq_len': avg_seq_len,
             'elapsed': elapsed,
             'k': args.k,
-            'block_size': args.block_size,
+            'model': args.model,
+            'block_size_q': args.block_size_q,
+            'block_size_k': args.block_size_k,
             'dense_queries': args.dense_queries,
             'results': results,
         }, f, indent=2)
