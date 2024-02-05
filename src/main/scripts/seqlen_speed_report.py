@@ -28,7 +28,7 @@ def samples():
     }
     num_samples = 200
     
-    batch_size = batch_sizes[1]
+    batch_size = max(list(batch_sizes.values()))
     results = {}
     for dup in dups:
         if dup in batch_sizes:
