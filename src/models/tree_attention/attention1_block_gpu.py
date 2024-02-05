@@ -1160,6 +1160,12 @@ class CalcScoreAutoGradFn(Function):
             grad_queries = torch.zeros_like(queries)
             
             if ENABLED:
+                assert ks.ndim == 2
+                assert indices.ndim == 3
+                assert keys.ndim == 3
+                assert grad_scores.ndim == 3
+                assert  grad_queries.ndim == 3
+                
                 _calc_score_compute_bwd_queries[grid](
                     ks, ks.stride(0), ks.stride(1),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2), 
@@ -1864,7 +1870,7 @@ class SparseAttentionAutoGradFn(Function):
         
         # for probs
         if ctx.needs_input_grad[3]:
-            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_K), BK)
+            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_Q), BK)
             BLOCK_HID = triton.next_power_of_2(HID)
             
             grad_probs = torch.zeros(
