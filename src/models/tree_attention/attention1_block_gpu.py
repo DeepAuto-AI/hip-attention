@@ -1102,7 +1102,7 @@ class CalcScoreAutoGradFn(Function):
         BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 1)
         BLOCK_BK = next_multiple_of(32 // BLOCK_SIZE_K_PADDED, 1)
         BLOCK_HID = max(BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED)
-        grid = (N, BDST, BK)
+        grid = (N, BDST, triton.cdiv(BK, BLOCK_BK))
         
         assert queries.ndim == 3
         assert keys.ndim == 3
@@ -1131,7 +1131,7 @@ class CalcScoreAutoGradFn(Function):
                 BLOCK_SIZE_K_PADDED,
                 BLOCK_HID,
                 
-                num_warps=BLOCK_HID//8,
+                num_warps=BLOCK_HID//16,
             )
             
         # print(scores[0, 300, :])
@@ -1233,8 +1233,10 @@ def calc_score_return_prob(
     
     N, TDST, K = scores.shape
     _, TSRC = attention_mask.shape
-    probs = probs * attention_mask[:, TSRC-TDST:, None]
-    # probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
+    if probs.requires_grad:
+        probs = probs * attention_mask[:, TSRC-TDST:, None]
+    else:
+        probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
     
     return scores, probs
 
