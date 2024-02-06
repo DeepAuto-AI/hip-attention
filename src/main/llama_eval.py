@@ -1,4 +1,5 @@
 import os
+import pathlib
 import time
 import traceback
 import torch
@@ -8,7 +9,7 @@ from tqdm import tqdm
 import argparse
 from transformers import TextStreamer
 
-from peft import LoraConfig, TaskType
+from peft import LoraConfig, TaskType, PeftModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from src.utils import seed, get_bench
@@ -58,37 +59,46 @@ def load_model(args):
             m.tree_dense_queries = args.dense_queries
     
     if args.method != 'none' and args.checkpoint is not None:
-        peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            inference_mode=True,
-            r=args.lora_r,
-            lora_alpha=args.lora_r//2, 
-            lora_dropout=0.0,
-            target_modules=[
-                'q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                'gate_proj', 'up_proj', 'down_proj', 
-                # 'input_layernorm', 'post_attention_layernorm'
-            ],
-            modules_to_save=[
-                'tree_avgpool_scaler',
-                'input_layernorm', 'post_attention_layernorm'
-            ]
-        )
-        
-        model = prepare_model_for_kbit_training(model)
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
-        
-        state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
-        keys = list(state_dict.keys())
-        for key in keys:
-            x = state_dict[key]
-            state_dict[key.strip('model.')] = x
-            del state_dict[key]
-        result = model.load_state_dict(state_dict, strict=False)
-        print('load result', result)
+        if pathlib.Path(args.checkpoint).is_dir():
+            # is peft checkpoint
+            # Load peft pretrained
+            print(f"Loading peft model from {args.checkpoint}")
+            model = PeftModel.from_pretrained(model, args.checkpoint)
+
+        else:
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=True,
+                r=args.lora_r,
+                lora_alpha=args.lora_r//2,
+                lora_dropout=0.0,
+                target_modules=[
+                    'q_proj', 'k_proj', 'v_proj', 'o_proj',
+                    'gate_proj', 'up_proj', 'down_proj',
+                    # 'input_layernorm', 'post_attention_layernorm'
+                ],
+                modules_to_save=[
+                    'tree_avgpool_scaler',
+                    'input_layernorm', 'post_attention_layernorm'
+                ]
+            )
+
+            model = prepare_model_for_kbit_training(model)
+            model = get_peft_model(model, peft_config)
+            model.print_trainable_parameters()
+
+            state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
+            keys = list(state_dict.keys())
+            for key in keys:
+                x = state_dict[key]
+                state_dict[key.strip('model.')] = x
+                del state_dict[key]
+            result = model.load_state_dict(state_dict, strict=False)
+            print('load result', result)
+
         model = model.to(infer_dtype)
         print('lora checkpoint loaded from', args.checkpoint)
+
     elif args.method != 'none':
         for m in model.modules():
             if hasattr(m, 'attention_method'):

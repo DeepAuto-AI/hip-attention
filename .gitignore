@@ -35,3 +35,4 @@ hello.png
 hello*.png
 data/
 save/
+.idea/*

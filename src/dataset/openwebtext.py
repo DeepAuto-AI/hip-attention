@@ -24,6 +24,7 @@ class OpenWebTextDataset(Dataset):
         labels[:, -1] = -100
         return ids[0], labels[0]
 
+
 if __name__ == '__main__':
     import transformers
     tokenizer = transformers.AutoTokenizer.from_pretrained('togethercomputer/LLaMA-2-7B-32K')
