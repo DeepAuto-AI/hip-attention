@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 os.environ['PYTHONPATH'] = './'
 
 block_sizes = [1, 2, 4, 8, 16]
-block_size_k = 4
 query_sizes = [1, 2, 4, 8, 16]
 ks = [128, 256, 512, 1024]
 
@@ -26,7 +25,7 @@ def samples():
             'python', 'src/models/tree_attention/attention1_block_gpu.py',
             '--method', 'tree',
             '--block_size_q', str(block_size),
-            '--block_size_k', str(block_size_k),
+            '--block_size_k', str(block_size),
             '--k', str(k),
             '--query_size', str(query_size),
             '--dups', '4',
@@ -39,7 +38,7 @@ def samples():
             'query_size': query_size,
             'k': k,
             'block_size': block_size,
-            'block_size_k': block_size_k,
+            'block_size_k': block_size,
             'latency': latency,
             'method': 'tree',
         }
