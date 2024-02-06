@@ -1,9 +1,11 @@
 import json
 import os, torch
+import time
 import datasets
 import tqdm
 import transformers
 
+from src.utils import get_bench
 from src.main.eval_args import eval_args, ArgsType
 
 MMMU_SUBJECT = [
@@ -108,10 +110,14 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
     few_shots = []
     for entry in ds['dev']:
         if entry['question_type'] != 'multiple-choice': continue
-        
         few_shots.append(convert_to_inputs(entry, True))
     
-    few_shots = few_shots[:5]
+    for i, entry in enumerate(ds['validation']):
+        if i >= 3: break
+        if entry['question_type'] != 'multiple-choice': continue
+        few_shots.append(convert_to_inputs(entry, True))
+    
+    few_shots = few_shots[:7]
     few_shots = sum(few_shots, start = [])
     
     results = []
@@ -119,7 +125,12 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
     corrects = 0
     count = 0
     choices = 0
-    for entry in tqdm.tqdm(ds['validation'], desc=subject, dynamic_ncols=True, leave=True):
+    t_start = time.time()
+    get_bench().reset_measures()
+    get_bench().reset_trace()
+    get_bench().disabled = False
+    for i, entry in enumerate(tqdm.tqdm(ds['validation'], desc=subject, dynamic_ncols=True, leave=True)):
+        if i < 3: continue
         if entry['question_type'] != 'multiple-choice': continue
         
         question_inputs = convert_to_inputs(entry, False)
@@ -134,10 +145,11 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
         
         # print(inputs.input_ids.shape)
         
-        with torch.no_grad(), torch.autocast('cuda', torch.float16):
+        with torch.no_grad():
             logits = model(**inputs).logits
             logits = torch.softmax(logits, -1)[0, -1]
             # print(logits.shape)
+        
         
         probs = [
             get_logit_prob(logits, tokenizer, 'A'),
@@ -167,6 +179,11 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
         seq_lens.append(inputs.input_ids.shape[-1])
         choices += len(entry['options'])
     
+    # print(get_bench().format_tracetree())
+    benchmarks = get_bench().todict()
+    tick_vit = benchmarks['qwen.vit.encode'] * 1000
+    tick_decoder = benchmarks['qwen.decoder'] * 1000
+    elapsed = time.time() - t_start
     bogo_accuracy = count / choices * 100
     accuracy = corrects / count * 100
     avg_seq_len = sum(seq_lens) / len(seq_lens)
@@ -174,23 +191,39 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
     os.makedirs('./saves/qwen_eval/mmmu', exist_ok=True)
     json_path = f'./saves/qwen_eval/mmmu/{subject}_{args.model}_{args.method}.json'
     if args.method == 'tree':
-        json_path = f'./saves/qwen_eval/mmmu/{subject}_{args.model}_{args.method}.json'
+        json_path = f'./saves/qwen_eval/mmmu/{subject}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
     with open(json_path, 'w') as f:
         json.dump({
             'accuracy': accuracy,
             'bogo_accuracy': bogo_accuracy,
             'avg_seq_len': avg_seq_len,
+            'elapsed': elapsed,
+            'tick_vit': tick_vit,
+            'tick_decoder': tick_decoder,
             'results': results, 
         }, f, indent=2)
-        print(f'{json_path}: {accuracy:.2f} (seq: {avg_seq_len:.2f})')
+        print(f'{json_path}: {accuracy:.2f} (seq: {avg_seq_len:.2f}) ({elapsed:.2f} sec, {tick_vit:.4f}, {tick_decoder:.4f})')
     
     return accuracy
 
 def job_mmmu(args: ArgsType, model, tokenizer, device):
     accs = []
+    results = {}
     for subject in MMMU_SUBJECT:
-        accs.append(evaluate_subject(args, model, tokenizer, subject))
+        acc = evaluate_subject(args, model, tokenizer, subject)
+        results[subject] = acc
+        accs.append(acc)
     
     accuracy = sum(accs) / len(accs)
     
-    print(f'MMMU (Avg.): {accuracy}')
+    os.makedirs('./saves/qwen_eval/mmmu', exist_ok=True)
+    json_path = f'./saves/qwen_eval/mmmu/{args.model}_{args.method}.json'
+    if args.method == 'tree':
+        json_path = f'./saves/qwen_eval/mmmu/{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
+    with open(json_path, 'w') as f:
+        json.dump({
+            'accuracy': accuracy,
+            'results': results,
+        }, f, indent=2)
+    
+    print(f'MMMU (Avg.): {accuracy} ({json_path})')

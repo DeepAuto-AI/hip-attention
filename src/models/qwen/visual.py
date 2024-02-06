@@ -5,6 +5,7 @@
 
 from collections import OrderedDict
 import math
+import os
 import requests
 from io import BytesIO
 from functools import partial
@@ -337,6 +338,8 @@ class TransformerBlock(nn.Module):
             x = r(x, attn_mask=attn_mask)
         return x
 
+CACHE = {}
+CACHE_ENABLED = os.environ.get('VIT_CACHE', '0') == '1'
 
 class VisionTransformer(nn.Module):
 
@@ -425,12 +428,20 @@ class VisionTransformer(nn.Module):
 
     def encode(self, image_paths: List[str]):
         images = []
+        # print('start load')
         for image_path in image_paths:
-            if image_path.startswith("http://") or image_path.startswith("https://"):
-                image = Image.open(requests.get(image_path, stream=True).raw)
+            if (not CACHE_ENABLED) or (image_path not in CACHE):
+                if image_path.startswith("http://") or image_path.startswith("https://"):
+                    image = Image.open(requests.get(image_path, stream=True).raw)
+                else:
+                    image = Image.open(image_path)
+                image = image.convert("RGB")
+                image = self.image_transform(image)
+                if CACHE_ENABLED:
+                    CACHE[image_path] = image
             else:
-                image = Image.open(image_path)
-            image = image.convert("RGB")
-            images.append(self.image_transform(image))
+                image = CACHE[image_path]
+            images.append(image)
         images = torch.stack(images, dim=0)
+        # print('end load')
         return self(images)

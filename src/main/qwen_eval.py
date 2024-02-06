@@ -27,6 +27,14 @@ def load_qwen(args: ArgsType):
         ),
         fp16=True,
     ).eval()
+    
+    for m in model.modules():
+        if hasattr(m, 'attention_method'):
+            m.attention_method = args.method
+            m.tree_k = args.k
+            m.tree_block_size_k = args.block_size_k
+            m.tree_block_size_q = args.block_size_q
+            m.tree_dense_queries = args.dense_queries
 
     return model, tokenizer, device
 

@@ -1237,7 +1237,9 @@ def calc_score_return_prob(
     ) # type: Tensor
     
     with timer("calc_score_return_prob.softmax"):
-        probs = scores.softmax(-1)
+        probs = scores.softmax(-1).to(scores.dtype)
+    
+    assert probs.dtype == queries.dtype
     
     N, TDST, K = scores.shape
     _, TSRC = attention_mask.shape
@@ -1245,6 +1247,9 @@ def calc_score_return_prob(
         probs = probs * attention_mask[:, TSRC-TDST:, None]
     else:
         probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
+    
+    assert scores.dtype == queries.dtype
+    assert probs.dtype == queries.dtype
     
     return scores, probs
 
@@ -1291,26 +1296,27 @@ def attention_matrix(
     # w_curr = w_start
     assert w_curr <= mask_k
     
-    # vectors
-    tsrcs = torch.arange( # NOTE: store non blocked tsrc
-        T_SRC-T_DST+1, T_SRC+1, 1, 
-        dtype=torch.int64,
-        device=device,
-    )\
-        .view(1, T_DST)\
-        .expand(N, T_DST)\
-        .contiguous()[:, ::BLOCK_SIZE_Q]\
-        .contiguous()
-    tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
-    tsrcs.clamp_max_(T_SRC)
-    ws = torch.clamp(tsrcs, 0, w_curr).to(torch.int64) # NOTE: store non blocked width
-    ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64) # NOTE: store num blocks
-    
-    # matrices
-    # NOTE: float16 -> int32 seems not possible
-    mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
-    mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
-    tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+    with timer('matrix.setup'):
+        # vectors
+        tsrcs = torch.arange( # NOTE: store non blocked tsrc
+            T_SRC-T_DST+1, T_SRC+1, 1, 
+            dtype=torch.int64,
+            device=device,
+        )\
+            .view(1, T_DST)\
+            .expand(N, T_DST)\
+            .contiguous()[:, ::BLOCK_SIZE_Q]\
+            .contiguous()
+        tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
+        tsrcs.clamp_max_(T_SRC)
+        ws = torch.clamp(tsrcs, 0, w_curr).to(torch.int64) # NOTE: store non blocked width
+        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64) # NOTE: store num blocks
+        
+        # matrices
+        # NOTE: float16 -> int32 seems not possible
+        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
+        mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
+        tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
     
     B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
     B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
@@ -1392,8 +1398,9 @@ def attention_matrix(
     # NOTE: Calc. Mask
     with timer("iterations"):
         while w_curr < T_SRC:
-            tmask.fill_(0)
-            mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE_K) - 1) / triton.cdiv(w_curr, BLOCK_SIZE_K))
+            with timer(f'iteration_{w_curr}.reset'):
+                tmask.fill_(0)
+                mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE_K) - 1) / triton.cdiv(w_curr, BLOCK_SIZE_K))
             with timer(f"iteration_{w_curr}"):
                 masking_iteration(
                     # input matrices
@@ -1417,11 +1424,14 @@ def attention_matrix(
             if DEBUG:
                 debug_print()
     
-    # NOTE: align with blocks
-    indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
-    indices = safe_indices(indices)
-    # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE_K) - 1)
-    indices = indices * BLOCK_SIZE_K
+    with timer('matrix.cleanup'):
+        # NOTE: align with blocks
+        with timer('matrix.cleanup.cdiv'):
+            indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
+        with timer('matrix.cleanup.safe_indices'):
+            indices = safe_indices(indices)
+        # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE_K) - 1)
+        indices = indices * BLOCK_SIZE_K
     
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score"):
@@ -1431,6 +1441,7 @@ def attention_matrix(
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
         )
+        assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
     
     if DEBUG:
         x = to_dense(
@@ -1800,6 +1811,8 @@ class SparseAttentionAutoGradFn(Function):
         assert probs.ndim == 3
         assert values.ndim == 3
         assert context.ndim == 3
+        assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
+        assert values.dtype == context.dtype
         _sdbmm_compute[grid](
             # inputs
             indices, *indices.stride(),
@@ -2034,6 +2047,8 @@ def tree_attention(
                 reduce_method,
                 reduce_stride,
             )
+            
+            assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
         
         with timer('sparse_attention'):
             if DENSE_SPARSE_ATTENTION:
