@@ -100,25 +100,12 @@ def load_model(args):
     
     return model, tokenizer, device
 
+from src.main.eval_args import eval_args
+
 def main():
     seed()
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='llama32k')
-    parser.add_argument('--job', type=str, default='ppl')
-    parser.add_argument('--method', type=str, default='none')
-    parser.add_argument('--stride', type=int, default=-1)
-    parser.add_argument('--lora_r', type=int, default=32)
-    parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--count', type=int, default=100)
-    parser.add_argument('--block_size_q', type=int, default=4)
-    parser.add_argument('--block_size_k', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--k', type=int, default=512)
-    parser.add_argument('--dense_queries', type=int, default=2048)
-    args = parser.parse_args()
-    
-    print(args)
+    args = eval_args()
     
     assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer']
     

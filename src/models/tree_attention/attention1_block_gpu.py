@@ -666,8 +666,8 @@ def masking_iteration(
         REDUCE_STRIDE,
         
         num_warps=8,
-        num_stages=2,
-        # enable_warp_specialization=False,
+        num_stages=1,
+        enable_warp_specialization=True,
     )
     
     # if DEBUG:
@@ -1131,7 +1131,9 @@ class CalcScoreAutoGradFn(Function):
                 BLOCK_SIZE_K_PADDED,
                 BLOCK_HID,
                 
-                num_warps=BLOCK_HID//16,
+                num_warps=8,
+                num_stages=8,
+                enable_warp_specialization=True,
             )
             
         # print(scores[0, 300, :])

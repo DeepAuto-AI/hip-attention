@@ -5,7 +5,11 @@ from src.main.jobs.mmlu import MMLU_SUBJECTS
 def main():
     os.makedirs('./saves/mmlu_report', exist_ok=True)
     
-    configs = ['none', 'tree_b4_k512']
+    configs = [
+        'none', 
+        'llama32k_tree_bq32_bk2_k512',
+        'llama13b_tree_bq32_bk2_k512'
+    ]
     header = ['config',] + MMLU_SUBJECTS + ['avg',]
     lines = [','.join(header)]
     seq_len = {}

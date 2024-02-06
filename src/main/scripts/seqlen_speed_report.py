@@ -51,7 +51,8 @@ def samples():
         subprocess.call([
             'python', 'src/models/tree_attention/attention1_block_gpu.py',
             '--method', 'none',
-            '--block_size', str(block_size),
+            '--block_size_q', str(block_size),
+            '--block_size_k', str(block_size),
             '--k', str(k),
             '--query_size', str(query_size),
             '--dups', str(dup),
