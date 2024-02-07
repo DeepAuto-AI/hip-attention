@@ -14,8 +14,25 @@ ks = [128, 256, 512, 1024]
 
 def samples():
     num_samples = 200
-    batch_size = 128
+    batch_size = 256
     results = {}
+    
+    for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
+        subprocess.call([
+            'python', 'src/models/tree_attention/attention1_block_gpu.py',
+            '--method', 'none',
+            '--query_size', str(query_size),
+            '--dups', '4',
+            '--batch_size', str(batch_size),
+            '--samples', str(num_samples),
+        ])
+        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+            latency = json.load(f)['mean']
+        results[f'none_q{query_size}'] = {
+            'query_size': query_size,
+            'latency': latency,
+            'method': 'none'
+        }
     
     for query_size, block_size, k in tqdm.tqdm(
         list(itertools.product(query_sizes, block_sizes, ks)),
@@ -41,23 +58,6 @@ def samples():
             'block_size_k': block_size,
             'latency': latency,
             'method': 'tree',
-        }
-    
-    for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
-        subprocess.call([
-            'python', 'src/models/tree_attention/attention1_block_gpu.py',
-            '--method', 'none',
-            '--query_size', str(query_size),
-            '--dups', '4',
-            '--batch_size', str(batch_size),
-            '--samples', str(num_samples),
-        ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
-            latency = json.load(f)['mean']
-        results[f'none_q{query_size}'] = {
-            'query_size': query_size,
-            'latency': latency,
-            'method': 'none'
         }
     
     os.makedirs('./saves/speedup_report', exist_ok=True)
@@ -154,7 +154,9 @@ def plot_ppl(query_size=1):
             fontsize=9,
         )
     
-    plt.axhline(5.59, color='#555', linestyle='--', linewidth=1)
+    # baseline_ppl = 5.59
+    baseline_ppl = 4.682
+    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=1)
     plt.axvline(1.0, color='#555', linestyle='--', linewidth=1)
     plt.yscale('log', base=2)
     # plt.xscale('log', base=2)

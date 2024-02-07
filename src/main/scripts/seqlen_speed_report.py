@@ -9,22 +9,23 @@ dups = range(1, 17)
 
 def samples():
     block_size = 16
+    block_size_ks = [1, 2, 4, 8, 16]
     query_size = 1
     k = 512
     batch_sizes = {
-        1: 128,
-        4: 128,
-        5: 96,
-        6: 80,
-        7: 70,
-        8: 60,
-        9: 48,
-        10: 48,
-        11: 42,
-        12: 40,
-        13: 32,
-        14: 32,
-        16: 32,
+        1: 256,
+        4: 256,
+        5: 192,
+        6: 160,
+        7: 160,
+        8: 128,
+        9: 96,
+        10: 96,
+        11: 64,
+        12: 64,
+        13: 64,
+        14: 64,
+        16: 64,
     }
     num_samples = 200
     
@@ -33,20 +34,23 @@ def samples():
     for dup in dups:
         if dup in batch_sizes:
             batch_size = batch_sizes[dup]
-            
-        subprocess.call([
-            'python', 'src/models/tree_attention/attention1_block_gpu.py',
-            '--method', 'tree',
-            '--block_size_q', str(block_size),
-            '--block_size_k', str(block_size),
-            '--k', str(k),
-            '--query_size', str(query_size),
-            '--dups', str(dup),
-            '--batch_size', str(batch_size),
-            '--samples', str(num_samples),
-        ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
-            latency_tree = json.load(f)['mean']
+        
+        latency_trees = []
+        for block_size_k in block_size_ks:
+            subprocess.call([
+                'python', 'src/models/tree_attention/attention1_block_gpu.py',
+                '--method', 'tree',
+                '--block_size_q', str(block_size),
+                '--block_size_k', str(block_size_k),
+                '--k', str(k),
+                '--query_size', str(query_size),
+                '--dups', str(dup),
+                '--batch_size', str(batch_size),
+                '--samples', str(num_samples),
+            ])
+            with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+                latency_tree = json.load(f)['mean']
+            latency_trees.append(latency_tree)
         
         subprocess.call([
             'python', 'src/models/tree_attention/attention1_block_gpu.py',
@@ -64,7 +68,8 @@ def samples():
         
         seq_len = dup * 1024
         results[f's{seq_len}'] = {
-            'latency_tree': latency_tree,
+            'block_size_ks': block_size_ks,
+            'latency_trees': latency_trees,
             'latency_base': latency_base,
             'batch_size': batch_size,
             'query_size': query_size,
@@ -85,27 +90,39 @@ def plot():
     with open(path, 'r') as f:
         data = json.load(f)
     
-    xs = []
-    ys_base = []
-    ys_tree = []
-    ys_speedup = []
+    block_size_ks = data[list(data.keys())[0]]['block_size_ks']
     
-    for dup in dups:
-        entry = data[f's{dup * 1024}']
-        xs.append(entry['seq_len'])
-        ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
-        ys_tree.append(entry['latency_tree'] / entry['batch_size'] * 1000)
-        ys_speedup.append(entry['speedup'])
+    xss = []
+    ys_bases = []
+    ys_trees = []
+    ys_speedups = []
+    
+    for iks, block_size_k in enumerate(block_size_ks):
+        xs = []
+        ys_base = []
+        ys_tree = []
+        ys_speedup = []
+        for dup in dups:
+            entry = data[f's{dup * 1024}']
+            xs.append(entry['seq_len'])
+            ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
+            ys_tree.append(entry['latency_trees'][iks] / entry['batch_size'] * 1000)
+            ys_speedup.append(entry['latency_base'] / entry['latency_trees'][iks])
+        xss.append(xs)
+        ys_bases.append(ys_bases)
+        ys_trees.append(ys_tree)
+        ys_speedups.append(ys_speedup)
     
     plt.figure(figsize=(5,4))
     
     sns.lineplot(x=xs, y=ys_base, label='baseline')
-    sns.lineplot(x=xs, y=ys_tree, label='timber')
+    for iks, block_size_k in enumerate(block_size_ks):
+        sns.lineplot(x=xs, y=ys_trees[iks], label=f'timber (bk={block_size_k})')
     plt.legend()
-    plt.title('Single Query Latency')
+    plt.title('Single Query Latency (k=512, bq=16)')
     plt.xlabel('Seq. Length')
     plt.ylabel('Latency (us)')
-    plt.xlim(2048, 16*1024)
+    plt.xlim(0, 17*1024)
     
     fig_path = './saves/seqlen_speed_report/plot_seqlen_latency'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
@@ -114,11 +131,13 @@ def plot():
     
     plt.figure(figsize=(5,4))
     
-    plt.title('Single Query Speedup (k=512, b=4)')
-    sns.lineplot(x=xs, y=ys_speedup, label='speedup')
+    plt.title('Single Query Speedup (k=512, bq=16)')
+    sns.lineplot(x=xs, y=[1.0,] * len(xs), label='baseline')
+    for iks, block_size_k in enumerate(block_size_ks):
+        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'timber (bk={block_size_k})')
     plt.xlabel('Seq. Length')
     plt.ylabel('Speedup')
-    plt.xlim(2048, 16*1024)
+    plt.xlim(0, 17*1024)
     
     fig_path = './saves/seqlen_speed_report/plot_seqlen_speedup'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')

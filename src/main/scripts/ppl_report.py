@@ -20,6 +20,7 @@ def samples():
         print(f'ppl measure b{block_size}, k{k}')
         subprocess.call([
             'python', 'src/main/llama_eval.py', 
+            '--model', 'llama13b',
             '--method', 'tree',
             '--stride', '4096',
             '--block_size_q', str(block_size),
@@ -52,7 +53,9 @@ def by_value(a, b):
         return pypareto.Domination.EQUAL
 
 def plots():
-    baseline_ppl = 5.59
+    # llama32k
+    # baseline_ppl = 5.59
+    baseline_ppl = 4.682
     
     with open('./saves/ppl_report/report.json', 'r') as f:
         data = json.load(f)
