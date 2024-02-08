@@ -688,8 +688,8 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         
-        # num_warps=min(8, max(BLOCK_TMASK_K//32, 1)),
-        num_warps=4,
+        num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
+        # num_warps=4,
         num_stages=2,
         enable_warp_specialization=True,
     )

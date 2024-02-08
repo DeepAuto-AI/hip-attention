@@ -37,7 +37,7 @@ def samples():
         
         latency_trees = []
         for block_size_k in block_size_ks:
-            subprocess.call([
+            cmd = [
                 'python', 'src/models/tree_attention/attention1_block_gpu.py',
                 '--method', 'tree',
                 '--block_size_q', str(block_size),
@@ -47,7 +47,9 @@ def samples():
                 '--dups', str(dup),
                 '--batch_size', str(batch_size),
                 '--samples', str(num_samples),
-            ])
+            ]
+            print(' '.join(cmd))
+            subprocess.call(cmd)
             with open('./cache/attention1_block_gpu/result.json', 'r') as f:
                 latency_tree = json.load(f)['mean']
             latency_trees.append(latency_tree)

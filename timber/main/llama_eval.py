@@ -8,17 +8,44 @@ from tqdm import tqdm
 import argparse
 from transformers import TextStreamer
 
+from vllm import LLM
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from src.models.modeling_vllm_llama import LlamaForCausalLM as VllmLlamaForCausalLM
 from src.utils import seed, get_bench
 
 from src.main.jobs.bench_single_layer import job_bench_single_layer
 from src.main.jobs.ppl import job_ppl
 from src.main.jobs.stream import job_stream
 from src.main.jobs.mmlu import job_mmlu
+from src.main.eval_args import eval_args, ArgsType
+
+def load_vllm_model(args: ArgsType):
+    device = 'cuda:0'
+    MODELS = {
+        'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
+    }
+    assert args.model in MODELS
+    model_id = MODELS[args.model]
+    
+    assert args.checkpoint is None
+    
+    config = LlamaConfig.from_pretrained(model_id)
+    model = VllmLlamaForCausalLM(config).to(device).eval()
+    model.load_weights(model_id)
+    
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    
+    LLM()
+
+    return model, tokenizer, device
 
 def load_model(args):
+    if args.model.startswith('vllm'):
+        return load_vllm_model(args)
+    
     device = 'cuda:0'
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
@@ -99,8 +126,6 @@ def load_model(args):
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     
     return model, tokenizer, device
-
-from src.main.eval_args import eval_args
 
 def main():
     seed()
