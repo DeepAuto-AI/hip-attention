@@ -52,7 +52,7 @@ from transformers.utils import (
 from transformers.utils.import_utils import is_torch_fx_available
 from transformers.models.llama.configuration_llama import LlamaConfig
 
-from src.utils import get_bench, seed
+from timber.utils import get_bench, seed
 
 timer = lambda x: get_bench().region(x)
 
@@ -652,11 +652,11 @@ class LlamaFlashAttention2(LlamaAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-from src.models.tree_attention.attention1_gpu import flash_attention
+from timber.models.tree_attention.attention1_gpu import flash_attention
 # NOTE: element-wise implementation
-# from src.models.tree_attention.attention1_gpu import tree_attention
+# from timber.models.tree_attention.attention1_gpu import tree_attention
 # NOTE: block-wise implementation. more efficient
-from src.models.tree_attention.attention1_block_gpu import tree_attention
+from timber.models.tree_attention.attention1_block_gpu import tree_attention
 
 class LlamaCustomAttention(LlamaAttention):
     def __init__(self, config: LlamaConfig, layer_idx = None):

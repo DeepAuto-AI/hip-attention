@@ -47,7 +47,7 @@ from .qwen_generation_utils import (
 )
 from .visual import VisionTransformer
 
-from src.utils import get_bench, seed
+from timber.utils import get_bench, seed
 
 timer = lambda x: get_bench().region(x)
 
@@ -107,7 +107,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
-from src.models.tree_attention.attention1_block_gpu import tree_attention
+from timber.models.tree_attention.attention1_block_gpu import tree_attention
 
 class QWenAttention(nn.Module):
     def __init__(self, config):

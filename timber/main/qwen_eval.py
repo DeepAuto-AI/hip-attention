@@ -1,11 +1,11 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from transformers.generation import GenerationConfig
-from src.models.qwen.modeling_qwen import QWenLMHeadModel
+from timber.models.qwen.modeling_qwen import QWenLMHeadModel
 import torch
 
-from src.main.jobs.mmmu import job_mmmu
-from src.utils import seed
-from src.main.eval_args import eval_args, ArgsType
+from timber.main.jobs.mmmu import job_mmmu
+from timber.utils import seed
+from timber.main.eval_args import eval_args, ArgsType
 
 def load_qwen(args: ArgsType):
     assert args.model in ['qwen']

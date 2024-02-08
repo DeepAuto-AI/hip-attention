@@ -24,13 +24,13 @@ import torch.autograd
 
 # torch.autograd.set_detect_anomaly(True)
 
-from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
 
-from src.utils import seed
-from src.dataset.labdataset import LabDataset
-from src.dataset.booksum import BookSumDataset
-from src.dataset.alpaca import AlpacaDataset
-from src.dataset.openwebtext import OpenWebTextDataset
+from timber.utils import seed
+from timber.dataset.labdataset import LabDataset
+from timber.dataset.booksum import BookSumDataset
+from timber.dataset.alpaca import AlpacaDataset
+from timber.dataset.openwebtext import OpenWebTextDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')

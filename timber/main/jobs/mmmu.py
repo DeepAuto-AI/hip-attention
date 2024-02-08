@@ -5,8 +5,8 @@ import datasets
 import tqdm
 import transformers
 
-from src.utils import get_bench
-from src.main.eval_args import eval_args, ArgsType
+from timber.utils import get_bench
+from timber.main.eval_args import eval_args, ArgsType
 
 MMMU_SUBJECT = [
     'Accounting', 'Agriculture', 'Architecture_and_Engineering', 

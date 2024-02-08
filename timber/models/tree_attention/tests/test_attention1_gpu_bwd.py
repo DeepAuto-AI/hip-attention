@@ -2,7 +2,7 @@ import torch
 import warnings
 from torch import nn
 
-from src.models.tree_attention.attention1_gpu import (
+from timber.models.tree_attention.attention1_gpu import (
     load_checkouts,
     sparse_attention,
     attention_matrix,

@@ -10,8 +10,8 @@ from transformers import TextStreamer
 
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
-from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from src.utils import seed, get_bench
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.utils import seed, get_bench
 
 def job_ppl(args, model, tokenizer, device):
     os.makedirs('./cache', exist_ok=True)

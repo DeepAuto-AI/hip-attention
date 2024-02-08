@@ -7,7 +7,7 @@ from datasets import load_dataset
 import tqdm
 import numpy as np
 
-from src.utils import seed, get_bench
+from timber.utils import seed, get_bench
 
 MMLU_FORMAT = """> The following are multiple choice questions (with answers) about {subject_name}.
 

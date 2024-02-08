@@ -34,8 +34,8 @@ from torch.autograd import Function
 
 assert triton.__version__ in ['2.2.0']
 
-from src.utils import get_bench, seed
-from src.models.tree_attention.common import load_checkouts
+from timber.utils import get_bench, seed
+from timber.models.tree_attention.common import load_checkouts
 
 timer = lambda x: get_bench().region(x)
 

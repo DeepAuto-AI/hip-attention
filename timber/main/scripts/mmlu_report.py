@@ -1,6 +1,6 @@
 import os
 import json
-from src.main.jobs.mmlu import MMLU_SUBJECTS
+from timber.main.jobs.mmlu import MMLU_SUBJECTS
 
 def main():
     os.makedirs('./saves/mmlu_report', exist_ok=True)

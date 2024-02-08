@@ -11,15 +11,15 @@ from transformers import TextStreamer
 from vllm import LLM
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
-from src.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from src.models.modeling_vllm_llama import LlamaForCausalLM as VllmLlamaForCausalLM
-from src.utils import seed, get_bench
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.models.modeling_vllm_llama import LlamaForCausalLM as VllmLlamaForCausalLM
+from timber.utils import seed, get_bench
 
-from src.main.jobs.bench_single_layer import job_bench_single_layer
-from src.main.jobs.ppl import job_ppl
-from src.main.jobs.stream import job_stream
-from src.main.jobs.mmlu import job_mmlu
-from src.main.eval_args import eval_args, ArgsType
+from timber.main.jobs.bench_single_layer import job_bench_single_layer
+from timber.main.jobs.ppl import job_ppl
+from timber.main.jobs.stream import job_stream
+from timber.main.jobs.mmlu import job_mmlu
+from timber.main.eval_args import eval_args, ArgsType
 
 def load_vllm_model(args: ArgsType):
     device = 'cuda:0'

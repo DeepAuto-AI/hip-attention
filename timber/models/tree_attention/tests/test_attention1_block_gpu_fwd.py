@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import Tensor
 import matplotlib.pyplot as plt
-from src.models.tree_attention.attention1_block_gpu import tree_attention, attention_matrix, sparse_attention, load_checkouts
+from timber.models.tree_attention.attention1_block_gpu import tree_attention, attention_matrix, sparse_attention, load_checkouts
 
 def to_dense(
     indices: np.ndarray, 
