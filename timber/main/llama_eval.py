@@ -9,10 +9,10 @@ import argparse
 from transformers import TextStreamer
 
 from vllm import LLM
+from vllm.model_executor.layers.attention import PagedAttention
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from timber.models.modeling_vllm_llama import LlamaForCausalLM as VllmLlamaForCausalLM
 from timber.utils import seed, get_bench
 
 from timber.main.jobs.bench_single_layer import job_bench_single_layer
@@ -25,6 +25,8 @@ def load_vllm_model(args: ArgsType):
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+        'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
     }
     assert args.model in MODELS
@@ -32,13 +34,8 @@ def load_vllm_model(args: ArgsType):
     
     assert args.checkpoint is None
     
-    config = LlamaConfig.from_pretrained(model_id)
-    model = VllmLlamaForCausalLM(config).to(device).eval()
-    model.load_weights(model_id)
-    
+    model = LLM(model_id)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
-    
-    LLM()
 
     return model, tokenizer, device
 

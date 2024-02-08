@@ -8,6 +8,7 @@ from tqdm import tqdm
 import argparse
 from transformers import TextStreamer
 
+from vllm import LLM, SamplingParams
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers.models.auto import AutoTokenizer
@@ -29,7 +30,6 @@ class BatchedStreamer(TextStreamer):
 
 def job_stream(args, model, tokenizer, device):
     while True:
-        model.eval()
         get_bench().reset_trace()
         get_bench().reset_measures()
         get_bench().disabled = False
@@ -42,25 +42,39 @@ def job_stream(args, model, tokenizer, device):
                 input_text = f.read()
         
         inputs = tokenizer([tokenizer.bos_token + input_text, ] * args.batch_size, return_tensors='pt').to(device)
-        
         print('input_ids', len(input_text), inputs.input_ids.shape)
 
-        streamer = BatchedStreamer(tokenizer, skip_prompt=True)
         t = time.time()
-        with torch.no_grad():
-            try:
-                model.generate(
-                    **inputs, 
-                    streamer=streamer, 
-                    do_sample=True,
-                    max_new_tokens=256,
-                    temperature=0.5,
-                    top_p=0.8,
-                    top_k=1000,
+        try:
+            if isinstance(model, LLM):
+                prompts = [input_text]
+                sampling_params = SamplingParams(
+                    temperature=0.8, 
+                    top_p=0.95,
+                    max_tokens=inputs.input_ids.shape[-1] + 128,
                 )
-            except KeyboardInterrupt:
-                traceback.print_exc()
-                print('Interrupted')
+                
+                outputs = model.generate(prompts, sampling_params, use_tqdm=True)
+                
+                for output in outputs:
+                    generated_text = output.outputs[0].text
+                    print(generated_text)
+            else:
+                streamer = BatchedStreamer(tokenizer, skip_prompt=True)
+                
+                with torch.no_grad():
+                    model.generate(
+                        **inputs, 
+                        streamer=streamer, 
+                        do_sample=True,
+                        max_new_tokens=256,
+                        temperature=0.5,
+                        top_p=0.8,
+                        top_k=1000,
+                    )
+        except KeyboardInterrupt:
+            traceback.print_exc()
+            print('Interrupted')
         elapsed = time.time() - t
         print(get_bench().format_tracetree())
         print(f'elapsed {elapsed:.4f} sec')

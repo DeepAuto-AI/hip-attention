@@ -61,21 +61,4 @@ In July 2010, Google signed an agreement with an Iowa wind farm to buy 114 megaw
 
 In December 2016, Google announced that—starting in 2017—it would purchase enough renewable energy to match 100% of the energy usage of its data centers and offices. The commitment will make Google "the world's largest corporate buyer of renewable power, with commitments reaching 2.6 gigawatts (2,600 megawatts) of wind and solar energy".[296][297][298]
 
-In November 2017, Google bought 536 megawatts of wind power. The purchase made the firm reach 100% renewable energy. The wind energy comes from two power plants in South Dakota, one in Iowa and one in Oklahoma.[299] In September 2019, Google's chief executive announced plans for a $2 billion wind and solar investment, the biggest renewable energy deal in corporate history. This will grow their green energy profile by 40%, giving them an extra 1.6 gigawatt of clean energy, the company said.[300]
-
-In September 2020, Google announced it had retroactively offset all of its carbon emissions since the company's foundation in 1998.[301] It also committed to operating its data centers and offices using only carbon-free energy by 2030.[302] In October 2020, the company pledged to make the packaging for its hardware products 100% plastic-free and 100% recyclable by 2025. It also said that all its final assembly manufacturing sites will achieve a UL 2799 Zero Waste to Landfill certification by 2022 by ensuring that the vast majority of waste from the manufacturing process is recycled instead of ending up in a landfill.[303]
-
-> Climate change denial and misinformation
-Google donates to climate change denial political groups including the State Policy Network and the Competitive Enterprise Institute.[304][305] The company also actively funds and profits from climate disinformation by monetizing ad spaces on most of the largest climate disinformation sites.[306] Google continued to monetize and profit from sites propagating climate disinformation even after the company updated their policy to prohibit placing their ads on similar sites.[307]
-
-> Philanthropy
-Main article: Google.org
-In 2004, Google formed the not-for-profit philanthropic Google.org, with a start-up fund of $1 billion.[308] The mission of the organization is to create awareness about climate change, global public health, and global poverty. One of its first projects was to develop a viable plug-in hybrid electric vehicle that can attain 100 miles per gallon. Google hired Larry Brilliant as the program's executive director in 2004[309] and Megan Smith has since replaced him as director.[310]
-
-In March 2007, in partnership with the Mathematical Sciences Research Institute (MSRI), Google hosted the first Julia Robinson Mathematics Festival at its headquarters in Mountain View.[311] In 2011, Google donated 1 million euros to International Mathematical Olympiad to support the next five annual International Mathematical Olympiads (2011–2015).[312][313] In July 2012, Google launched a "Legalize Love" campaign in support of gay rights.[314]
-
-In 2008, Google announced its "project 10100" which accepted ideas for how to help the community and then allowed Google users to vote on their favorites.[315] After two years of silence, during which many wondered what had happened to the program,[316] Google revealed the winners of the project, giving a total of ten million dollars to various ideas ranging from non-profit organizations that promote education to a website that intends to make all legal documents public and online.[317]
-
-Responding to the humanitarian crisis after the 2022 Russian invasion of Ukraine, Google announced a $15 million donation to support Ukrainian citizens.[318] The company also decided to transform its office in Warsaw into a help center for refugees.[319]
-
-Also in February 2022, Google announced a $100 million fund to expand skills training and job placement for low-income Americans, in conjunction with non-profits Year Up, Social Finance, and Merit America.[320]
+In November 2017, Google bought 536 megawatts of wind power. The 
