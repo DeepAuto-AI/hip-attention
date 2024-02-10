@@ -2042,6 +2042,7 @@ class PagedKeyCacheVllmCompat(VllmCompat):
     dtype: torch.dtype
     device: torch.device
     shape: Tuple[int, int, int]
+    ndim: int
     
     # vllm compat
     key_cache: Tensor
@@ -2077,12 +2078,14 @@ class PagedKeyCacheVllmCompat(VllmCompat):
         
         self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
         self.block_size = BLOCK_SIZE
+        self.ndim = 3
 
 class PagedValueCacheVllmCompat(VllmCompat):
     # interface
     dtype: torch.dtype
     device: torch.device
     shape: Tuple[int, int, int]
+    ndim: int
     
     # vllm compat
     value_cache: Tensor
@@ -2119,6 +2122,7 @@ class PagedValueCacheVllmCompat(VllmCompat):
         assert BLOCK_SIZE == self.block_size
         
         self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
+        self.ndim = 3
 
 def paged_timber_attention(
     q: Tensor, 
@@ -2154,6 +2158,7 @@ def paged_timber_attention(
     """
     
     q = q * q_scale
+    q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
     
     paged_k = PagedKeyCacheVllmCompat(
         key_cache=k,

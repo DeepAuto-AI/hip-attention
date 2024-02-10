@@ -149,7 +149,8 @@ def test_vllm_compat():
 
 def main():
     test_vllm()
-    test_vllm_compat_cpu()
+    test_vllm_compat()
+    # test_vllm_compat_cpu()
     
 if __name__ == '__main__':
     main()
