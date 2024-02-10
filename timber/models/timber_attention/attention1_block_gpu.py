@@ -2034,6 +2034,154 @@ def to_dense(
                     ]
     return out
 
+class VllmCompat:
+    pass
+
+class PagedKeyCacheVllmCompat(VllmCompat):
+    # interface
+    dtype: torch.dtype
+    device: torch.device
+    shape: Tuple[int, int, int]
+    
+    # vllm compat
+    key_cache: Tensor
+    block_table: Tensor
+    context_length: Tensor
+    max_context_length: int
+    block_size: int
+    
+    def __init__(
+        self,
+        key_cache: Tensor,
+        block_table: Tensor,
+        context_length: Tensor,
+        max_context_length: int,
+    ):
+        self.key_cache = key_cache
+        self.block_table = block_table
+        self.context_length = context_length
+        self.max_context_length = max_context_length
+        
+        self.dtype = key_cache.dtype
+        self.device = key_cache.device
+        
+        BATCH_SIZE, MAX_NUM_BLOCKS = block_table.shape
+        assert context_length.shape == (BATCH_SIZE,)
+        assert isinstance(max_context_length, int)
+        
+        NUM_BLOCKS, NUM_HEADS, HEAD_SIZE_DIV_X, BLOCK_SIZE, X = key_cache.shape
+        HEAD_SIZE = HEAD_SIZE_DIV_X * X
+        
+        assert NUM_BLOCKS >= MAX_NUM_BLOCKS
+        assert (BLOCK_SIZE * NUM_BLOCKS) >= max_context_length
+        
+        self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
+        self.block_size = BLOCK_SIZE
+
+class PagedValueCacheVllmCompat(VllmCompat):
+    # interface
+    dtype: torch.dtype
+    device: torch.device
+    shape: Tuple[int, int, int]
+    
+    # vllm compat
+    value_cache: Tensor
+    block_table: Tensor
+    context_length: Tensor
+    max_context_length: int
+    block_size: int
+    
+    def __init__(
+        self,
+        key_cache: "PagedKeyCacheVllmCompat",
+        value_cache: Tensor,
+    ):
+        self.block_size = key_cache.block_size
+        block_table = key_cache.block_table
+        context_length = key_cache.context_length
+        max_context_length = key_cache.max_context_length
+        
+        self.value_cache = value_cache
+        self.block_table = block_table
+        self.context_length = context_length
+        self.max_context_length = max_context_length
+        
+        self.dtype = value_cache.dtype
+        self.device = value_cache.device
+        
+        BATCH_SIZE, MAX_NUM_BLOCKS = block_table.shape
+        assert context_length.shape == (BATCH_SIZE,)
+        assert isinstance(max_context_length, int)
+        
+        NUM_BLOCKS, NUM_HEADS, HEAD_SIZE, BLOCK_SIZE = value_cache.shape
+        
+        assert NUM_BLOCKS >= MAX_NUM_BLOCKS
+        assert BLOCK_SIZE == self.block_size
+        
+        self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
+
+def paged_timber_attention(
+    q: Tensor, 
+    q_scale: float,
+    k: Tensor, 
+    v: Tensor,
+    block_tables: Tensor,
+    context_lens: Tensor,
+    max_context_len: int,
+    # optional mask
+    attention_mask: Tensor = None,
+    
+    # heuristics: w_start == mask_k * scale_up
+    w_start: int = None,
+    # heuristics: n_patches == mask_k // scale_up
+    n_patches: int = None,
+    mask_k: int = 512,
+    scale_up: float = 2,
+    
+    block_size_q: int = 8,
+    block_size_k: int = 1,
+    reduce_method: str = 'max',
+    reduce_stride: int = 1,
+):
+    """
+    vLLM compatible paged attention
+    
+    q: [num_seqs, num_heads, head_size]
+    k: [num_blocks, num_kv_heads, head_size/x, block_size, x]
+    v: [num_blocks, num_kv_heads, head_size, block_size]
+    block_tables: [num_seqs, max_num_blocks_per_seq]
+    context_lens: [num_seqs]
+    """
+    
+    q = q * q_scale
+    
+    paged_k = PagedKeyCacheVllmCompat(
+        key_cache=k,
+        block_table=block_tables,
+        context_length=context_lens,
+        max_context_length=max_context_len,
+    )
+    
+    paged_v = PagedValueCacheVllmCompat(
+        key_cache=paged_k,
+        value_cache=v,
+    )
+    
+    return timber_attention(
+        q=q,
+        k=paged_k,
+        v=paged_v,
+        attention_mask=attention_mask,
+        w_start=w_start,
+        n_patches=n_patches,
+        mask_k=mask_k,
+        scale_up=scale_up,
+        block_size_q=block_size_q,
+        block_size_k=block_size_k,
+        reduce_method=reduce_method,
+        reduce_stride=reduce_stride,
+    )
+
 def timber_attention(
     q: Tensor, 
     k: Tensor, 
