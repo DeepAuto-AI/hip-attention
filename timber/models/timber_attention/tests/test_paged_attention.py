@@ -134,15 +134,16 @@ def test_vllm_compat():
     assert alibi_slopes is None
     output_truth = state['output']
     
-    output = paged_timber_attention(
-        q=query,
-        q_scale=scale,
-        k=key_cache,
-        v=value_cache,
-        block_tables=input_metadata.block_tables,
-        context_lens=input_metadata.context_lens,
-        max_context_len=input_metadata.max_context_len,
-    )
+    with torch.no_grad():
+        output = paged_timber_attention(
+            q=query,
+            q_scale=scale,
+            k=key_cache,
+            v=value_cache,
+            block_tables=input_metadata.block_tables,
+            context_lens=input_metadata.context_lens,
+            max_context_len=input_metadata.max_context_len,
+        )
     
     error = torch.abs(output - output_truth).mean()
     print(torch.std_mean(output_truth), torch.std_mean(output), error, sep='\n')
