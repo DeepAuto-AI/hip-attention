@@ -34,7 +34,7 @@ def load_vllm_model(args: ArgsType):
     
     assert args.checkpoint is None
     
-    model = LLM(model_id)
+    model = LLM(model_id, enforce_eager=True)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 
     return model, tokenizer, device
