@@ -19,7 +19,7 @@ def samples():
     
     for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
         subprocess.call([
-            'python', 'src/models/tree_attention/attention1_block_gpu.py',
+            'python', 'src/models/timber_attention/attention1_block_gpu.py',
             '--method', 'none',
             '--query_size', str(query_size),
             '--dups', '4',
@@ -39,8 +39,8 @@ def samples():
         dynamic_ncols=True, desc='eval',
     ):
         subprocess.call([
-            'python', 'src/models/tree_attention/attention1_block_gpu.py',
-            '--method', 'tree',
+            'python', 'src/models/timber_attention/attention1_block_gpu.py',
+            '--method', 'timber',
             '--block_size_q', str(block_size),
             '--block_size_k', str(block_size),
             '--k', str(k),
@@ -51,13 +51,13 @@ def samples():
         ])
         with open('./cache/attention1_block_gpu/result.json', 'r') as f:
             latency = json.load(f)['mean']
-        results[f'tree_q{query_size}_b{block_size}_k{k}'] = {
+        results[f'timber_q{query_size}_b{block_size}_k{k}'] = {
             'query_size': query_size,
             'k': k,
             'block_size': block_size,
             'block_size_k': block_size,
             'latency': latency,
-            'method': 'tree',
+            'method': 'timber',
         }
     
     os.makedirs('./saves/speedup_report', exist_ok=True)
@@ -77,10 +77,10 @@ def plot():
         xs = []
         ys = []
         for block_size, k in itertools.product(block_sizes, ks):
-            tree_entry = data[f'tree_q{query_size}_b{block_size}_k{k}']
+            timber_entry = data[f'timber_q{query_size}_b{block_size}_k{k}']
             base_entry = data[f'none_q{query_size}']
             num_blocks = k / block_size
-            speedup = base_entry['latency'] / tree_entry['latency']
+            speedup = base_entry['latency'] / timber_entry['latency']
             xs.append(num_blocks)
             ys.append(speedup)
         sns.scatterplot(x=xs, y=ys, label=f'Query Length: {query_size}')
@@ -123,13 +123,13 @@ def plot_ppl(query_size=1):
         ys.append(entry_ppl['ppl'])
         k = entry_ppl["k"]
         block_size = entry_ppl["block_size"]
-        latency_tree = data_latency[f'tree_q{query_size}_b{block_size}_k{k}']['latency']
+        latency_timber = data_latency[f'timber_q{query_size}_b{block_size}_k{k}']['latency']
         latency_base = data_latency[f'none_q{query_size}']['latency']
         entries.append({
             'k': k,
             'block_size': block_size,
         })
-        xs.append(latency_base / latency_tree)
+        xs.append(latency_base / latency_timber)
     
     pts = list(zip(xs, ys, map(lambda x: (x,), range(len(data_ppl)))))
     chain = pypareto.Comparison(by_value, pypareto.MaxMinList(pypareto.MaxMin.MAX, pypareto.MaxMin.MIN, pypareto.MaxMin.MIN)).as_chain()

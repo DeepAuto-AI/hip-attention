@@ -48,7 +48,7 @@ import triton
 import triton.language as tl
 
 from timber.utils import get_bench, seed
-from timber.models.tree_attention.common import load_checkouts
+from timber.models.timber_attention.common import load_checkouts
 
 timer = lambda x: get_bench().region(x)
 
@@ -846,7 +846,7 @@ def attention_matrix(
     global DEBUG
     
     if DEBUG:
-        os.makedirs('saves/models/tree_attention/', exist_ok=True)
+        os.makedirs('saves/models/timber_attention/', exist_ok=True)
     
     dtype = queries.dtype
     device = queries.device
@@ -904,7 +904,7 @@ def attention_matrix(
             )[0]
             x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
             plt.imshow(x)
-            path = f'saves/models/tree_attention/hello_{w_curr}.png'
+            path = f'saves/models/timber_attention/hello_{w_curr}.png'
             print('saved', path)
             plt.savefig(path, dpi=200, bbox_inches='tight')
     
@@ -930,7 +930,7 @@ def attention_matrix(
         )[0]
         x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
         plt.imshow(x)
-        path = 'saves/models/tree_attention/hello_est.png'
+        path = 'saves/models/timber_attention/hello_est.png'
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         
@@ -943,7 +943,7 @@ def attention_matrix(
         x = x / x.sum(-1, keepdims=True)
         x = skimage.measure.block_reduce(x, (4, 4), np.max) ** 0.1
         plt.imshow(x)
-        path = 'saves/models/tree_attention/hello_truth.png'
+        path = 'saves/models/timber_attention/hello_truth.png'
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         print(ks)
@@ -1313,7 +1313,7 @@ def sparse_attention(
         values, indices, ks, probs,
     )
 
-def tree_attention(
+def timber_attention(
     q: Tensor, 
     k: Tensor, 
     v: Tensor,
@@ -1351,7 +1351,7 @@ def tree_attention(
     if not v.is_contiguous():
         v = v.contiguous()
     
-    with timer('tree_attention'):
+    with timer('timber_attention'):
         with timer('attention_matrix'):
             indices, ks, probs = attention_matrix(
                 q,
@@ -1398,7 +1398,7 @@ def main_debug():
     # out = out[:, skip:, :]
     # q = q[:, skip:, :]
     
-    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+    context, (atten_indices, atten_ks, atten_probs) = timber_attention(
         q,
         k,
         v,
@@ -1435,7 +1435,7 @@ def main_latency_benchmark():
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--dups', type=int, default=2)
     parser.add_argument('--query_size', type=int, default=1)
-    parser.add_argument('--method', type=str, default='tree')
+    parser.add_argument('--method', type=str, default='timber')
     parser.add_argument('--samples', type=int, default=200)
     args = parser.parse_args()
     
@@ -1470,8 +1470,8 @@ def main_latency_benchmark():
                 torch_attention(q, k, v)
             elif METHOD == 'flash':
                 flash_attention(q, k, v)
-            elif METHOD == 'tree':
-                tree_attention(
+            elif METHOD == 'timber':
+                timber_attention(
                     q,
                     k,
                     v,

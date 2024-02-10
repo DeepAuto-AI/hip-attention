@@ -7,8 +7,8 @@ def main():
     
     configs = [
         'none', 
-        'llama32k_tree_bq32_bk2_k512',
-        'llama13b_tree_bq32_bk2_k512'
+        'llama32k_timber_bq32_bk2_k512',
+        'llama13b_timber_bq32_bk2_k512'
     ]
     header = ['config',] + MMLU_SUBJECTS + ['avg',]
     lines = [','.join(header)]

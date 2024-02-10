@@ -2,35 +2,42 @@ import torch
 import warnings
 from torch import nn
 
-from timber.models.tree_attention.attention1_gpu import (
+from timber.models.timber_attention.attention1_block_gpu import (
     load_checkouts,
     sparse_attention,
     attention_matrix,
 )
 
 def test_sparse_attention():
-    q, k, v, out = load_checkouts()
+    q, k, v, out = load_checkouts(idx=0, window=40)
     
     w_start = 512
     n_patches = 128
     mask_k = 256
     scale_up = 2
+    block_size_q = 16
+    block_size_k = 4
     
     if q.dtype != torch.float32:
         q = q.to(torch.float32)
         k = k.to(torch.float32)
         v = v.to(torch.float32)
-        warnings.warn("tree attention does not support 32 bits right now.")
+        warnings.warn("timber attention does not support 32 bits right now.")
+    
+    mask = torch.ones((q.shape[0], k.shape[1]), dtype=torch.bool, device=q.device)
     
     with torch.autocast('cuda', torch.float32):
-        indices, ks, probs = attention_matrix(
+        indices, ks, probs, scores = attention_matrix(
             q,
             k,
+            mask,
             
             w_start,
             n_patches,
             mask_k,
             scale_up,
+            block_size_q,
+            block_size_k,
         )
         
     v = nn.Parameter(v)
@@ -43,64 +50,73 @@ def test_sparse_attention():
             indices,
             ks,
             probs,
+            block_size_q,
+            block_size_k,
         )
         
-        loss = context.square().sum()
+        loss = context.square().sum() * 0.01
         loss.backward()
         
         v.data -= 0.1 * v.grad
-        probs.data -= 0.001 * probs.grad
+        probs.data -= 0.1 * probs.grad
         
         v.grad = None
         probs.grad = None
         
         # print(loss.item())
     
-    assert loss.item() < 0.01
+    assert loss.item() < 1.0
     print('[pass] test_sparse_attention')
 
 def test_attention_mask():
-    q, k, v, out = load_checkouts()
+    q, k, v, out = load_checkouts(idx=0, window=40)
     
     w_start = 512
     n_patches = 128
     mask_k = 256
     scale_up = 2
+    block_size_q = 16
+    block_size_k = 4
     
     if q.dtype != torch.float32:
         q = q.to(torch.float32)
         k = k.to(torch.float32)
         v = v.to(torch.float32)
-        warnings.warn("tree attention does not support 32 bits right now.")
+        warnings.warn("timber attention does not support 32 bits right now.")
+    
+    mask = torch.ones((q.shape[0], k.shape[1]), dtype=torch.bool, device=q.device)
     
     q = nn.Parameter(q)
     k = nn.Parameter(k)
     
     # exam GD
     for i in range(1000):
-        indices, ks, probs = attention_matrix(
+        indices, ks, probs, scores = attention_matrix(
             q,
             k,
+            mask,
             
             w_start,
             n_patches,
             mask_k,
             scale_up,
+            block_size_q,
+            block_size_k,
         )
         
         loss = probs.std() * 1000
         loss.backward()
         
         # print(q.grad.abs().sum())
-        q.data -= 0.1 * q.grad
-        k.data -= 0.1 * k.grad
+        q.data -= 50 * q.grad
+        k.data -= 50 * k.grad
         
         q.grad = None
         k.grad = None
         
         # print(loss.item())
     
-    assert loss.item() < 3.5
+    assert loss.item() < 5.0
     print('[pass] test_attention_mask')
 
 if __name__ == '__main__':

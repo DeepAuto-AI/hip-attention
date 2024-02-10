@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import Tensor
 import matplotlib.pyplot as plt
-from timber.models.tree_attention.attention1_block_gpu import tree_attention, attention_matrix, sparse_attention, load_checkouts
+from timber.models.timber_attention.attention1_block_gpu import timber_attention, attention_matrix, sparse_attention, load_checkouts
 
 def to_dense(
     indices: np.ndarray, 
@@ -35,8 +35,8 @@ def imsave(im: Tensor, name: str, gamma: float = 0.2, idx_batch: int = -1):
     plt.title(name)
     plt.imshow(im)
     plt.colorbar()
-    os.makedirs('./saves/models/test_tree_block_fwd', exist_ok=True)
-    path = f'./saves/models/test_tree_block_fwd/{name}.png'
+    os.makedirs('./saves/models/test_timber_block_fwd', exist_ok=True)
+    path = f'./saves/models/test_timber_block_fwd/{name}.png'
     plt.savefig(path, dpi=200, bbox_inches='tight')
     plt.clf()
     print('saved', path)
@@ -128,22 +128,22 @@ def main():
     # print(context_truth[1, 2, :])
     
     for i in range(3):
-        context_tree, (indices_tree, ks_tree, probs_tree) = tree_attention(
+        context_timber, (indices_timber, ks_timber, probs_timber) = timber_attention(
             q, k, v, torch.ones((N, TSRC), dtype=torch.bool, device=q.device),
             w_start, n_patches, mask_k, scale_up, BLOCKSIZE_Q, BLOCKSIZE_K,
         )
-    context_tree_error_map = (context_tree - context_dense).abs()
-    context_tree_error = context_tree_error_map.max()
+    context_timber_error_map = (context_timber - context_dense).abs()
+    context_timber_error = context_timber_error_map.max()
     print((q - q_backup).abs().sum())
     print((k - k_backup).abs().sum())
     print((v - v_backup).abs().sum())
-    print('error between tree', context_tree_error)
+    print('error between timber', context_timber_error)
     
-    probs_dense_tree = to_dense(
-        indices_tree.cpu(), ks_tree.cpu(), probs_tree.cpu(), 
+    probs_dense_timber = to_dense(
+        indices_timber.cpu(), ks_timber.cpu(), probs_timber.cpu(), 
         N, TDST, TSRC, BLOCKSIZE_Q, BLOCKSIZE_K
     ).to(indices.device)
-    imsave(probs_dense_tree, 'probs_dense_tree')
+    imsave(probs_dense_timber, 'probs_dense_timber')
 
 if __name__ == '__main__':
     for i in range(1):

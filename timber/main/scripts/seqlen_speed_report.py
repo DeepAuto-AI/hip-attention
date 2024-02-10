@@ -35,11 +35,11 @@ def samples():
         if dup in batch_sizes:
             batch_size = batch_sizes[dup]
         
-        latency_trees = []
+        latency_timbers = []
         for block_size_k in block_size_ks:
             cmd = [
-                'python', 'src/models/tree_attention/attention1_block_gpu.py',
-                '--method', 'tree',
+                'python', 'src/models/timber_attention/attention1_block_gpu.py',
+                '--method', 'timber',
                 '--block_size_q', str(block_size),
                 '--block_size_k', str(block_size_k),
                 '--k', str(k),
@@ -51,11 +51,11 @@ def samples():
             print(' '.join(cmd))
             subprocess.call(cmd)
             with open('./cache/attention1_block_gpu/result.json', 'r') as f:
-                latency_tree = json.load(f)['mean']
-            latency_trees.append(latency_tree)
+                latency_timber = json.load(f)['mean']
+            latency_timbers.append(latency_timber)
         
         subprocess.call([
-            'python', 'src/models/tree_attention/attention1_block_gpu.py',
+            'python', 'src/models/timber_attention/attention1_block_gpu.py',
             '--method', 'none',
             '--block_size_q', str(block_size),
             '--block_size_k', str(block_size),
@@ -71,14 +71,14 @@ def samples():
         seq_len = dup * 1024
         results[f's{seq_len}'] = {
             'block_size_ks': block_size_ks,
-            'latency_trees': latency_trees,
+            'latency_timbers': latency_timbers,
             'latency_base': latency_base,
             'batch_size': batch_size,
             'query_size': query_size,
             'seq_len': seq_len,
             'dups': dup,
             'k': k,
-            'speedup': latency_base / latency_tree,
+            'speedup': latency_base / latency_timber,
         }
     
     os.makedirs('./saves/seqlen_speed_report', exist_ok=True)
@@ -96,30 +96,30 @@ def plot():
     
     xss = []
     ys_bases = []
-    ys_trees = []
+    ys_timbers = []
     ys_speedups = []
     
     for iks, block_size_k in enumerate(block_size_ks):
         xs = []
         ys_base = []
-        ys_tree = []
+        ys_timber = []
         ys_speedup = []
         for dup in dups:
             entry = data[f's{dup * 1024}']
             xs.append(entry['seq_len'])
             ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
-            ys_tree.append(entry['latency_trees'][iks] / entry['batch_size'] * 1000)
-            ys_speedup.append(entry['latency_base'] / entry['latency_trees'][iks])
+            ys_timber.append(entry['latency_timbers'][iks] / entry['batch_size'] * 1000)
+            ys_speedup.append(entry['latency_base'] / entry['latency_timbers'][iks])
         xss.append(xs)
         ys_bases.append(ys_bases)
-        ys_trees.append(ys_tree)
+        ys_timbers.append(ys_timber)
         ys_speedups.append(ys_speedup)
     
     plt.figure(figsize=(5,4))
     
     sns.lineplot(x=xs, y=ys_base, label='baseline')
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_trees[iks], label=f'timber (bk={block_size_k})')
+        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'timber (bk={block_size_k})')
     plt.legend()
     plt.title('Single Query Latency (k=512, bq=16)')
     plt.xlabel('Seq. Length')

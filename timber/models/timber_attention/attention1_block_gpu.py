@@ -35,7 +35,7 @@ from torch.autograd import Function
 assert triton.__version__ in ['2.2.0']
 
 from timber.utils import get_bench, seed
-from timber.models.tree_attention.common import load_checkouts
+from timber.models.timber_attention.common import load_checkouts
 
 timer = lambda x: get_bench().region(x)
 
@@ -560,7 +560,7 @@ def _masking_iteration_compute(
     )
     # tl.debug_barrier()
 
-DEBUG = os.environ.get('TREE_DEBUG', '0') == '1'
+DEBUG = os.environ.get('TIMBER_DEBUG', '0') == '1'
 
 def next_multiple_of(x: int, multiple_by: int = 16):
     # if (x % multiple_by) == 0:
@@ -1303,7 +1303,7 @@ def attention_matrix(
     
     if DEBUG:
         print('attention_matrix', queries.shape, keys.shape, w_start, n_patches, mask_k, scale_up, BLOCK_SIZE_Q, BLOCK_SIZE_K)
-        os.makedirs('saves/models/tree_attention/', exist_ok=True)
+        os.makedirs('saves/models/timber_attention/', exist_ok=True)
     
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
@@ -1442,8 +1442,8 @@ def attention_matrix(
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
         plt.imshow(x)
-        path = f'saves/models/tree_attention/block_{w_curr}.png'
-        # path = f'saves/models/tree_attention/block.png'
+        path = f'saves/models/timber_attention/block_{w_curr}.png'
+        # path = f'saves/models/timber_attention/block.png'
         print('saved', path)
         plt.savefig(path, dpi=96, bbox_inches='tight')
     
@@ -1511,7 +1511,7 @@ def attention_matrix(
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
         plt.imshow(x)
-        path = 'saves/models/tree_attention/block_est.png'
+        path = 'saves/models/timber_attention/block_est.png'
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         
@@ -1525,7 +1525,7 @@ def attention_matrix(
         x = x / x.sum(-1, keepdims=True)
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
         plt.imshow(x)
-        path = 'saves/models/tree_attention/block_truth.png'
+        path = 'saves/models/timber_attention/block_truth.png'
         print('saved', path)
         plt.savefig(path, dpi=200, bbox_inches='tight')
         # print(ks)
@@ -2034,7 +2034,7 @@ def to_dense(
                     ]
     return out
 
-def tree_attention(
+def timber_attention(
     q: Tensor, 
     k: Tensor, 
     v: Tensor,
@@ -2096,7 +2096,7 @@ def tree_attention(
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     
-    with timer('tree_attention'):
+    with timer('timber_attention'):
         with timer('attention_matrix'):
             indices, ks, probs, scores = attention_matrix(
                 q,
@@ -2173,7 +2173,7 @@ def main_latency_benchmark():
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--dups', type=int, default=2)
     parser.add_argument('--query_size', type=int, default=1)
-    parser.add_argument('--method', type=str, default='tree')
+    parser.add_argument('--method', type=str, default='timber')
     parser.add_argument('--samples', type=int, default=200)
     parser.add_argument('--block_size_q', type=int, default=16)
     parser.add_argument('--block_size_k', type=int, default=1)
@@ -2211,8 +2211,8 @@ def main_latency_benchmark():
                 torch_attention(q, k, v)
             elif METHOD == 'flash':
                 flash_attention(q, k, v)
-            elif METHOD == 'tree':
-                tree_attention(
+            elif METHOD == 'timber':
+                timber_attention(
                     q,
                     k,
                     v,
@@ -2263,7 +2263,7 @@ def main_debug():
     print('v', v.shape)
     print('out', out.shape)
     
-    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+    context, (atten_indices, atten_ks, atten_probs) = timber_attention(
         q,
         k,
         v,
@@ -2289,7 +2289,7 @@ def main_debug_mask():
     for i in range(N):
         mask[i, :1024] = 0
     
-    context, (atten_indices, atten_ks, atten_probs) = tree_attention(
+    context, (atten_indices, atten_ks, atten_probs) = timber_attention(
         q,
         k,
         v,

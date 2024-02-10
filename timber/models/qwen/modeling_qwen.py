@@ -107,7 +107,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
-from timber.models.tree_attention.attention1_block_gpu import tree_attention
+from timber.models.timber_attention.attention1_block_gpu import timber_attention
 
 class QWenAttention(nn.Module):
     def __init__(self, config):
@@ -202,7 +202,7 @@ class QWenAttention(nn.Module):
             attn_output =  F.scaled_dot_product_attention(
                 query, key, value, is_causal=True, scale=1.0
             )
-        elif self.attention_method == 'tree':
+        elif self.attention_method == 'timber':
             # warnings.warn("dense queries is not supported yet for qwen!!!")
             # warnings.warn("global context is not supported yet for qwen!!!")
             
@@ -213,7 +213,7 @@ class QWenAttention(nn.Module):
             
             # print(query.dtype, key.dtype, value.dtype)
             
-            attn_output, _ = tree_attention(
+            attn_output, _ = timber_attention(
                 query, key, value, None, 
                 mask_k=self.tree_k, 
                 block_size_q=self.tree_block_size_q,

@@ -54,7 +54,7 @@ class TrainConfig:
     block_size_q: int = 8
     block_size_k: int = 8
     init_from_checkpoint: str = None
-    method: str = 'tree'
+    method: str = 'timber'
     model: str = 'llama32k'
 
 class LabDataModule(pl.LightningDataModule):
@@ -137,7 +137,7 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 
 def load_model(
     train_config: TrainConfig = None, 
-    method = 'tree', 
+    method = 'timber', 
     device = 'cuda:0',
 ):
     if train_config.using_fsdp:
@@ -379,7 +379,7 @@ def main(config: TrainConfig):
         devices = "1"
         strategy = "auto"
     
-    if config.method == 'tree':
+    if config.method == 'timber':
         filename = f'llama32k-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-{{epoch:02d}}-{{step}}'
     elif config.method == 'none':
         filename = f'llama32k-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
@@ -414,7 +414,7 @@ def main(config: TrainConfig):
         max_steps=config.max_steps,
         logger=WandbLogger(
             save_dir="saves/dev/wandb", 
-            project="tree-attention"
+            project="timber-attention"
         ),
         enable_checkpointing=True,
         callbacks=[
@@ -455,7 +455,7 @@ if __name__ == "__main__":
     parser.add_argument('--k', default=512, type=int)
     parser.add_argument('--block_size_q', default=16, type=int)
     parser.add_argument('--block_size_k', default=2, type=int)
-    parser.add_argument('--method', default='tree', type=str)
+    parser.add_argument('--method', default='timber', type=str)
     
     args = parser.parse_args()
     

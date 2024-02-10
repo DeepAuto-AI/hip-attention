@@ -196,7 +196,7 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
     
     os.makedirs('./saves/llama_eval/mmlu/', exist_ok=True)
     json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}.json'
-    if args.method == 'tree':
+    if args.method == 'timber':
         json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
         
     with open(json_path, 'w') as f:

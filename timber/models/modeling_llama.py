@@ -652,11 +652,11 @@ class LlamaFlashAttention2(LlamaAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-from timber.models.tree_attention.attention1_gpu import flash_attention
+from timber.models.timber_attention.attention1_gpu import flash_attention
 # NOTE: element-wise implementation
-# from timber.models.tree_attention.attention1_gpu import tree_attention
+# from timber.models.timber_attention.attention1_gpu import timber_attention
 # NOTE: block-wise implementation. more efficient
-from timber.models.tree_attention.attention1_block_gpu import tree_attention
+from timber.models.timber_attention.attention1_block_gpu import timber_attention
 
 class LlamaCustomAttention(LlamaAttention):
     def __init__(self, config: LlamaConfig, layer_idx = None):
@@ -703,7 +703,7 @@ class LlamaCustomAttention(LlamaAttention):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional["TreeCache"] = None,
+        past_key_value: Optional["TimberCache"] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -794,8 +794,8 @@ class LlamaCustomAttention(LlamaAttention):
                 with torch.autocast('cuda', enabled=False):
                     attn_output = self.tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
                 attn_output = attn_output.to(q.dtype)                
-            elif self.attention_method == 'tree':
-                with timer("layer.tree.prepare"):
+            elif self.attention_method == 'timber':
+                with timer("layer.timber.prepare"):
                     q = query_states / (query_states.shape[-1] ** 0.5)
                     k = key_states
                     v = value_states
@@ -823,7 +823,7 @@ class LlamaCustomAttention(LlamaAttention):
                 attn_outputs = []
                 
                 # if DENSE_QUERIES == 0:
-                #     print("converted to TREE")
+                #     print("converted to TIMBER")
                 
                 if DENSE_QUERIES > 0:
                     with timer("layer.flash"):
@@ -847,35 +847,34 @@ class LlamaCustomAttention(LlamaAttention):
                     # print(q.dtype)
                     # input()
                     
-                    q_tree = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
-                    with timer("layer.tree"):
-                        attn_output_tree, _ = tree_attention(
-                            q_tree,
+                    q_timber = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
+                    with timer("layer.timber"):
+                        attn_output_timber, _ = timber_attention(
+                            q_timber,
                             k[:, :LAST_DENSE_QUERIES, :],
                             v[:, :LAST_DENSE_QUERIES, :],
                             mask_k=self.tree_k,
                             block_size_q=self.tree_block_size_q,
                             block_size_k=self.tree_block_size_k,
                         )
-                        # assert attn_output_tree.dtype == torch.bfloat16
                     
                     # flash_attention_mask = torch.ones((N*H, TDST-DENSE_QUERIES, TSRC), device=q.device, dtype=q.dtype)
                     # flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index+DENSE_QUERIES)
                     # flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
                     # # print(q.shape, flash_attention_mask, TSRC-current_query_index)
-                    # attn_output_tree_truth, _ = flash_attention(
+                    # attn_output_timber_truth, _ = flash_attention(
                     #     q[:, min(DENSE_QUERIES, TDST):, :],
                     #     # q,
                     #     k,
                     #     v,
                     #     flash_attention_mask,
                     # )
-                    # attn_output_tree = attn_output_tree_truth
+                    # attn_output_timber = attn_output_timber_truth
                     
                     # """
                     # NOTE: accumulation should be done with fp32
                     
-                    with timer("layer.tree.after"):
+                    with timer("layer.timber.after"):
                         if self.tree_using_context_avg:
                             last_cumsum = None
                             if past_key_value is not None:
@@ -888,7 +887,7 @@ class LlamaCustomAttention(LlamaAttention):
                                 last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:LAST_DENSE_QUERIES, :]
                             else:
                                 # print('cache hit')
-                                curr_v = v[:, -q_tree.shape[-2]:LAST_DENSE_QUERIES, :]
+                                curr_v = v[:, -q_timber.shape[-2]:LAST_DENSE_QUERIES, :]
                                 curr_v = curr_v.cumsum(-2, dtype=torch.float32)
                                 last_cumsum = curr_v + last_cumsum[:, -1:, :]
 
@@ -897,7 +896,7 @@ class LlamaCustomAttention(LlamaAttention):
                             
                             context_avg = last_cumsum / torch.arange(
                                 current_query_index+DENSE_QUERIES+1, 
-                                current_query_index+DENSE_QUERIES+1+q_tree.shape[1],
+                                current_query_index+DENSE_QUERIES+1+q_timber.shape[1],
                                 device=v.device
                             )[None, :, None]
                             context_avg = context_avg.to(v.dtype)
@@ -907,14 +906,14 @@ class LlamaCustomAttention(LlamaAttention):
                             # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
                             scale_avg = torch.sigmoid(
                                 self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1, -2).reshape(N*H, -1, 1)
-                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_tree.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
+                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
                             # NOTE: 0.25 is just heuristic
                             # NOTE: 256 is top-k value
-                            attn_output_tree = attn_output_tree * (1 - scale_avg) + context_avg * scale_avg
+                            attn_output_timber = attn_output_timber * (1 - scale_avg) + context_avg * scale_avg
                             # """
                         # assert scale_avg.dtype == torch.bfloat16
-                        # assert attn_output_tree.dtype == torch.bfloat16
-                    attn_outputs.append(attn_output_tree)
+                        # assert attn_output_timber.dtype == torch.bfloat16
+                    attn_outputs.append(attn_output_timber)
                     
                 if LAST_DENSE_QUERIES is not None:
                     flash_attention_mask = torch.zeros((N*H, abs(LAST_DENSE_QUERIES), TSRC), dtype=q.dtype, device=q.device)
@@ -1046,7 +1045,7 @@ LLAMA_ATTENTION_CLASSES = {
     "sdpa": LlamaCustomAttention,
 }
 
-class TreeCache(DynamicCache):
+class TimberCache(DynamicCache):
     def __init__(self):
         super().__init__()
         self.cumsum = [None, ] * 100
@@ -1343,7 +1342,7 @@ class LlamaModel(LlamaPreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = TreeCache.from_legacy_cache(past_key_values)
+                past_key_values = TimberCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:

@@ -21,7 +21,7 @@ def samples():
         subprocess.call([
             'python', 'src/main/llama_eval.py', 
             '--model', 'llama13b',
-            '--method', 'tree',
+            '--method', 'timber',
             '--stride', '4096',
             '--block_size_q', str(block_size),
             '--block_size_k', str(block_size),

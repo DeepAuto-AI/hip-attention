@@ -190,7 +190,7 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
     
     os.makedirs('./saves/qwen_eval/mmmu', exist_ok=True)
     json_path = f'./saves/qwen_eval/mmmu/{subject}_{args.model}_{args.method}.json'
-    if args.method == 'tree':
+    if args.method == 'timber':
         json_path = f'./saves/qwen_eval/mmmu/{subject}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
     with open(json_path, 'w') as f:
         json.dump({
@@ -218,7 +218,7 @@ def job_mmmu(args: ArgsType, model, tokenizer, device):
     
     os.makedirs('./saves/qwen_eval/mmmu', exist_ok=True)
     json_path = f'./saves/qwen_eval/mmmu/{args.model}_{args.method}.json'
-    if args.method == 'tree':
+    if args.method == 'timber':
         json_path = f'./saves/qwen_eval/mmmu/{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
     with open(json_path, 'w') as f:
         json.dump({
