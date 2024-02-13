@@ -325,6 +325,8 @@ def _masking_iteration_compute(
                 #     vec_q * vec_k, 
                 #     axis=0,
                 # )
+                if vec_k.dtype == tl.uint8:
+                    vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
                 scores_partial = -tl.dot(vec_q, vec_k).to(scores.dtype)
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
@@ -467,6 +469,8 @@ def _masking_iteration_compute(
                         raise Exception()
                     
                     # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+                    if vec_k.dtype == tl.uint8:
+                        vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
                     scores_micro = -tl.dot(vec_q, vec_k)
                     scores_partial += scores_micro.to(scores_partial.dtype)
                 
@@ -1017,6 +1021,8 @@ def _calc_score_compute(
         
         # TOOD: WIP
         
+        if keys.dtype == tl.uint8:
+            keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
         scores_mini = tl.dot(queries, keys)
         scores_mini = tl.reshape(scores_mini, (BLOCK_SIZE_Q_PADDED, BLOCK_BK, BLOCK_SIZE_K_PADDED))
         
@@ -1588,6 +1594,13 @@ def attention_matrix(
         if SPARQ:
             with timer('matrix.setup.sparq'):
                 queries_scores = queries.abs()
+                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST:
+                    queries_scores = F.pad(
+                        queries_scores.unsqueeze(0), 
+                        (0, 0, 0, B_DST * BLOCK_SIZE_Q - T_DST), 
+                        value=0
+                    ).squeeze(0)
+                # print(queries_scores.shape, B_DST, BLOCK_SIZE_Q, T_DST, T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST)
                 # TODO: padding
                 queries_scores = queries_scores.view(N, B_DST, -1, HID)
                 if SPARQ_REDUCE_METHOD == 'sum':
@@ -1899,6 +1912,8 @@ def _sdbmm_compute(
             raise Exception()
         
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+        if value.dtype == tl.uint8:
+            value = value.to(tl.float8e5, bitcast=True).to(atten_probs.dtype)
         scores_mini = tl.dot(atten_probs, value)
         scores += scores_mini.to(scores.dtype)
         
@@ -2123,7 +2138,11 @@ class SparseAttentionAutoGradFn(Function):
         
         BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
         
-        context = torch.zeros((N, TDST, HID), dtype=values.dtype, device=values.device)
+        context_dtype = values.dtype
+        if context_dtype not in [torch.float16, torch.bfloat16, torch.float32]:
+            context_dtype = probs.dtype
+        assert context_dtype in [torch.float16, torch.bfloat16, torch.float32]
+        context = torch.zeros((N, TDST, HID), dtype=context_dtype, device=values.device)
         
         BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
         BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 16)
@@ -2195,8 +2214,8 @@ class SparseAttentionAutoGradFn(Function):
         assert probs.ndim == 3
         assert values.ndim == 3
         assert context.ndim == 3
-        assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
-        assert values.dtype == context.dtype
+        # assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
+        # assert values.dtype == context.dtype
         _sdbmm_compute[grid](
             # inputs
             indices, *indices.stride(),
@@ -2513,6 +2532,8 @@ def paged_timber_attention(
         value_cache=v,
     )
     
+    print('paged qkv cache shape', q.shape, paged_k.shape, paged_v.shape)
+    
     return timber_attention(
         q=q,
         k=paged_k,
@@ -2568,8 +2589,8 @@ def timber_attention(
     assert N == _N
     assert HID == _HID
     
-    assert q.dtype == k.dtype
-    assert q.dtype == v.dtype
+    # assert q.dtype == k.dtype, f'{q.dtype} == {k.dtype}'
+    # assert q.dtype == v.dtype
     
     if attention_mask is None:
         attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
@@ -2608,7 +2629,7 @@ def timber_attention(
                 reduce_stride,
             )
             
-            assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
+            # assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
         
         with timer('sparse_attention'):
             if DENSE_SPARSE_ATTENTION:
