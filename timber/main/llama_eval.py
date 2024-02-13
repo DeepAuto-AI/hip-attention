@@ -28,18 +28,29 @@ def load_vllm_model(args: ArgsType):
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
+        'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
+        'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+        'vllm_pythia70m': 'EleutherAI/pythia-70m',
     }
     assert args.model in MODELS
+    assert args.job in ['stream']
     model_id = MODELS[args.model]
     
     assert args.checkpoint is None
     
     model = LLM(
         model_id, 
-        max_context_len_to_capture=4096,
+        max_context_len_to_capture=1024*24,
         max_num_seqs=args.batch_size,
+        max_model_len=1024*24,
+        swap_space=0,
+        kv_cache_dtype='fp8_e5m2',
+        dtype='half',
+        gpu_memory_utilization=0.8,
+        # tensor_parallel_size=2,
         enforce_eager=True
     )
+    
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 
     return model, tokenizer, device
@@ -52,6 +63,7 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
     assert args.model in MODELS, MODELS.keys()
     model_id = MODELS[args.model]
