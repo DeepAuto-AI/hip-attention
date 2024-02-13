@@ -32,7 +32,7 @@ def job_stream(args, model, tokenizer, device):
     while True:
         get_bench().reset_trace()
         get_bench().reset_measures()
-        get_bench().disabled = False
+        get_bench().disabled = True
         
         input_text = input('>>>').strip()
         
@@ -47,11 +47,11 @@ def job_stream(args, model, tokenizer, device):
         t = time.time()
         try:
             if isinstance(model, LLM):
-                prompts = [input_text]
+                prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
                     temperature=0.8, 
                     top_p=0.95,
-                    max_tokens=inputs.input_ids.shape[-1] + 128,
+                    max_tokens=inputs.input_ids.shape[-1] + 16,
                 )
                 
                 outputs = model.generate(prompts, sampling_params, use_tqdm=True)

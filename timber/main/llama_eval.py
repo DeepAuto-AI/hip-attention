@@ -34,7 +34,12 @@ def load_vllm_model(args: ArgsType):
     
     assert args.checkpoint is None
     
-    model = LLM(model_id, enforce_eager=True)
+    model = LLM(
+        model_id, 
+        max_context_len_to_capture=4096,
+        max_num_seqs=args.batch_size,
+        enforce_eager=True
+    )
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 
     return model, tokenizer, device

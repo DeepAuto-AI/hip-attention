@@ -27,7 +27,7 @@ from torch import Tensor
 import tqdm
 import triton
 import triton.language as tl
-from typing import Literal, Tuple, List
+from typing import Literal, Tuple, List, Union
 import os
 import math
 from torch.autograd import Function
@@ -72,7 +72,26 @@ def _masking_iteration_compute(
     # input variables
     N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ_HID: int,
     
+    # vLLM compat inputs
+    stride_keys_vllm_num_blcoks, 
+    stride_keys_vllm_num_kv_heads,
+    stride_keys_vllm_head_size_x,
+    stride_keys_vllm_block_size,
+    stride_keys_vllm_x,
+    
+    VLLM_NUM_BLOCKS: int, 
+    VLLM_NUM_KV_HEADS: int,
+    VLLM_HEAD_SIZE_X: int,
+    VLLM_BLOCK_SIZE: int,
+    VLLM_X: int, 
+    VLLM_HEAD_SIZE: int,
+    
+    BLOCK_TABLES, 
+    stride_block_tables_num_seqs, 
+    stride_block_tables_max_num_blocks_per_seq,
+    
     # block constant
+    KEY_CACHE_METHOD: tl.constexpr,
     SPARQ: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
     BLOCK_MASK_K: tl.constexpr, 
@@ -248,6 +267,8 @@ def _masking_iteration_compute(
         scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
         
         if REDUCE_METHOD == 'first':
+            assert KEY_CACHE_METHOD == 'cont'
+            
             for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
                 idx_hid = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
                 mask_hid = idx_hid < HID
@@ -263,7 +284,7 @@ def _masking_iteration_compute(
                 
                 num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
                 num_pixels_mask = num_pixels_range < num_pixels_scalar
-                loc_k_vec = tl.load(
+                idx_tsrc = tl.load(
                     TMASK +\
                         idx_n * stride_tmask_n +\
                         idx_bdst * stride_tmask_bdst +\
@@ -274,13 +295,14 @@ def _masking_iteration_compute(
                 # tl.debug_barrier()
                 # NOTE: random key selection with in the block
                 # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                vec_k_mask = num_pixels_mask[None, :] & mask_hid[:, None]
+                idx_tsrc = (idx_tsrc.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+                mask_tsrc = num_pixels_mask
+                vec_k_mask = mask_tsrc[None, :] & mask_hid[:, None]
                 
                 key_mask = tl.load(
                     ATTEN_MASK +\
                         idx_n * stride_atten_mask_n +\
-                        loc_k_vec * stride_atten_mask_tsrc,
+                        idx_tsrc * stride_atten_mask_tsrc,
                     mask = num_pixels_mask,
                     other = False,
                 ).to(tl.int1)
@@ -289,7 +311,7 @@ def _masking_iteration_compute(
                 vec_k = tl.load(
                     KEYS +\
                         idx_n * stride_keys_n +\
-                        loc_k_vec[None, :] * stride_keys_tsrc + \
+                        idx_tsrc[None, :] * stride_keys_tsrc + \
                         idx_hid[:, None] * stride_keys_hid,
                     mask = vec_k_mask,
                     other = 0,
@@ -307,7 +329,7 @@ def _masking_iteration_compute(
                 scores_partial = tl.sum(scores_partial, axis=0)
                 scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
                 scores_partial = scores_partial +\
-                    ((idx_bdst * BLOCK_SIZE_Q + T_SRC - T_DST) < loc_k_vec) * 10000.0
+                    ((idx_bdst * BLOCK_SIZE_Q + T_SRC - T_DST) < idx_tsrc) * 10000.0
                 
                 scores += scores_partial
         elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
@@ -331,7 +353,7 @@ def _masking_iteration_compute(
             
             num_pixels_range = tl.arange(0, BLOCK_TMASK_K)
             num_pixels_mask = num_pixels_range < num_pixels_scalar
-            loc_k_vec = tl.load(
+            idx_tsrc = tl.load(
                 TMASK +\
                     idx_n * stride_tmask_n +\
                     idx_bdst * stride_tmask_bdst +\
@@ -342,13 +364,13 @@ def _masking_iteration_compute(
             # tl.debug_barrier()
             # NOTE: random key selection with in the block
             # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-            loc_k_vec = (loc_k_vec.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+            idx_tsrc = (idx_tsrc.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
             
             for _idx_block_k in range(BLOCK_SIZE_K):
                 scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
                 
                 # [BLOCK_TMASK_K, ]
-                idx_tsrc = (loc_k_vec + _idx_block_k)
+                idx_tsrc = (idx_tsrc + _idx_block_k)
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
                 
                 # [BLOCK_TMASK_K, ]
@@ -397,20 +419,52 @@ def _masking_iteration_compute(
                     # tl.debug_barrier()
                     
                     # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
-                    vec_k = tl.load(
-                        KEYS +\
-                            idx_n * stride_keys_n +\
-                            idx_tsrc[None, :] * stride_keys_tsrc + \
-                            idx_hid[:, None] * stride_keys_hid,
-                        mask = (
-                            num_pixels_mask[None, :] &
-                            mask_hid[:, None] &
-                            mask_tsrc[None, :] &
-                            # key_mask[None, :] &
-                            True
-                        ),
-                        other = 0,
+                    vec_k_mask = (
+                        num_pixels_mask[None, :] &
+                        mask_hid[:, None] &
+                        mask_tsrc[None, :] &
+                        # key_mask[None, :] &
+                        True
                     )
+                    if KEY_CACHE_METHOD == 'cont':
+                        # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                        vec_k = tl.load(
+                            KEYS +\
+                                idx_n * stride_keys_n +\
+                                idx_tsrc[None, :] * stride_keys_tsrc + \
+                                idx_hid[:, None] * stride_keys_hid,
+                            mask = vec_k_mask,
+                            other = 0,
+                        )
+                    elif KEY_CACHE_METHOD == 'vllm':
+                        """
+                        idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+                        offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+                        key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
+                        """
+                        idx_batch = idx_n // VLLM_NUM_KV_HEADS
+                        idx_head = idx_n % VLLM_NUM_KV_HEADS
+                        idx_block = tl.load(
+                            BLOCK_TABLES +\
+                                idx_batch * stride_block_tables_num_seqs +\
+                                (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                            mask = mask_tsrc,
+                        )
+                        offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
+                        
+                        # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                        vec_k = tl.load(
+                            KEYS +\
+                                idx_block[None, :] * stride_keys_vllm_num_blcoks +\
+                                idx_head * stride_keys_vllm_num_kv_heads +\
+                                (idx_hid[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
+                                offset_block[None, :] * stride_keys_vllm_block_size +\
+                                (idx_hid[:, None] % VLLM_X) * stride_keys_vllm_x,
+                            mask = vec_k_mask,
+                            other = 0,
+                        )
+                    else:
+                        raise Exception()
                     
                     # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
                     scores_micro = -tl.dot(vec_q, vec_k)
@@ -570,7 +624,7 @@ def next_multiple_of(x: int, multiple_by: int = 16):
 
 def masking_iteration(
     # input matrices
-    queries: Tensor, keys: Tensor, attention_mask: Tensor,
+    queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], attention_mask: Tensor,
     # input metrices (blocked) 
     mask: Tensor, t_mask: Tensor, sparq_indices, sparq_indices_strides,
     # temp vectors (blocked)
@@ -635,6 +689,49 @@ def masking_iteration(
     elif BLOCK_TMASK_K >= 128:
         BLOCK_HID = min(BLOCK_HID, 128)
     # print(BLOCK_HID, BLOCK_TMASK_K)
+    
+    if isinstance(keys, Tensor):
+        KEY_CACHE_METHOD = 'cont'
+        stride_keys_vllm = (0, 0, 0, 0, 0)
+        VLLM_NUM_BLOCKS = 0
+        VLLM_NUM_KV_HEADS = 0
+        VLLM_HEAD_SIZE_X = 0
+        VLLM_BLOCK_SIZE = 0
+        VLLM_X = 0
+        VLLM_HEAD_SIZE = 0
+        block_tables = keys
+        block_tables_stride = (0, 0)
+    elif isinstance(keys, PagedKeyCacheVllmCompat):
+        """
+        vLLM compatible paged attention
+        
+        q: [num_seqs, num_heads, head_size]
+        k: [num_blocks, num_kv_heads, head_size/x, block_size, x]
+        v: [num_blocks, num_kv_heads, head_size, block_size]
+        block_tables: [num_seqs, max_num_blocks_per_seq]
+        context_lens: [num_seqs]
+        """
+        KEY_CACHE_METHOD = 'vllm'
+        stride_keys_vllm = keys.key_cache.stride()
+        (
+            VLLM_NUM_BLOCKS, 
+            VLLM_NUM_KV_HEADS, 
+            VLLM_HEAD_SIZE_X, 
+            VLLM_BLOCK_SIZE, 
+            VLLM_X
+        ) = keys.key_cache.shape
+        VLLM_HEAD_SIZE = VLLM_HEAD_SIZE_X * VLLM_X
+        block_tables = keys.block_table
+        block_tables_stride = block_tables.stride()
+        assert len(block_tables_stride) == 2
+        
+        # context_length = keys.context_length
+        # context_length = context_length.unsqueeze(-1).repeat_interleave(VLLM_NUM_KV_HEADS, dim=0)
+        # assert t_srcs.shape == context_length.shape, f"{t_srcs.shape} == {context_length.shape}"
+        # t_srcs = context_length
+    else:
+        raise Exception()
+    
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
     assert GROUP_N == 1
@@ -675,7 +772,20 @@ def masking_iteration(
         # input variables
         N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID,
         
+        # vLLM compat inputs
+        *stride_keys_vllm,
+        
+        VLLM_NUM_BLOCKS, 
+        VLLM_NUM_KV_HEADS,
+        VLLM_HEAD_SIZE_X,
+        VLLM_BLOCK_SIZE,
+        VLLM_X, 
+        VLLM_HEAD_SIZE,
+        
+        block_tables, *block_tables_stride,
+        
         # block constant
+        KEY_CACHE_METHOD,
         SPARQ,
         REDUCE_METHOD,
         BLOCK_MASK_K,
@@ -769,7 +879,26 @@ def _calc_score_compute(
     # input variables
     N, TDST, TSRC, HID, BK, K, BDST, BSRC,
     
+    # vllm key cache compat
+    stride_keys_vllm_num_bocks,
+    stride_keys_vllm_num_kv_heads,
+    stride_keys_vllm_head_size_x,
+    stride_keys_vllm_block_size,
+    stride_keys_vllm_x,
+    
+    VLLM_NUM_BLOCKS,
+    VLLM_NUM_KV_HEADS,
+    VLLM_HEAD_SIZE_X,
+    VLLM_BLOCK_SIZE,
+    VLLM_X,
+    VLLM_HEAD_SIZE,
+    
+    BLOCK_TABLES,
+    stride_block_tables_num_seqs,
+    stride_block_tables_max_num_blocks_per_seq,
+    
     # kernel constatnts
+    KEY_CACHE_METHOD: tl.constexpr,
     BLOCK_BK: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_Q_PADDED: tl.constexpr,
@@ -845,15 +974,45 @@ def _calc_score_compute(
             other = 0
         )
         
-        # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
-        keys = tl.load(
-            KEYS +\
-                idx_n * stride_keys_n +\
-                idx_tsrc[None, :, :] * stride_keys_tsrc +\
-                idx_hid[:, None, None] * stride_keys_hid,
-            mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
-            other = 0
-        )
+        if KEY_CACHE_METHOD == 'cont':
+            # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
+            keys = tl.load(
+                KEYS +\
+                    idx_n * stride_keys_n +\
+                    idx_tsrc[None, :, :] * stride_keys_tsrc +\
+                    idx_hid[:, None, None] * stride_keys_hid,
+                mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
+                other = 0
+            )
+        elif KEY_CACHE_METHOD == 'vllm':
+            """
+            idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+            offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+            key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
+            """
+            idx_batch = idx_n // VLLM_NUM_KV_HEADS
+            idx_head = idx_n % VLLM_NUM_KV_HEADS
+            idx_block = tl.load(
+                BLOCK_TABLES +\
+                    idx_batch * stride_block_tables_num_seqs +\
+                    (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                mask = mask_tsrc,
+            )
+            offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
+            
+            # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
+            keys = tl.load(
+                KEYS +\
+                    idx_block[None, :, :] * stride_keys_vllm_num_bocks +\
+                    idx_head * stride_keys_vllm_num_kv_heads +\
+                    (idx_hid[:, None, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
+                    offset_block[None, :, :] * stride_keys_vllm_block_size +\
+                    (idx_hid[:, None, None] % VLLM_X) * stride_keys_vllm_x,
+                mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
+                other = 0,
+            )
+        else:
+            raise Exception()
         keys = tl.reshape(keys, (BLOCK_HID, BLOCK_BK * BLOCK_SIZE_K_PADDED))
         
         # TOOD: WIP
@@ -881,15 +1040,19 @@ def _calc_score_compute(
 @triton.jit
 def _calc_score_compute_bwd_queries(
     # input matrices
-    ks, stride_ks_n, stride_ks_bdst,
-    indices, stride_indices_n, stride_indices_bdst, stride_indices_bk,
-    keys, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    KS, stride_ks_n, stride_ks_bdst,
+    INDICES, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid,
+    
     # grad output (read)
-    grad_scores, stride_grad_scores_n, stride_grad_scores_tdst, stride_grad_scores_k,
+    GRAD_SCORES, stride_grad_scores_n, stride_grad_scores_tdst, stride_grad_scores_k,
+    
     # grad input (write)
-    grad_queries, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
+    GRAD_QUERIES, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
+    
     # input variables
     N, TDST, TSRC, HID, BK, K,
+    
     # block constant
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_Q_PADDED: tl.constexpr,
@@ -921,7 +1084,7 @@ def _calc_score_compute_bwd_queries(
     idx_bdst = tl.program_id(1)
     
     scalar_ks = tl.load(
-        ks +\
+        KS +\
             idx_n * stride_ks_n +\
             idx_bdst * stride_ks_bdst
     )
@@ -940,7 +1103,7 @@ def _calc_score_compute_bwd_queries(
     accumulator = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID,), dtype=tl.float32)
     for idx_bk in range(BK):
         idx_tsrc = tl.load(
-            indices + \
+            INDICES + \
                 idx_n * stride_indices_n + \
                 idx_bdst * stride_indices_bdst + \
                 idx_bk * stride_indices_bk,
@@ -954,7 +1117,7 @@ def _calc_score_compute_bwd_queries(
         
         # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: score]
         grad_score = tl.load(
-            grad_scores +\
+            GRAD_SCORES +\
                 idx_n * stride_grad_scores_n +\
                 idx_tdst[:, None] * stride_grad_scores_tdst + \
                 idx_k[None, :] * stride_grad_scores_k,
@@ -964,7 +1127,7 @@ def _calc_score_compute_bwd_queries(
         
         # [BLOCK_SIZE_K_PADDED: score, BLOCK_HID: hid]
         key = tl.load(
-            keys +\
+            KEYS +\
                 idx_n * stride_keys_n +\
                 idx_tsrc[:, None] * stride_keys_tsrc +\
                 idx_hid[None, :] * stride_keys_hid,
@@ -976,7 +1139,7 @@ def _calc_score_compute_bwd_queries(
         accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
     
     tl.store(
-        grad_queries +\
+        GRAD_QUERIES +\
             idx_n * stride_grad_queries_n +\
             idx_tdst[:, None] * stride_grad_queries_tdst +\
             idx_hid[None, :] * stride_grad_queries_hid,
@@ -1091,7 +1254,7 @@ class CalcScoreAutoGradFn(Function):
     def forward(
         ctx, 
         # matrices
-        queries: Tensor, keys: Tensor, attention_mask: Tensor,
+        queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], attention_mask: Tensor,
         # indices matrices
         indices: Tensor, ks: Tensor,
         # block constant
@@ -1127,6 +1290,52 @@ class CalcScoreAutoGradFn(Function):
         # BLOCK_HID = triton.next_power_of_2(HID)
         # BLOCK_HID = max(BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED)
         BLOCK_HID = 32
+        
+        if isinstance(keys, Tensor):
+            KEY_CACHE_METHOD = 'cont'
+            
+            VLLM_NUM_BLOCKS =\
+            VLLM_NUM_KV_HEADS =\
+            VLLM_HEAD_SIZE_X =\
+            VLLM_BLOCK_SIZE =\
+            VLLM_X =\
+            VLLM_HEAD_SIZE = 0
+            
+            vllm_keys_strides = (0, 0, 0, 0, 0)
+            
+            block_tables = keys
+            block_tables_strides = (0, 0)
+        elif isinstance(keys, PagedKeyCacheVllmCompat):
+            """
+            vLLM compatible paged attention
+            
+            q: [num_seqs, num_heads, head_size]
+            k: [num_blocks, num_kv_heads, head_size/x, block_size, x]
+            v: [num_blocks, num_kv_heads, head_size, block_size]
+            block_tables: [num_seqs, max_num_blocks_per_seq]
+            context_lens: [num_seqs]
+            """
+            
+            KEY_CACHE_METHOD = 'vllm'
+            
+            (
+                VLLM_NUM_BLOCKS,
+                VLLM_NUM_KV_HEADS, 
+                VLLM_HEAD_SIZE_X,
+                VLLM_BLOCK_SIZE,
+                VLLM_X,
+            ) = keys.key_cache.shape
+            VLLM_HEAD_SIZE = VLLM_HEAD_SIZE_X * VLLM_X
+            
+            block_tables = keys.block_table
+            block_tables_strides = block_tables.stride()
+            assert len(block_tables_strides) == 2
+            
+            vllm_keys_strides = keys.key_cache.stride()
+            assert len(vllm_keys_strides) == 5
+        else:
+            raise Exception()
+        
         grid = (N, BDST, triton.cdiv(BK, BLOCK_BK))
         
         assert queries.ndim == 3
@@ -1138,17 +1347,34 @@ class CalcScoreAutoGradFn(Function):
         assert scores.ndim == 3
         with timer("_calc_score_compute"):
             _calc_score_compute[grid](
+                # input matrix
                 queries, *queries.stride(),
                 keys, *keys.stride(),
                 attention_mask, *attention_mask.stride(),
                 
+                # block indices
                 indices, *indices.stride(),
                 ks, *ks.stride(),
                 
+                # out matrix
                 scores, *scores.stride(),
                 
+                # input variables
                 N, TDST, TSRC, HID, BK, K, BDST, BSRC,
                 
+                # vllm key cache compat
+                *vllm_keys_strides,
+                VLLM_NUM_BLOCKS,
+                VLLM_NUM_KV_HEADS,
+                VLLM_HEAD_SIZE_X,
+                VLLM_BLOCK_SIZE,
+                VLLM_X,
+                VLLM_HEAD_SIZE,
+                
+                block_tables, *block_tables_strides,
+                
+                # kernel constatnts
+                KEY_CACHE_METHOD,
                 BLOCK_BK,
                 BLOCK_SIZE_Q,
                 BLOCK_SIZE_Q_PADDED,
@@ -1441,6 +1667,8 @@ def attention_matrix(
             N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K,
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        if x.shape[0] == 1:
+            x = x.repeat(32, 0)
         plt.imshow(x)
         path = f'saves/models/timber_attention/block_{w_curr}.png'
         # path = f'saves/models/timber_attention/block.png'
@@ -1510,6 +1738,8 @@ def attention_matrix(
             BLOCK_SIZE_K,
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        if x.shape[0] == 1:
+            x = x.repeat(32, 0)
         plt.imshow(x)
         path = 'saves/models/timber_attention/block_est.png'
         print('saved', path)
@@ -1519,17 +1749,18 @@ def attention_matrix(
         #     queries[0].cpu().numpy(), 
         #     keys[0].cpu().numpy().transpose((-1, -2))
         # )
-        x = (queries[0] @ keys[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
-        x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
-        x = np.exp(x - x.max(-1, keepdims=True))
-        x = x / x.sum(-1, keepdims=True)
-        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-        plt.imshow(x)
-        path = 'saves/models/timber_attention/block_truth.png'
-        print('saved', path)
-        plt.savefig(path, dpi=200, bbox_inches='tight')
-        # print(ks)
-        # input('>>>')
+        if isinstance(keys, Tensor):
+            x = (queries[0] @ keys[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
+            x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+            x = np.exp(x - x.max(-1, keepdims=True))
+            x = x / x.sum(-1, keepdims=True)
+            x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+            plt.imshow(x)
+            path = 'saves/models/timber_attention/block_truth.png'
+            print('saved', path)
+            plt.savefig(path, dpi=200, bbox_inches='tight')
+            # print(ks)
+            # input('>>>')
     
     return indices, ks, probs, scores
 
@@ -1537,18 +1768,34 @@ def attention_matrix(
 @triton.jit
 def _sdbmm_compute(
     # inputs
-    indices, stride_indices_n, stride_indices_bdst, stride_indices_bk,
-    ks, stride_ks_n, stride_ks_bdst, 
-    probs, stride_probs_n, stride_probs_tdst, stride_probs_k,
-    values, stride_values_n, stride_values_tsrc, stride_values_hid,
+    INDICES, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    KS, stride_ks_n, stride_ks_bdst, 
+    PROBS, stride_probs_n, stride_probs_tdst, stride_probs_k,
+    VALUES, stride_values_n, stride_values_tsrc, stride_values_hid,
     
     # output
-    context, stride_context_n, stride_context_tdst, stride_context_hid,
+    CONTEXT, stride_context_n, stride_context_tdst, stride_context_hid,
     
     # variables
     N, TSRC, TDST, HID, K, BK, BSRC, BDST,
     
+    # vllm value cache compat,
+    stride_values_vllm_num_blocks,
+    stride_values_vllm_num_kv_heads,
+    stride_values_vllm_head_size,
+    stride_values_vllm_block_size,
+    
+    VLLM_NUM_BLOCKS,
+    VLLM_NUM_KV_HEADS,
+    VLLM_HEAD_SIZE,
+    VLLM_BLOCK_SIZE,
+    
+    BLOCK_TABLES,
+    stride_block_tables_num_seqs,
+    stride_block_tables_max_num_blocks_per_seq,
+    
     # kernel blocks
+    VALUE_CACHE_METHOD: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_Q_PADDED: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -1572,7 +1819,7 @@ def _sdbmm_compute(
     mask_hid = idx_hid < HID
     
     n_bk = tl.load(
-        ks +\
+        KS +\
             idx_n * stride_ks_n+\
             idx_bdst * stride_ks_bdst,
     )
@@ -1581,7 +1828,7 @@ def _sdbmm_compute(
     for idx_bk in range(BK):
         mask_bk = idx_bk < n_bk
         _idx_tsrc = tl.load(
-            indices +\
+            INDICES +\
                 idx_n * stride_indices_n +\
                 idx_bdst * stride_indices_bdst +\
                 idx_bk * stride_indices_bk,
@@ -1596,7 +1843,7 @@ def _sdbmm_compute(
         idx_prob_k = (idx_bk * BLOCK_SIZE_K + idx_block_k)
         mask_prob_k = (idx_prob_k < K) & mask_block_k & mask_bk
         atten_probs = tl.load(
-            probs +\
+            PROBS +\
                 idx_n * stride_probs_n +\
                 idx_tdst[:, None] * stride_probs_tdst +\
                 idx_prob_k[None, :] * stride_probs_k,
@@ -1607,28 +1854,58 @@ def _sdbmm_compute(
                 mask_bk,
             other = 0,
         )
-        # tl.device_print("", K)
-        tl.device_assert(tl.max(idx_tsrc * mask_tsrc) < TSRC, "TSRC")
-        # tl.device_print("", stride_values_tsrc)
-        # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
-        # tl.device_print('n', idx_n)
-        value = tl.load(
-            values +\
-                idx_n.to(tl.int64) * stride_values_n +\
-                idx_tsrc[:, None].to(tl.int64) * stride_values_tsrc +\
-                idx_hid[None, :].to(tl.int64) * stride_values_hid,
-            mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_bk,
-            other = 0,
-        )
+        # DEBUG: tl.device_assert(tl.max(idx_tsrc * mask_tsrc) < TSRC, "TSRC")
         
-        # # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+        if VALUE_CACHE_METHOD == 'cont':
+            # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
+            value = tl.load(
+                VALUES +\
+                    idx_n.to(tl.int64) * stride_values_n +\
+                    idx_tsrc[:, None].to(tl.int64) * stride_values_tsrc +\
+                    idx_hid[None, :].to(tl.int64) * stride_values_hid,
+                mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_bk,
+                other = 0,
+            )
+        elif VALUE_CACHE_METHOD == 'vllm':
+            """
+            idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+            offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+            value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
+            """
+            idx_batch = idx_n // VLLM_NUM_KV_HEADS
+            idx_head = idx_n % VLLM_NUM_KV_HEADS
+            
+            idx_block = tl.load(
+                BLOCK_TABLES +\
+                    idx_batch * stride_block_tables_num_seqs +\
+                    (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                mask = mask_tsrc & mask_bk,
+                other = 0
+            ).to(tl.int64)
+            mask_block = (idx_tsrc // VLLM_BLOCK_SIZE) < tl.cdiv(TSRC, VLLM_BLOCK_SIZE)
+            offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
+            
+            # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
+            value = tl.load(
+                VALUES +\
+                    idx_block[:, None] * stride_values_vllm_num_blocks+\
+                    idx_head * stride_values_vllm_num_kv_heads+\
+                    idx_hid[None, :].to(tl.int64) * stride_values_vllm_head_size +\
+                    offset_block[:, None] * stride_values_vllm_block_size,
+                mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_bk & mask_block[:, None],
+                other = 0
+            )
+        else:
+            raise Exception()
+        
+        # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
         scores_mini = tl.dot(atten_probs, value)
         scores += scores_mini.to(scores.dtype)
         
         # scores += tl.sum(value)
         
     tl.store(
-        context +\
+        CONTEXT +\
             idx_n * stride_context_n +\
             idx_tdst[:, None] * stride_context_tdst +\
             idx_hid[None, :] * stride_context_hid,
@@ -1821,7 +2098,7 @@ class SparseAttentionAutoGradFn(Function):
     def forward(
         ctx, 
         # attention values
-        values: Tensor,
+        values: Union[Tensor, "PagedValueCacheVllmCompat"],
         
         # attention matrix
         indices: Tensor,
@@ -1851,6 +2128,47 @@ class SparseAttentionAutoGradFn(Function):
         BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
         BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 16)
         BLOCK_HID = triton.next_power_of_2(HID)
+        
+        if isinstance(values, Tensor):
+            VALUE_CACHE_METHOD = 'cont'
+            
+            block_tables = values
+            block_tables_strides = (0, 0)
+            
+            VLLM_NUM_BLOCKS =\
+            VLLM_NUM_KV_HEADS =\
+            VLLM_HEAD_SIZE =\
+            VLLM_BLOCK_SIZE = 0
+            
+            vllm_values_strides = (0, 0, 0, 0)
+        elif isinstance(values, PagedValueCacheVllmCompat):
+            """
+            vLLM compatible paged attention
+            
+            q: [num_seqs, num_heads, head_size]
+            k: [num_blocks, num_kv_heads, head_size/x, block_size, x]
+            v: [num_blocks, num_kv_heads, head_size, block_size]
+            block_tables: [num_seqs, max_num_blocks_per_seq]
+            context_lens: [num_seqs]
+            """
+            
+            VALUE_CACHE_METHOD = 'vllm'
+            
+            block_tables = values.block_table
+            block_tables_strides = block_tables.stride()
+            assert len(block_tables_strides) == 2
+            
+            (
+                VLLM_NUM_BLOCKS,
+                VLLM_NUM_KV_HEADS,
+                VLLM_HEAD_SIZE,
+                VLLM_BLOCK_SIZE
+            ) = values.value_cache.shape
+            vllm_values_strides = values.value_cache.stride()
+            assert len(vllm_values_strides) == 4 
+        else:
+            raise Exception()
+        
         grid = (N, BDST, triton.cdiv(HID, BLOCK_HID))
         # grid = (1, 1, 1)
         
@@ -1892,7 +2210,18 @@ class SparseAttentionAutoGradFn(Function):
             # input variables
             N, TSRC, TDST, HID, K, BK, BSRC, BDST,
             
+            # vllm value cache compat
+            *vllm_values_strides,
+            VLLM_NUM_BLOCKS,
+            VLLM_NUM_KV_HEADS,
+            VLLM_HEAD_SIZE,
+            VLLM_BLOCK_SIZE,
+            
+            block_tables,
+            *block_tables_strides,
+            
             # blocks
+            VALUE_CACHE_METHOD,
             BLOCK_SIZE_Q,
             BLOCK_SIZE_Q_PADDED,
             BLOCK_SIZE_K,
@@ -2079,6 +2408,12 @@ class PagedKeyCacheVllmCompat(VllmCompat):
         self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
         self.block_size = BLOCK_SIZE
         self.ndim = 3
+    
+    def stride(self):
+        return tuple([1, ] * len(self.shape))
+
+    def data_ptr(self):
+        return self.key_cache.data_ptr()
 
 class PagedValueCacheVllmCompat(VllmCompat):
     # interface
@@ -2123,6 +2458,12 @@ class PagedValueCacheVllmCompat(VllmCompat):
         
         self.shape = (BATCH_SIZE * NUM_HEADS, max_context_length, HEAD_SIZE)
         self.ndim = 3
+    
+    def stride(self):
+        return tuple([1, ] * len(self.shape))
+
+    def data_ptr(self):
+        return self.value_cache.data_ptr()
 
 def paged_timber_attention(
     q: Tensor, 

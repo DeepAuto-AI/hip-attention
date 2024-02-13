@@ -135,7 +135,7 @@ def test_vllm_compat():
     output_truth = state['output']
     
     with torch.no_grad():
-        output = paged_timber_attention(
+        output, _ = paged_timber_attention(
             q=query,
             q_scale=scale,
             k=key_cache,
@@ -143,6 +143,7 @@ def test_vllm_compat():
             block_tables=input_metadata.block_tables,
             context_lens=input_metadata.context_lens,
             max_context_len=input_metadata.max_context_len,
+            # mask_k=8096,
         )
     
     error = torch.abs(output - output_truth).mean()
