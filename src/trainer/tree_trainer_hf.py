@@ -148,6 +148,7 @@ def load_model(
         train_config: TrainConfig = None,
         method='tree',
         device='cuda:0',
+        is_teacher=False,
 ):
     if train_config.using_fsdp:
         device = 'cpu'
@@ -172,7 +173,12 @@ def load_model(
     if train_config.using_fsdp:
         quant_config = None
 
-    model = LlamaForCausalLM.from_pretrained(
+    if method == 'tree':
+        ModelClass = LlamaForCausalLM
+    else:
+        ModelClass = transformers.LlamaForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config,
         device_map="auto",
@@ -201,7 +207,7 @@ def load_model(
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
 
-    if method != 'none':
+    if not is_teacher:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
@@ -379,7 +385,7 @@ def main(config: TrainConfig):
 
     model = load_model(train_config=config, method=config.method)
     if not config.disable_kd:
-        teacher = load_model(train_config=config, method='none')
+        teacher = load_model(train_config=config, method='none', is_teacher=True)
     else:
         teacher = None
 
