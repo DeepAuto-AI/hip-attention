@@ -36,3 +36,4 @@ hello*.png
 data/
 save/
 *.ttf
+.idea/*

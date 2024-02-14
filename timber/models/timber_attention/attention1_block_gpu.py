@@ -653,6 +653,8 @@ def masking_iteration(
     assert ws.ndim == 2
     assert ks.ndim == 2
     assert t_srcs.ndim == 2
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(queries.device)
     _masking_iteration_compute[grid](
         # input matrices
         queries, *queries.stride(),
@@ -693,6 +695,7 @@ def masking_iteration(
         num_stages=2,
         enable_warp_specialization=True,
     )
+    torch.cuda.set_device(orig_device)
     
     # if DEBUG:
     #     print('after')
@@ -741,12 +744,15 @@ def safe_indices(indices):
     grid = (triton.cdiv(N*TDST, BLOCK_BATCH), )
     
     assert indices.ndim == 2
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(indices.device)
     _safe_indices_compute[grid](
         indices, *indices.stride(),
         N*TDST, K,
         BLOCK_BATCH,
         num_warps=1,
     )
+    torch.cuda.set_device(orig_device)
     
     indices = indices.reshape(N, TDST, K)
     
@@ -1137,6 +1143,8 @@ class CalcScoreAutoGradFn(Function):
         assert ks.ndim == 2
         assert scores.ndim == 3
         with timer("_calc_score_compute"):
+            orig_device = torch.cuda.current_device()
+            torch.cuda.set_device(queries.device)
             _calc_score_compute[grid](
                 queries, *queries.stride(),
                 keys, *keys.stride(),
@@ -1160,6 +1168,7 @@ class CalcScoreAutoGradFn(Function):
                 num_stages=4,
                 enable_warp_specialization=True,
             )
+            torch.cuda.set_device(orig_device)
             
         # print(scores[0, 300, :])
         return scores
@@ -1879,6 +1888,9 @@ class SparseAttentionAutoGradFn(Function):
         assert context.ndim == 3
         assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
         assert values.dtype == context.dtype
+
+        orig_device = torch.cuda.current_device()
+        torch.cuda.set_device(indices.device)
         _sdbmm_compute[grid](
             # inputs
             indices, *indices.stride(),
@@ -1901,6 +1913,7 @@ class SparseAttentionAutoGradFn(Function):
             
             num_warps=BLOCK_HID//32,
         )
+        torch.cuda.set_device(orig_device)
         
         return context
     
@@ -1933,6 +1946,8 @@ class SparseAttentionAutoGradFn(Function):
             )
             
             if ENABLED_VALUES:
+                orig_device = torch.cuda.current_device()
+                torch.cuda.set_device(indices.device)
                 _sdbmm_compute_bwd_values[grid](
                     probs, probs.stride(0), probs.stride(1), probs.stride(2),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
@@ -1949,6 +1964,7 @@ class SparseAttentionAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                 )
+                torch.cuda.set_device(orig_device)
             
             # print(grad_values.abs().sum())
         

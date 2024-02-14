@@ -16,6 +16,7 @@ class BookSumDataset:
         tokenizer: transformers.PreTrainedTokenizer, 
         json_path = './cache/long_data_collection/booksum.jsonl',
         max_seq_len = 32768,
+        for_eval = False,
     ):
         with open(json_path, 'r') as f:
             lines = f.readlines()
@@ -74,13 +75,17 @@ class BookSumDataset:
             self.processed = torch.load(cache_path)
             print('loaded', cache_path)
         print('loaded booksum', len(self.processed))
+        self.for_eval = for_eval
 
     def __len__(self):
         return len(self.processed)
 
     def __getitem__(self, idx):
         entry = self.processed[idx]
-        return entry['input_ids'], entry['labels']
+        if self.for_eval:
+            return entry['prompt_ids'], entry['completion_ids']
+        else:
+            return entry['input_ids'], entry['labels']
 
 if __name__ == '__main__':
     tokenizer = transformers.AutoTokenizer.from_pretrained('togethercomputer/LLaMA-2-7B-32K')

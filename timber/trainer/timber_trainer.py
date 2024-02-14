@@ -139,6 +139,7 @@ def load_model(
     train_config: TrainConfig = None, 
     method = 'timber', 
     device = 'cuda:0',
+    trainable: bool = True,
 ):
     if train_config.using_fsdp:
         device = 'cpu'
@@ -162,8 +163,13 @@ def load_model(
     )
     if train_config.using_fsdp:
         quant_config = None
-    
-    model = LlamaForCausalLM.from_pretrained(
+
+    if method == 'timber':
+        ModelClass = LlamaForCausalLM
+    else:
+        ModelClass = transformers.models.llama.LlamaForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config, 
         device_map={"" : device} if device != 'cpu' else 'cpu',
@@ -191,7 +197,7 @@ def load_model(
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
     
-    if method != 'none':
+    if trainable:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
@@ -219,9 +225,13 @@ def load_model(
             keys = list(state_dict.keys())
             for key in keys:
                 x = state_dict[key]
-                state_dict[key.strip('model.')] = x
+                new_key = key.strip('model.')
+                state_dict[new_key] = x
                 del state_dict[key]
-            model.load_state_dict(state_dict)
+            try:
+                model.load_state_dict(state_dict, strict=False)
+            except RuntimeError as e:
+                pass
             print('lora checkpoint loaded from', train_config.init_from_checkpoint)
     
     return model
@@ -237,13 +247,13 @@ class LabModule(pl.LightningModule):
         
         self.model = load_model(train_config=config, method=config.method)
         if not config.disable_kd:
-            self.teacher = load_model(train_config=config, method='none')
+            self.teacher = load_model(train_config=config, method='none', trainable=False)
         else:
             self.teacher = None
         
         self.validation_preds = []
         self.validation_targets = []
-        
+        self.pad_token_id = self.model.base_model.config.pad_token_id
         self.config = config
 
     def forward(self, inputs, target, output_hidden_states=False):
@@ -259,7 +269,14 @@ class LabModule(pl.LightningModule):
         self.model.train()
         
         inputs, target = batch
-        
+
+        inputs = inputs[:, :self.config.seq_len]
+        target = target[:, :self.config.seq_len]
+
+        # pad inputs and target
+        inputs = torch.nn.functional.pad(inputs, (0, self.config.seq_len - inputs.shape[1]), value=self.pad_token_id)
+        target = torch.nn.functional.pad(target, (0, self.config.seq_len - target.shape[1]), value=-100)
+
         if not self.config.disable_kd:
             with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
                 output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
@@ -304,7 +321,9 @@ class LabModule(pl.LightningModule):
         self.model.eval()
         
         inputs, target = batch
-        with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
+        inputs = inputs[:, :self.config.seq_len]
+        target = target[:, :self.config.seq_len]
+        with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
             # print('asdfasdf', inputs.shape, target.shape, flush=True)
             output = self(inputs, target).logits
             loss = torch.nn.functional.cross_entropy(
@@ -484,5 +503,7 @@ if __name__ == "__main__":
         train_config.seq_len = args.seq_len
     if args.save_steps > 0:
         train_config.save_steps = args.save_steps
-    
+    if args.init_checkpoint is not None:
+        train_config.init_from_checkpoint = args.init_checkpoint
+
     main(train_config)
