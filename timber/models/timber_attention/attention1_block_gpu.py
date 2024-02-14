@@ -215,10 +215,10 @@ def _masking_iteration_compute(
     dup_pixels_first = tl.min(num_pixels_vec)
     num_pixels_scalar = tl.max(num_pixels_vec)
     
-    num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - TMASK_K, 0)
-    num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
-    dup_pixels_first = tl.min(num_pixels_vec)
-    num_pixels_scalar = tl.max(num_pixels_vec)
+    # num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - TMASK_K, 0)
+    # num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
+    # dup_pixels_first = tl.min(num_pixels_vec)
+    # num_pixels_scalar = tl.max(num_pixels_vec)
     
     # NOTE: compiler bug?
     
@@ -382,7 +382,7 @@ def _masking_iteration_compute(
                 
                 # [BLOCK_TMASK_K, ]
                 idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
-                idx_tsrc = idx_tsrc + (tl.maximum(0, tl.cdiv(w_new, k_new) - BLOCK_SIZE_K) / w_new).to(tl.int64)
+                idx_tsrc = idx_tsrc + (tl.maximum(0, tl.cdiv(w_new, k_new) - BLOCK_SIZE_K)).to(tl.int64)
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
                 
                 # [BLOCK_TMASK_K, ]
@@ -834,8 +834,8 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         
-        num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
-        # num_warps=4,
+        # num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
+        num_warps=4,
         num_stages=2,
         enable_warp_specialization=True,
     )
