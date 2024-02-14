@@ -16,7 +16,7 @@ import subprocess
 import logging
 
 
-def gen_summary(args, model, tokenizer, device, idx, item, out_dir, gen_tokens=512):
+def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
     LAST_DENSE = os.environ.get('LAST_DENSE', '0') == '1'
 
@@ -31,7 +31,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir, gen_tokens=5
     assert hasattr(model, 'config')
     assert hasattr(model.config, 'max_position_embeddings')
 
-    inputs = inputs[..., inputs.shape[-1] - (model.config.max_position_embeddings - gen_tokens):]
+    inputs = inputs[..., inputs.shape[-1] - (model.config.max_position_embeddings - args.gen_tokens):]
 
     seq_len = inputs.shape[-1]
     print(f"seq_len: {seq_len}")
@@ -48,7 +48,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir, gen_tokens=5
     output = model.generate(
         inputs=inputs.unsqueeze(0).cuda(),
         attention_mask=torch.ones((1, inputs.shape[-1]), dtype=torch.long, device='cuda'),
-        max_new_tokens=gen_tokens,
+        max_new_tokens=args.gen_tokens,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
@@ -102,7 +102,8 @@ def job_booksum(args, model, tokenizer, device):
 
     outputs = []
 
-    out_dir = pathlib.Path(f"saves/llama_eval/booksum/{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}")
+    out_dir = pathlib.Path(f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
+                           f"_bk{args.block_size_k}_k{args.k}_gl{args.gen_tokens}")
     out_dir.mkdir(parents=True, exist_ok=True)
     pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
 

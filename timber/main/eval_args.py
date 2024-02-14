@@ -34,6 +34,8 @@ def eval_args(
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--dense_queries', type=int, default=2048)
+    parser.add_argument('--gen_tokens', default=256, type=int)
+    parser.add_argument('--name', required=True, type=str)
     args = parser.parse_args()
     print(args)
     return args
