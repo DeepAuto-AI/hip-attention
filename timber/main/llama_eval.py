@@ -40,9 +40,9 @@ def load_vllm_model(args: ArgsType):
     
     model = LLM(
         model_id, 
-        max_context_len_to_capture=1024*24,
+        max_context_len_to_capture=1024*32,
         max_num_seqs=args.batch_size,
-        max_model_len=1024*24,
+        max_model_len=1024*32,
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
         dtype='half',

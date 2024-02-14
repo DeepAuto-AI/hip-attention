@@ -15,6 +15,9 @@ from transformers.models.auto import AutoTokenizer
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
+from vllm.transformers_utils import config as vllm_transformers_config
+vllm_transformers_config.FORCE_SIGNLE_LAYER = os.environ.get('FORCE_SINGLE_LAYER', '0') == '1'
+
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)

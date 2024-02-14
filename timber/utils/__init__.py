@@ -441,13 +441,13 @@ class BenchmarkMemRegion:
     def __enter__(self):
         if self.benchmark.disabled: return
         
-        if self.benchmark.synchronize: torch.cuda.synchronize()
+        # if self.benchmark.synchronize: torch.cuda.synchronize()
         self.t = torch.cuda.memory_allocated()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.benchmark.disabled: return
         
-        if self.benchmark.synchronize: torch.cuda.synchronize()
+        # if self.benchmark.synchronize: torch.cuda.synchronize()
         self.t = torch.cuda.memory_allocated() - self.t
         # print(self.name, self.t // 1024)
         # self.benchmark.add_data(self.name, self.t)
@@ -457,7 +457,7 @@ class Benchmark:
     traced_callstack: BenchmarkRegion
     
     def __init__(self):
-        self.synchronize = False
+        self.synchronize = True
         self.disabled = True
         self.activate_temp_buffers = False
         self.buffers = {}

@@ -38,6 +38,8 @@ def test_vllm():
         input_metadata.kv_cache_dtype,
     )
     
+    # print(output_truth)
+    
     error = torch.abs(output - output_truth).mean()
     print(torch.std_mean(output_truth), torch.std_mean(output), error, sep='\n')
 
@@ -145,6 +147,12 @@ def test_vllm_compat():
             max_context_len=input_metadata.max_context_len,
             # mask_k=8096,
         )
+        N_H, _, HID = output.shape
+        N = query.shape[0]
+        H = N_H // N
+        output = output.view(N, H, HID)
+    
+    print(output.shape, output_truth.shape)
     
     error = torch.abs(output - output_truth).mean()
     print(torch.std_mean(output_truth), torch.std_mean(output), error, sep='\n')

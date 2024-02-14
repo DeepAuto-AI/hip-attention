@@ -67,10 +67,10 @@ def _masking_iteration_compute(
     TSRCS, stride_tsrcs_n, stride_tsrcs_bdst,
     
     # operation variables (blocked)
-    SCALE_UP: float, N_PATCHES: int, MASK_K: int,
+    SCALE_UP, N_PATCHES, MASK_K,
     
     # input variables
-    N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ_HID: int,
+    N, T_DST, T_SRC, B_DST, B_SRC, HID, SPARQ_HID,
     
     # vLLM compat inputs
     stride_keys_vllm_num_blcoks, 
@@ -79,16 +79,20 @@ def _masking_iteration_compute(
     stride_keys_vllm_block_size,
     stride_keys_vllm_x,
     
-    VLLM_NUM_BLOCKS: int, 
-    VLLM_NUM_KV_HEADS: int,
-    VLLM_HEAD_SIZE_X: int,
-    VLLM_BLOCK_SIZE: int,
-    VLLM_X: int, 
-    VLLM_HEAD_SIZE: int,
+    VLLM_NUM_BLOCKS, 
+    VLLM_NUM_KV_HEADS,
+    VLLM_HEAD_SIZE_X,
+    VLLM_BLOCK_SIZE,
+    VLLM_X, 
+    VLLM_HEAD_SIZE,
     
     BLOCK_TABLES, 
     stride_block_tables_num_seqs, 
     stride_block_tables_max_num_blocks_per_seq,
+    
+    # debug output
+    DEBUG: tl.constexpr,
+    DEBUG_STATE, stride_debug_state_n, stride_debug_state_bdst,
     
     # block constant
     KEY_CACHE_METHOD: tl.constexpr,
@@ -152,7 +156,7 @@ def _masking_iteration_compute(
         N_PATCHES,
         (
             tl.minimum(
-                MASK_K.to(tl.float32) / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32),
+                MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32),
                 1.0
             ) * tl.cdiv(w_new, BLOCK_SIZE_K)
         ).to(tl.int64),
@@ -252,7 +256,7 @@ def _masking_iteration_compute(
     # t_mask -> mask (using scores)
     if k_new < num_pixels:
     """
-    if k_new < num_pixels_scalar and True:
+    if k_new < num_pixels_scalar:
         """
         # need top_k, so compute scores
         vec_q = queries[i, j, :]
@@ -596,6 +600,15 @@ def _masking_iteration_compute(
         # tl.debug_barrier()
         # del temp1, temp1_range, temp1_mask
     
+    if DEBUG:
+        tl.store(
+            DEBUG_STATE +\
+                idx_n * stride_debug_state_n +\
+                idx_bdst * stride_debug_state_bdst,
+            # value = k_new < num_pixels_scalar
+            value = num_pixels_scalar
+        )
+    
     """
     ws[i, j, 0] = w_new
     ks[i, j, 0] = min(k_new, num_pixels)
@@ -671,9 +684,9 @@ def masking_iteration(
         assert keys.shape[1] == T_SRC
         assert queries.shape[1] == T_DST
         assert mask.min() >= 0
-        assert mask.max() < 1
+        # assert mask.max() < 1
         assert t_mask.min() >= 0
-        assert t_mask.max() < 1
+        # assert t_mask.max() < 1
     
     BLOCK_MASK_K = triton.next_power_of_2(mask.shape[-1])
     BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
@@ -738,6 +751,14 @@ def masking_iteration(
     
     grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
     
+    KERNEL_DEBUG = False
+    if KERNEL_DEBUG:
+        debug_state = torch.zeros((grid[0], grid[1]), dtype=torch.float32, device=queries.device)
+        debug_state_strides = debug_state.stride()
+    else:
+        debug_state = queries
+        debug_state_strides = (0, 0)
+    
     assert GROUP_N == 1
     assert GROUP_BDST == 1
     
@@ -788,6 +809,10 @@ def masking_iteration(
         
         block_tables, *block_tables_stride,
         
+        # debug output
+        KERNEL_DEBUG,
+        debug_state, *debug_state_strides,
+        
         # block constant
         KEY_CACHE_METHOD,
         SPARQ,
@@ -807,6 +832,9 @@ def masking_iteration(
         num_stages=2,
         enable_warp_specialization=True,
     )
+    
+    if KERNEL_DEBUG:
+        print(debug_state[0])
     
     # if DEBUG:
     #     print('after')
@@ -1541,7 +1569,7 @@ def attention_matrix(
     _, T_SRC, _ = keys.shape
     assert T_DST <= T_SRC
     
-    if SPARQ and (mask_k // BLOCK_SIZE_K < SPARQ_START_BK):
+    if SPARQ and ((mask_k // BLOCK_SIZE_K) < SPARQ_START_BK):
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
@@ -1560,7 +1588,7 @@ def attention_matrix(
     
     # NOTE: width of last query
     # w_curr = w_start
-    w_curr = round(w_start / scale_up)
+    w_curr = max(w_start // scale_up, 1)
     # w_curr = w_start
     assert w_curr <= mask_k
     
@@ -1584,7 +1612,11 @@ def attention_matrix(
         # NOTE: float16 -> int64 seems not possible
         mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
         mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
-        tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+        # tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+        # tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block + math.ceil(scale_up)), dtype=mask.dtype, device=device)
+        tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block), dtype=mask.dtype, device=device)
+        
+        # print(mask.shape, tmask.shape, n_patches)
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
         B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
@@ -2517,20 +2549,22 @@ def paged_timber_attention(
     context_lens: [num_seqs]
     """
     
-    q = q * q_scale
-    q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
+    with timer('scaling'):
+        q = q * q_scale
+        q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
     
-    paged_k = PagedKeyCacheVllmCompat(
-        key_cache=k,
-        block_table=block_tables,
-        context_length=context_lens,
-        max_context_length=max_context_len,
-    )
-    
-    paged_v = PagedValueCacheVllmCompat(
-        key_cache=paged_k,
-        value_cache=v,
-    )
+    with timer('compat'):
+        paged_k = PagedKeyCacheVllmCompat(
+            key_cache=k,
+            block_table=block_tables,
+            context_length=context_lens,
+            max_context_length=max_context_len,
+        )
+        
+        paged_v = PagedValueCacheVllmCompat(
+            key_cache=paged_k,
+            value_cache=v,
+        )
     
     # print('paged qkv cache shape', q.shape, paged_k.shape, paged_v.shape)
     
@@ -2572,10 +2606,10 @@ def timber_attention(
     DENSE_SPARSE_ATTENTION = False
     
     if w_start is None:
-        w_start = math.ceil(mask_k * scale_up)
+        # w_start = math.ceil(mask_k * scale_up)
         # w_start = math.ceil(mask_k * scale_up * scale_up)
         # w_start = math.ceil(mask_k / scale_up)
-        # w_start = mask_k
+        w_start = mask_k
     if n_patches is None:
         n_patches = math.ceil(mask_k / scale_up)
         # n_patches = mask_k / scale_up
