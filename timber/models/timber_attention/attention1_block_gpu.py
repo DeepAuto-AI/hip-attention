@@ -364,7 +364,7 @@ def _masking_iteration_compute(
             
             num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
             num_pixels_mask = num_pixels_range < num_pixels_scalar
-            idx_tsrc = tl.load(
+            idx_tsrc_block = tl.load(
                 TMASK +\
                     idx_n * stride_tmask_n +\
                     idx_bdst * stride_tmask_bdst +\
@@ -375,13 +375,13 @@ def _masking_iteration_compute(
             # tl.debug_barrier()
             # NOTE: random key selection with in the block
             # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-            idx_tsrc = (idx_tsrc.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+            idx_tsrc_block = (idx_tsrc_block.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
             
             for _idx_block_k in range(BLOCK_SIZE_K):
                 scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
                 
                 # [BLOCK_TMASK_K, ]
-                idx_tsrc = (idx_tsrc + _idx_block_k).to(tl.int64)
+                idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
                 idx_tsrc = idx_tsrc + (tl.maximum(0, tl.cdiv(w_new, k_new) - BLOCK_SIZE_K) / w_new).to(tl.int64)
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
                 
@@ -1650,7 +1650,13 @@ def attention_matrix(
                     queries_scores = queries_scores.max(-2)[0]
                 else:
                     raise Exception()
-                _, sparq_indices = torch.topk(queries_scores, k=SPARQ_HID, dim=-1)
+                _, sparq_indices = torch.topk(
+                    queries_scores, 
+                    k=SPARQ_HID, 
+                    dim=-1, 
+                    sorted=False
+                )
+                # print(sparq_indices[0, 0])
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
                 sparq_indices_strides = sparq_indices.stride()
@@ -2724,10 +2730,13 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     return context, probs
 
 def flash_attention(q: Tensor, k: Tensor, v: Tensor):
-    context = F.scaled_dot_product_attention(
-        q, k, v, is_causal=True, scale=1.0,
-    )
-    return context, None
+    # context = F.scaled_dot_product_attention(
+    #     q, k, v, is_causal=False, scale=None,
+    # )
+    # return context, None
+    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
+
+    return flash_attn_with_kvcache(q, k, v), None
 
 def main_latency_benchmark():
     global DEBUG
@@ -2760,12 +2769,27 @@ def main_latency_benchmark():
     get_bench().disabled = not TRACE
     get_bench().synchronize = True
     
-    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=1024)
+    CHUNK_LEN = 1024
+    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
+    HID = q.shape[-1]
+    
+    q = q.cpu()
+    k = k.cpu()
+    v = v.cpu()
     
     q = q.repeat(BSIZE, max(1, QUERY_SIZE // 1024), 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
     started = False
+    
+    if METHOD == 'flash':
+        q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
+    
+    q = q.cuda()
+    k = k.cuda()
+    v = v.cuda()
     
     samples = []
     for i in tqdm.tqdm(range(n_samples)):
