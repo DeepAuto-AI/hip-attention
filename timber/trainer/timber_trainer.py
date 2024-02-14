@@ -103,6 +103,8 @@ class LabDataModule(pl.LightningDataModule):
             raise Exception()
     
     def setup(self, stage: str):
+        if self.dataset is None:
+            self.prepare_data()
         if self.config.dataset in ['wikitext2', 'wikitext103']:
             if stage == "fit" or stage is None:
                 test_size = min(100, len(self.dataset) * (1 - self.train_size))
@@ -371,7 +373,7 @@ def main(config: TrainConfig):
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
     
     if config.using_fsdp:
-        devices = "1"
+        devices = torch.cuda.device_count()
         policy = {LlamaDecoderLayer}
         # strategy = FSDPStrategy(
         #     auto_wrap_policy=policy,
