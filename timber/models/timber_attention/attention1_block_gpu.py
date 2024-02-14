@@ -67,7 +67,7 @@ def _masking_iteration_compute(
     TSRCS, stride_tsrcs_n, stride_tsrcs_bdst,
     
     # operation variables (blocked)
-    SCALE_UP, N_PATCHES, MASK_K,
+    SCALE_UP, N_PATCHES, MASK_K, TMASK_K,
     
     # input variables
     N, T_DST, T_SRC, B_DST, B_SRC, HID, SPARQ_HID,
@@ -188,7 +188,7 @@ def _masking_iteration_compute(
     """
     
     k_old_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
-    k_old_mask = tl.arange(0, BLOCK_MASK_K) < k_old
+    k_old_mask = k_old_range < k_old
     # tl.debug_barrier()
     loc_vec = tl.load(
         MASK +\
@@ -212,6 +212,11 @@ def _masking_iteration_compute(
     dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
     dup_pixels_vec = dup_pixels_vec * k_old_mask
     num_pixels_vec = tl.cumsum(dup_pixels_vec)
+    dup_pixels_first = tl.min(num_pixels_vec)
+    num_pixels_scalar = tl.max(num_pixels_vec)
+    
+    num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - TMASK_K, 0)
+    num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
     dup_pixels_first = tl.min(num_pixels_vec)
     num_pixels_scalar = tl.max(num_pixels_vec)
     
@@ -377,6 +382,7 @@ def _masking_iteration_compute(
                 
                 # [BLOCK_TMASK_K, ]
                 idx_tsrc = (idx_tsrc + _idx_block_k).to(tl.int64)
+                idx_tsrc = idx_tsrc + (tl.maximum(0, tl.cdiv(w_new, k_new) - BLOCK_SIZE_K) / w_new).to(tl.int64)
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
                 
                 # [BLOCK_TMASK_K, ]
@@ -542,6 +548,7 @@ def _masking_iteration_compute(
         masked_scores = scores
         # tl.debug_barrier()
         scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
+        
         # tl.debug_barrier()
         topk_mask = masked_scores <= scores_kth_large
         topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
@@ -794,7 +801,7 @@ def masking_iteration(
         t_srcs, *t_srcs.stride(),
         
         # operation variables
-        float(scale_up), int(n_patches), int(mask_k),
+        float(scale_up), int(n_patches), int(mask_k), int(t_mask.shape[-1]),
         
         # input variables
         N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID,
@@ -846,7 +853,10 @@ def masking_iteration(
     #     print('after')
 
 def torch_cdiv(a, b):
-    return torch.floor(a / b) + torch.ceil((a / b) - torch.floor(a / b))
+    t1 = a.div_(b)
+    t2 = torch.floor(t1)
+    t1.sub_(t2)
+    return t2.add_(torch.ceil_(t1))
 
 @triton.jit
 def _safe_indices_compute(
@@ -1603,14 +1613,13 @@ def attention_matrix(
     
     with timer('matrix.setup'):
         # vectors
-        tsrcs = torch.arange( # NOTE: store non blocked tsrc
-            T_SRC-T_DST+1, T_SRC+1, 1, 
+        tsrcs = torch.arange(
+            T_SRC-T_DST+1, T_SRC+1, BLOCK_SIZE_Q, 
             dtype=torch.int64,
             device=device,
         )\
-            .view(1, T_DST)\
-            .expand(N, T_DST)\
-            .contiguous()[:, ::BLOCK_SIZE_Q]\
+            .view(1, -1)\
+            .expand(N, -1)\
             .contiguous()
         tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
         tsrcs.clamp_max_(T_SRC)
@@ -1721,6 +1730,8 @@ def attention_matrix(
             N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K,
         )[0]
         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+        x = np.repeat(x, BLOCK_SIZE_Q, 0)
+        x = np.repeat(x, BLOCK_SIZE_K, 1)
         if x.shape[0] == 1:
             x = x.repeat(32, 0)
         plt.imshow(x)
@@ -1765,6 +1776,12 @@ def attention_matrix(
         # NOTE: align with blocks
         with timer('matrix.cleanup.cdiv'):
             indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
+        # with timer('matrix.heuristic'):
+        #     indices.scatter_(
+        #         dim=-1,
+        #         index=(ks - 1).unsqueeze(-1).clamp_min_(0),
+        #         src=(torch_cdiv(ws, BLOCK_SIZE_K).to(indices.dtype) - 1).unsqueeze(-1).clamp_min_(0)
+        #     )
         with timer('matrix.cleanup.safe_indices'):
             indices = safe_indices(indices)
         # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE_K) - 1)
@@ -2613,8 +2630,8 @@ def timber_attention(
     mask_k: int = 512,
     scale_up: float = 2,
     
-    block_size_q: int = 8,
-    block_size_k: int = 1,
+    block_size_q: int = 16,
+    block_size_k: int = 8,
     reduce_method: str = 'max',
     reduce_stride: int = 1,
 ):

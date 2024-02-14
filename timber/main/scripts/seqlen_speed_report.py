@@ -38,7 +38,7 @@ def samples():
         latency_timbers = []
         for block_size_k in block_size_ks:
             cmd = [
-                'python', 'src/models/timber_attention/attention1_block_gpu.py',
+                'python', 'timber/models/timber_attention/attention1_block_gpu.py',
                 '--method', 'timber',
                 '--block_size_q', str(block_size),
                 '--block_size_k', str(block_size_k),
@@ -55,7 +55,7 @@ def samples():
             latency_timbers.append(latency_timber)
         
         subprocess.call([
-            'python', 'src/models/timber_attention/attention1_block_gpu.py',
+            'python', 'timber/models/timber_attention/attention1_block_gpu.py',
             '--method', 'none',
             '--block_size_q', str(block_size),
             '--block_size_k', str(block_size),

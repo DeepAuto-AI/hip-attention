@@ -27,6 +27,7 @@ wandb/
 *.csv
 
 src/utils/secrets.*
+timber/utils/secrets.*
 plots/
 submission/
 submission*.zip
