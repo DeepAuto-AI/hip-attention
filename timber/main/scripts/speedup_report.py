@@ -19,7 +19,7 @@ def samples():
     
     for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
         subprocess.call([
-            'python', 'src/models/timber_attention/attention1_block_gpu.py',
+            'python', 'timber/models/timber_attention/attention1_block_gpu.py',
             '--method', 'none',
             '--query_size', str(query_size),
             '--dups', '4',
@@ -39,7 +39,7 @@ def samples():
         dynamic_ncols=True, desc='eval',
     ):
         subprocess.call([
-            'python', 'src/models/timber_attention/attention1_block_gpu.py',
+            'python', 'timber/models/timber_attention/attention1_block_gpu.py',
             '--method', 'timber',
             '--block_size_q', str(block_size),
             '--block_size_k', str(block_size),

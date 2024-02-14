@@ -19,7 +19,7 @@ def samples():
     ):
         print(f'ppl measure b{block_size}, k{k}')
         subprocess.call([
-            'python', 'src/main/llama_eval.py', 
+            'python', 'timber/main/llama_eval.py', 
             '--model', 'llama13b',
             '--method', 'timber',
             '--stride', '4096',
