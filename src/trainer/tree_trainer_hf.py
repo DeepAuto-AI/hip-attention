@@ -286,6 +286,8 @@ class Trainer(Seq2SeqTrainer):
         self.model.train()
 
         inputs, target = inputs['input_ids'], inputs['labels']
+        inputs = inputs[..., :self.config.seq_len]
+        target = target[..., :self.config.seq_len]
 
         if not self.config.disable_kd:
             with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
@@ -334,6 +336,9 @@ class Trainer(Seq2SeqTrainer):
         self.model.eval()
 
         inputs, target = batch
+        inputs = inputs[..., :self.config.seq_len]
+        target = target[..., :self.config.seq_len]
+
         with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
             # print('asdfasdf', inputs.shape, target.shape, flush=True)
             output = self.model(inputs, target).logits
