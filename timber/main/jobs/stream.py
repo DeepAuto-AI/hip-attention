@@ -56,9 +56,12 @@ def job_stream(args, model, tokenizer, device):
             if isinstance(model, LLM):
                 prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
-                    temperature=0.8, 
-                    top_p=0.95,
+                    temperature=0.7, 
+                    top_p=0.9,
+                    top_k=50,
                     max_tokens=512,
+                    frequency_penalty=0.0,
+                    repetition_penalty=1.1,
                     ignore_eos=True,
                     skip_special_tokens=False,
                     # max_tokens=inputs.input_ids.shape[-1] + 32,
@@ -72,7 +75,10 @@ def job_stream(args, model, tokenizer, device):
                     generated_text = output.outputs[0].text
                     n_tokens = len(tokenizer([generated_text]).input_ids[0])
                     n_generated += n_tokens
-                    print(generated_text[:50] + ' [...]', n_tokens)
+                    if len(outputs) > 1:
+                        print(generated_text[:150] + ' [...]', n_tokens)
+                    else:
+                        print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
             else:
                 streamer = BatchedStreamer(tokenizer, skip_prompt=True)

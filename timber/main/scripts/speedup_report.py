@@ -140,9 +140,9 @@ def plot_ppl(query_size=1):
     
     plt.figure(figsize=(5, 4))
     
-    plt.title(f'Perplexity / Speedup (#Query: {query_size})')
+    plt.title(f'Perplexity / Decoding Speedup (#Query: {query_size})')
     plt.ylabel('PPL. (w/o train)')
-    plt.xlabel('Speedup')
+    plt.xlabel('Decoding Speedup')
     sns.scatterplot(x=xs, y=ys)
     sns.lineplot(x=xs_front, y=ys_front)
     for idx in range(len(idxs_front)):
