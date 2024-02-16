@@ -67,7 +67,7 @@ def _masking_iteration_compute(
     TSRCS, stride_tsrcs_n, stride_tsrcs_bdst,
     
     # operation variables (blocked)
-    SCALE_UP: float, N_PATCHES: int, MASK_K: int, TMASK_K: int,
+    SCALE_UP: float, N_PATCHES: int, MASK_K: int, TMASK_K: int, IS_CAUSAL: tl.constexpr,
     
     # input variables
     N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ_HID: int,
@@ -493,9 +493,14 @@ def _masking_iteration_compute(
                     (~mask_block_q[:, None]) |
                     (~mask_strided_block_q[:, None]) |
                     (scores_partial == 0) |
-                    ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
                     False
                 )
+                
+                if IS_CAUSAL:
+                    scores_partial_ignore_mask |= (
+                        ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
+                        False
+                    )
                 
                 if ATTEN_MASK is not None:
                     scores_partial_ignore_mask |= (
@@ -650,7 +655,7 @@ def masking_iteration(
     # temp vectors (blocked)
     ws: Tensor, ks: Tensor, t_srcs: Tensor, 
     # operator variables
-    scale_up: float, n_patches: int, mask_k: int, 
+    scale_up: float, n_patches: int, mask_k: int, is_causal: bool,
     # iteration controls
     i_iteration: int, n_iteration: int,
     # input constant
@@ -797,7 +802,7 @@ def masking_iteration(
         t_srcs, *t_srcs.stride(),
         
         # operation variables
-        float(scale_up), int(n_patches), int(mask_k), int(t_mask.shape[-1]),
+        float(scale_up), int(n_patches), int(mask_k), int(t_mask.shape[-1]), is_causal,
         
         # input variables
         N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID,
@@ -910,7 +915,7 @@ def _calc_score_compute(
     SCORES, stride_scores_n, stride_scores_tdst, stride_scores_k,
     
     # input variables
-    N, TDST, TSRC, HID, BK, K, BDST, BSRC,
+    N, TDST, TSRC, HID, BK, K, BDST, BSRC, IS_CAUSAL,
     
     # vllm key cache compat
     stride_keys_vllm_num_bocks,
@@ -1063,15 +1068,21 @@ def _calc_score_compute(
     idx_scorek = (idx_bk[:, None] * BLOCK_SIZE_K + idx_block_k[None, :])
     mask_scorek = (idx_scorek < K) & mask_block_k[None, :] & mask_bk[:, None]
     
+    scores_mask = (
+        (mask_tdst[:, None, None] & mask_tsrc[None, :, :]) &
+        mask_scorek[None, :] &
+        True
+    )
+    
+    if IS_CAUSAL:
+        scores_mask = scores_mask & ((idx_tdst[:, None, None] + (TSRC - TDST)) >= idx_tsrc[None, :, :])
+    
     tl.store(
         SCORES +\
             idx_n * stride_scores_n +\
             idx_tdst[:, None, None] * stride_scores_tdst +\
             idx_scorek[None, :, :] * stride_scores_k,
-        mask = \
-            (mask_tdst[:, None, None] & mask_tsrc[None, :, :]) &\
-            mask_scorek[None, :] &\
-            ((idx_tdst[:, None, None] + (TSRC-TDST)) >= idx_tsrc[None, :, :]),
+        mask = scores_mask,
         value = scores,
     )
 
@@ -1298,6 +1309,7 @@ class CalcScoreAutoGradFn(Function):
         # block constant
         BLOCK_SIZE_Q: int,
         BLOCK_SIZE_K: int,
+        IS_CAUSAL: bool,
     ):
         ctx.save_for_backward(queries, keys, indices, ks)
         ctx.BLOCK_SIZE_Q = BLOCK_SIZE_Q
@@ -1402,7 +1414,7 @@ class CalcScoreAutoGradFn(Function):
                 scores, *scores.stride(),
                 
                 # input variables
-                N, TDST, TSRC, HID, BK, K, BDST, BSRC,
+                N, TDST, TSRC, HID, BK, K, BDST, BSRC, IS_CAUSAL,
                 
                 # vllm key cache compat
                 *vllm_keys_strides,
@@ -1513,6 +1525,7 @@ class CalcScoreAutoGradFn(Function):
             None,
             None,
             None,
+            None,
         )
 
 def calc_score_return_prob(
@@ -1520,13 +1533,14 @@ def calc_score_return_prob(
     indices: Tensor, ks: Tensor,
     
     BLOCK_SIZE_Q: int,
-    BLOCK_SIZE_K: int
+    BLOCK_SIZE_K: int,
+    IS_CAUSAL: bool,
 ):
     scores = CalcScoreAutoGradFn.apply(
         queries, keys, attention_mask,
         indices, ks,
         
-        BLOCK_SIZE_Q, BLOCK_SIZE_K,
+        BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL
     ) # type: Tensor
     
     with timer("calc_score_return_prob.softmax"):
@@ -1556,6 +1570,7 @@ def attention_matrix(
     n_patches: int,
     mask_k: int,
     scale_up: int,
+    is_causal: bool,
     
     BLOCK_SIZE_Q: int = 16,
     BLOCK_SIZE_K: int = 1,
@@ -1617,6 +1632,8 @@ def attention_matrix(
             .contiguous()
         tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
         tsrcs.clamp_max_(T_SRC)
+        if not is_causal:
+            tsrcs.fill_(T_SRC)
         ws = torch.clamp(tsrcs, 0, w_curr).to(torch.int64) # NOTE: store non blocked width
         ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64) # NOTE: store num blocks
         
@@ -1759,7 +1776,7 @@ def attention_matrix(
                     # temp vectors (blocked)
                     ws, ks, tsrcs, 
                     # operator variables
-                    scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), 
+                    scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
                     # iteration controls
                     i_iteration, n_iteration,
                     # input constant
@@ -1796,6 +1813,7 @@ def attention_matrix(
             indices=indices, ks=ks,
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
+            IS_CAUSAL=is_causal,
         )
         assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
     
@@ -1824,7 +1842,8 @@ def attention_matrix(
         # )
         if isinstance(keys, Tensor):
             x = (queries[0] @ keys[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
-            x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+            if is_causal:
+                x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
             x = np.exp(x - x.max(-1, keepdims=True))
             x = x / x.sum(-1, keepdims=True)
             x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
@@ -2624,6 +2643,7 @@ def timber_attention(
     n_patches: int = None,
     mask_k: int = 512,
     scale_up: float = 2,
+    is_causal: bool = True,
     
     block_size_q: int = 8,
     block_size_k: int = 1,
@@ -2658,6 +2678,7 @@ def timber_attention(
                 n_patches=n_patches,
                 mask_k=mask_k,
                 scale_up=scale_up,
+                is_causal=is_causal,
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
                 reduce_method=reduce_method,
@@ -2723,6 +2744,7 @@ def timber_attention(
                 n_patches,
                 mask_k,
                 scale_up,
+                is_causal,
                 
                 block_size_q,
                 block_size_k,
@@ -2773,14 +2795,14 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     context = torch.bmm(probs, v)
     return context, probs
 
-def flash_attention(q: Tensor, k: Tensor, v: Tensor):
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     # context = F.scaled_dot_product_attention(
     #     q, k, v, is_causal=False, scale=None,
     # )
     # return context, None
     from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
 
-    return flash_attn_with_kvcache(q, k, v), None
+    return flash_attn_with_kvcache(q, k, v, causal=is_causal), None
 
 def main_latency_benchmark():
     global DEBUG
@@ -2798,6 +2820,7 @@ def main_latency_benchmark():
     parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--scale_up', type=int, default=2)
+    parser.add_argument('--not_causal', action='store_true')
     args = parser.parse_args()
     
     DEBUG = args.debug
@@ -2807,6 +2830,7 @@ def main_latency_benchmark():
     QUERY_SIZE = args.query_size
     METHOD = args.method
     n_samples = args.samples
+    is_causal = not args.not_causal
     
     if DEBUG:
         seed()
@@ -2847,7 +2871,7 @@ def main_latency_benchmark():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
             elif METHOD == 'flash':
-                flash_attention(q, k, v)
+                flash_attention(q, k, v, is_causal=is_causal)
             elif METHOD == 'timber':
                 timber_attention(
                     q,
@@ -2858,6 +2882,7 @@ def main_latency_benchmark():
                     block_size_q=args.block_size_q,
                     block_size_k=args.block_size_k,
                     scale_up=args.scale_up,
+                    is_causal=is_causal,
                 )
             else:
                 raise Exception()
