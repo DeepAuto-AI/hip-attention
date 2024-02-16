@@ -304,14 +304,15 @@ def _masking_iteration_compute(
                 mask_tsrc = num_pixels_mask
                 vec_k_mask = mask_tsrc[None, :] & mask_hid[:, None]
                 
-                key_mask = tl.load(
-                    ATTEN_MASK +\
-                        idx_n * stride_atten_mask_n +\
-                        idx_tsrc * stride_atten_mask_tsrc,
-                    mask = num_pixels_mask,
-                    other = False,
-                ).to(tl.int1)
-                vec_k_mask = vec_k_mask & key_mask[None, :]
+                if ATTEN_MASK is not None:
+                    key_mask = tl.load(
+                        ATTEN_MASK +\
+                            idx_n * stride_atten_mask_n +\
+                            idx_tsrc * stride_atten_mask_tsrc,
+                        mask = num_pixels_mask,
+                        other = False,
+                    ).to(tl.int1)
+                    vec_k_mask = vec_k_mask & key_mask[None, :]
                 
                 vec_k = tl.load(
                     KEYS +\
@@ -349,13 +350,14 @@ def _masking_iteration_compute(
             idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q).to(tl.int64)
             mask_tdst = (idx_tdst < T_DST) & mask_block_q
             
-            query_mask = tl.load(
-                ATTEN_MASK +\
-                    idx_n * stride_atten_mask_n +\
-                    (idx_tdst + T_SRC - T_DST) * stride_atten_mask_tsrc,
-                mask = mask_tdst,
-                other = False
-            ).to(tl.int1)
+            if ATTEN_MASK is not None:
+                query_mask = tl.load(
+                    ATTEN_MASK +\
+                        idx_n * stride_atten_mask_n +\
+                        (idx_tdst + T_SRC - T_DST) * stride_atten_mask_tsrc,
+                    mask = mask_tdst,
+                    other = False
+                ).to(tl.int1)
             # mask_tdst = mask_tdst & query_mask
             
             num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
@@ -382,13 +384,14 @@ def _masking_iteration_compute(
                 mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
                 
                 # [BLOCK_TMASK_K, ]
-                key_mask = tl.load(
-                    ATTEN_MASK +\
-                        idx_n * stride_atten_mask_n +\
-                        idx_tsrc * stride_atten_mask_tsrc,
-                    mask = mask_tsrc,
-                    other = False,
-                ).to(tl.int1)
+                if ATTEN_MASK is not None:
+                    key_mask = tl.load(
+                        ATTEN_MASK +\
+                            idx_n * stride_atten_mask_n +\
+                            idx_tsrc * stride_atten_mask_tsrc,
+                        mask = mask_tsrc,
+                        other = False,
+                    ).to(tl.int1)
                 # mask_tsrc = mask_tsrc & key_mask
                 
                 mask_strided_block_q = (idx_block_q % REDUCE_STRDIE) == 0
@@ -409,19 +412,21 @@ def _masking_iteration_compute(
                     mask_hid = idx_hid < HID
                     
                     # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+                    mask_vec_q = (
+                        mask_hid[None, :] &
+                        mask_tdst[:, None] &
+                        mask_block_q[:, None] &
+                        mask_strided_block_q[:, None] &
+                        True
+                    )
+                    if ATTEN_MASK is not None:
+                        mask_vec_q = mask_vec_q & query_mask[:, None]
                     vec_q = tl.load(
                         QUERIES +\
                             idx_n * stride_queries_n +\
                             idx_tdst[:, None] * stride_queries_tdst +\
                             idx_hid[None, :] * stride_queries_hid,
-                        mask = (
-                            mask_hid[None, :] &
-                            mask_tdst[:, None] &
-                            mask_block_q[:, None] &
-                            mask_strided_block_q[:, None] &
-                            query_mask[:, None] &
-                            True
-                        ),
+                        mask = mask_vec_q,
                         other = 0,
                     )
                     # tl.debug_barrier()
@@ -489,10 +494,15 @@ def _masking_iteration_compute(
                     (~mask_strided_block_q[:, None]) |
                     (scores_partial == 0) |
                     ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
-                    (~key_mask[None, :]) |
-                    (~query_mask[:, None]) |
                     False
                 )
+                
+                if ATTEN_MASK is not None:
+                    scores_partial_ignore_mask |= (
+                        (~key_mask[None, :]) |
+                        (~query_mask[:, None]) |
+                        False
+                    )
                 
                 # NOTE: owo powerful dark magic. select first / last block always. testing sink attention.
                 # scores_partial_force_mask = (
@@ -641,6 +651,8 @@ def masking_iteration(
     ws: Tensor, ks: Tensor, t_srcs: Tensor, 
     # operator variables
     scale_up: float, n_patches: int, mask_k: int, 
+    # iteration controls
+    i_iteration: int, n_iteration: int,
     # input constant
     N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ: bool, SPARQ_HID: int,
     # kernel constant
@@ -684,6 +696,13 @@ def masking_iteration(
     BLOCK_MASK_K = triton.next_power_of_2(mask.shape[-1])
     BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
     # print(BLOCK_MASK_K, BLOCK_TMASK_K)
+    
+    if i_iteration == 0 or i_iteration == (n_iteration - 1):
+        pass
+    else:
+        if i_iteration > 1:
+            BLOCK_MASK_K = BLOCK_MASK_K // scale_up
+        BLOCK_TMASK_K = BLOCK_TMASK_K // scale_up
     
     GROUP_N = 1
     GROUP_BDST = 1
@@ -754,7 +773,8 @@ def masking_iteration(
     
     assert queries.ndim == 3
     assert keys.ndim == 3
-    assert attention_mask.ndim == 2
+    if attention_mask is not None:
+        assert attention_mask.ndim == 2
     assert mask.ndim == 3
     assert t_mask.ndim == 3
     assert ws.ndim == 2
@@ -764,7 +784,7 @@ def masking_iteration(
         # input matrices
         queries, *queries.stride(),
         keys, *keys.stride(),
-        attention_mask, *attention_mask.stride(),
+        attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
         sparq_indices, *sparq_indices_strides,
         
         # input matrices (blocked)
@@ -929,8 +949,9 @@ def _calc_score_compute(
             idx_bdst * stride_ks_bdst,
     )
     
-    # if idx_bk >= ks:
+    # if (pid_bk + 1) * BLOCK_BK > ks:
     #     return
+    
     idx_bk = tl.arange(0, BLOCK_BK) + pid_bk * BLOCK_BK
     mask_bk = idx_bk < ks
     
@@ -951,25 +972,27 @@ def _calc_score_compute(
     mask_tsrc = (idx_tsrc < TSRC) & mask_block_k[None, :] & mask_bk[:, None]
     
     # [BLOCK_BK: bk, BLOCK_SIZE_K_PADDED]
-    key_mask = tl.load(
-        ATTEN_MASK +\
-            idx_n * stride_atten_mask_n +\
-            idx_tsrc * stride_atten_mask_tsrc,
-        mask = mask_tsrc,
-        other = False,
-    ).to(tl.int1)
-    mask_tsrc = mask_tsrc & key_mask
+    if ATTEN_MASK is not None:
+        key_mask = tl.load(
+            ATTEN_MASK +\
+                idx_n * stride_atten_mask_n +\
+                idx_tsrc * stride_atten_mask_tsrc,
+            mask = mask_tsrc,
+            other = False,
+        ).to(tl.int1)
+        mask_tsrc = mask_tsrc & key_mask
     
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + idx_block_q
     mask_tdst = (idx_tdst < TDST) & mask_block_q
-    query_mask = tl.load(
-        ATTEN_MASK +\
-            idx_n * stride_atten_mask_n +\
-            (idx_tdst + TSRC - TDST) * stride_atten_mask_tsrc,
-        mask = mask_tdst,
-        other = False,
-    ).to(tl.int1)
-    mask_tdst = mask_tdst & query_mask
+    if ATTEN_MASK is not None:
+        query_mask = tl.load(
+            ATTEN_MASK +\
+                idx_n * stride_atten_mask_n +\
+                (idx_tdst + TSRC - TDST) * stride_atten_mask_tsrc,
+            mask = mask_tdst,
+            other = False,
+        ).to(tl.int1)
+        mask_tdst = mask_tdst & query_mask
     
     # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
     scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK, BLOCK_SIZE_K_PADDED), dtype=tl.float32)
@@ -1301,10 +1324,11 @@ class CalcScoreAutoGradFn(Function):
         
         BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
         BLOCK_SIZE_K_PADDED = next_multiple_of(BLOCK_SIZE_K, 1)
-        BLOCK_BK = next_multiple_of(32 // BLOCK_SIZE_K_PADDED, 1)
-        # BLOCK_HID = triton.next_power_of_2(HID)
+        BLOCK_BK = next_multiple_of(128 // BLOCK_SIZE_K_PADDED, 1)
+        # BLOCK_BK = 1
+        BLOCK_HID = triton.next_power_of_2(HID)
         # BLOCK_HID = max(BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED)
-        BLOCK_HID = 32
+        # BLOCK_HID = 32
         
         if isinstance(keys, Tensor):
             KEY_CACHE_METHOD = 'cont'
@@ -1353,10 +1377,13 @@ class CalcScoreAutoGradFn(Function):
         
         grid = (N, BDST, triton.cdiv(BK, BLOCK_BK))
         
+        # print(grid)
+        
         assert queries.ndim == 3
         assert keys.ndim == 3
-        assert attention_mask.ndim == 2
-        assert attention_mask.dtype == torch.bool
+        if attention_mask is not None:
+            assert attention_mask.ndim == 2
+            assert attention_mask.dtype == torch.bool
         assert indices.ndim == 3
         assert ks.ndim == 2
         assert scores.ndim == 3
@@ -1365,7 +1392,7 @@ class CalcScoreAutoGradFn(Function):
                 # input matrix
                 queries, *queries.stride(),
                 keys, *keys.stride(),
-                attention_mask, *attention_mask.stride(),
+                attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
                 
                 # block indices
                 indices, *indices.stride(),
@@ -1398,8 +1425,8 @@ class CalcScoreAutoGradFn(Function):
                 BLOCK_HID,
                 
                 num_warps=4,
-                num_stages=4,
-                enable_warp_specialization=True,
+                num_stages=2,
+                enable_warp_specialization=False,
             )
             
         # print(scores[0, 300, :])
@@ -1508,11 +1535,12 @@ def calc_score_return_prob(
     assert probs.dtype == queries.dtype
     
     N, TDST, K = scores.shape
-    _, TSRC = attention_mask.shape
-    if probs.requires_grad:
-        probs = probs * attention_mask[:, TSRC-TDST:, None]
-    else:
-        probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
+    if attention_mask is not None:
+        _, TSRC = attention_mask.shape
+        if probs.requires_grad:
+            probs = probs * attention_mask[:, TSRC-TDST:, None]
+        else:
+            probs.masked_fill_(~attention_mask[:, TSRC-TDST:, None], 0)
     
     assert scores.dtype == queries.dtype
     assert probs.dtype == queries.dtype
@@ -1555,6 +1583,9 @@ def attention_matrix(
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
     
+    # SPARQ_HID = 16
+    # SPARQ = True
+    
     dtype = queries.dtype
     device = queries.device
     assert queries.device == keys.device
@@ -1564,8 +1595,9 @@ def attention_matrix(
     BLOCK_SIZE_Q = int(BLOCK_SIZE_Q)
     BLOCK_SIZE_K = int(BLOCK_SIZE_K)
     
-    assert attention_mask.shape == (N, T_SRC)
-    assert attention_mask.dtype == torch.bool
+    if attention_mask is not None:
+        assert attention_mask.shape == (N, T_SRC)
+        assert attention_mask.dtype == torch.bool
     
     # NOTE: width of last query
     # w_curr = w_start
@@ -1709,11 +1741,15 @@ def attention_matrix(
         debug_print()
         
     # NOTE: Calc. Mask
+    n_iteration = 0
+    _w_curr = w_curr
+    while w_curr < T_SRC:
+        w_curr = round(w_curr * scale_up)
+        n_iteration += 1
+    w_curr = _w_curr
+    
     with timer("iterations"):
-        while w_curr < T_SRC:
-            # with timer(f'iteration_{w_curr}.reset'):
-            #     tmask.fill_(0)
-            #     mask.clamp_(0, (triton.cdiv(w_curr, BLOCK_SIZE_K) - 1) / triton.cdiv(w_curr, BLOCK_SIZE_K))
+        for i_iteration in range(n_iteration):
             with timer(f"iteration_{w_curr}"):
                 masking_iteration(
                     # input matrices
@@ -1724,6 +1760,8 @@ def attention_matrix(
                     ws, ks, tsrcs, 
                     # operator variables
                     scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), 
+                    # iteration controls
+                    i_iteration, n_iteration,
                     # input constant
                     N, T_DST, T_SRC, B_DST, B_SRC, HID, SPARQ, SPARQ_HID,
                     # kernel constant
@@ -1733,14 +1771,13 @@ def attention_matrix(
                     REDUCE_STRIDE,
                 )
             w_curr = round(w_curr * scale_up)
-            
             if DEBUG:
                 debug_print()
     
     with timer('matrix.cleanup'):
         # NOTE: align with blocks
         with timer('matrix.cleanup.cdiv'):
-            indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
+            indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
         # with timer('matrix.heuristic'):
         #     indices.scatter_(
         #         dim=-1,
@@ -2592,7 +2629,46 @@ def timber_attention(
     block_size_k: int = 1,
     reduce_method: str = 'max',
     reduce_stride: int = 1,
+    
+    chunking: bool = False,
+    chunk_size: int = 2048
 ):
+    CHUNKING = chunking
+    CHUNK_SIZE = chunk_size
+    if q.shape[1] > CHUNK_SIZE and CHUNKING:
+        N, T_DST, HID = q.shape
+        N, T_SRC, HID = k.shape
+        
+        contexts = []
+        
+        for ichunk in range(triton.cdiv(T_DST, CHUNK_SIZE)):
+            q_chunk = q[:, ichunk*CHUNK_SIZE:(ichunk+1)*CHUNK_SIZE, :]
+            cache_chunk_end = T_SRC-T_DST+(ichunk+1)*CHUNK_SIZE
+            k_chunk = k[:, :cache_chunk_end, :]
+            v_chunk = v[:, :cache_chunk_end, :]
+            if attention_mask is not None:
+                attention_mask_chunk = attention_mask[:, :cache_chunk_end]
+            else:
+                attention_mask_chunk = None
+            
+            context, _ = timber_attention(
+                q_chunk, k_chunk, v_chunk, 
+                attention_mask=attention_mask_chunk,
+                w_start=w_start,
+                n_patches=n_patches,
+                mask_k=mask_k,
+                scale_up=scale_up,
+                block_size_q=block_size_q,
+                block_size_k=block_size_k,
+                reduce_method=reduce_method,
+                reduce_stride=reduce_stride,
+            )
+            contexts.append(context)
+            
+        contexts = torch.cat(contexts, dim=1)    
+        
+        return contexts, None    
+    
     global DEBUG
     DENSE_SPARSE_ATTENTION = False
     
@@ -2617,12 +2693,12 @@ def timber_attention(
     # assert q.dtype == k.dtype, f'{q.dtype} == {k.dtype}'
     # assert q.dtype == v.dtype
     
-    if attention_mask is None:
-        attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
-    if attention_mask.dtype != torch.bool:
-        # mask should mark alive token as True
-        attention_mask = attention_mask > 0.5
-    assert attention_mask.dtype == torch.bool
+    # if attention_mask is None:
+    #     attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
+    # if attention_mask.dtype != torch.bool:
+    #     # mask should mark alive token as True
+    #     attention_mask = attention_mask > 0.5
+    # assert attention_mask.dtype == torch.bool
     
     assert isinstance(block_size_q, int)
     assert isinstance(block_size_k, int)
@@ -2721,6 +2797,7 @@ def main_latency_benchmark():
     parser.add_argument('--block_size_q', type=int, default=16)
     parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
+    parser.add_argument('--scale_up', type=int, default=2)
     args = parser.parse_args()
     
     DEBUG = args.debug
@@ -2759,6 +2836,8 @@ def main_latency_benchmark():
     k = k.cuda()
     v = v.cuda()
     
+    timber_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
+    
     samples = []
     for i in tqdm.tqdm(range(n_samples)):
         start = torch.cuda.Event(enable_timing=True)
@@ -2774,9 +2853,11 @@ def main_latency_benchmark():
                     q,
                     k,
                     v,
+                    # attention_mask=timber_attention_mask,
                     mask_k=args.k,
                     block_size_q=args.block_size_q,
                     block_size_k=args.block_size_k,
+                    scale_up=args.scale_up,
                 )
             else:
                 raise Exception()
