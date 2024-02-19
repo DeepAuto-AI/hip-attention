@@ -843,9 +843,9 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         
-        # num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
-        num_warps=1,
-        num_stages=1,
+        num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
+        # num_warps=1,
+        num_stages=2,
         enable_warp_specialization=False,
     )
     
@@ -888,7 +888,7 @@ def _safe_indices_compute(
             value = col,
             mask = mask_n
         )
-        tl.debug_barrier()
+        # tl.debug_barrier()
         last_col = col
 
 def safe_indices(indices):
@@ -1087,7 +1087,7 @@ def calc_prob_return_context(
     
     # BLOCK_BK = max(1, 512 // BLOCK_SIZE_K)
     BLOCK_BK = triton.next_power_of_2(BK)
-    BLOCK_HID = 64
+    BLOCK_HID = 32
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
     
     assert values.dtype in [torch.float32, torch.float16, torch.bfloat16]
@@ -1128,7 +1128,7 @@ def calc_prob_return_context(
         IS_CAUSAL,
         
         num_warps=8,
-        num_stages=2,
+        num_stages=1,
     )
     
     return context
@@ -1834,6 +1834,7 @@ def attention_matrix(
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
     
+    # SPARQ = False
     # SPARQ_HID = 16
     # SPARQ = True
     

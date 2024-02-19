@@ -16,6 +16,7 @@ def samples():
     num_samples = 200
     batch_size = 256
     results = {}
+    cache_path = './cache/attention1_block_gpu/result.json'
     
     for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
         subprocess.call([
@@ -26,8 +27,9 @@ def samples():
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
         ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+        with open(cache_path, 'r') as f:
             latency = json.load(f)['mean']
+        os.remove(cache_path)
         results[f'none_q{query_size}'] = {
             'query_size': query_size,
             'latency': latency,
@@ -49,8 +51,9 @@ def samples():
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
         ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+        with open(cache_path, 'r') as f:
             latency = json.load(f)['mean']
+        os.remove(cache_path)
         results[f'timber_q{query_size}_b{block_size}_k{k}'] = {
             'query_size': query_size,
             'k': k,
