@@ -7,6 +7,7 @@ import torch
 
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+from transformers import LogitsProcessor, LogitsProcessorList
 
 from timber.dataset.booksum import BookSumDataset
 from timber.utils import seed, get_bench
@@ -31,7 +32,19 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model, 'config')
     assert hasattr(model.config, 'max_position_embeddings')
 
-    inputs = inputs[..., inputs.shape[-1] - (model.config.max_position_embeddings - args.gen_tokens):]
+    if args.give_prompt:
+        prompt = "Summarize the following text in about 300 words:\n\n" + tokenizer.decode(inputs, skip_special_tokens=True)
+    else:
+        prompt = tokenizer.decode(inputs, skip_special_tokens=True)
+    if prompt.endswith('</s>'):
+        prompt = prompt[:-4]
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors='pt',
+        max_length=model.config.max_position_embeddings - args.gen_tokens,
+        truncation=True,
+    )['input_ids'][0]
 
     seq_len = inputs.shape[-1]
     print(f"seq_len: {seq_len}")
@@ -45,17 +58,33 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
             if hasattr(m, 'attention_method'):
                 m.tree_last_dense_queries = -1
 
+    additional_args = {}
+    if args.do_sample:
+        additional_args = dict(
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            top_k=50,
+        )
+
     output = model.generate(
         inputs=inputs.unsqueeze(0).cuda(),
         attention_mask=torch.ones((1, inputs.shape[-1]), dtype=torch.long, device='cuda'),
         max_new_tokens=args.gen_tokens,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
+        logits_processor=LogitsProcessorList([
+            StopAfterStringIsGenerated(inputs.shape[-1], tokenizer)
+        ]),
+        **additional_args,
     )
-    output = tokenizer.decode(
+    output: str = tokenizer.decode(
         output[0][seq_len:].data.cpu(),
         skip_special_tokens=True,
     )
+    if output.endswith('</s>'):
+        output = output[:-4]
+    output = output.strip()
     tqdm.write(f"{idx} Summary:\t{(output[:200],)}[...]\n\n")
 
     with open(out_dir / f"out_{idx}.txt", 'w') as f:
@@ -131,3 +160,23 @@ def job_booksum(args, model, tokenizer, device):
     output_dict = r.output_to_dict(output)
     with open(out_dir / "rouge_scores.json", 'w') as f:
         json.dump(output_dict, f, indent=2)
+
+
+class StopAfterStringIsGenerated(LogitsProcessor):
+
+    def __init__(self, base_len: int, tokenizer):
+        super().__init__()
+
+        self.base_len = base_len
+        self.tokenizer = tokenizer
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if input_ids.size(1) > self.base_len:
+            decoded = self.tokenizer.batch_decode(input_ids[:, self.base_len:])
+            ends_with_answer = torch.tensor([s.endswith("</s>") for s in decoded], device=scores.device)
+            forced_eos = torch.full((scores.size(1),), -float("inf"), device=scores.device)
+            forced_eos[self.tokenizer.eos_token_id] = 0
+
+            # Force generation of EOS after a space
+            scores[ends_with_answer] = forced_eos
+        return scores
