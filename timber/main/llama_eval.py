@@ -42,7 +42,7 @@ def load_vllm_model(args: ArgsType):
     assert args.checkpoint is None
     
     seq_len = 1024*32
-    seq_len = 10600
+    # seq_len = 10600
     model = LLM(
         model_id, 
         max_context_len_to_capture=seq_len,
@@ -52,7 +52,7 @@ def load_vllm_model(args: ArgsType):
         kv_cache_dtype='fp8_e5m2',
         dtype='half',
         gpu_memory_utilization=0.8,
-        # tensor_parallel_size=2,
+        tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=True
     )
     

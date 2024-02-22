@@ -29,6 +29,7 @@ def samples():
         16: 72,
     }
     num_samples = 200
+    cache_path = './cache/attention1_block_gpu/result.json'
     
     batch_size = max(list(batch_sizes.values()))
     results = {}
@@ -51,8 +52,9 @@ def samples():
             ]
             print(' '.join(cmd))
             subprocess.call(cmd)
-            with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+            with open(cache_path, 'r') as f:
                 latency_timber = json.load(f)['mean']
+            os.remove(cache_path)
             latency_timbers.append(latency_timber)
         
         subprocess.call([
@@ -66,8 +68,9 @@ def samples():
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
         ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+        with open(cache_path, 'r') as f:
             latency_base = json.load(f)['mean']
+        os.remove(cache_path)
         
         subprocess.call([
             'python', 'timber/models/timber_attention/attention1_block_gpu.py',
@@ -80,8 +83,9 @@ def samples():
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
         ])
-        with open('./cache/attention1_block_gpu/result.json', 'r') as f:
+        with open(cache_path, 'r') as f:
             latency_flash = json.load(f)['mean']
+        os.remove(cache_path)
         
         seq_len = dup * 1024
         results[f's{seq_len}'] = {

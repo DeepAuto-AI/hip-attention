@@ -152,7 +152,7 @@ def test_vllm_compat():
         H = N_H // N
         output = output.view(N, H, HID)
     
-    print(output.shape, output_truth.shape)
+    print(output.shape, output.dtype, output_truth.shape, output_truth.dtype)
     
     error = torch.abs(output - output_truth).mean()
     print(torch.std_mean(output_truth), torch.std_mean(output), error, sep='\n')

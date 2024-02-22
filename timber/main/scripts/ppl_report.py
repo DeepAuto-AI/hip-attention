@@ -13,6 +13,7 @@ ks = [128, 256, 512, 1024]
 
 def samples():
     results = {}
+    cache_path = './cache/llama_eval/ppl.json'
     for block_size, k in tqdm.tqdm(
         list(itertools.product(block_sizes, ks)), 
         desc='exam', dynamic_ncols=True
@@ -27,8 +28,9 @@ def samples():
             '--block_size_k', str(block_size),
             '--k', str(k),
         ])
-        with open('./cache/llama_eval/ppl.json', 'r') as f:
+        with open(cache_path, 'r') as f:
             ppl = json.load(f)['ppl']
+        os.remove(cache_path)
         print(f'ppl measured {ppl} (b{block_size}, k{k})')
         results[f'b{block_size}_k{k}'] = {
             'block_size': block_size,

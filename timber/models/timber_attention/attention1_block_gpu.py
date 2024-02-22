@@ -27,7 +27,7 @@ from torch import Tensor
 import tqdm
 import triton
 import triton.language as tl
-from typing import Literal, Tuple, List, Union
+from typing import Literal, Optional, Tuple, List, Union
 import os
 import math
 from torch.autograd import Function
@@ -70,7 +70,14 @@ def _masking_iteration_compute(
     SCALE_UP: float, N_PATCHES: int, MASK_K: int, TMASK_K: int, IS_CAUSAL: tl.constexpr,
     
     # input variables
-    N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ_HID: int,
+    N: int, 
+    T_DST: int, 
+    T_SRC: int, 
+    B_DST: int, 
+    B_SRC: int, 
+    HID: int, 
+    SPARQ_HID: int,
+    N_COMPLETED: int,
     
     # vLLM compat inputs
     stride_keys_vllm_num_blcoks, 
@@ -105,7 +112,7 @@ def _masking_iteration_compute(
     REDUCE_STRDIE: tl.constexpr,
 ):
     idx_n = tl.program_id(0).to(tl.int64)
-    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_bdst = tl.program_id(1).to(tl.int64) + N_COMPLETED
     """ non blocked
     # for each query
     w_old = ws[i, j, 0]
@@ -234,6 +241,11 @@ def _masking_iteration_compute(
         # value = num_pixels_scalar=
     )
     """
+    
+    # interp_loc_vec_padded = (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
+    # mask_interp_loc_vec_padded = tl.arange(0, BLOCK_MAX_DUP)[None, :] < dup_pixels_vec[:, None]
+    # interp_loc_vec_padded = tl.reshape(interp_loc_vec_padded, BLOCK_MASK_K * BLOCK_MAX_DUP)
+    
     
     for _idx in range(BLOCK_MAX_DUP):
         # _idx = BLOCK_MAX_DUP - _idx - 1
@@ -659,7 +671,15 @@ def masking_iteration(
     # iteration controls
     i_iteration: int, n_iteration: int,
     # input constant
-    N: int, T_DST: int, T_SRC: int, B_DST: int, B_SRC: int, HID: int, SPARQ: bool, SPARQ_HID: int,
+    N: int, 
+    T_DST: int, 
+    T_SRC: int, 
+    B_DST: int, 
+    B_SRC: int, 
+    HID: int, 
+    SPARQ: bool, 
+    SPARQ_HID: int,
+    N_COMPLETED: int,
     # kernel constant
     BLOCK_SIZE_Q: int, 
     BLOCK_SIZE_K: int, 
@@ -709,8 +729,6 @@ def masking_iteration(
             BLOCK_MASK_K = BLOCK_MASK_K // scale_up
         BLOCK_TMASK_K = BLOCK_TMASK_K // scale_up
     
-    GROUP_N = 1
-    GROUP_BDST = 1
     BLOCK_HID = triton.next_power_of_2(HID)
     if SPARQ:
         BLOCK_HID = triton.next_power_of_2(max(16, SPARQ_HID))
@@ -766,10 +784,7 @@ def masking_iteration(
     else:
         raise Exception()
     
-    grid = (triton.cdiv(N, GROUP_N), triton.cdiv(B_DST, GROUP_BDST))
-    
-    assert GROUP_N == 1
-    assert GROUP_BDST == 1
+    grid = (N, B_DST - N_COMPLETED)
     
     # HID cannot be chunked if use reduce
     # if REDUCE_METHOD in ['max', 'sum']:
@@ -807,7 +822,7 @@ def masking_iteration(
         float(scale_up), int(n_patches), int(mask_k), int(t_mask.shape[-1]), is_causal,
         
         # input variables
-        N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID,
+        N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID, N_COMPLETED,
         
         # vLLM compat inputs
         *stride_keys_vllm,
@@ -836,9 +851,9 @@ def masking_iteration(
         REDUCE_STRIDE,
         
         num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
-        # num_warps=4,
+        # num_warps=1,
         num_stages=2,
-        enable_warp_specialization=True,
+        enable_warp_specialization=False,
     )
     torch.cuda.set_device(orig_device)
     
@@ -881,7 +896,7 @@ def _safe_indices_compute(
             value = col,
             mask = mask_n
         )
-        tl.debug_barrier()
+        # tl.debug_barrier()
         last_col = col
 
 def safe_indices(indices):
@@ -905,6 +920,384 @@ def safe_indices(indices):
     indices = indices.reshape(N, TDST, K)
     
     return indices
+
+@triton.jit
+def _calc_prob_return_context_compute(
+    # input matrices
+    Q, stride_q_n, stride_q_tdst, stride_q_hid,
+    K, stride_k_n, stride_k_tsrc, stride_k_hid,
+    V, stride_v_n, stride_v_tsrc, stride_v_hid,
+    ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
+    
+    # indices metrices
+    INDICES, stride_indices_n, stride_indices_bdst, stride_indices_bk,
+    KS, stride_ks_n, stride_ks_bdst,
+    
+    # output matrices,
+    CONTEXT, stride_context_n, stride_context_tdst, stride_context_hid,
+    
+    # input variables
+    N, TDST, TSRC, HID, BDST, BSRC, BK,
+    
+    # vllm compat
+    stride_k_vllm_num_blocks, 
+    stride_k_vllm_num_kv_heads, 
+    stride_k_vllm_head_size_x, 
+    stride_k_vllm_block_size, 
+    stride_k_vllm_x,
+    
+    stride_v_vllm_num_blocks,
+    stride_v_vllm_num_kv_heads,
+    stride_v_vllm_head_size,
+    stride_v_vllm_block_size,
+    
+    BLOCK_TABLES,
+    stride_block_tables_num_seqs,
+    stride_block_tables_max_num_blocks_per_seq,
+    
+    VLLM_NUM_BLOCKS,
+    VLLM_NUM_KV_HEADS,
+    VLLM_HEAD_SIZE_X,
+    VLLM_BLOCK_SIZE: tl.constexpr,
+    VLLM_X: tl.constexpr,
+    VLLM_HEAD_SIZE,
+    
+    # block constant
+    CACHE_METHOD: tl.constexpr,
+    BLOCK_SIZE_Q,
+    BLOCK_SIZE_Q_PADDED: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64)
+    mask_block_q = idx_block_q < BLOCK_SIZE_Q
+    
+    idx_n = tl.program_id(0).to(tl.int64)
+    
+    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_tdst = idx_block_q + idx_bdst * BLOCK_SIZE_Q
+    mask_tdst = (idx_tdst < TDST) & mask_block_q
+    
+    ks = tl.load(
+        KS + \
+            idx_n * stride_ks_n +
+            idx_bdst * stride_ks_bdst,
+    ).to(tl.int64)
+    
+    # scores_rowmax_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
+    scores_rowmax_state = tl.zeros((BLOCK_SIZE_Q_PADDED, 1), dtype=tl.float32)
+    # scores_sum_exp_norm_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
+    scores_sum_exp_norm_state = tl.zeros((BLOCK_SIZE_Q_PADDED, 1), dtype=tl.float32)
+    for idx_bbk in range(tl.cdiv(BK, BLOCK_BK)):
+        idx_bk = tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK
+        mask_bk = (idx_bk < BK) & (idx_bk < ks)
+        
+        # [BLOCK_BK,]
+        idx_tsrc_block_start = tl.load(
+            INDICES +\
+                idx_n * stride_indices_n +\
+                idx_bdst * stride_indices_bdst +\
+                idx_bk * stride_indices_bk,
+            mask = mask_bk,
+            other = TSRC,
+        ).to(tl.int64)
+        
+        # [BLOCK_BK, BLOCK_SIZE_K]
+        idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :] + idx_tsrc_block_start[:, None]
+        mask_tsrc = (idx_tsrc < TSRC) & mask_bk[:, None]
+        
+        # [BLOCK_BK * BLOCK_SIZE_K; multiple of 16]
+        idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K,))
+        mask_tsrc = tl.reshape(mask_tsrc, (BLOCK_BK * BLOCK_SIZE_K,))
+        
+        # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
+        # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
+        # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
+        scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K), dtype=tl.float32)
+        for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
+            idx_hid = tl.arange(0, BLOCK_HID) + idx_bhid * BLOCK_HID
+            mask_hid = idx_hid < HID
+            
+            queries = tl.load(
+                Q +\
+                    idx_n * stride_q_n +\
+                    idx_tdst[:, None] * stride_q_tdst +\
+                    idx_hid[None, :] * stride_q_hid,
+                mask = mask_tdst[:, None] & mask_hid[None, :],
+                other = 0
+            )
+
+            if CACHE_METHOD == 'cont':
+                keys = tl.load(
+                    K +\
+                        idx_n * stride_k_n +\
+                        idx_tsrc[None, :] * stride_k_tsrc +\
+                        idx_hid[:, None] * stride_k_hid,
+                    mask = mask_tsrc[None, :] & mask_hid[:, None],
+                    other = 0,
+                )
+            elif CACHE_METHOD == 'vllm':
+                """
+                idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+                offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+                key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
+                """
+                idx_batch = (idx_n // VLLM_NUM_KV_HEADS).to(tl.int64)
+                idx_head = (idx_n % VLLM_NUM_KV_HEADS).to(tl.int64)
+                idx_block = tl.load(
+                    BLOCK_TABLES +\
+                        idx_batch * stride_block_tables_num_seqs +\
+                        (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                    mask = mask_tsrc,
+                ).to(tl.int64)
+                offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
+                
+                # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
+                keys = tl.load(
+                    K +\
+                        idx_block[None, :] * stride_k_vllm_num_blocks +\
+                        idx_head * stride_k_vllm_num_kv_heads +\
+                        (idx_hid[:, None] // VLLM_X) * stride_k_vllm_head_size_x +\
+                        offset_block[None, :] * stride_k_vllm_block_size +\
+                        (idx_hid[:, None] % VLLM_X) * stride_k_vllm_x,
+                    mask = mask_tsrc[None, :] & mask_hid[:, None],
+                    other = 0,
+                )
+            else:
+                raise Exception()
+            if keys.dtype == tl.uint8:
+                keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
+            
+            scores_mini = tl.dot(queries, keys)
+            scores += scores_mini.to(scores.dtype)
+        
+        if IS_CAUSAL:
+            scores += ((idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :]) * (-10000.0)
+        scores += (~(mask_tdst[:, None] & mask_tsrc[None, :])) * (-10000.0)
+        
+        # [BLOCK_SIZE_Q: tdst, 1: tsrc]
+        scores_rowmax = tl.expand_dims(tl.max(scores, axis=1), axis=1)
+        # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
+        scores_exp_norm = tl.exp(scores - scores_rowmax)
+        # [BLOCK_SIZE_Q: tdst, 1: tsrc]
+        scores_sum_exp_norm = tl.expand_dims(tl.sum(scores_exp_norm, axis=1), axis=1)
+        
+        new_scores_rowmax = tl.maximum(scores_rowmax_state, scores_rowmax)
+        new_scores_sum_exp_norm = \
+            tl.exp(scores_rowmax_state - new_scores_rowmax) * scores_sum_exp_norm_state +\
+            tl.exp(scores_rowmax - new_scores_rowmax) * scores_sum_exp_norm
+        
+        for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
+            idx_hid = tl.arange(0, BLOCK_HID) + idx_bhid * BLOCK_HID
+            mask_hid = idx_hid < HID
+            
+            context = tl.load(
+                CONTEXT +\
+                    idx_n * stride_context_n +\
+                    idx_tdst[:, None] * stride_context_tdst +\
+                    idx_hid[None, :] * stride_context_hid,
+                mask = mask_tdst[:, None] & mask_hid[None, :],
+                other = 0
+            )
+            
+            if CACHE_METHOD == 'cont':
+                values = tl.load(
+                    V +\
+                        idx_n * stride_v_n +\
+                        idx_tsrc[:, None] * stride_v_tsrc +\
+                        idx_hid[None, :] * stride_v_hid,
+                    mask = mask_tsrc[:, None] & mask_hid[None, :],
+                    other = 0
+                )
+            elif CACHE_METHOD == 'vllm':
+                """
+                idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+                offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+                value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
+                """
+                idx_batch = idx_n // VLLM_NUM_KV_HEADS
+                idx_head = idx_n % VLLM_NUM_KV_HEADS
+                
+                idx_block = tl.load(
+                    BLOCK_TABLES +\
+                        idx_batch * stride_block_tables_num_seqs +\
+                        (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                    mask = mask_tsrc,
+                    other = 0
+                ).to(tl.int64)
+                mask_block = (idx_tsrc // VLLM_BLOCK_SIZE) < tl.cdiv(TSRC, VLLM_BLOCK_SIZE)
+                offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
+                
+                # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
+                values = tl.load(
+                    V +\
+                        idx_block[:, None] * stride_v_vllm_num_blocks+\
+                        idx_head * stride_v_vllm_num_kv_heads+\
+                        idx_hid[None, :].to(tl.int64) * stride_v_vllm_head_size +\
+                        offset_block[:, None] * stride_v_vllm_block_size,
+                    mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_block[:, None],
+                    other = 0
+                )
+            else:
+                raise Exception()
+            
+            if values.dtype == tl.uint8:
+                values = values.to(tl.float8e5, bitcast=True).to(tl.float16)
+            
+            context = (
+                scores_sum_exp_norm_state * tl.exp(scores_rowmax_state - new_scores_rowmax) * context +\
+                tl.exp(scores_rowmax - new_scores_rowmax) * tl.dot(scores_exp_norm.to(values.dtype), values)
+            ) / new_scores_sum_exp_norm
+            
+            tl.store(
+                CONTEXT +\
+                    idx_n * stride_context_n +\
+                    idx_tdst[:, None] * stride_context_tdst +\
+                    idx_hid[None, :] * stride_context_hid,
+                mask = mask_tdst[:, None] & mask_hid[None, :],
+                value = context
+            )
+        
+        scores_rowmax_state = scores_rowmax
+        scores_sum_exp_norm_state = scores_sum_exp_norm
+
+def calc_prob_return_context(
+    # input matrices
+    queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], values: Union[Tensor, "PagedValueCacheVllmCompat"], attention_mask: Optional[Tensor],
+    # indices metrices
+    indices: Tensor, ks: Tensor,
+    # block constant
+    BLOCK_SIZE_Q: int,
+    BLOCK_SIZE_K: int,
+    IS_CAUSAL: bool,
+):
+    """
+    implement flash attention 1, not 2.
+    """
+    
+    N, TDST, HID = queries.shape
+    N, TSRC, HID = keys.shape
+    assert keys.shape == values.shape
+    assert attention_mask is None or attention_mask.shape == (N, TDST)
+    
+    BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
+    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
+    _, _, BK = indices.shape
+    assert ks.shape == (N, BDST)
+    
+    # BLOCK_BK = max(1, 512 // BLOCK_SIZE_K)
+    BLOCK_BK = triton.next_power_of_2(BK)
+    BLOCK_HID = 32
+    BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
+    
+    assert values.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]
+    context = torch.zeros(
+        (N, TDST, HID),
+        dtype=queries.dtype,
+        device=queries.device,
+    )
+    
+    if isinstance(keys, Tensor) and isinstance(values, Tensor):
+        CACHE_METHOD = 'cont'
+        
+        VLLM_NUM_BLOCKS =\
+        VLLM_NUM_KV_HEADS =\
+        VLLM_HEAD_SIZE_X =\
+        VLLM_BLOCK_SIZE =\
+        VLLM_X =\
+        VLLM_HEAD_SIZE = 0
+        
+        vllm_keys_strides = (0, 0, 0, 0, 0)
+        vllm_values_strides = (0, 0, 0, 0)
+        
+        block_tables = keys
+        block_tables_strides = (0, 0)
+    elif isinstance(keys, PagedKeyCacheVllmCompat) and isinstance(values, PagedValueCacheVllmCompat):
+        """
+        vLLM compatible paged attention
+        
+        q: [num_seqs, num_heads, head_size]
+        k: [num_blocks, num_kv_heads, head_size/x, block_size, x]
+        v: [num_blocks, num_kv_heads, head_size, block_size]
+        block_tables: [num_seqs, max_num_blocks_per_seq]
+        context_lens: [num_seqs]
+        """
+        
+        CACHE_METHOD = 'vllm'
+        
+        (
+            VLLM_NUM_BLOCKS,
+            VLLM_NUM_KV_HEADS, 
+            VLLM_HEAD_SIZE_X,
+            VLLM_BLOCK_SIZE,
+            VLLM_X,
+        ) = keys.key_cache.shape
+        VLLM_HEAD_SIZE = VLLM_HEAD_SIZE_X * VLLM_X
+        
+        block_tables = keys.block_table
+        block_tables_strides = block_tables.stride()
+        assert len(block_tables_strides) == 2
+        
+        vllm_keys_strides = keys.key_cache.stride()
+        assert len(vllm_keys_strides) == 5
+        
+        vllm_values_strides = values.value_cache.stride()
+        assert len(vllm_values_strides) == 4
+    else:
+        raise Exception("not supported")
+    
+    grid = (N, BDST)
+    
+    assert attention_mask is None, "attention mask is not supported yet"
+    assert queries.ndim == 3
+    assert keys.ndim == 3
+    assert values.ndim == 3
+    assert attention_mask is None or attention_mask.ndim == 3
+    assert indices.ndim == 3
+    assert ks.ndim == 2
+    assert context.ndim == 3
+    _calc_prob_return_context_compute[grid](
+        queries, *queries.stride(),
+        keys, *keys.stride(),
+        values, *values.stride(),
+        attention_mask, *((0, 0) if attention_mask is None else attention_mask.stride()),
+        
+        indices, *indices.stride(),
+        ks, *ks.stride(),
+        
+        context, *context.stride(),
+        
+        N, TDST, TSRC, HID, BDST, BSRC, BK,
+        
+        # vllm key value cache compat
+        *vllm_keys_strides,
+        *vllm_values_strides,
+        
+        block_tables,
+        *block_tables_strides,
+        
+        VLLM_NUM_BLOCKS,
+        VLLM_NUM_KV_HEADS,
+        VLLM_HEAD_SIZE_X,
+        VLLM_BLOCK_SIZE,
+        VLLM_X,
+        VLLM_HEAD_SIZE,
+        
+        CACHE_METHOD,
+        BLOCK_SIZE_Q,
+        BLOCK_SIZE_Q_PADDED, 
+        BLOCK_SIZE_K,
+        BLOCK_HID,
+        BLOCK_BK,
+        IS_CAUSAL,
+        
+        num_warps=8,
+        num_stages=1,
+    )
+    
+    return context
 
 @triton.jit
 def _calc_score_compute(
@@ -1315,7 +1708,7 @@ class CalcScoreAutoGradFn(Function):
         # block constant
         BLOCK_SIZE_Q: int,
         BLOCK_SIZE_K: int,
-        IS_CAUSAL: bool,
+        IS_CAUSAL: bool
     ):
         ctx.save_for_backward(queries, keys, indices, ks)
         ctx.BLOCK_SIZE_Q = BLOCK_SIZE_Q
@@ -1573,6 +1966,7 @@ def calc_score_return_prob(
 def attention_matrix(
     queries: Tensor, 
     keys: Tensor,
+    values: Tensor,
     attention_mask: Tensor,
     
     w_start: int,
@@ -1591,6 +1985,8 @@ def attention_matrix(
     SPARQ_START_BK: int = 256,
     SPARQ_HID: int = 32,
     SPARQ_REDUCE_METHOD: Literal['sum', 'max'] = 'sum',
+    
+    IS_FLASH: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -1607,6 +2003,7 @@ def attention_matrix(
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
     
+    # SPARQ = False
     # SPARQ_HID = 16
     # SPARQ = True
     
@@ -1761,7 +2158,7 @@ def attention_matrix(
         path = f'saves/models/timber_attention/block_{w_curr}.png'
         # path = f'saves/models/timber_attention/block.png'
         print('saved', path)
-        plt.savefig(path, dpi=96, bbox_inches='tight')
+        # plt.savefig(path, dpi=96, bbox_inches='tight')
     
     if DEBUG:
         debug_print()
@@ -1774,6 +2171,7 @@ def attention_matrix(
         n_iteration += 1
     w_curr = _w_curr
     
+    n_completed = w_curr
     with timer("iterations"):
         for i_iteration in range(n_iteration):
             with timer(f"iteration_{w_curr}"):
@@ -1789,7 +2187,15 @@ def attention_matrix(
                     # iteration controls
                     i_iteration, n_iteration,
                     # input constant
-                    N, T_DST, T_SRC, B_DST, B_SRC, HID, SPARQ, SPARQ_HID,
+                    N, 
+                    T_DST, 
+                    T_SRC, 
+                    B_DST, 
+                    B_SRC, 
+                    HID, 
+                    SPARQ, 
+                    SPARQ_HID, 
+                    max(0, triton.cdiv(n_completed, BLOCK_SIZE_Q) - (triton.cdiv(T_SRC, BLOCK_SIZE_Q) - triton.cdiv(T_DST, BLOCK_SIZE_Q))),
                     # kernel constant
                     BLOCK_SIZE_Q,
                     BLOCK_SIZE_K,
@@ -1797,6 +2203,7 @@ def attention_matrix(
                     REDUCE_STRIDE,
                 )
             w_curr = round(w_curr * scale_up)
+            n_completed = round(n_completed * scale_up)
             if DEBUG:
                 debug_print()
     
@@ -1816,15 +2223,25 @@ def attention_matrix(
         indices = indices * BLOCK_SIZE_K
     
     # # NOTE: are you sure this function is the only thing can differentiate?
-    with timer("score"):
-        scores, probs = calc_score_return_prob(
-            queries=queries, keys=keys, attention_mask=attention_mask,
-            indices=indices, ks=ks,
-            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-            BLOCK_SIZE_K=BLOCK_SIZE_K,
-            IS_CAUSAL=is_causal,
-        )
-        assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
+    with timer("score" if not IS_FLASH else "flash_atten"):
+        if not IS_FLASH:
+            scores, probs = calc_score_return_prob(
+                queries=queries, keys=keys, attention_mask=attention_mask,
+                indices=indices, ks=ks,
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                IS_CAUSAL=is_causal,
+            )
+            assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
+        else:
+            context = calc_prob_return_context(
+                queries=queries, keys=keys, values=values, attention_mask=attention_mask,
+                indices=indices, ks=ks,
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K,
+                IS_CAUSAL=is_causal,
+            )
+
+            return indices, ks, context, None
     
     if DEBUG:
         x = to_dense(
@@ -2015,7 +2432,6 @@ def _sdbmm_compute(
         mask = mask_tdst[:, None] & mask_hid[None, :],
         value = scores
     )
-
 
 @triton.jit
 def _sdbmm_compute_bwd_values(
@@ -2667,7 +3083,9 @@ def timber_attention(
     reduce_stride: int = 1,
     
     chunking: bool = False,
-    chunk_size: int = 2048
+    chunk_size: int = 2048,
+    
+    is_flash: bool = True,
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
@@ -2699,6 +3117,7 @@ def timber_attention(
                 block_size_k=block_size_k,
                 reduce_method=reduce_method,
                 reduce_stride=reduce_stride,
+                is_flash=is_flash,
             )
             contexts.append(context)
             
@@ -2751,9 +3170,10 @@ def timber_attention(
     
     with timer('timber_attention'):
         with timer('attention_matrix'):
-            indices, ks, probs, scores = attention_matrix(
+            indices, ks, probs_or_context, scores = attention_matrix(
                 q,
                 k,
+                v,
                 attention_mask,
                 
                 w_start,
@@ -2766,7 +3186,14 @@ def timber_attention(
                 block_size_k,
                 reduce_method,
                 reduce_stride,
+                
+                IS_FLASH=is_flash,
             )
+            
+            if is_flash:
+                return probs_or_context, (indices, ks, None)
+            else:
+                probs = probs_or_context
             
             # assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
         
