@@ -570,10 +570,11 @@ def _masking_iteration_compute(
         # select min-k from negative scores -> select top-k
         # masked_scores = scores + (~num_pixels_mask) * 32000.0
         masked_scores = scores
-        # tl.debug_barrier()
+        
         scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
-        # tl.debug_barrier()
         topk_mask = masked_scores <= scores_kth_large
+        # topk_mask = tl.arange(0, BLOCK_TMASK_K) <= k_new
+        
         topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
         # tl.debug_barrier()
         topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, k_new - 1).to(tl.int64)
@@ -858,8 +859,8 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         
-        num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
-        # num_warps=1,
+        # num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
+        num_warps=16,
         num_stages=2,
         enable_warp_specialization=False,
     )
@@ -1082,9 +1083,9 @@ def _calc_prob_return_context_compute(
         scores += (~(mask_tdst[:, None] & mask_tsrc[None, :])) * (-10000.0)
         
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-        scores_rowmax = tl.expand_dims(tl.max(scores, axis=1), axis=1)
+        scores_rowmax = tl.expand_dims(tl.max(scores, axis=1), axis=1).to(tl.float32)
         # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-        scores_exp_norm = tl.exp(scores - scores_rowmax)
+        scores_exp_norm = tl.exp((scores - scores_rowmax).to(tl.float32))
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
         scores_sum_exp_norm = tl.expand_dims(tl.sum(scores_exp_norm, axis=1), axis=1)
         
@@ -1163,6 +1164,8 @@ def _calc_prob_return_context_compute(
                 mask = mask_tdst[:, None] & mask_hid[None, :],
                 value = context
             )
+            
+            tl.debug_barrier()
         
         scores_rowmax_state = scores_rowmax
         scores_sum_exp_norm_state = scores_sum_exp_norm
@@ -1195,9 +1198,10 @@ def calc_prob_return_context(
     _, _, BK = indices.shape
     assert ks.shape == (N, BDST)
     
-    # BLOCK_BK = max(1, 512 // BLOCK_SIZE_K)
-    BLOCK_BK = triton.next_power_of_2(BK)
-    BLOCK_HID = 32
+    # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
+    BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
+    # print(256 // BLOCK_SIZE_K, BK)
+    BLOCK_HID = min(32, triton.next_power_of_2(HID))
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
     
     assert values.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]
