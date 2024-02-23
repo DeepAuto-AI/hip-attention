@@ -3277,6 +3277,18 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
 
     return flash_attn_with_kvcache(q, k, v, causal=is_causal), None
 
+def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
+    """
+    https://arxiv.org/pdf/2305.16300.pdf
+    this paper claimed, they are faster than original attetnion... but seems not?
+    """
+    from timber.models.landmark_attention import fused_landmark_attention
+    
+    seqlen_k = k.shape[1]
+    block_size = 64
+    is_mem = torch.arange(0, seqlen_k, device=q.device) % block_size == (block_size - 1)
+    return fused_landmark_attention(q, k, v, is_mem, block_size=block_size)
+
 def main_latency_benchmark():
     global DEBUG
     
@@ -3324,10 +3336,14 @@ def main_latency_benchmark():
     v = v.repeat(BSIZE, DUPS, 1)
     started = False
     
-    if METHOD == 'flash':
+    if METHOD in 'flash':
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
+    elif METHOD in 'landmark':
+        q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
     
     q = q.cuda()
     k = k.cuda()
@@ -3345,6 +3361,8 @@ def main_latency_benchmark():
                 torch_attention(q, k, v)
             elif METHOD == 'flash':
                 flash_attention(q, k, v, is_causal=is_causal)
+            elif METHOD == 'landmark':
+                landmark_attention(q, k, v)
             elif METHOD == 'timber':
                 timber_attention(
                     q,
