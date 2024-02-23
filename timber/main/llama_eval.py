@@ -32,6 +32,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
+        'vllm_yi6b': '01-ai/Yi-6B-200K',
     }
     assert args.model in MODELS
     assert args.job in ['stream']
@@ -66,6 +67,8 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
     assert args.model in MODELS, MODELS.keys()

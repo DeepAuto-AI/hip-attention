@@ -70,6 +70,7 @@ def _masking_iteration_compute(
     SCALE_UP: float, N_PATCHES: int, MASK_K: int, TMASK_K: int, IS_CAUSAL: tl.constexpr,
     
     # input variables
+    KV_REPEAT_INTERLEAVE: int,
     N: int, 
     T_DST: int, 
     T_SRC: int, 
@@ -328,7 +329,7 @@ def _masking_iteration_compute(
                 
                 vec_k = tl.load(
                     KEYS +\
-                        idx_n * stride_keys_n +\
+                        (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
                         idx_tsrc[None, :] * stride_keys_tsrc + \
                         idx_hid[:, None] * stride_keys_hid,
                     mask = vec_k_mask,
@@ -455,7 +456,7 @@ def _masking_iteration_compute(
                         # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
                         vec_k = tl.load(
                             KEYS +\
-                                idx_n * stride_keys_n +\
+                                (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
                                 idx_tsrc[None, :] * stride_keys_tsrc + \
                                 idx_hid[:, None] * stride_keys_hid,
                             mask = vec_k_mask,
@@ -467,8 +468,8 @@ def _masking_iteration_compute(
                         offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
                         key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
                         """
-                        idx_batch = (idx_n // VLLM_NUM_KV_HEADS).to(tl.int64)
-                        idx_head = (idx_n % VLLM_NUM_KV_HEADS).to(tl.int64)
+                        idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
+                        idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
                         idx_block = tl.load(
                             BLOCK_TABLES +\
                                 idx_batch * stride_block_tables_num_seqs +\
@@ -671,6 +672,7 @@ def masking_iteration(
     # iteration controls
     i_iteration: int, n_iteration: int,
     # input constant
+    KV_REPEAT_INTERLEAVE: int,
     N: int, 
     T_DST: int, 
     T_SRC: int, 
@@ -722,12 +724,12 @@ def masking_iteration(
     BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
     # print(BLOCK_MASK_K, BLOCK_TMASK_K)
     
-    if i_iteration == 0 or i_iteration == (n_iteration - 1):
-        pass
-    else:
-        if i_iteration > 1:
-            BLOCK_MASK_K = BLOCK_MASK_K // scale_up
-        BLOCK_TMASK_K = BLOCK_TMASK_K // scale_up
+    # if i_iteration == 0 or i_iteration == (n_iteration - 1):
+    #     pass
+    # else:
+    #     if i_iteration > 1:
+    #         BLOCK_MASK_K = BLOCK_MASK_K // scale_up
+    #     BLOCK_TMASK_K = BLOCK_TMASK_K // scale_up
     
     BLOCK_HID = triton.next_power_of_2(HID)
     if SPARQ:
@@ -820,7 +822,15 @@ def masking_iteration(
         float(scale_up), int(n_patches), int(mask_k), int(t_mask.shape[-1]), is_causal,
         
         # input variables
-        N, T_DST, T_SRC, int(B_DST), int(B_SRC), HID, SPARQ_HID, N_COMPLETED,
+        KV_REPEAT_INTERLEAVE, 
+        N, 
+        T_DST, 
+        T_SRC, 
+        int(B_DST), 
+        int(B_SRC), 
+        HID, 
+        SPARQ_HID, 
+        N_COMPLETED,
         
         # vLLM compat inputs
         *stride_keys_vllm,
@@ -931,7 +941,7 @@ def _calc_prob_return_context_compute(
     CONTEXT, stride_context_n, stride_context_tdst, stride_context_hid,
     
     # input variables
-    N, TDST, TSRC, HID, BDST, BSRC, BK,
+    KV_REPEAT_INTERLEAVE, N, TDST, TSRC, HID, BDST, BSRC, BK,
     
     # vllm compat
     stride_k_vllm_num_blocks, 
@@ -971,7 +981,7 @@ def _calc_prob_return_context_compute(
     idx_n = tl.program_id(0).to(tl.int64)
     
     idx_bdst = tl.program_id(1).to(tl.int64)
-    idx_tdst = idx_block_q + idx_bdst * BLOCK_SIZE_Q
+    idx_tdst = (idx_block_q + idx_bdst * BLOCK_SIZE_Q).to(tl.int64)
     mask_tdst = (idx_tdst < TDST) & mask_block_q
     
     ks = tl.load(
@@ -985,7 +995,7 @@ def _calc_prob_return_context_compute(
     # scores_sum_exp_norm_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
     scores_sum_exp_norm_state = tl.zeros((BLOCK_SIZE_Q_PADDED, 1), dtype=tl.float32)
     for idx_bbk in range(tl.cdiv(BK, BLOCK_BK)):
-        idx_bk = tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK
+        idx_bk = (tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK).to(tl.int64)
         mask_bk = (idx_bk < BK) & (idx_bk < ks)
         
         # [BLOCK_BK,]
@@ -999,7 +1009,7 @@ def _calc_prob_return_context_compute(
         ).to(tl.int64)
         
         # [BLOCK_BK, BLOCK_SIZE_K]
-        idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :] + idx_tsrc_block_start[:, None]
+        idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
         mask_tsrc = (idx_tsrc < TSRC) & mask_bk[:, None]
         
         # [BLOCK_BK * BLOCK_SIZE_K; multiple of 16]
@@ -1011,7 +1021,7 @@ def _calc_prob_return_context_compute(
         # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
         scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K), dtype=tl.float32)
         for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
-            idx_hid = tl.arange(0, BLOCK_HID) + idx_bhid * BLOCK_HID
+            idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64) + idx_bhid.to(tl.int64) * BLOCK_HID
             mask_hid = idx_hid < HID
             
             queries = tl.load(
@@ -1026,7 +1036,7 @@ def _calc_prob_return_context_compute(
             if CACHE_METHOD == 'cont':
                 keys = tl.load(
                     K +\
-                        idx_n * stride_k_n +\
+                        (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
                         idx_tsrc[None, :] * stride_k_tsrc +\
                         idx_hid[:, None] * stride_k_hid,
                     mask = mask_tsrc[None, :] & mask_hid[:, None],
@@ -1038,8 +1048,8 @@ def _calc_prob_return_context_compute(
                 offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
                 key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
                 """
-                idx_batch = (idx_n // VLLM_NUM_KV_HEADS).to(tl.int64)
-                idx_head = (idx_n % VLLM_NUM_KV_HEADS).to(tl.int64)
+                idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
+                idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
                 idx_block = tl.load(
                     BLOCK_TABLES +\
                         idx_batch * stride_block_tables_num_seqs +\
@@ -1099,7 +1109,7 @@ def _calc_prob_return_context_compute(
             if CACHE_METHOD == 'cont':
                 values = tl.load(
                     V +\
-                        idx_n * stride_v_n +\
+                        (idx_n // KV_REPEAT_INTERLEAVE) * stride_v_n +\
                         idx_tsrc[:, None] * stride_v_tsrc +\
                         idx_hid[None, :] * stride_v_hid,
                     mask = mask_tsrc[:, None] & mask_hid[None, :],
@@ -1111,8 +1121,8 @@ def _calc_prob_return_context_compute(
                 offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
                 value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
                 """
-                idx_batch = idx_n // VLLM_NUM_KV_HEADS
-                idx_head = idx_n % VLLM_NUM_KV_HEADS
+                idx_batch = (idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS
+                idx_head = (idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS
                 
                 idx_block = tl.load(
                     BLOCK_TABLES +\
@@ -1159,10 +1169,14 @@ def _calc_prob_return_context_compute(
 
 def calc_prob_return_context(
     # input matrices
-    queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], values: Union[Tensor, "PagedValueCacheVllmCompat"], attention_mask: Optional[Tensor],
+    queries: Tensor, 
+    keys: Union[Tensor, "PagedKeyCacheVllmCompat"], 
+    values: Union[Tensor, "PagedValueCacheVllmCompat"], 
+    attention_mask: Optional[Tensor],
     # indices metrices
     indices: Tensor, ks: Tensor,
     # block constant
+    KV_REPEAT_INTERLEAVE: int,
     BLOCK_SIZE_Q: int,
     BLOCK_SIZE_K: int,
     IS_CAUSAL: bool,
@@ -1172,7 +1186,7 @@ def calc_prob_return_context(
     """
     
     N, TDST, HID = queries.shape
-    N, TSRC, HID = keys.shape
+    _N, TSRC, HID = keys.shape
     assert keys.shape == values.shape
     assert attention_mask is None or attention_mask.shape == (N, TDST)
     
@@ -1263,7 +1277,14 @@ def calc_prob_return_context(
         
         context, *context.stride(),
         
-        N, TDST, TSRC, HID, BDST, BSRC, BK,
+        KV_REPEAT_INTERLEAVE, 
+        N, 
+        TDST, 
+        TSRC, 
+        HID, 
+        BDST, 
+        BSRC, 
+        BK,
         
         # vllm key value cache compat
         *vllm_keys_strides,
@@ -1308,7 +1329,7 @@ def _calc_score_compute(
     SCORES, stride_scores_n, stride_scores_tdst, stride_scores_k,
     
     # input variables
-    N, TDST, TSRC, HID, BK, K, BDST, BSRC, IS_CAUSAL,
+    KV_REPEAT_INTERLEAVE, N, TDST, TSRC, HID, BK, K, BDST, BSRC, IS_CAUSAL,
     
     # vllm key cache compat
     stride_keys_vllm_num_bocks,
@@ -1412,7 +1433,7 @@ def _calc_score_compute(
             # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
             keys = tl.load(
                 KEYS +\
-                    idx_n * stride_keys_n +\
+                    (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
                     idx_tsrc[None, :, :] * stride_keys_tsrc +\
                     idx_hid[:, None, None] * stride_keys_hid,
                 mask = mask_tsrc[None, :, :] & mask_hid[:, None, None],
@@ -1424,8 +1445,8 @@ def _calc_score_compute(
             offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
             key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
             """
-            idx_batch = (idx_n // VLLM_NUM_KV_HEADS).to(tl.int64)
-            idx_head = (idx_n % VLLM_NUM_KV_HEADS).to(tl.int64)
+            idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
+            idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
             idx_block = tl.load(
                 BLOCK_TABLES +\
                     idx_batch * stride_block_tables_num_seqs +\
@@ -1700,6 +1721,7 @@ class CalcScoreAutoGradFn(Function):
         # indices matrices
         indices: Tensor, ks: Tensor,
         # block constant
+        KV_REPEAT_INTERLEAVE: int,
         BLOCK_SIZE_Q: int,
         BLOCK_SIZE_K: int,
         IS_CAUSAL: bool
@@ -1709,13 +1731,13 @@ class CalcScoreAutoGradFn(Function):
         ctx.BLOCK_SIZE_K = BLOCK_SIZE_K
         
         N, TDST, HID = queries.shape
-        _, TSRC, _ = keys.shape
+        _N, TSRC, _ = keys.shape
         _, _, BK = indices.shape
         
         BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
         BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
         
-        assert keys.shape == (N, TSRC, HID)
+        assert keys.shape == (_N, TSRC, HID)
         assert indices.shape == (N, BDST, BK)
         assert ks.shape == (N, BDST)
         
@@ -1776,7 +1798,7 @@ class CalcScoreAutoGradFn(Function):
             assert len(block_tables_strides) == 2
             
             vllm_keys_strides = keys.key_cache.stride()
-            assert len(vllm_keys_strides) == 5
+            assert len(vllm_keys_strides) == 5            
         else:
             raise Exception()
         
@@ -1807,7 +1829,16 @@ class CalcScoreAutoGradFn(Function):
                 scores, *scores.stride(),
                 
                 # input variables
-                N, TDST, TSRC, HID, BK, K, BDST, BSRC, IS_CAUSAL,
+                KV_REPEAT_INTERLEAVE, 
+                N, 
+                TDST, 
+                TSRC, 
+                HID, 
+                BK, 
+                K, 
+                BDST, 
+                BSRC, 
+                IS_CAUSAL,
                 
                 # vllm key cache compat
                 *vllm_keys_strides,
@@ -1913,6 +1944,7 @@ class CalcScoreAutoGradFn(Function):
         return (
             grad_queries, 
             grad_keys, 
+            None,
             None, 
             None, 
             None,
@@ -1925,6 +1957,7 @@ def calc_score_return_prob(
     queries: Tensor, keys: Tensor, attention_mask: Tensor,
     indices: Tensor, ks: Tensor,
     
+    KV_REPEAT_INTERLEAVE: int,
     BLOCK_SIZE_Q: int,
     BLOCK_SIZE_K: int,
     IS_CAUSAL: bool,
@@ -1933,7 +1966,7 @@ def calc_score_return_prob(
         queries, keys, attention_mask,
         indices, ks,
         
-        BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL
+        KV_REPEAT_INTERLEAVE, BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL
     ) # type: Tensor
     
     with timer("calc_score_return_prob.softmax"):
@@ -1959,6 +1992,7 @@ def attention_matrix(
     keys: Tensor,
     values: Tensor,
     attention_mask: Tensor,
+    kv_repeat_interleave: int,
     
     w_start: int,
     n_patches: int,
@@ -2128,7 +2162,7 @@ def attention_matrix(
                             ]
         return out
     
-    def debug_print():
+    def debug_print(w_curr):
         plt.clf()
         indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
         indices = safe_indices(indices)
@@ -2148,11 +2182,11 @@ def attention_matrix(
         plt.imshow(x)
         path = f'saves/models/timber_attention/block_{w_curr}.png'
         # path = f'saves/models/timber_attention/block.png'
-        print('saved', path)
-        # plt.savefig(path, dpi=96, bbox_inches='tight')
+        print('saved', path, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K, x.shape)
+        plt.savefig(path, dpi=96, bbox_inches='tight')
     
     if DEBUG:
-        debug_print()
+        debug_print(w_curr)
         
     # NOTE: Calc. Mask
     n_iteration = 0
@@ -2178,6 +2212,7 @@ def attention_matrix(
                     # iteration controls
                     i_iteration, n_iteration,
                     # input constant
+                    kv_repeat_interleave,
                     N, 
                     T_DST, 
                     T_SRC, 
@@ -2196,7 +2231,7 @@ def attention_matrix(
             w_curr = round(w_curr * scale_up)
             n_completed = round(n_completed * scale_up)
             if DEBUG:
-                debug_print()
+                debug_print(w_curr)
     
     with timer('matrix.cleanup'):
         # NOTE: align with blocks
@@ -2219,6 +2254,7 @@ def attention_matrix(
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
+                KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 IS_CAUSAL=is_causal,
@@ -2228,7 +2264,9 @@ def attention_matrix(
             context = calc_prob_return_context(
                 queries=queries, keys=keys, values=values, attention_mask=attention_mask,
                 indices=indices, ks=ks,
-                BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K,
+                KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
                 IS_CAUSAL=is_causal,
             )
 
@@ -2286,7 +2324,7 @@ def _sdbmm_compute(
     CONTEXT, stride_context_n, stride_context_tdst, stride_context_hid,
     
     # variables
-    N, TSRC, TDST, HID, K, BK, BSRC, BDST,
+    KV_REPEAT_INTERLEAVE, N, TSRC, TDST, HID, K, BK, BSRC, BDST,
     
     # vllm value cache compat,
     stride_values_vllm_num_blocks,
@@ -2369,7 +2407,7 @@ def _sdbmm_compute(
             # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
             value = tl.load(
                 VALUES +\
-                    idx_n.to(tl.int64) * stride_values_n +\
+                    (idx_n // KV_REPEAT_INTERLEAVE).to(tl.int64) * stride_values_n +\
                     idx_tsrc[:, None].to(tl.int64) * stride_values_tsrc +\
                     idx_hid[None, :].to(tl.int64) * stride_values_hid,
                 mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_bk,
@@ -2381,8 +2419,8 @@ def _sdbmm_compute(
             offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
             value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
             """
-            idx_batch = idx_n // VLLM_NUM_KV_HEADS
-            idx_head = idx_n % VLLM_NUM_KV_HEADS
+            idx_batch = (idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS
+            idx_head = (idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS
             
             idx_block = tl.load(
                 BLOCK_TABLES +\
@@ -2615,6 +2653,7 @@ class SparseAttentionAutoGradFn(Function):
         ks: Tensor,
         probs: Tensor,
         
+        KV_REPEAT_INTERLEAVE: int,
         BLOCK_SIZE_Q: int,
         BLOCK_SIZE_K: int,
     ):
@@ -2624,11 +2663,12 @@ class SparseAttentionAutoGradFn(Function):
         ctx.BLOCK_SIZE_Q = BLOCK_SIZE_Q
         ctx.BLOCK_SIZE_K = BLOCK_SIZE_K
     
-        N, TSRC, HID = values.shape
-        _N, BDST, BK = indices.shape
-        __N, TDST, K = probs.shape
+        N, BDST, BK = indices.shape
+        _N, TDST, K = probs.shape
+        __N, TSRC, HID = values.shape
         assert N == _N
-        assert N == __N
+        assert N == (__N * KV_REPEAT_INTERLEAVE)
+        # assert N == __N
         assert ks.shape == (N, BDST)
         
         BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
@@ -2702,8 +2742,8 @@ class SparseAttentionAutoGradFn(Function):
         
         assert indices.shape[0] == N
         assert ks.shape[0] == N
-        assert probs.shape[0] == N
-        assert values.shape[0] == N
+        assert probs.shape[0] == N, f'{probs.shape} == {N}'
+        # assert values.shape[0] == N
         assert context.shape[0] == N
         assert ks.ndim == 2
         assert probs.ndim == 3
@@ -2722,7 +2762,7 @@ class SparseAttentionAutoGradFn(Function):
             context, *context.stride(),
             
             # input variables
-            N, TSRC, TDST, HID, K, BK, BSRC, BDST,
+            KV_REPEAT_INTERLEAVE, N, TSRC, TDST, HID, K, BK, BSRC, BDST,
             
             # vllm value cache compat
             *vllm_values_strides,
@@ -2831,6 +2871,7 @@ class SparseAttentionAutoGradFn(Function):
             grad_probs, 
             None,
             None,
+            None,
         )
 
 def sparse_attention(
@@ -2842,11 +2883,13 @@ def sparse_attention(
     ks: Tensor,
     probs: Tensor,
     
+    KV_REPEAT_INTERLEAVE: int,
     BLOCK_SIZE_Q: int,
     BLOCK_SIZE_K: int,
 ):
     context = SparseAttentionAutoGradFn.apply(
-        values, indices, ks, probs, BLOCK_SIZE_Q, BLOCK_SIZE_K,
+        values, indices, ks, probs, 
+        KV_REPEAT_INTERLEAVE, BLOCK_SIZE_Q, BLOCK_SIZE_K,
     )
     
     return context
@@ -3127,8 +3170,9 @@ def timber_attention(
     N, T_DST, HID = q.shape
     _N, T_SRC, _HID = k.shape
     assert k.shape[:-1] == v.shape[:-1]
-    assert N == _N
+    assert (N % _N) == 0
     assert HID == _HID
+    KV_REPEAT_INTERLEAVE = N // _N
     
     # assert q.dtype == k.dtype, f'{q.dtype} == {k.dtype}'
     # assert q.dtype == v.dtype
@@ -3155,21 +3199,22 @@ def timber_attention(
     with timer('timber_attention'):
         with timer('attention_matrix'):
             indices, ks, probs_or_context, scores = attention_matrix(
-                q,
-                k,
-                v,
-                attention_mask,
+                queries=q,
+                keys=k,
+                values=v,
+                attention_mask=attention_mask,
+                kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
                 
-                w_start,
-                n_patches,
-                mask_k,
-                scale_up,
-                is_causal,
+                w_start=w_start,
+                n_patches=n_patches,
+                mask_k=mask_k,
+                scale_up=scale_up,
+                is_causal=is_causal,
                 
-                block_size_q,
-                block_size_k,
-                reduce_method,
-                reduce_stride,
+                BLOCK_SIZE_Q=block_size_q,
+                BLOCK_SIZE_K=block_size_k,
+                REDUCE_METHOD=reduce_method,
+                REDUCE_STRIDE=reduce_stride,
                 
                 IS_FLASH=is_flash,
             )
@@ -3208,8 +3253,9 @@ def timber_attention(
                     indices,
                     ks,
                     probs,
-                    block_size_q,
-                    block_size_k,
+                    KV_REPEAT_INTERLEAVE=KV_REPEAT_INTERLEAVE,
+                    BLOCK_SIZE_Q=block_size_q,
+                    BLOCK_SIZE_K=block_size_k,
                 )
     
     return context, (indices, ks, probs)
