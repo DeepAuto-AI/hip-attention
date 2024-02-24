@@ -41,7 +41,7 @@ def load_vllm_model(args: ArgsType):
     
     assert args.checkpoint is None
     
-    seq_len = 1024*32
+    seq_len = args.stride
     # seq_len = 10600
     model = LLM(
         model_id,
@@ -51,7 +51,7 @@ def load_vllm_model(args: ArgsType):
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
         dtype='half',
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.85,
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=True
     )
