@@ -112,8 +112,8 @@ def _masking_iteration_compute(
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
 ):
-    idx_n = tl.program_id(0).to(tl.int64)
-    idx_bdst = tl.program_id(1).to(tl.int64) + N_COMPLETED
+    idx_n = tl.program_id(1).to(tl.int64)
+    idx_bdst = tl.program_id(0).to(tl.int64) + N_COMPLETED
     """ non blocked
     # for each query
     w_old = ws[i, j, 0]
@@ -787,7 +787,7 @@ def masking_iteration(
     else:
         raise Exception()
     
-    grid = (N, B_DST - N_COMPLETED)
+    grid = (B_DST - N_COMPLETED, N)
     
     # HID cannot be chunked if use reduce
     # if REDUCE_METHOD in ['max', 'sum']:
@@ -3139,6 +3139,7 @@ def timber_attention(
     chunk_size: int = 2048,
     
     is_flash: bool = True,
+    enable_sparq: bool = False,
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
@@ -3171,6 +3172,7 @@ def timber_attention(
                 reduce_method=reduce_method,
                 reduce_stride=reduce_stride,
                 is_flash=is_flash,
+                enable_sparq=enable_sparq,
             )
             contexts.append(context)
             
@@ -3243,6 +3245,7 @@ def timber_attention(
                 REDUCE_STRIDE=reduce_stride,
                 
                 IS_FLASH=is_flash,
+                SPARQ=enable_sparq,
             )
             
             if is_flash:
