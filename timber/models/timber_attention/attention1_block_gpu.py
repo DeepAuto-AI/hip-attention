@@ -942,7 +942,7 @@ def _calc_prob_return_context_compute(
     CONTEXT, stride_context_n, stride_context_tdst, stride_context_hid,
     
     # input variables
-    KV_REPEAT_INTERLEAVE, N, TDST, TSRC, HID, BDST, BSRC, BK,
+    KV_REPEAT_INTERLEAVE, N, TDST, TSRC, HID: tl.constexpr, BDST, BSRC, BK,
     
     # vllm compat
     stride_k_vllm_num_blocks, 
@@ -993,7 +993,10 @@ def _calc_prob_return_context_compute(
     mask_tdst = (idx_tdst < TDST) & mask_block_q
     
     idx_hid = tl.arange(0, BLOCK_HID)
-    mask_hid = idx_hid < HID
+    if BLOCK_HID != HID:
+        mask_hid = idx_hid < HID
+    else:
+        mask_hid = True
     
     ks = tl.load(
         KS + \
@@ -1001,11 +1004,12 @@ def _calc_prob_return_context_compute(
             idx_bdst * stride_ks_bdst,
     ).to(tl.int64)
     
-    acc = tl.zeros([BLOCK_SIZE_Q_PADDED, BLOCK_HID], dtype=tl.float32)
+    acc = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID), dtype=tl.float32)
     # scores_rowmax_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
     m_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), -float("inf"), dtype=tl.float32)
     l_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), 1.0, dtype=tl.float32)
-    for idx_bbk in range(tl.cdiv(BK, BLOCK_BK)):
+    
+    for idx_bbk in range(tl.cdiv(ks, BLOCK_BK)):
         idx_bk = (tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK).to(tl.int64)
         mask_bk = (idx_bk < ks) & (idx_bk < BK)
         
@@ -1030,8 +1034,6 @@ def _calc_prob_return_context_compute(
         # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
         # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
         # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-        scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K), dtype=tl.float32)
-        
         queries = tl.load(
             Q +\
                 idx_n * stride_q_n +\
@@ -1079,32 +1081,45 @@ def _calc_prob_return_context_compute(
             )
         else:
             raise Exception()
+        
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
         
-        scores_mini = tl.dot(queries, keys)
-        scores += scores_mini
+        qk = tl.dot(queries, keys).to(tl.float32) * 1.44269504
         
         if IS_CAUSAL:
-            scores += (
+            qk += (
                 (idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :] |
                 (~(mask_tdst[:, None] & mask_tsrc[None, :]))
             ) * (-1.0e-6)
         else:
-            scores += (
+            qk += (
                 ~(mask_tdst[:, None] & mask_tsrc[None, :])
             ) * (-1.0e-6)
         
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-        m_ij = tl.maximum(m_i, tl.max(scores, axis=1)[:, None])
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
+        qk = qk - m_ij
         # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-        p = tl.math.exp2((scores - m_ij))
+        p = tl.math.exp2(qk)
+        
+        if IS_CAUSAL:
+            p *= (
+                ((idx_tdst[:, None] + TSRC - TDST) >= idx_tsrc[None, :]) &
+                (mask_tdst[:, None] & mask_tsrc[None, :])
+            )
+        else:
+            p *= (
+                (mask_tdst[:, None] & mask_tsrc[None, :])
+            )
+        
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-        l_ij = tl.sum(p, axis=1)[:, None]
+        l_ij = tl.sum(p, axis=1)
         
         # -- update m_i and l_i
         alpha = tl.math.exp2(m_i - m_ij)
-        l_i = l_i * alpha + l_ij
+        # tl.device_print('ff', l_ij)
+        l_i = l_i * alpha + l_ij[:, None]
         
         # -- update output accumulator --
         acc = acc * alpha
@@ -1154,7 +1169,7 @@ def _calc_prob_return_context_compute(
             values = values.to(tl.float8e5, bitcast=True).to(tl.float16)
         
         # update acc
-        acc += tl.dot(p.to(values.dtype), values)
+        acc += tl.dot(p.to(values.dtype), values).to(tl.float32)
         
         # update m_i and l_i
         m_i = m_ij
@@ -1170,6 +1185,7 @@ def _calc_prob_return_context_compute(
         mask = mask_tdst[:, None] & mask_hid[None, :],
         value = acc.to(CONTEXT.type.element_ty)
     )
+    
 
 def calc_prob_return_context(
     # input matrices
@@ -1201,7 +1217,7 @@ def calc_prob_return_context(
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
-    BLOCK_BK = min(triton.cdiv(64, BLOCK_SIZE_K), 64)
+    BLOCK_BK = triton.cdiv(128, BLOCK_SIZE_K)
     # print(256 // BLOCK_SIZE_K, BK)
     BLOCK_HID = triton.next_power_of_2(HID)
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
@@ -1275,6 +1291,7 @@ def calc_prob_return_context(
     assert indices.ndim == 3
     assert ks.ndim == 2
     assert context.ndim == 3
+    
     _calc_prob_return_context_compute[grid](
         queries, *queries.stride(),
         keys, *keys.stride(),
@@ -1317,7 +1334,7 @@ def calc_prob_return_context(
         BLOCK_BK,
         IS_CAUSAL,
         
-        num_warps=4,
+        num_warps=8,
         num_stages=2,
     )
     
@@ -3417,10 +3434,17 @@ def main_debug():
     global DEBUG
     DEBUG = True
     
-    q, k, v, out = load_checkouts(dtype=torch.float16, seq_len=1024 * 4, idx=26, window=1)
+    block = 1024
+    # block = 8
+    q, k, v, out = load_checkouts(
+        dtype=torch.float32, 
+        seq_len=block * 4, 
+        idx=26, 
+        window=1
+    )
     
-    q = q[:, 1024 * 2:, :]
-    out = out[:, 1024 * 2:, :]
+    q = q[:, block * 2:, :]
+    out = out[:, block * 2:, :]
     
     print('q', q.shape)
     print('k', k.shape)
@@ -3436,6 +3460,8 @@ def main_debug():
         k,
         v,
         mask_k=512,
+        block_size_q=16,
+        block_size_k=2,
     )
     
     stderr = (out - context).abs().mean().item()
