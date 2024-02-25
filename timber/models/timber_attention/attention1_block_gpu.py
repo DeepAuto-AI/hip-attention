@@ -57,7 +57,7 @@ def _masking_iteration_compute(
     ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
     SPARQ_INDICES, stride_sparq_indices_n, stride_sparq_indices_bdst, stride_sparq_indices_hid,
     
-    # input metrices (blocked)
+    # input / temp metrices (blocked)
     MASK, stride_mask_n, stride_mask_bdst, stride_mask_k,
     TMASK, stride_tmask_n, stride_tmask_bdst, stride_tmask_k,
     
@@ -67,7 +67,11 @@ def _masking_iteration_compute(
     TSRCS, stride_tsrcs_n, stride_tsrcs_bdst,
     
     # operation variables (blocked)
-    SCALE_UP: float, N_PATCHES: int, MASK_K: int, TMASK_K: int, IS_CAUSAL: tl.constexpr,
+    SCALE_UP: tl.constexpr, 
+    N_PATCHES: tl.constexpr, 
+    MASK_K: tl.constexpr, 
+    TMASK_K: tl.constexpr, 
+    IS_CAUSAL: tl.constexpr,
     
     # input variables
     KV_REPEAT_INTERLEAVE: int,
@@ -134,7 +138,7 @@ def _masking_iteration_compute(
     )
     
     w_new = tl.minimum(
-        tl.math.round(w_old.to(tl.float32) * SCALE_UP.to(tl.float32)).to(tl.float32), 
+        tl.math.round(w_old.to(tl.float32) * SCALE_UP).to(tl.float32), 
         t_src
     ).to(tl.int64)
     
@@ -160,7 +164,7 @@ def _masking_iteration_compute(
         N_PATCHES,
         (
             tl.minimum(
-                MASK_K.to(tl.float32) / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32),
+                MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32),
                 1.0
             ) * tl.cdiv(w_new, BLOCK_SIZE_K)
         ).to(tl.int64),
