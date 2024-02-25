@@ -3335,7 +3335,7 @@ def main_latency_benchmark():
     k = k.cpu()
     v = v.cpu()
     
-    q = q.repeat(BSIZE, max(1, QUERY_SIZE // 1024), 1)[:, :QUERY_SIZE, :].contiguous()
+    q = q.repeat(BSIZE, max(1, triton.cdiv(QUERY_SIZE, 1024)), 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
     started = False
