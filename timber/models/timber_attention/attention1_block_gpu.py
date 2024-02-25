@@ -976,14 +976,24 @@ def _calc_prob_return_context_compute(
     BLOCK_BK: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
 ):
+    pid = tl.program_id(0).to(tl.int64)
+    pid_n = pid // BDST
+    pid_bdst = pid % BDST
+    
+    # pid_n = tl.program_id(0).to(tl.int64)
+    # pid_bdst = tl.program_id(1).to(tl.int64)
+    
     idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64)
     mask_block_q = idx_block_q < BLOCK_SIZE_Q
     
-    idx_n = tl.program_id(0).to(tl.int64)
+    idx_n = pid_n
     
-    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_bdst = pid_bdst
     idx_tdst = (idx_block_q + idx_bdst * BLOCK_SIZE_Q).to(tl.int64)
     mask_tdst = (idx_tdst < TDST) & mask_block_q
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < HID
     
     ks = tl.load(
         KS + \
@@ -991,13 +1001,13 @@ def _calc_prob_return_context_compute(
             idx_bdst * stride_ks_bdst,
     ).to(tl.int64)
     
+    acc = tl.zeros([BLOCK_SIZE_Q_PADDED, BLOCK_HID], dtype=tl.float32)
     # scores_rowmax_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    scores_rowmax_state = tl.zeros((BLOCK_SIZE_Q_PADDED, 1), dtype=tl.float32)
-    # scores_sum_exp_norm_state: [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    scores_sum_exp_norm_state = tl.zeros((BLOCK_SIZE_Q_PADDED, 1), dtype=tl.float32)
+    m_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), -float("inf"), dtype=tl.float32)
+    l_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), 1.0, dtype=tl.float32)
     for idx_bbk in range(tl.cdiv(BK, BLOCK_BK)):
         idx_bk = (tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK).to(tl.int64)
-        mask_bk = (idx_bk < BK) & (idx_bk < ks)
+        mask_bk = (idx_bk < ks) & (idx_bk < BK)
         
         # [BLOCK_BK,]
         idx_tsrc_block_start = tl.load(
@@ -1021,154 +1031,145 @@ def _calc_prob_return_context_compute(
         # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
         # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
         scores = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_BK * BLOCK_SIZE_K), dtype=tl.float32)
-        for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
-            idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64) + idx_bhid.to(tl.int64) * BLOCK_HID
-            mask_hid = idx_hid < HID
-            
-            queries = tl.load(
-                Q +\
-                    idx_n * stride_q_n +\
-                    idx_tdst[:, None] * stride_q_tdst +\
-                    idx_hid[None, :] * stride_q_hid,
-                mask = mask_tdst[:, None] & mask_hid[None, :],
-                other = 0
-            )
+        
+        queries = tl.load(
+            Q +\
+                idx_n * stride_q_n +\
+                idx_tdst[:, None] * stride_q_tdst +\
+                idx_hid[None, :] * stride_q_hid,
+            mask = mask_tdst[:, None] & mask_hid[None, :],
+            other = 0
+        )
 
-            if CACHE_METHOD == 'cont':
-                keys = tl.load(
-                    K +\
-                        (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
-                        idx_tsrc[None, :] * stride_k_tsrc +\
-                        idx_hid[:, None] * stride_k_hid,
-                    mask = mask_tsrc[None, :] & mask_hid[:, None],
-                    other = 0,
-                )
-            elif CACHE_METHOD == 'vllm':
-                """
-                idx_block = block_tables[idx_batch, idx_tsrc // block_size]
-                offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
-                key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
-                """
-                idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
-                idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
-                idx_block = tl.load(
-                    BLOCK_TABLES +\
-                        idx_batch * stride_block_tables_num_seqs +\
-                        (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
-                    mask = mask_tsrc,
-                ).to(tl.int64)
-                offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
-                
-                # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
-                keys = tl.load(
-                    K +\
-                        idx_block[None, :] * stride_k_vllm_num_blocks +\
-                        idx_head * stride_k_vllm_num_kv_heads +\
-                        (idx_hid[:, None] // VLLM_X) * stride_k_vllm_head_size_x +\
-                        offset_block[None, :] * stride_k_vllm_block_size +\
-                        (idx_hid[:, None] % VLLM_X) * stride_k_vllm_x,
-                    mask = mask_tsrc[None, :] & mask_hid[:, None],
-                    other = 0,
-                )
-            else:
-                raise Exception()
-            if keys.dtype == tl.uint8:
-                keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
+        if CACHE_METHOD == 'cont':
+            keys = tl.load(
+                K +\
+                    (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
+                    idx_tsrc[None, :] * stride_k_tsrc +\
+                    idx_hid[:, None] * stride_k_hid,
+                mask = mask_tsrc[None, :] & mask_hid[:, None],
+                other = 0,
+            )
+        elif CACHE_METHOD == 'vllm':
+            """
+            idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+            offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+            key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
+            """
+            idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
+            idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
+            idx_block = tl.load(
+                BLOCK_TABLES +\
+                    idx_batch * stride_block_tables_num_seqs +\
+                    (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                mask = mask_tsrc,
+            ).to(tl.int64)
+            offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
             
-            scores_mini = tl.dot(queries, keys)
-            scores += scores_mini.to(scores.dtype)
+            # [BLOCK_HID: hid, BLOCK_BK: bk, BLOCK_SIZE_K_PADDED: tsrc]
+            keys = tl.load(
+                K +\
+                    idx_block[None, :] * stride_k_vllm_num_blocks +\
+                    idx_head * stride_k_vllm_num_kv_heads +\
+                    (idx_hid[:, None] // VLLM_X) * stride_k_vllm_head_size_x +\
+                    offset_block[None, :] * stride_k_vllm_block_size +\
+                    (idx_hid[:, None] % VLLM_X) * stride_k_vllm_x,
+                mask = mask_tsrc[None, :] & mask_hid[:, None],
+                other = 0,
+            )
+        else:
+            raise Exception()
+        if keys.dtype == tl.uint8:
+            keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
+        
+        scores_mini = tl.dot(queries, keys)
+        scores += scores_mini
         
         if IS_CAUSAL:
-            scores += ((idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :]) * (-10000.0)
-        scores += (~(mask_tdst[:, None] & mask_tsrc[None, :])) * (-10000.0)
+            scores += (
+                (idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :] |
+                (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+            ) * (-1.0e-6)
+        else:
+            scores += (
+                ~(mask_tdst[:, None] & mask_tsrc[None, :])
+            ) * (-1.0e-6)
         
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-        scores_rowmax = tl.expand_dims(tl.max(scores, axis=1), axis=1).to(tl.float32)
+        m_ij = tl.maximum(m_i, tl.max(scores, axis=1)[:, None])
         # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-        scores_exp_norm = tl.exp((scores - scores_rowmax).to(tl.float32))
+        p = tl.math.exp2((scores - m_ij))
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-        scores_sum_exp_norm = tl.expand_dims(tl.sum(scores_exp_norm, axis=1), axis=1)
+        l_ij = tl.sum(p, axis=1)[:, None]
         
-        new_scores_rowmax = tl.maximum(scores_rowmax_state, scores_rowmax)
-        new_scores_sum_exp_norm = \
-            tl.exp(scores_rowmax_state - new_scores_rowmax) * scores_sum_exp_norm_state +\
-            tl.exp(scores_rowmax - new_scores_rowmax) * scores_sum_exp_norm
+        # -- update m_i and l_i
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
         
-        for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
-            idx_hid = tl.arange(0, BLOCK_HID) + idx_bhid * BLOCK_HID
-            mask_hid = idx_hid < HID
-            
-            context = tl.load(
-                CONTEXT +\
-                    idx_n * stride_context_n +\
-                    idx_tdst[:, None] * stride_context_tdst +\
-                    idx_hid[None, :] * stride_context_hid,
-                mask = mask_tdst[:, None] & mask_hid[None, :],
+        # -- update output accumulator --
+        acc = acc * alpha
+        
+        if CACHE_METHOD == 'cont':
+            values = tl.load(
+                V +\
+                    (idx_n // KV_REPEAT_INTERLEAVE) * stride_v_n +\
+                    idx_tsrc[:, None] * stride_v_tsrc +\
+                    idx_hid[None, :] * stride_v_hid,
+                mask = mask_tsrc[:, None] & mask_hid[None, :],
                 other = 0
             )
+        elif CACHE_METHOD == 'vllm':
+            """
+            idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+            offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+            value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
+            """
+            idx_batch = (idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS
+            idx_head = (idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS
             
-            if CACHE_METHOD == 'cont':
-                values = tl.load(
-                    V +\
-                        (idx_n // KV_REPEAT_INTERLEAVE) * stride_v_n +\
-                        idx_tsrc[:, None] * stride_v_tsrc +\
-                        idx_hid[None, :] * stride_v_hid,
-                    mask = mask_tsrc[:, None] & mask_hid[None, :],
-                    other = 0
-                )
-            elif CACHE_METHOD == 'vllm':
-                """
-                idx_block = block_tables[idx_batch, idx_tsrc // block_size]
-                offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
-                value = value_cache[idx_block, idx_head, :, offset_block].reshape(-1)
-                """
-                idx_batch = (idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS
-                idx_head = (idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS
-                
-                idx_block = tl.load(
-                    BLOCK_TABLES +\
-                        idx_batch * stride_block_tables_num_seqs +\
-                        (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
-                    mask = mask_tsrc,
-                    other = 0
-                ).to(tl.int64)
-                mask_block = (idx_tsrc // VLLM_BLOCK_SIZE) < tl.cdiv(TSRC, VLLM_BLOCK_SIZE)
-                offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
-                
-                # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
-                values = tl.load(
-                    V +\
-                        idx_block[:, None] * stride_v_vllm_num_blocks+\
-                        idx_head * stride_v_vllm_num_kv_heads+\
-                        idx_hid[None, :].to(tl.int64) * stride_v_vllm_head_size +\
-                        offset_block[:, None] * stride_v_vllm_block_size,
-                    mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_block[:, None],
-                    other = 0
-                )
-            else:
-                raise Exception()
+            idx_block = tl.load(
+                BLOCK_TABLES +\
+                    idx_batch * stride_block_tables_num_seqs +\
+                    (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                mask = mask_tsrc,
+                other = 0
+            ).to(tl.int64)
+            mask_block = (idx_tsrc // VLLM_BLOCK_SIZE) < tl.cdiv(TSRC, VLLM_BLOCK_SIZE)
+            offset_block = idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)
             
-            if values.dtype == tl.uint8:
-                values = values.to(tl.float8e5, bitcast=True).to(tl.float16)
-            
-            context = (
-                scores_sum_exp_norm_state * tl.exp(scores_rowmax_state - new_scores_rowmax) * context +\
-                tl.exp(scores_rowmax - new_scores_rowmax) * tl.dot(scores_exp_norm.to(values.dtype), values)
-            ) / new_scores_sum_exp_norm
-            
-            tl.store(
-                CONTEXT +\
-                    idx_n * stride_context_n +\
-                    idx_tdst[:, None] * stride_context_tdst +\
-                    idx_hid[None, :] * stride_context_hid,
-                mask = mask_tdst[:, None] & mask_hid[None, :],
-                value = context
+            # value: [BLOCK_SIZE_PADDED: tsrc, BLOCK_HID: hid]
+            values = tl.load(
+                V +\
+                    idx_block[:, None] * stride_v_vllm_num_blocks+\
+                    idx_head * stride_v_vllm_num_kv_heads+\
+                    idx_hid[None, :].to(tl.int64) * stride_v_vllm_head_size +\
+                    offset_block[:, None] * stride_v_vllm_block_size,
+                mask = mask_tsrc[:, None] & mask_hid[None, :] & mask_block[:, None],
+                other = 0
             )
-            
-            tl.debug_barrier()
+        else:
+            raise Exception()
         
-        scores_rowmax_state = scores_rowmax
-        scores_sum_exp_norm_state = scores_sum_exp_norm
+        if values.dtype == tl.uint8:
+            values = values.to(tl.float8e5, bitcast=True).to(tl.float16)
+        
+        # update acc
+        acc += tl.dot(p.to(values.dtype), values)
+        
+        # update m_i and l_i
+        m_i = m_ij
+    
+    # epilogue
+    m_i += tl.math.log2(l_i)
+    acc = acc / l_i
+    tl.store(
+        CONTEXT +\
+            idx_n * stride_context_n +\
+            idx_tdst[:, None] * stride_context_tdst +\
+            idx_hid[None, :] * stride_context_hid,
+        mask = mask_tdst[:, None] & mask_hid[None, :],
+        value = acc.to(CONTEXT.type.element_ty)
+    )
 
 def calc_prob_return_context(
     # input matrices
@@ -1199,10 +1200,13 @@ def calc_prob_return_context(
     assert ks.shape == (N, BDST)
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
-    BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
+    # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
+    BLOCK_BK = min(triton.cdiv(64, BLOCK_SIZE_K), 64)
     # print(256 // BLOCK_SIZE_K, BK)
-    BLOCK_HID = min(32, triton.next_power_of_2(HID))
+    BLOCK_HID = triton.next_power_of_2(HID)
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
+    
+    # print(BK, BLOCK_BK)
     
     assert values.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]
     context = torch.zeros(
@@ -1260,7 +1264,8 @@ def calc_prob_return_context(
     else:
         raise Exception("not supported")
     
-    grid = (N, BDST)
+    # grid = (N, BDST, )
+    grid = (N * BDST, )
     
     assert attention_mask is None, "attention mask is not supported yet"
     assert queries.ndim == 3
@@ -1312,8 +1317,8 @@ def calc_prob_return_context(
         BLOCK_BK,
         IS_CAUSAL,
         
-        num_warps=8,
-        num_stages=1,
+        num_warps=4,
+        num_stages=2,
     )
     
     return context
@@ -3422,10 +3427,15 @@ def main_debug():
     print('v', v.shape)
     print('out', out.shape)
     
-    context, (atten_indices, atten_ks, atten_probs) = timber_attention(
+    context, (
+        atten_indices, 
+        atten_ks, 
+        atten_probs
+    ) = timber_attention(
         q,
         k,
         v,
+        mask_k=512,
     )
     
     stderr = (out - context).abs().mean().item()
