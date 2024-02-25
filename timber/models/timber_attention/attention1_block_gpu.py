@@ -3116,7 +3116,7 @@ def timber_attention(
     chunking: bool = False,
     chunk_size: int = 2048,
     
-    is_flash: bool = False,
+    is_flash: bool = True,
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
