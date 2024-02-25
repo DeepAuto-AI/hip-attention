@@ -146,6 +146,9 @@ def load_model(
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
+        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'yi6b': '01-ai/Yi-6B-200K',
     }
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
