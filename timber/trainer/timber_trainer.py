@@ -248,8 +248,8 @@ class LabModule(pl.LightningModule):
 
     def forward(self, inputs, target, output_hidden_states=False):
         return self.model(
-            inputs, 
-            target, 
+            inputs,
+            labels=target, 
             output_hidden_states=output_hidden_states
         )
 
