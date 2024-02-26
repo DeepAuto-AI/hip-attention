@@ -923,7 +923,7 @@ def _safe_indices_compute(
                 idx_k * stride_mask_k,
             mask = mask,
             other = 0
-        )
+        ).to(tl.float32)
         ws_vec = tl.load(
             WS +\
                 idx_n * stride_ws_n +\
@@ -931,13 +931,15 @@ def _safe_indices_compute(
                 idx_k * stride_ws_k,
             mask = mask,
             other = 0
-        )
+        ).to(tl.float32)
         indices_float = mask_vec * ws_vec
         col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
     
         if not ALLOW_COLLISION:
             col = tl.maximum(last_col + 1, col)
             last_col = col
+        
+        col = col * BLOCK_SIZE_K
         
         tl.store(
             INDICES +\
@@ -948,7 +950,7 @@ def _safe_indices_compute(
             mask = mask
         )
 
-def safe_indices(mask, ws, block_size_k, allow_collision=True):
+def safe_indices(mask, ws, block_size_k, allow_collision=False):
     N, TDST, K = mask.shape
     ws = ws.unsqueeze(-1).expand(N, TDST, K)
 
