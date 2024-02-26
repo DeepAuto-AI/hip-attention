@@ -103,6 +103,9 @@ def _masking_iteration_compute(
     stride_block_tables_num_seqs, 
     stride_block_tables_max_num_blocks_per_seq,
     
+    CONTEXT_LENGTH,
+    stride_context_length_num_seqs,
+    
     # block constant
     KEY_CACHE_METHOD: tl.constexpr,
     SPARQ: tl.constexpr,
@@ -768,6 +771,8 @@ def masking_iteration(
         VLLM_HEAD_SIZE = 0
         block_tables = keys
         block_tables_stride = (0, 0)
+        context_length = keys
+        context_length_stride = (0,)
     elif isinstance(keys, PagedKeyCacheVllmCompat):
         """
         vLLM compatible paged attention
@@ -791,6 +796,10 @@ def masking_iteration(
         block_tables = keys.block_table
         block_tables_stride = block_tables.stride()
         assert len(block_tables_stride) == 2
+        
+        context_length = keys.context_length
+        context_length_stride = context_length.stride()
+        assert len(context_length_stride) == 1
         
         # context_length = keys.context_length
         # context_length = context_length.unsqueeze(-1).repeat_interleave(VLLM_NUM_KV_HEADS, dim=0)
@@ -857,6 +866,8 @@ def masking_iteration(
         VLLM_HEAD_SIZE,
         
         block_tables, *block_tables_stride,
+        
+        context_length, *context_length_stride,
         
         # block constant
         KEY_CACHE_METHOD,
@@ -954,7 +965,7 @@ def safe_indices(mask, ws, block_size_k, allow_collision=False):
     N, TDST, K = mask.shape
     ws = ws.unsqueeze(-1).expand(N, TDST, K)
 
-    indices = torch.zeros(
+    indices = torch.empty(
         (N, TDST, K), 
         dtype=torch.int32, 
         device=mask.device
@@ -980,7 +991,7 @@ def safe_indices(mask, ws, block_size_k, allow_collision=False):
         num_warps=1,
     )
     
-    indices = indices.reshape(N, TDST, K)
+    # indices = indices.reshape(N, TDST, K)
     
     return indices
 
@@ -2310,10 +2321,10 @@ def attention_matrix(
             REDUCE_METHOD,
             REDUCE_STRIDE,
         )
-        for i_iteration in range(n_iteration):
-            # with timer(f"iteration_{w_curr}"):
-            w_curr = round(w_curr * scale_up)
-            n_completed = round(n_completed * scale_up)
+        # for i_iteration in range(n_iteration):
+        #     # with timer(f"iteration_{w_curr}"):
+        #     w_curr = round(w_curr * scale_up)
+        #     n_completed = round(n_completed * scale_up)
         if DEBUG:
             debug_print(w_curr)
     
