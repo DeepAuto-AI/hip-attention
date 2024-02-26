@@ -1006,7 +1006,7 @@ def _safe_indices_compute(
             mask = mask
         )
 
-def safe_indices(mask, ws, block_size_k, allow_collision=True):
+def safe_indices(mask, ws, block_size_k, allow_collision=False):
     N, TDST, K = mask.shape
     ws = ws.unsqueeze(-1).expand(N, TDST, K)
 
