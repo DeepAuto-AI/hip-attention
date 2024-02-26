@@ -129,7 +129,14 @@ def _masking_iteration_compute(
     w_new = min(torch.round(w_old * scale_up), t_src)
     """
     
+    if CONTEXT_LENGTH is not None:
+        context_length = tl.load(
+            CONTEXT_LENGTH +\
+                ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS) * stride_context_length_num_seqs,
+        )
+    
     for _ in range(N_ITERATION):
+        tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
         w_old = tl.load(
             WS + \
@@ -154,7 +161,9 @@ def _masking_iteration_compute(
         # if w_old == w_new:
         #     return
 
+        tl.debug_barrier()
         mask_w = w_old != w_new
+        tl.debug_barrier()
         
         """
         k_old = ks[i, j, 0]
@@ -328,6 +337,8 @@ def _masking_iteration_compute(
                     # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
                     idx_tsrc = (idx_tsrc.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
                     mask_tsrc = num_pixels_mask
+                    if CONTEXT_LENGTH is not None:
+                        mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
                     vec_k_mask = mask_tsrc[None, :] & mask_hid[:, None]
                     
                     if ATTEN_MASK is not None:
@@ -408,6 +419,8 @@ def _masking_iteration_compute(
                     idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
                     # idx_tsrc = tl.minimum(idx_tsrc + (tl.maximum(0, tl.cdiv(t_src, (k_new * BLOCK_SIZE_K)) - BLOCK_SIZE_K)).to(tl.int64), T_SRC - 1)
                     mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
+                    if CONTEXT_LENGTH is not None:
+                        mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
                     
                     # [BLOCK_TMASK_K, ]
                     if ATTEN_MASK is not None:
@@ -667,6 +680,7 @@ def _masking_iteration_compute(
             # value = num_pixels_scalar,
         )
         tl.debug_barrier()
+    tl.debug_barrier()
 
 DEBUG = os.environ.get('TIMBER_DEBUG', '0') == '1'
 
@@ -771,7 +785,7 @@ def masking_iteration(
         VLLM_HEAD_SIZE = 0
         block_tables = keys
         block_tables_stride = (0, 0)
-        context_length = keys
+        context_length = None
         context_length_stride = (0,)
     elif isinstance(keys, PagedKeyCacheVllmCompat):
         """
@@ -1080,6 +1094,9 @@ def _calc_prob_return_context_compute(
     stride_block_tables_num_seqs,
     stride_block_tables_max_num_blocks_per_seq,
     
+    CONTEXT_LENGTH,
+    stride_context_length_num_seqs,
+    
     VLLM_NUM_BLOCKS,
     VLLM_NUM_KV_HEADS,
     VLLM_HEAD_SIZE_X,
@@ -1118,6 +1135,12 @@ def _calc_prob_return_context_compute(
     else:
         mask_hid = True
     
+    if CONTEXT_LENGTH is not None:
+        context_length = tl.load(
+            CONTEXT_LENGTH +\
+                ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS) * stride_context_length_num_seqs,
+        )
+    
     ks = tl.load(
         KS + \
             idx_n * stride_ks_n +
@@ -1146,6 +1169,8 @@ def _calc_prob_return_context_compute(
         # [BLOCK_BK, BLOCK_SIZE_K]
         idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
         mask_tsrc = (idx_tsrc < TSRC) & mask_bk[:, None]
+        if CONTEXT_LENGTH is not None:
+            mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
         
         # [BLOCK_BK * BLOCK_SIZE_K; multiple of 16]
         idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K,))
@@ -1366,6 +1391,9 @@ def calc_prob_return_context(
         
         block_tables = keys
         block_tables_strides = (0, 0)
+        
+        context_length = None
+        context_length_strides = (0, )
     elif isinstance(keys, PagedKeyCacheVllmCompat) and isinstance(values, PagedValueCacheVllmCompat):
         """
         vLLM compatible paged attention
@@ -1391,6 +1419,10 @@ def calc_prob_return_context(
         block_tables = keys.block_table
         block_tables_strides = block_tables.stride()
         assert len(block_tables_strides) == 2
+        
+        context_length = keys.context_length
+        context_length_strides = context_length.stride()
+        assert len(context_length_strides) == 1
         
         vllm_keys_strides = keys.key_cache.stride()
         assert len(vllm_keys_strides) == 5
@@ -1438,6 +1470,9 @@ def calc_prob_return_context(
         
         block_tables,
         *block_tables_strides,
+        
+        context_length,
+        *context_length_strides,
         
         VLLM_NUM_BLOCKS,
         VLLM_NUM_KV_HEADS,
