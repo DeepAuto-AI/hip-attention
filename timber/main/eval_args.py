@@ -38,6 +38,7 @@ def eval_args(
     parser.add_argument('--name', required=True, type=str)
     parser.add_argument('--give_prompt', default=False, action='store_true')
     parser.add_argument('--do_sample', default=False, action='store_true')
+    parser.add_argument('--input', type=str, default=None)
     args = parser.parse_args()
     print(args)
     return args

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from timber.models.timber_attention.attention1_block_gpu import paged_timber_attention
 from vllm._C import ops
+from vllm.model_executor.layers.attention import _paged_attention
 import tqdm
 
 def load_states():
@@ -18,24 +19,15 @@ def test_vllm():
     alibi_slopes = state['alibi_slopes']
     assert alibi_slopes is None
     output_truth = state['output']
-    
-    output = torch.empty_like(query)
 
-    block_size = value_cache.shape[3]
-
-    ops.paged_attention_v1(
-        output,
+    output = _paged_attention(
         query,
         key_cache,
         value_cache,
+        input_metadata,
         num_kv_heads,
         scale,
-        input_metadata.block_tables,
-        input_metadata.context_lens,
-        block_size,
-        input_metadata.max_context_len,
         alibi_slopes,
-        input_metadata.kv_cache_dtype,
     )
     
     # print(output_truth)
@@ -69,6 +61,8 @@ def cpu_kernel(
     block_size = value_cache.shape[-1]
     batch_size, num_heads, head_size = query.shape
     
+    print(query.shape, key_cache.shape, value_cache.shape)
+    
     for idx_n in range(batch_size):
         for idx_h in range(num_heads):
             context_length = context_lens[idx_n]
@@ -77,7 +71,11 @@ def cpu_kernel(
             for idx_tsrc in tqdm.tqdm(range(context_length), dynamic_ncols=True, desc=f'score_{idx_n}_{idx_h}'):
                 idx_block = block_tables[idx_n, idx_tsrc // block_size]
                 offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
-                key = key_cache[idx_block, idx_h, :, offset_block, :].reshape(-1)
+                assert key_cache.ndim == 5, key_cache.shape
+                try:
+                    key = key_cache[idx_block, idx_h, :, offset_block, :].reshape(-1)
+                except:
+                    raise Exception(f'{idx_block}, {idx_h}, :, {offset_block}, : {key_cache.shape}')
                 qvec = query[idx_n, idx_h, :]
                 score = np.sum(key * qvec)
                 scores[idx_tsrc] = score
@@ -145,7 +143,7 @@ def test_vllm_compat():
             block_tables=input_metadata.block_tables,
             context_lens=input_metadata.context_lens,
             max_context_len=input_metadata.max_context_len,
-            # mask_k=8096,
+            mask_k=1024,
         )
         N_H, _, HID = output.shape
         N = query.shape[0]
@@ -160,7 +158,7 @@ def test_vllm_compat():
 def main():
     test_vllm()
     test_vllm_compat()
-    # test_vllm_compat_cpu()
+    test_vllm_compat_cpu()
     
 if __name__ == '__main__':
     main()

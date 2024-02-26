@@ -37,7 +37,10 @@ def job_stream(args, model, tokenizer, device):
         get_bench().reset_measures()
         # get_bench().disabled = False
         
-        input_text = input('>>>').strip()
+        if args.input is None:
+            input_text = input('>>>').strip()
+        else:
+            input_text = args.input
         
         if len(input_text.strip()) == 0:
             continue
@@ -57,7 +60,7 @@ def job_stream(args, model, tokenizer, device):
                 prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
                     temperature=0.7, 
-                    top_p=0.9,
+                    top_p=0.5,
                     top_k=50,
                     max_tokens=512,
                     # max_tokens=16,
@@ -103,3 +106,6 @@ def job_stream(args, model, tokenizer, device):
         if len(tracetree) > 0:
             print(tracetree)
         print(f'elapsed {elapsed:.4f} sec')
+    
+        if args.input is not None:
+            return

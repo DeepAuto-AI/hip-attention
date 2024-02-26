@@ -854,15 +854,26 @@ class LlamaCustomAttention(LlamaAttention):
                     
                     q_timber = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
                     with timer("layer.timber"):
-                        attn_output_timber, _ = timber_attention(
-                            q_timber,
-                            k[:, :LAST_DENSE_QUERIES, :],
-                            v[:, :LAST_DENSE_QUERIES, :],
-                            attention_mask=attention_mask,
-                            mask_k=self.tree_k,
-                            block_size_q=self.tree_block_size_q,
-                            block_size_k=self.tree_block_size_k,
-                        )
+                        try:
+                            attn_output_timber, _ = timber_attention(
+                                q_timber,
+                                k[:, :LAST_DENSE_QUERIES, :],
+                                v[:, :LAST_DENSE_QUERIES, :],
+                                mask_k=self.tree_k,
+                                block_size_q=self.tree_block_size_q,
+                                block_size_k=self.tree_block_size_k,
+                            )
+                        except RuntimeError as ex:
+                            os.makedirs('cache/timber', exist_ok=True)
+                            torch.save({
+                                'q': q_timber,
+                                'k': k[:, :LAST_DENSE_QUERIES, :],
+                                'v': v[:, :LAST_DENSE_QUERIES, :],
+                                'mask_k': self.tree_k,
+                                'block_size_q': self.tree_block_size_q,
+                                'block_size_k': self.tree_block_size_k,
+                            }, 'cache/timber/qkv.pth')
+                            raise Exception('oops timber is dead, check cache/timber/qkv.pth') from ex
                     
                     # flash_attention_mask = torch.ones((N*H, TDST-DENSE_QUERIES, TSRC), device=q.device, dtype=q.dtype)
                     # flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index+DENSE_QUERIES)
