@@ -1987,7 +1987,7 @@ def attention_matrix(
     SPARQ_REDUCE_METHOD: Literal['sum', 'max'] = 'sum',
     
     IS_FLASH: bool = False,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
     if DEBUG:
@@ -3085,7 +3085,7 @@ def timber_attention(
     chunking: bool = False,
     chunk_size: int = 2048,
     
-    is_flash: bool = True,
+    is_flash: bool = False,  # FIXME: temporarily disable bugged flash attention
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size

@@ -250,6 +250,7 @@ def load_model(
 def load_tokenizer():
     model_id = 'togethercomputer/LLaMA-2-7B-32K'
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    tokenizer.padding_side = 'right'
     return tokenizer
 
 
@@ -308,7 +309,12 @@ class Trainer(Seq2SeqTrainer):
             with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
                 output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
         # with torch.autocast('cuda', torch.bfloat16):
-        output = self.model(inputs, target, output_hidden_states=not self.config.disable_kd)
+        output = self.model(
+            inputs,
+            attention_mask=(inputs != self.model.config.pad_token_id).to(inputs.dtype),
+            labels=target,
+            output_hidden_states=not self.config.disable_kd
+        )
         logits = output.logits
 
         loss_model = torch.nn.functional.cross_entropy(
@@ -356,7 +362,11 @@ class Trainer(Seq2SeqTrainer):
 
         with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
             # print('asdfasdf', inputs.shape, target.shape, flush=True)
-            output = self.model(inputs, target).logits
+            output = self.model(
+                inputs,
+                attention_mask=(inputs != self.model.config.pad_token_id).to(inputs.dtype),
+                labels=target,
+            ).logits
             loss = torch.nn.functional.cross_entropy(
                 output.view(-1, output.shape[-1]),
                 target.view(-1)
@@ -454,6 +464,8 @@ def run():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--model', default='llama32k', type=str)
+    parser.add_argument('--method', default='timber', type=str)
+    parser.add_argument('--dense_queries', default=None, type=int)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -469,7 +481,6 @@ def run():
     parser.add_argument('--k', default=512, type=int)
     parser.add_argument('--block_size_q', default=16, type=int)
     parser.add_argument('--block_size_k', default=2, type=int)
-    parser.add_argument('--method', default='timber', type=str)
 
     args = parser.parse_args()
 
@@ -498,6 +509,8 @@ def run():
         train_config.seq_len = args.seq_len
     if args.save_steps > 0:
         train_config.save_steps = args.save_steps
+    if args.dense_queries is not None:
+        train_config.dense_queries = args.dense_queries
 
     main(train_config)
 

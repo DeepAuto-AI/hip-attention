@@ -12,11 +12,11 @@ from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
 import torch.utils.checkpoint
 import torch.autograd
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq, LlamaConfig
 
 # torch.autograd.set_detect_anomaly(True)
 
-from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
+from timber.models.modeling_greedy_llama import GreedyLlamaForCausalLM
 
 from timber.utils import seed
 from timber.dataset.labdataset import LabDataset
@@ -30,7 +30,6 @@ torch.set_float32_matmul_precision('high')
 
 @dataclass
 class TrainConfig:
-    disable_kd: bool = False
     using_fsdp: bool = False
     lr: float = 5e-5
     batch_size: int = 1
@@ -175,14 +174,7 @@ def load_model(
     if train_config.using_fsdp:
         quant_config = None
 
-    if method == 'timber':
-        ModelClass = LlamaForCausalLM
-    else:
-        ModelClass = transformers.LlamaForCausalLM
-
-    print(ModelClass)
-
-    model = ModelClass.from_pretrained(
+    model = GreedyLlamaForCausalLM.from_pretrained(
         model_id,
         config=config,
         device_map="auto",
@@ -258,7 +250,6 @@ class Trainer(Seq2SeqTrainer):
             self,
             config=None,
             model=None,
-            teacher=None,
             args=None,
             data_collator=None,
             train_dataset=None,
@@ -277,7 +268,6 @@ class Trainer(Seq2SeqTrainer):
         )
 
         self.model = model
-        self.teacher = teacher
 
         self.validation_preds = []
         self.validation_targets = []
@@ -296,52 +286,77 @@ class Trainer(Seq2SeqTrainer):
         return result
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        if self.teacher is not None:
-            self.teacher.eval()
         self.model.train()
+
+        n_topk = 128
+        temp = 0.1
 
         inputs, target = inputs['input_ids'], inputs['labels']
         inputs = inputs[..., :self.config.seq_len]
         target = target[..., :self.config.seq_len]
 
-        if not self.config.disable_kd:
-            with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
-                output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
-        # with torch.autocast('cuda', torch.bfloat16):
-        output = self.model(inputs, target, output_hidden_states=not self.config.disable_kd)
-        logits = output.logits
+        batch_size, seq_len = inputs.shape
+        vocab_size = self.model.config.vocab_size
 
-        loss_model = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.shape[-1]).to(torch.float32),
-            target.view(-1)
+        attention_mask = inputs.ne(self.model.config.pad_token_id).long()
+
+        # Obtain first logits
+        with torch.no_grad():
+            output = self.model(
+                inputs,
+                attention_mask=attention_mask,
+                labels=target,
+                compute_greedy_head=True,
+                use_cache=True,
+                return_dict=True,
+            )
+        log_pr_1 = output.logits.log_softmax(dim=-1)  # [batch_size, seq_len, vocab_size]
+        greedy_logits = output.greedy_logits.log_softmax(dim=-1)  # [batch_size, seq_len, vocab_size]
+
+        # p(x_t | x_{<t})
+        topk_log_pr_1, topk_indices = torch.topk(log_pr_1, n_topk, dim=-1)
+        # topk_log_pr_1: [batch_size, n_topk, seq_len]
+
+        # Expand past_key_values
+        past_key_values = (
+            (keys,  # TODO
+             values,
+             cumsums)
+            for (keys, values, cumsums) in output.past_key_values
         )
 
-        loss_kd_hidden = 0
-        loss_kd_logits = 0
-        if not self.config.disable_kd:
-            for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
-                loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32),
-                                                               teacher_layer.to(torch.float32))
-            loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
+        # Obtain second logits
+        topk_reshaped = topk_indices.reshape(batch_size * seq_len * n_topk, 1)
+        output_2 = self.model(
+            topk_reshaped,
+            attention_mask=torch.ones_like(topk_reshaped, dtype=torch.long),
+            past_key_values=output.past_key_values,
+            return_dict=True,
+        )
 
-            loss_kd_logits = torch.nn.functional.kl_div(
-                output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
-                output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
-                reduction='batchmean',
-            )
+        # p(x_{t+1} | x_t, x_{<t})
+        log_pr_2 = output_2.logits.reshape(batch_size, seq_len, n_topk, vocab_size).log_softmax(dim=-1)
 
-        if not self.config.disable_kd:
-            loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
-        else:
-            loss = loss_model
+        # p(x_t, x_{t+1} | x_{<t}) = p(x_t | x_{<t}) * p(x_{t+1} | x_t, x_{<t})
+        log_pr_1_2 = topk_log_pr_1.unsqueeze(-1) + log_pr_2  # [batch_size, n_topk, seq_len, vocab_size]
+
+        # Apply temperature and normalize
+        log_pr_1_2 = (log_pr_1_2 / temp)
+        log_pr_1_2 = log_pr_1_2 - log_pr_1_2.logsumexp(dim=-1, keepdim=True)
+
+        loss_kd_logits = torch.nn.functional.kl_div(
+            greedy_logits.view(-1, vocab_size).log_softmax(dim=-1),
+            log_pr_1_2.logits.view(-1, vocab_size),
+            reduction='batchmean',
+            log_target=True,
+        )
+
+        loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
 
         log_dict = dict()
         log_dict["training/loss_model"] = loss_model.item()
-        if not self.config.disable_kd:
-            if loss_kd_hidden > 0:
-                log_dict["training/loss_kd_hidden"] = loss_kd_hidden.item()
-            if loss_kd_logits > 0:
-                log_dict["training/loss_kd_logits"] = loss_kd_logits.item()
+        if loss_kd_logits > 0:
+            log_dict["training/loss_kd_logits"] = loss_kd_logits.item()
         log_dict["training/loss"] = loss.item()
         self.log(log_dict)
 
@@ -404,10 +419,6 @@ def main(config: TrainConfig):
     config.model_checkpoint_dir = config.model_checkpoint_dir + '/' + filename
 
     model = load_model(train_config=config, method=config.method)
-    if not config.disable_kd:
-        teacher = load_model(train_config=config, method='none', is_teacher=True)
-    else:
-        teacher = None
 
     datamodule = LabDataModule(config=config)
     datamodule.setup("fit")
@@ -431,7 +442,6 @@ def main(config: TrainConfig):
     trainer = Trainer(
         config=config,
         model=model,
-        teacher=teacher,
         args=trainer_config,
         train_dataset=get_hf_dataset(datamodule.train_data),
         eval_dataset=get_hf_dataset(datamodule.val_data),
@@ -455,7 +465,6 @@ def run():
 
     parser.add_argument('--model', default='llama32k', type=str)
     parser.add_argument('--using_fsdp', action='store_true')
-    parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
@@ -475,7 +484,6 @@ def run():
 
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
-        disable_kd=args.disable_kd,
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
         k=args.k,

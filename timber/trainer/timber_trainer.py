@@ -260,8 +260,9 @@ class LabModule(pl.LightningModule):
 
     def forward(self, inputs, target, output_hidden_states=False):
         return self.model(
-            inputs, 
-            target, 
+            inputs,
+            attention_mask=(inputs != self.pad_token_id).to(inputs.dtype),
+            labels=target,
             output_hidden_states=output_hidden_states
         )
 

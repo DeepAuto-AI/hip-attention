@@ -675,28 +675,30 @@ class LlamaCustomAttention(LlamaAttention):
             nn.ReLU(),
             nn.Linear(config.hidden_size // 4,  config.num_attention_heads)
         )
-        
-        from reformer_pytorch import LSHAttention
-        self.tree_reformer = LSHAttention(
-            dropout=config.attention_dropout,
-            bucket_size=self.tree_k,
-            n_hashes=8,
-            causal=True,
-        )
-        
-        from performer_pytorch import FastAttention
-        if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
-            dim_heads = config.hidden_size // config.num_attention_heads
-            default_dtype = torch.get_default_dtype()
-            torch.set_default_dtype(torch.float32)
-            self.tree_performer = FastAttention(
-                dim_heads=dim_heads,
-                nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
-                # nb_features=dim_heads,
+
+        if self.attention_method == 'reformer':
+            from reformer_pytorch import LSHAttention
+            self.tree_reformer = LSHAttention(
+                dropout=config.attention_dropout,
+                bucket_size=self.tree_k,
+                n_hashes=8,
                 causal=True,
             )
-            torch.set_default_dtype(default_dtype)
-    
+
+        elif self.attention_method == 'performer':
+            from performer_pytorch import FastAttention
+            if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
+                dim_heads = config.hidden_size // config.num_attention_heads
+                default_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(torch.float32)
+                self.tree_performer = FastAttention(
+                    dim_heads=dim_heads,
+                    nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
+                    # nb_features=dim_heads,
+                    causal=True,
+                )
+                torch.set_default_dtype(default_dtype)
+
     # Adapted from LlamaAttention.forward
     def forward(
         self,
@@ -736,13 +738,13 @@ class LlamaCustomAttention(LlamaAttention):
                 key_states = repeat_kv(key_states, self.num_key_value_groups)
                 value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            if attention_mask is not None:
-                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                    raise ValueError(
-                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                    )
-
             if self.attention_method == 'none':
+                if attention_mask is not None:
+                    if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                        raise ValueError(
+                            f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                        )
+
                 # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
                 # Reference: https://github.com/pytorch/pytorch/issues/112577.
                 if query_states.device.type == "cuda" and attention_mask is not None:
@@ -807,6 +809,7 @@ class LlamaCustomAttention(LlamaAttention):
                     q = q.reshape(N*H, TDST, HID) #.contiguous()
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
+                    attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
                     
                 TARGET_DENSE_QUERIES = self.tree_dense_queries
                 current_query_index = TSRC - TDST
@@ -826,6 +829,8 @@ class LlamaCustomAttention(LlamaAttention):
                 #     print("converted to TIMBER")
                 
                 if DENSE_QUERIES > 0:
+                    if self.training:
+                        warnings.warn("DENSE_QUERIES > 0 is not supported in training mode")
                     with timer("layer.flash"):
                         if min(DENSE_QUERIES, TDST) != min(TSRC, DENSE_QUERIES):
                             flash_attention_mask = torch.ones((N*H, min(DENSE_QUERIES, TDST), min(TSRC, DENSE_QUERIES)), device=q.device, dtype=q.dtype)
@@ -853,6 +858,7 @@ class LlamaCustomAttention(LlamaAttention):
                             q_timber,
                             k[:, :LAST_DENSE_QUERIES, :],
                             v[:, :LAST_DENSE_QUERIES, :],
+                            attention_mask=attention_mask,
                             mask_k=self.tree_k,
                             block_size_q=self.tree_block_size_q,
                             block_size_k=self.tree_block_size_k,
@@ -880,6 +886,8 @@ class LlamaCustomAttention(LlamaAttention):
                             if past_key_value is not None:
                                 assert hasattr(past_key_value, "cumsum")
                                 last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+                                if last_cumsum is not None:
+                                    last_cumsum = last_cumsum.flatten(0, 1)
                             
                             if last_cumsum is None:
                                 # print('cache miss')
@@ -892,7 +900,10 @@ class LlamaCustomAttention(LlamaAttention):
                                 last_cumsum = curr_v + last_cumsum[:, -1:, :]
 
                             if past_key_value is not None:  
-                                past_key_value.update_cumsum(last_cumsum, self.layer_idx)
+                                past_key_value.update_cumsum(
+                                    last_cumsum.unflatten(0, (N, H)),
+                                    self.layer_idx
+                                )
                             
                             context_avg = last_cumsum / torch.arange(
                                 current_query_index+DENSE_QUERIES+1, 
@@ -1193,6 +1204,8 @@ class LlamaPreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, LlamaRMSNorm):
+            module.weight.data.fill_(1.0)
 
 
 LLAMA_INPUTS_DOCSTRING = r"""
@@ -1355,23 +1368,8 @@ class LlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if self._use_flash_attention_2:
-            # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        elif self._use_sdpa and not output_attentions:
-            # output_attentions=True can not be supported when using SDPA, and we fall back on
-            # the manual implementation that requires a 4D causal mask in all cases.
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
-            )
-        else:
-            # 4d mask is passed through the layers
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
-            )
+        # 2d mask is passed through the layers
+        attention_mask = attention_mask.bool() if (attention_mask is not None and 0 in attention_mask) else None
 
         # embed positions
         hidden_states = inputs_embeds

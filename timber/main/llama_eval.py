@@ -78,7 +78,12 @@ def load_model(args):
     
     infer_dtype = torch.bfloat16
     # infer_dtype = torch.float32
-    model = LlamaForCausalLM.from_pretrained(
+
+    ModelClass = LlamaForCausalLM
+    if args.method == 'none':
+        ModelClass = transformers.LlamaForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config, 
         load_in_4bit=True,

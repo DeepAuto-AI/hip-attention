@@ -39,19 +39,19 @@ class BookSumDataset:
             with tqdm.tqdm(self.data, desc='tokenizing', dynamic_ncols=True, leave=False) as pbar:
                 for data in pbar:
                     text_ids = tokenizer(
-                        data['text'] + self.tokenizer.eos_token, 
+                        tokenizer.bos_token + data['text'] + ' ' + self.tokenizer.eos_token,
                         return_tensors='pt', 
                         truncation=True, 
                         max_length=self.max_seq_len,
                     )['input_ids'][0]
                     prompt_ids = tokenizer(
-                        data['prompt'] + self.tokenizer.eos_token, 
+                        tokenizer.bos_token + data['prompt'] + ' ' + self.tokenizer.eos_token,
                         return_tensors='pt',
                         truncation=True, 
                         max_length=self.max_seq_len,
                     )['input_ids'][0]
                     completion_ids = tokenizer(
-                        data['completion'] + self.tokenizer.eos_token, 
+                        tokenizer.bos_token + data['completion'] + ' ' + self.tokenizer.eos_token,
                         return_tensors='pt',
                         truncation=True, 
                         max_length=self.max_seq_len,
