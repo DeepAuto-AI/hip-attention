@@ -937,15 +937,16 @@ def _safe_indices_compute(
     
         if not ALLOW_COLLISION:
             col = tl.maximum(last_col + 1, col)
-            tl.store(
-                INDICES +\
-                    idx_n * stride_indices_n +\
-                    idx_tdst * stride_indices_tdst +\
-                    idx_k * stride_indices_k,
-                value = col,
-                mask = mask
-            )
             last_col = col
+        
+        tl.store(
+            INDICES +\
+                idx_n * stride_indices_n +\
+                idx_tdst * stride_indices_tdst +\
+                idx_k * stride_indices_k,
+            value = col,
+            mask = mask
+        )
 
 def safe_indices(mask, ws, block_size_k, allow_collision=True):
     N, TDST, K = mask.shape
@@ -1272,7 +1273,7 @@ def calc_prob_return_context(
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
-    BLOCK_BK = triton.cdiv(128, BLOCK_SIZE_K)
+    BLOCK_BK = triton.cdiv(64 if queries.dtype == torch.float32 else 128, BLOCK_SIZE_K)
     # print(256 // BLOCK_SIZE_K, BK)
     BLOCK_HID = triton.next_power_of_2(HID)
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
@@ -2205,7 +2206,7 @@ def attention_matrix(
                     if k < ks[idx_n, idx_bdst]:
                         idx_bsrc = indices[idx_n, idx_bdst, k]
                         if idx_bsrc < out.shape[2]:
-                            assert out[idx_n, idx_bdst, idx_bsrc] == 0, f"{out[idx_n, idx_bdst, idx_bsrc]}, {ks[idx_n, idx_bdst]}, {idx_bsrc}, {mask[idx_n, idx_bdst, :]}"
+                            # assert out[idx_n, idx_bdst, idx_bsrc] == 0, f"{out[idx_n, idx_bdst, idx_bsrc]}, {ks[idx_n, idx_bdst]}, {idx_bsrc}, {mask[idx_n, idx_bdst, :]}"
                             out[idx_n, idx_bdst, idx_bsrc] = 1
         return out
 
@@ -2245,8 +2246,7 @@ def attention_matrix(
     
     def debug_print(w_curr):
         plt.clf()
-        indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
-        indices = safe_indices(indices)
+        indices = safe_indices(mask, ws, BLOCK_SIZE_K)
         # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
         x = to_dense_blocked(
             indices.cpu().numpy(),
@@ -2312,8 +2312,8 @@ def attention_matrix(
             # with timer(f"iteration_{w_curr}"):
             w_curr = round(w_curr * scale_up)
             n_completed = round(n_completed * scale_up)
-            if DEBUG:
-                debug_print(w_curr)
+        if DEBUG:
+            debug_print(w_curr)
     
     with timer('matrix.cleanup'):
         # NOTE: align with blocks
