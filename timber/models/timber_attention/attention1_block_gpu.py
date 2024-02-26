@@ -133,7 +133,7 @@ def _masking_iteration_compute(
         context_length = tl.load(
             CONTEXT_LENGTH +\
                 ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS) * stride_context_length_num_seqs,
-        )
+        ).to(tl.int64)
     
     for _ in range(N_ITERATION):
         tl.debug_barrier()
@@ -149,6 +149,7 @@ def _masking_iteration_compute(
                 idx_n * stride_tsrcs_n + \
                 idx_bdst * stride_tsrcs_bdst,
         )
+        t_src = tl.minimum(context_length, t_src)
         
         w_new = tl.minimum(
             tl.math.round(w_old.to(tl.float32) * SCALE_UP).to(tl.float32), 
@@ -419,8 +420,10 @@ def _masking_iteration_compute(
                     idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
                     # idx_tsrc = tl.minimum(idx_tsrc + (tl.maximum(0, tl.cdiv(t_src, (k_new * BLOCK_SIZE_K)) - BLOCK_SIZE_K)).to(tl.int64), T_SRC - 1)
                     mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
-                    if CONTEXT_LENGTH is not None:
-                        mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
+                    
+                    # tl.device_print('a', context_length)
+                    # if CONTEXT_LENGTH is not None:
+                    #     mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
                     
                     # [BLOCK_TMASK_K, ]
                     if ATTEN_MASK is not None:
@@ -478,6 +481,10 @@ def _masking_iteration_compute(
                             # key_mask[None, :] &
                             True
                         )
+                        if CONTEXT_LENGTH is not None:
+                            vec_k_mask &= (
+                                (idx_tsrc < context_length)[None, :]
+                            )
                         if KEY_CACHE_METHOD == 'cont':
                             # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
                             vec_k = tl.load(
@@ -546,6 +553,11 @@ def _masking_iteration_compute(
                             (~key_mask[None, :]) |
                             (~query_mask[:, None]) |
                             False
+                        )
+                    
+                    if CONTEXT_LENGTH is not None:
+                        scores_partial_ignore_mask |= (
+                            (idx_tsrc[None, :] >= context_length)
                         )
                     
                     # NOTE: owo powerful dark magic. select first / last block always. testing sink attention.
