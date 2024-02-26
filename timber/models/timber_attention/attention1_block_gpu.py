@@ -2222,27 +2222,37 @@ def attention_matrix(
     assert w_curr <= mask_k
     
     with timer('matrix.setup'):
+        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
+        
         # vectors
+        tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
         tsrcs = torch.arange(
-            T_SRC-T_DST+1, T_SRC+1, BLOCK_SIZE_Q, 
+            tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, BLOCK_SIZE_Q, 
             dtype=torch.int64,
             device=device,
         )\
             .view(1, -1)\
             .expand(N, -1)\
             .contiguous()
-        tsrcs += max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1 # - BLOCK_SIZE_K // 2
-        tsrcs.clamp_max_(T_SRC)
+        # tsrcs.clamp_max_(T_SRC)
         if not is_causal:
             tsrcs.fill_(T_SRC)
-        ws = torch.clamp(tsrcs, 0, w_curr).to(torch.int64) # NOTE: store non blocked width
-        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64) # NOTE: store num blocks
+        # NOTE: store non blocked width
+        ws = torch.clamp(tsrcs, 0, w_curr)
+        # NOTE: store num blocks
+        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
+        # assert tsrcs.dtype == torch.int64
+        # assert ws.dtype == torch.int64
+        # assert ks.dtype == torch.int64
         
         # matrices
         # NOTE: float16 -> int64 seems not possible
-        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
-        mask = (torch.arange(mask_k_block, device=device).view(1, 1, mask_k_block) / ks.unsqueeze(-1)).to(torch.float32)
-        tmask = torch.zeros((mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), dtype=mask.dtype, device=device)
+        mask = torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
+        tmask = torch.empty(
+            (mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), 
+            dtype=torch.float32, 
+            device=device
+        )
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
         B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
