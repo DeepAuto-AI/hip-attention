@@ -914,19 +914,68 @@ def _safe_indices_compute(
     
     ALLOW_COLLISION: tl.constexpr,
     BLOCK_N_TDST: tl.constexpr,
-): 
-    pids = tl.program_id(0) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
+    BLOCK_K: tl.constexpr,
+):
+    if not ALLOW_COLLISION:
+        pids = tl.program_id(0) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
     
-    idx_n = pids // TDST
-    mask_n = idx_n < N
+        idx_n = pids // TDST
+        mask_n = idx_n < N
+        
+        idx_tdst = pids % TDST
+        mask_tdst = idx_tdst < TDST
+        
+        mask = mask_n & mask_tdst
+        
+        last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
+        for idx_k in range(K):
+            mask_vec = tl.load(
+                MASK +\
+                    idx_n * stride_mask_n +\
+                    idx_tdst * stride_mask_tdst +\
+                    idx_k * stride_mask_k,
+                mask = mask,
+                other = 0
+            ).to(tl.float32)
+            ws_vec = tl.load(
+                WS +\
+                    idx_n * stride_ws_n +\
+                    idx_tdst * stride_ws_tdst +\
+                    idx_k * stride_ws_k,
+                mask = mask,
+                other = 0
+            ).to(tl.float32)
+            indices_float = mask_vec * ws_vec
+            col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
+
+            # avoid collision
+            col = tl.maximum(last_col + 1, col)
+            last_col = col
+            
+            col = col * BLOCK_SIZE_K
+            
+            tl.store(
+                INDICES +\
+                    idx_n * stride_indices_n +\
+                    idx_tdst * stride_indices_tdst +\
+                    idx_k * stride_indices_k,
+                value = col,
+                mask = mask
+            )
+    else:
+        pids_ntdst = tl.program_id(1) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
     
-    idx_tdst = pids % TDST
-    mask_tdst = idx_tdst < TDST
-    
-    mask = mask_n & mask_tdst
-    
-    last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
-    for idx_k in range(K):
+        idx_n = (pids_ntdst // TDST)[:, None]
+        mask_n = idx_n < N
+        
+        idx_tdst = (pids_ntdst % TDST)[:, None]
+        mask_tdst = idx_tdst < TDST
+        
+        idx_k = (tl.program_id(0) * BLOCK_K + tl.arange(0, BLOCK_K))[None, :]
+        mask_k = idx_k < K
+        
+        mask = mask_n & mask_tdst & mask_k
+        
         mask_vec = tl.load(
             MASK +\
                 idx_n * stride_mask_n +\
@@ -943,13 +992,9 @@ def _safe_indices_compute(
             mask = mask,
             other = 0
         ).to(tl.float32)
+        
         indices_float = mask_vec * ws_vec
         col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
-    
-        if not ALLOW_COLLISION:
-            col = tl.maximum(last_col + 1, col)
-            last_col = col
-        
         col = col * BLOCK_SIZE_K
         
         tl.store(
@@ -971,8 +1016,13 @@ def safe_indices(mask, ws, block_size_k, allow_collision=True):
         device=mask.device
     )
     
-    BLOCK_N_TDST = 128
-    grid = (triton.cdiv(N*TDST, BLOCK_N_TDST), )
+    BLOCK_N_TDST = 32
+    BLOCK_K = 128
+    
+    if not allow_collision:
+        grid = (triton.cdiv(N*TDST, BLOCK_N_TDST), )
+    else:
+        grid = (triton.cdiv(K, BLOCK_K), triton.cdiv(N*TDST, BLOCK_N_TDST), )
     
     assert indices.ndim == 3
     assert mask.ndim == 3
@@ -987,8 +1037,9 @@ def safe_indices(mask, ws, block_size_k, allow_collision=True):
         
         allow_collision,
         BLOCK_N_TDST,
+        BLOCK_K,
         
-        num_warps=1,
+        num_warps=4 if allow_collision else 1,
     )
     
     # indices = indices.reshape(N, TDST, K)
