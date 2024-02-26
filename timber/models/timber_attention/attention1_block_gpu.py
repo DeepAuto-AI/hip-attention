@@ -2206,7 +2206,7 @@ def attention_matrix(
     def debug_print(w_curr):
         plt.clf()
         indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
-        # indices = safe_indices(indices)
+        indices = safe_indices(indices)
         # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
         x = to_dense_blocked(
             indices.cpu().numpy(),
@@ -3154,7 +3154,7 @@ def timber_attention(
     chunk_size: int = 2048,
     
     is_flash: bool = True,
-    enable_sparq: bool = True,
+    enable_sparq: bool = False,
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
