@@ -149,7 +149,8 @@ def _masking_iteration_compute(
                 idx_n * stride_tsrcs_n + \
                 idx_bdst * stride_tsrcs_bdst,
         )
-        t_src = tl.minimum(context_length, t_src)
+        if CONTEXT_LENGTH is not None:
+            t_src = tl.minimum(context_length, t_src)
         
         w_new = tl.minimum(
             tl.math.round(w_old.to(tl.float32) * SCALE_UP).to(tl.float32), 
