@@ -16,7 +16,7 @@ from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
 from vllm.transformers_utils import config as vllm_transformers_config
-vllm_transformers_config.FORCE_SIGNLE_LAYER = os.environ.get('FORCE_SINGLE_LAYER', '0') == '1'
+vllm_transformers_config.FORCE_SIGNLE_LAYER = int(os.environ.get('FORCE_SINGLE_LAYER', '0'))
 
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):

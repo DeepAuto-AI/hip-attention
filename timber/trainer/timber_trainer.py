@@ -56,6 +56,7 @@ class TrainConfig:
     init_from_checkpoint: str = None
     method: str = 'timber'
     model: str = 'llama32k'
+    disable_global_context: bool = False
 
 class LabDataModule(pl.LightningDataModule):
     def __init__(
@@ -149,6 +150,10 @@ def load_model(
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
+        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'yi6b': '01-ai/Yi-6B-200K',
+        'yi34b': '01-ai/Yi-34B-200K',
     }
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
@@ -191,6 +196,7 @@ def load_model(
             if train_config.dense_queries is None:
                 train_config.dense_queries = train_config.k
             m.tree_dense_queries = train_config.dense_queries
+            m.tree_using_context_avg = not train_config.disable_global_context
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
@@ -464,6 +470,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', default='llama32k', type=str)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
+    parser.add_argument('--disable_global_context', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
@@ -491,6 +498,7 @@ if __name__ == "__main__":
         block_size_k=args.block_size_k,
         method=args.method,
         model=args.model,
+        disable_global_context=args.disable_global_context,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
