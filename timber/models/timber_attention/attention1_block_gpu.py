@@ -892,46 +892,88 @@ def torch_cdiv(a, b):
 
 @triton.jit
 def _safe_indices_compute(
-    INDICES, stride_indices_n, stride_indices_k,
-    N, K,
-    BLOCK_N: tl.constexpr,
+    # input tensors
+    MASK, stride_mask_n, stride_mask_tdst, stride_mask_k,
+    WS, stride_ws_n, stride_ws_tdst, stride_ws_k,
+    
+    # output tensors
+    INDICES, stride_indices_n, stride_indices_tdst, stride_indices_k,
+    
+    N, TDST, K, BLOCK_SIZE_K,
+    
+    ALLOW_COLLISION: tl.constexpr,
+    BLOCK_N_TDST: tl.constexpr,
 ): 
-    pid_n = tl.program_id(0)
-    idx_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
+    pids = tl.program_id(0) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
+    
+    idx_n = pids // TDST
     mask_n = idx_n < N
     
-    last_col = tl.zeros((BLOCK_N, ), dtype=tl.int64) - 1
+    idx_tdst = pids % TDST
+    mask_tdst = idx_tdst < TDST
+    
+    mask = mask_n & mask_tdst
+    
+    last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
     for idx_k in range(K):
-        col = tl.load(
-            INDICES +\
-                idx_n * stride_indices_n +\
-                idx_k * stride_indices_k,
-            mask = mask_n,
-            other = 0,
-        ).to(tl.int64)
-        col = tl.maximum(last_col + 1, col)
-        tl.store(
-            INDICES +\
-                idx_n * stride_indices_n +\
-                idx_k * stride_indices_k,
-            value = col,
-            mask = mask_n
+        mask_vec = tl.load(
+            MASK +\
+                idx_n * stride_mask_n +\
+                idx_tdst * stride_mask_tdst +\
+                idx_k * stride_mask_k,
+            mask = mask,
+            other = 0
         )
-        # tl.debug_barrier()
-        last_col = col
+        ws_vec = tl.load(
+            WS +\
+                idx_n * stride_ws_n +\
+                idx_tdst * stride_ws_tdst +\
+                idx_k * stride_ws_k,
+            mask = mask,
+            other = 0
+        )
+        indices_float = mask_vec * ws_vec
+        col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
+    
+        if not ALLOW_COLLISION:
+            col = tl.maximum(last_col + 1, col)
+            tl.store(
+                INDICES +\
+                    idx_n * stride_indices_n +\
+                    idx_tdst * stride_indices_tdst +\
+                    idx_k * stride_indices_k,
+                value = col,
+                mask = mask
+            )
+            last_col = col
 
-def safe_indices(indices):
-    N, TDST, K = indices.shape
-    indices = indices.reshape(N*TDST, K).clone()
+def safe_indices(mask, ws, block_size_k, allow_collision=True):
+    N, TDST, K = mask.shape
+    ws = ws.unsqueeze(-1).expand(N, TDST, K)
+
+    indices = torch.zeros(
+        (N, TDST, K), 
+        dtype=torch.int32, 
+        device=mask.device
+    )
     
-    BLOCK_BATCH = 32
-    grid = (triton.cdiv(N*TDST, BLOCK_BATCH), )
+    BLOCK_N_TDST = 32
+    grid = (triton.cdiv(N*TDST, BLOCK_N_TDST), )
     
-    assert indices.ndim == 2
+    assert indices.ndim == 3
+    assert mask.ndim == 3
+    assert indices.ndim == 3
     _safe_indices_compute[grid](
+        mask, *mask.stride(),
+        ws, *ws.stride(),
+        
         indices, *indices.stride(),
-        N*TDST, K,
-        BLOCK_BATCH,
+        
+        N, TDST, K, block_size_k,
+        
+        allow_collision,
+        BLOCK_N_TDST,
+        
         num_warps=1,
     )
     
@@ -2275,18 +2317,20 @@ def attention_matrix(
     
     with timer('matrix.cleanup'):
         # NOTE: align with blocks
-        with timer('matrix.cleanup.cdiv'):
-            indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
+        # with timer('matrix.cleanup.cdiv'):
+        #     indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int32)
         # with timer('matrix.heuristic'):
         #     indices.scatter_(
         #         dim=-1,
         #         index=(ks - 1).unsqueeze(-1).clamp_min_(0),
         #         src=(torch_cdiv(ws, BLOCK_SIZE_K).to(indices.dtype) - 1).unsqueeze(-1).clamp_min_(0)
         #     )
-        with timer('matrix.cleanup.safe_indices'):
-            indices = safe_indices(indices)
+        # with timer('matrix.cleanup.safe_indices'):
+        indices = safe_indices(mask, ws, BLOCK_SIZE_K)
+        
         # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE_K) - 1)
-        indices = indices * BLOCK_SIZE_K
+        
+        # indices = indices * BLOCK_SIZE_K
     
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score" if not IS_FLASH else "flash_atten"):
