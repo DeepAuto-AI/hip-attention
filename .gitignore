@@ -38,3 +38,7 @@ data/
 save/
 *.ttf
 .idea/*
+
+timber.egg-info/
+timber/timber.egg-info/
+

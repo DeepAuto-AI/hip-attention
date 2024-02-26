@@ -18,10 +18,7 @@ w_start = 512 (32 block)
 import json
 import random
 import gc
-from matplotlib import pyplot as plt
 import numpy as np
-import skimage.measure
-import skimage
 import torch
 from torch import Tensor
 import tqdm
@@ -2202,6 +2199,9 @@ def attention_matrix(
         return out
     
     def debug_print(w_curr):
+        from matplotlib import pyplot as plt
+        import skimage.measure
+        import skimage
         plt.clf()
         indices = torch_cdiv(mask * ws.unsqueeze(-1), BLOCK_SIZE_K).to(torch.int64)
         # indices = safe_indices(indices)
@@ -2312,6 +2312,9 @@ def attention_matrix(
             return indices, ks, context, None
     
     if DEBUG:
+        from matplotlib import pyplot as plt
+        import skimage.measure
+        import skimage
         x = to_dense(
             indices.cpu().numpy(),
             ks.cpu().numpy(),
