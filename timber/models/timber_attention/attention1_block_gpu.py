@@ -961,7 +961,7 @@ def _safe_indices_compute(
             mask = mask
         )
 
-def safe_indices(mask, ws, block_size_k, allow_collision=False):
+def safe_indices(mask, ws, block_size_k, allow_collision=True):
     N, TDST, K = mask.shape
     ws = ws.unsqueeze(-1).expand(N, TDST, K)
 
@@ -3441,11 +3441,7 @@ def main_latency_benchmark():
     
     timber_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
-    samples = []
-    for i in tqdm.tqdm(range(n_samples)):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+    def sample():
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
@@ -3467,6 +3463,26 @@ def main_latency_benchmark():
                 )
             else:
                 raise Exception()
+    
+    s = torch.cuda.Stream()
+    graph = None
+    samples = []
+    for i in tqdm.tqdm(range(n_samples)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        
+        if i < 3:
+            s.wait_stream(torch.cuda.current_stream())
+            sample()
+            torch.cuda.current_stream().wait_stream(s)
+        elif graph is None:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                sample()
+        else:
+            graph.replay()
+        
         end.record()
         torch.cuda.synchronize()
         elapsed = start.elapsed_time(end)
