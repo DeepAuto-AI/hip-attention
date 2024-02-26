@@ -958,7 +958,7 @@ def safe_indices(mask, ws, block_size_k, allow_collision=True):
         device=mask.device
     )
     
-    BLOCK_N_TDST = 32
+    BLOCK_N_TDST = 128
     grid = (triton.cdiv(N*TDST, BLOCK_N_TDST), )
     
     assert indices.ndim == 3
