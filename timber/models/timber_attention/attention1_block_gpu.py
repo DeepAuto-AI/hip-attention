@@ -1248,11 +1248,15 @@ def _calc_prob_return_context_compute(
             qk += (
                 (idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :] |
                 (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-            ) * (-1.0e-6)
+            ) * (-1.0e+6)
         else:
             qk += (
                 ~(mask_tdst[:, None] & mask_tsrc[None, :])
-            ) * (-1.0e-6)
+            ) * (-1.0e+6)
+        if CONTEXT_LENGTH is not None:
+            qk += (
+                (idx_tsrc[None, :] >= context_length)
+            ) * (-1.0e+6)
         
         # [BLOCK_SIZE_Q: tdst, 1: tsrc]
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
