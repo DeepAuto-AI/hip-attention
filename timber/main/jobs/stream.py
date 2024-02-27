@@ -64,7 +64,7 @@ def job_stream(args, model, tokenizer, device):
                     top_k=500,
                     max_tokens=512,
                     # max_tokens=16,
-                    frequency_penalty=0.2,
+                    frequency_penalty=0.1,
                     repetition_penalty=1.0,
                     ignore_eos=True,
                     skip_special_tokens=False,
@@ -93,9 +93,10 @@ def job_stream(args, model, tokenizer, device):
                         streamer=streamer, 
                         do_sample=True,
                         max_new_tokens=256,
-                        temperature=0.5,
-                        top_p=0.8,
-                        top_k=1000,
+                        temperature=0.7,
+                        top_p=0.9,
+                        top_k=10,
+                        repetition_penalty=1.0,
                     )
         except KeyboardInterrupt:
             traceback.print_exc()
