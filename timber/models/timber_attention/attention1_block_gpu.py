@@ -135,10 +135,10 @@ def _masking_iteration_compute(
                 ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS) * stride_context_length_num_seqs,
         ).to(tl.int64)
     
-    for _ in range(N_ITERATION):
+    for _ in range(N_ITERATION): # CHECK stride is not mandatory factor of triton?
         tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
-        w_old = tl.load(
+        w_old = tl.load( # CHECK pointer? memory space?
             WS + \
                 idx_n * stride_ws_n + \
                 idx_bdst * stride_ws_bdst,
@@ -164,7 +164,7 @@ def _masking_iteration_compute(
         #     return
 
         tl.debug_barrier()
-        mask_w = w_old != w_new
+        mask_w = w_old != w_new # CHECK why - 2 times scale up vs tsrc
         tl.debug_barrier()
         
         """
@@ -184,11 +184,11 @@ def _masking_iteration_compute(
             N_PATCHES,
             (
                 tl.minimum(
-                    MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32),
+                    MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float32), # CHECK why
                     1.0
                 ) * tl.cdiv(w_new, BLOCK_SIZE_K)
             ).to(tl.int64),
-        )
+        ) # CHECK why maximum and not minimum?
         # """
             # k_new = tl.maximum(
             #     N_PATCHES,
@@ -835,7 +835,7 @@ def masking_iteration(
     else:
         raise Exception()
     
-    grid = (B_DST - N_COMPLETED, N)
+    grid = (B_DST - N_COMPLETED, N) # CHECK why order switched
     
     # HID cannot be chunked if use reduce
     # if REDUCE_METHOD in ['max', 'sum']:
@@ -2358,14 +2358,14 @@ def attention_matrix(
         )
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
-        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
+        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q) # CHECK upper bound?
         
         sparq_indices = None
         sparq_indices_strides = (1, 1, 1)
         if SPARQ:
             with timer('matrix.setup.sparq'):
                 queries_scores = queries.abs()
-                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST:
+                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST: # shen T_DST not divisible to BLOCK_SIZE_Q
                     queries_scores = F.pad(
                         queries_scores.unsqueeze(0), 
                         (0, 0, 0, B_DST * BLOCK_SIZE_Q - T_DST), 
@@ -2436,7 +2436,7 @@ def attention_matrix(
             debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
     
     with timer('matrix.cleanup'):
-        indices = safe_indices(mask, ws, BLOCK_SIZE_K)
+        indices = safe_indices(mask, ws, BLOCK_SIZE_K) # CHECK safe_indices?
     
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score" if not IS_FLASH else "flash_atten"):
