@@ -33,6 +33,7 @@ import math
 from torch.autograd import Function
 
 assert (triton.__version__ in ['2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
+assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
 
 from timber.utils import get_bench, seed
 from timber.models.timber_attention.common import load_checkouts
