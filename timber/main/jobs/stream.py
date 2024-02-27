@@ -16,7 +16,7 @@ from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
 from vllm.transformers_utils import config as vllm_transformers_config
-vllm_transformers_config.FORCE_SIGNLE_LAYER = os.environ.get('FORCE_SINGLE_LAYER', '0') == '1'
+vllm_transformers_config.FORCE_SIGNLE_LAYER = int(os.environ.get('FORCE_SINGLE_LAYER', '0'))
 
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):
@@ -37,7 +37,10 @@ def job_stream(args, model, tokenizer, device):
         get_bench().reset_measures()
         # get_bench().disabled = False
         
-        input_text = input('>>>').strip()
+        if args.input is None:
+            input_text = input('>>>').strip()
+        else:
+            input_text = args.input
         
         if len(input_text.strip()) == 0:
             continue
@@ -56,12 +59,13 @@ def job_stream(args, model, tokenizer, device):
             if isinstance(model, LLM):
                 prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
-                    temperature=0.7, 
-                    top_p=0.9,
-                    top_k=50,
+                    temperature=0.7,
+                    top_p=0.3,
+                    top_k=500,
                     max_tokens=512,
-                    frequency_penalty=0.0,
-                    repetition_penalty=1.1,
+                    # max_tokens=16,
+                    frequency_penalty=0.2,
+                    repetition_penalty=1.0,
                     ignore_eos=True,
                     skip_special_tokens=False,
                     # max_tokens=inputs.input_ids.shape[-1] + 32,
@@ -102,3 +106,6 @@ def job_stream(args, model, tokenizer, device):
         if len(tracetree) > 0:
             print(tracetree)
         print(f'elapsed {elapsed:.4f} sec')
+    
+        if args.input is not None:
+            return
