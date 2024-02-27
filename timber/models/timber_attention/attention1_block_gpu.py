@@ -166,7 +166,7 @@ def _masking_iteration_compute(
         #     ),
         # )
     # tl.device_print("before", t_src)
-    k_new = tl.minimum(tl.cdiv(t_src, BLOCK_SIZE_K), tl.maximum(N_PATCHES, k_new))
+    k_new = tl.minimum(tl.cdiv(t_src, BLOCK_SIZE_K), tl.maximum(N_PATCHES, k_new)) # CHECK
     
     """
     # mask -> t_mask
@@ -195,6 +195,7 @@ def _masking_iteration_compute(
         other = 0
     )
     k_old_mask = k_old_mask & (loc_vec < 1.0)
+    # tl.debug_barrier()
     
     # w_old_fp = w_old.to(tl.float32)
     # w_new_fp = w_new.to(tl.float32)
@@ -205,17 +206,23 @@ def _masking_iteration_compute(
     loc_idx_start_vec = (loc_idx_start_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
     loc_idx_end_vec = (loc_idx_end_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
     
+    # tl.debug_barrier()
+
     dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
     dup_pixels_vec = dup_pixels_vec * k_old_mask
     num_pixels_vec = tl.cumsum(dup_pixels_vec)
     dup_pixels_first = tl.min(num_pixels_vec)
     num_pixels_scalar = tl.max(num_pixels_vec)
     
+    # tl.debug_barrier()
+
     num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - TMASK_K, 0)
     num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
     dup_pixels_first = tl.min(num_pixels_vec)
     num_pixels_scalar = tl.max(num_pixels_vec)
     
+    # tl.debug_barrier()
+
     # NOTE: compiler bug?
     
     """
@@ -2655,10 +2662,11 @@ def timber_attention(
 ):
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
-    if q.shape[1] > CHUNK_SIZE and CHUNKING:
-        N, T_DST, HID = q.shape
+    
+    if q.shape[1] > CHUNK_SIZE and CHUNKING: # CHECK WHY
+        N, T_DST, HID = q.shape # q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len]
         N, T_SRC, HID = k.shape
-        
+        breakpoint()
         contexts = []
         
         for ichunk in range(triton.cdiv(T_DST, CHUNK_SIZE)):

@@ -11,7 +11,7 @@ def load_checkouts(idx = 24, window = 1, seq_len = 4096, dtype = torch.float16):
         out = state['out']
         N, H, T_DST, HID = q.shape
         N, H, T_SRC, HID = k.shape
-        q = q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
+        q = q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous() # CHECK - idx:idx+window
         k = k.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
         v = v.view(N*H, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
         out = out.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
