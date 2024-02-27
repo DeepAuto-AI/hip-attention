@@ -1,4 +1,5 @@
 import os
+import pathlib
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Union, Any
@@ -133,7 +134,7 @@ class LabDataModule:
         return DataLoader(self.test_data, num_workers=self.num_workers, batch_size=self.bsize)
 
 
-from peft import LoraConfig, TaskType
+from peft import LoraConfig, TaskType, PeftModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 
 
@@ -187,7 +188,7 @@ def load_model(
         config=config,
         device_map="auto",
         # device_map={"" : device} if device != 'cpu' else 'cpu',
-        load_in_4bit=quant_config is not None,
+        load_in_4bit=None if quant_config is not None else True,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
@@ -230,19 +231,38 @@ def load_model(
         )
 
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
 
         if train_config.init_from_checkpoint is not None:
-            print('loading from', train_config.init_from_checkpoint)
-            state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')['state_dict']
-            keys = list(state_dict.keys())
-            for key in keys:
-                x = state_dict[key]
-                state_dict[key.strip('model.')] = x
-                del state_dict[key]
-            model.load_state_dict(state_dict)
-            print('lora checkpoint loaded from', train_config.init_from_checkpoint)
+
+            print(f"Loading peft model from {train_config.init_from_checkpoint}")
+
+            if pathlib.Path(train_config.init_from_checkpoint).is_dir():
+                model = PeftModel.from_pretrained(model, train_config.init_from_checkpoint)
+                model.print_trainable_parameters()
+
+            else:
+                model = get_peft_model(model, peft_config)
+                model.print_trainable_parameters()
+
+                print('loading from', train_config.init_from_checkpoint)
+                state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')
+                if 'state_dict' in state_dict:
+                    state_dict = state_dict['state_dict']
+                keys = list(state_dict.keys())
+                for key in keys:
+                    x = state_dict[key]
+                    state_dict[key.strip('model.')] = x
+                    del state_dict[key]
+                try:
+                    result = model.load_state_dict(state_dict, strict=False)
+                    print('load result', result)
+                except RuntimeError as e:
+                    pass
+                print('lora checkpoint loaded from', train_config.init_from_checkpoint)
+
+        else:
+            model = get_peft_model(model, peft_config)
+            model.print_trainable_parameters()
 
     return model
 
@@ -284,6 +304,7 @@ class Trainer(Seq2SeqTrainer):
         self.validation_targets = []
 
         self.config = config
+        self.pad_token_id = tokenizer.pad_token_id
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
         result = super().training_step(model, inputs)
@@ -292,7 +313,6 @@ class Trainer(Seq2SeqTrainer):
             torch.cuda.max_memory_allocated(device)
             for device in range(torch.cuda.device_count())
         )
-        print(f"total max mem: {total_max_mem}")
 
         return result
 
@@ -311,7 +331,7 @@ class Trainer(Seq2SeqTrainer):
         # with torch.autocast('cuda', torch.bfloat16):
         output = self.model(
             inputs,
-            attention_mask=(inputs != self.model.config.pad_token_id).to(inputs.dtype),
+            attention_mask=(inputs.ne(self.pad_token_id)).to(inputs.dtype),
             labels=target,
             output_hidden_states=not self.config.disable_kd
         )
@@ -364,7 +384,7 @@ class Trainer(Seq2SeqTrainer):
             # print('asdfasdf', inputs.shape, target.shape, flush=True)
             output = self.model(
                 inputs,
-                attention_mask=(inputs != self.model.config.pad_token_id).to(inputs.dtype),
+                attention_mask=(inputs != self.pad_token_id).to(inputs.dtype),
                 labels=target,
             ).logits
             loss = torch.nn.functional.cross_entropy(
@@ -511,6 +531,8 @@ def run():
         train_config.save_steps = args.save_steps
     if args.dense_queries is not None:
         train_config.dense_queries = args.dense_queries
+    if args.init_checkpoint is not None:
+        train_config.init_from_checkpoint = args.init_checkpoint
 
     main(train_config)
 

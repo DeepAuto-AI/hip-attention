@@ -809,7 +809,8 @@ class LlamaCustomAttention(LlamaAttention):
                     q = q.reshape(N*H, TDST, HID) #.contiguous()
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
-                    attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
+                    if attention_mask is not None:
+                        attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
                     
                 TARGET_DENSE_QUERIES = self.tree_dense_queries
                 current_query_index = TSRC - TDST
@@ -829,8 +830,6 @@ class LlamaCustomAttention(LlamaAttention):
                 #     print("converted to TIMBER")
                 
                 if DENSE_QUERIES > 0:
-                    if self.training:
-                        warnings.warn("DENSE_QUERIES > 0 is not supported in training mode")
                     with timer("layer.flash"):
                         if min(DENSE_QUERIES, TDST) != min(TSRC, DENSE_QUERIES):
                             flash_attention_mask = torch.ones((N*H, min(DENSE_QUERIES, TDST), min(TSRC, DENSE_QUERIES)), device=q.device, dtype=q.dtype)

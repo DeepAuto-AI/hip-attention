@@ -21,6 +21,7 @@ from timber.main.jobs.ppl import job_ppl
 from timber.main.jobs.stream import job_stream
 from timber.main.jobs.mmlu import job_mmlu
 from timber.main.jobs.booksum import job_booksum
+from timber.main.jobs.merge_lora import job_merge_lora
 from timber.main.eval_args import eval_args, ArgsType
 
 def load_vllm_model(args: ArgsType):
@@ -90,7 +91,7 @@ def load_model(args):
     model = ModelClass.from_pretrained(
         model_id,
         config=config, 
-        load_in_4bit=True,
+        #load_in_4bit=True,
         device_map="auto",
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
@@ -172,7 +173,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora']
     
     model, tokenizer, device = load_model(args)
 
@@ -186,6 +187,8 @@ def main():
         job_bench_single_layer(args, model, tokenizer, device)
     elif args.job == 'booksum':
         job_booksum(args, model, tokenizer, device)
+    elif args.job == 'merge_lora':
+        job_merge_lora(args, model, tokenizer, device)
     else:
         raise Exception()
 
