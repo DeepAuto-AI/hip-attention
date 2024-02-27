@@ -307,297 +307,204 @@ def _masking_iteration_compute(
                     )
                 )
             
+            assert REDUCE_METHOD == 'max'
             scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
+            scores += 32000.0
             
-            if REDUCE_METHOD == 'first':
-                assert KEY_CACHE_METHOD == 'cont'
+            idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q).to(tl.int64)
+            mask_tdst = (idx_tdst < T_DST) & mask_block_q
+            
+            if ATTEN_MASK is not None:
+                query_mask = tl.load(
+                    ATTEN_MASK +\
+                        idx_n * stride_atten_mask_n +\
+                        (idx_tdst + T_SRC - T_DST) * stride_atten_mask_tsrc,
+                    mask = mask_w & mask_tdst,
+                    other = False
+                ).to(tl.int1)
+            
+            num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
+            num_pixels_mask = num_pixels_range < num_pixels_scalar
+            idx_tsrc_block = tl.load(
+                TMASK +\
+                    idx_n * stride_tmask_n +\
+                    idx_bdst * stride_tmask_bdst +\
+                    num_pixels_range * stride_tmask_k,
+                mask = mask_w & num_pixels_mask,
+                other = 0,
+            )
+            # NOTE: random key selection with in the block
+            idx_tsrc_block = (idx_tsrc_block.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+            
+            for _idx_block_k in range(BLOCK_SIZE_K):
+                scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
                 
-                for _idx_hid in range(tl.cdiv(HID, BLOCK_HID)):
-                    idx_hid = tl.arange(0, BLOCK_HID) + _idx_hid * BLOCK_HID
+                # [BLOCK_TMASK_K, ]
+                idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
+                mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
+                
+                # if CONTEXT_LENGTH is not None:
+                #     mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
+                
+                # [BLOCK_TMASK_K, ]
+                if ATTEN_MASK is not None:
+                    key_mask = tl.load(
+                        ATTEN_MASK +\
+                            idx_n * stride_atten_mask_n +\
+                            idx_tsrc * stride_atten_mask_tsrc,
+                        mask = mask_w & mask_tsrc,
+                        other = False,
+                    ).to(tl.int1)
+                # mask_tsrc = mask_tsrc & key_mask
+                
+                mask_strided_block_q = (idx_block_q % REDUCE_STRDIE) == 0
+                hidden_size = SPARQ_HID if SPARQ else HID
+                for pid_hid in range(tl.cdiv(hidden_size, BLOCK_HID)):
+                    idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
+                    mask_hid = idx_hid < hidden_size
+                    
+                    if SPARQ:
+                        idx_hid = tl.load(
+                            SPARQ_INDICES +\
+                                idx_n * stride_sparq_indices_n +\
+                                idx_bdst * stride_sparq_indices_bdst +\
+                                idx_hid * stride_sparq_indices_hid,
+                            mask = mask_w & mask_hid,
+                            other = HID,
+                        )
                     mask_hid = idx_hid < HID
+                    
+                    # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
+                    mask_vec_q = (
+                        mask_hid[None, :] &
+                        mask_tdst[:, None] &
+                        mask_block_q[:, None] &
+                        mask_strided_block_q[:, None] &
+                        True
+                    )
+                    if ATTEN_MASK is not None:
+                        mask_vec_q = mask_vec_q & query_mask[:, None]
                     vec_q = tl.load(
                         QUERIES +\
                             idx_n * stride_queries_n +\
-                            (idx_bdst * BLOCK_SIZE_Q).to(tl.int64) * stride_queries_tdst +\
-                            (idx_hid[None, :] + tl.arange(0, 16)[:, None]).to(tl.int64) * stride_queries_hid,
-                        mask = mask_w & (mask_hid[None, :] & (tl.arange(0, 16)[:, None] < 1)),
+                            idx_tdst[:, None] * stride_queries_tdst +\
+                            idx_hid[None, :] * stride_queries_hid,
+                        mask = mask_w & mask_vec_q,
                         other = 0,
                     )
-                    # tl.debug_barrier()
                     
-                    num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
-                    num_pixels_mask = num_pixels_range < num_pixels_scalar
-                    idx_tsrc = tl.load(
-                        TMASK +\
-                            idx_n * stride_tmask_n +\
-                            idx_bdst * stride_tmask_bdst +\
-                            num_pixels_range * stride_tmask_k,
-                        mask = mask_w & num_pixels_mask,
-                        other = 0,
+                    # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                    vec_k_mask = (
+                        num_pixels_mask[None, :] &
+                        mask_hid[:, None] &
+                        mask_tsrc[None, :] &
+                        # key_mask[None, :] &
+                        True
                     )
-                    # tl.debug_barrier()
-                    # NOTE: random key selection with in the block
-                    # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                    idx_tsrc = (idx_tsrc.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                    mask_tsrc = num_pixels_mask
                     if CONTEXT_LENGTH is not None:
-                        mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
-                    vec_k_mask = mask_tsrc[None, :] & mask_hid[:, None]
-                    
-                    if ATTEN_MASK is not None:
-                        key_mask = tl.load(
-                            ATTEN_MASK +\
-                                idx_n * stride_atten_mask_n +\
-                                idx_tsrc * stride_atten_mask_tsrc,
-                            mask = mask_w & num_pixels_mask,
-                            other = False,
-                        ).to(tl.int1)
-                        vec_k_mask = vec_k_mask & key_mask[None, :]
-                    
-                    vec_k = tl.load(
-                        KEYS +\
-                            (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
-                            idx_tsrc[None, :] * stride_keys_tsrc + \
-                            idx_hid[:, None] * stride_keys_hid,
-                        mask = mask_w & vec_k_mask,
-                        other = 0,
-                    )
-                    # tl.debug_barrier()
-                    
-                    # TODO: support tensorCore
-                    # scores = -tl.dot(vec_q, vec_k) # NOTE: negative scores
-                    # 1x128 @ 128x512 512x128 @ 128x1
-                    # scores = -tl.sum(
-                    #     vec_q * vec_k, 
-                    #     axis=0,
-                    # )
-                    if vec_k.dtype == tl.uint8:
-                        vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
-                    scores_partial = -tl.dot(vec_q, vec_k).to(scores.dtype)
-                    scores_partial = tl.sum(scores_partial, axis=0)
-                    scores_partial = scores_partial + (~num_pixels_mask) * 10000.0
-                    scores_partial = scores_partial +\
-                        ((idx_bdst * BLOCK_SIZE_Q + T_SRC - T_DST) < idx_tsrc) * 10000.0
-                    
-                    scores += scores_partial
-            elif REDUCE_METHOD == 'max' or REDUCE_METHOD == 'sum':
-                # NOTE: init scores
-                if REDUCE_METHOD == 'max':
-                    scores += 32000.0
-                elif REDUCE_METHOD == 'sum':
-                    scores *= 0.0
-                
-                idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q).to(tl.int64)
-                mask_tdst = (idx_tdst < T_DST) & mask_block_q
-                
-                if ATTEN_MASK is not None:
-                    query_mask = tl.load(
-                        ATTEN_MASK +\
-                            idx_n * stride_atten_mask_n +\
-                            (idx_tdst + T_SRC - T_DST) * stride_atten_mask_tsrc,
-                        mask = mask_w & mask_tdst,
-                        other = False
-                    ).to(tl.int1)
-                # mask_tdst = mask_tdst & query_mask
-                
-                num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
-                num_pixels_mask = num_pixels_range < num_pixels_scalar
-                idx_tsrc_block = tl.load(
-                    TMASK +\
-                        idx_n * stride_tmask_n +\
-                        idx_bdst * stride_tmask_bdst +\
-                        num_pixels_range * stride_tmask_k,
-                    mask = mask_w & num_pixels_mask,
-                    other = 0,
-                )
-                # tl.debug_barrier()
-                # NOTE: random key selection with in the block
-                # loc_k_vec = loc_k_vec.to(tl.float32) + tl.rand(idx_n * idx_tdst, w_old, 10) * (1.0 / w_old)
-                idx_tsrc_block = (idx_tsrc_block.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
-                
-                for _idx_block_k in range(BLOCK_SIZE_K):
-                    scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
-                    
-                    # [BLOCK_TMASK_K, ]
-                    idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
-                    # idx_tsrc = tl.minimum(idx_tsrc + (tl.maximum(0, tl.cdiv(t_src, (k_new * BLOCK_SIZE_K)) - BLOCK_SIZE_K)).to(tl.int64), T_SRC - 1)
-                    mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0)
-                    
-                    # tl.device_print('a', context_length)
-                    # if CONTEXT_LENGTH is not None:
-                    #     mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
-                    
-                    # [BLOCK_TMASK_K, ]
-                    if ATTEN_MASK is not None:
-                        key_mask = tl.load(
-                            ATTEN_MASK +\
-                                idx_n * stride_atten_mask_n +\
-                                idx_tsrc * stride_atten_mask_tsrc,
-                            mask = mask_w & mask_tsrc,
-                            other = False,
-                        ).to(tl.int1)
-                    # mask_tsrc = mask_tsrc & key_mask
-                    
-                    mask_strided_block_q = (idx_block_q % REDUCE_STRDIE) == 0
-                    hidden_size = SPARQ_HID if SPARQ else HID
-                    for pid_hid in range(tl.cdiv(hidden_size, BLOCK_HID)):
-                        idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
-                        mask_hid = idx_hid < hidden_size
-                        
-                        if SPARQ:
-                            idx_hid = tl.load(
-                                SPARQ_INDICES +\
-                                    idx_n * stride_sparq_indices_n +\
-                                    idx_bdst * stride_sparq_indices_bdst +\
-                                    idx_hid * stride_sparq_indices_hid,
-                                mask = mask_w & mask_hid,
-                                other = HID,
-                            )
-                        mask_hid = idx_hid < HID
-                        
-                        # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
-                        mask_vec_q = (
-                            mask_hid[None, :] &
-                            mask_tdst[:, None] &
-                            mask_block_q[:, None] &
-                            mask_strided_block_q[:, None] &
-                            True
+                        vec_k_mask &= (
+                            (idx_tsrc < context_length)[None, :]
                         )
-                        if ATTEN_MASK is not None:
-                            mask_vec_q = mask_vec_q & query_mask[:, None]
-                        vec_q = tl.load(
-                            QUERIES +\
-                                idx_n * stride_queries_n +\
-                                idx_tdst[:, None] * stride_queries_tdst +\
-                                idx_hid[None, :] * stride_queries_hid,
-                            mask = mask_w & mask_vec_q,
+                    if KEY_CACHE_METHOD == 'cont':
+                        # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                        vec_k = tl.load(
+                            KEYS +\
+                                (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
+                                idx_tsrc[None, :] * stride_keys_tsrc + \
+                                idx_hid[:, None] * stride_keys_hid,
+                            mask = mask_w & vec_k_mask,
                             other = 0,
                         )
-                        # tl.debug_barrier()
+                    elif KEY_CACHE_METHOD == 'vllm':
+                        """
+                        idx_block = block_tables[idx_batch, idx_tsrc // block_size]
+                        offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
+                        key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
+                        """
+                        idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
+                        idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
+                        idx_block = tl.load(
+                            BLOCK_TABLES +\
+                                idx_batch * stride_block_tables_num_seqs +\
+                                (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
+                            mask = mask_w & mask_tsrc,
+                        ).to(tl.int64)
+                        offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
                         
                         # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
-                        vec_k_mask = (
-                            num_pixels_mask[None, :] &
-                            mask_hid[:, None] &
-                            mask_tsrc[None, :] &
-                            # key_mask[None, :] &
-                            True
+                        vec_k = tl.load(
+                            KEYS +\
+                                idx_block[None, :] * stride_keys_vllm_num_blcoks +\
+                                idx_head * stride_keys_vllm_num_kv_heads +\
+                                (idx_hid[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
+                                offset_block[None, :] * stride_keys_vllm_block_size +\
+                                (idx_hid[:, None] % VLLM_X) * stride_keys_vllm_x,
+                            mask = mask_w & vec_k_mask,
+                            other = 0,
                         )
-                        if CONTEXT_LENGTH is not None:
-                            vec_k_mask &= (
-                                (idx_tsrc < context_length)[None, :]
-                            )
-                        if KEY_CACHE_METHOD == 'cont':
-                            # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
-                            vec_k = tl.load(
-                                KEYS +\
-                                    (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
-                                    idx_tsrc[None, :] * stride_keys_tsrc + \
-                                    idx_hid[:, None] * stride_keys_hid,
-                                mask = mask_w & vec_k_mask,
-                                other = 0,
-                            )
-                        elif KEY_CACHE_METHOD == 'vllm':
-                            """
-                            idx_block = block_tables[idx_batch, idx_tsrc // block_size]
-                            offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
-                            key = key_cache[idx_block, idx_head, :, offset_block, :].reshape(-1)
-                            """
-                            idx_batch = ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS).to(tl.int64)
-                            idx_head = ((idx_n // KV_REPEAT_INTERLEAVE) % VLLM_NUM_KV_HEADS).to(tl.int64)
-                            idx_block = tl.load(
-                                BLOCK_TABLES +\
-                                    idx_batch * stride_block_tables_num_seqs +\
-                                    (idx_tsrc // VLLM_BLOCK_SIZE) * stride_block_tables_max_num_blocks_per_seq,
-                                mask = mask_w & mask_tsrc,
-                            ).to(tl.int64)
-                            offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
-                            
-                            # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
-                            vec_k = tl.load(
-                                KEYS +\
-                                    idx_block[None, :] * stride_keys_vllm_num_blcoks +\
-                                    idx_head * stride_keys_vllm_num_kv_heads +\
-                                    (idx_hid[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
-                                    offset_block[None, :] * stride_keys_vllm_block_size +\
-                                    (idx_hid[:, None] % VLLM_X) * stride_keys_vllm_x,
-                                mask = mask_w & vec_k_mask,
-                                other = 0,
-                            )
-                        else:
-                            raise Exception()
-                        
-                        # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-                        if vec_k.dtype == tl.uint8:
-                            vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
-                        scores_micro = -tl.dot(vec_q, vec_k)
-                        scores_partial += scores_micro.to(scores_partial.dtype)
+                    else:
+                        raise Exception()
                     
                     # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-                    scores_partial_ignore_mask = (
-                        (~num_pixels_mask[None, :]) |
-                        (~mask_tdst[:, None]) |
-                        (~mask_tsrc[None, :]) |
-                        (~mask_block_q[:, None]) |
-                        (~mask_strided_block_q[:, None]) |
-                        (scores_partial == 0) |
+                    if vec_k.dtype == tl.uint8:
+                        vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
+                    scores_micro = -tl.dot(vec_q, vec_k)
+                    scores_partial += scores_micro.to(scores_partial.dtype)
+                
+                # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+                scores_partial_ignore_mask = (
+                    (~num_pixels_mask[None, :]) |
+                    (~mask_tdst[:, None]) |
+                    (~mask_tsrc[None, :]) |
+                    (~mask_block_q[:, None]) |
+                    (~mask_strided_block_q[:, None]) |
+                    (scores_partial == 0) |
+                    False
+                )
+                
+                if IS_CAUSAL:
+                    scores_partial_ignore_mask |= (
+                        ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
                         False
                     )
-                    
-                    if IS_CAUSAL:
-                        scores_partial_ignore_mask |= (
-                            ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
-                            False
-                        )
-                    
-                    if ATTEN_MASK is not None:
-                        scores_partial_ignore_mask |= (
-                            (~key_mask[None, :]) |
-                            (~query_mask[:, None]) |
-                            False
-                        )
-                    
-                    if CONTEXT_LENGTH is not None:
-                        scores_partial_ignore_mask |= (
-                            (idx_tsrc[None, :] >= context_length)
-                        )
-                    
-                    # NOTE: owo powerful dark magic. select first / last block always. testing sink attention.
-                    # scores_partial_force_mask = (
-                    #     (
-                    #         (idx_tsrc[None, :] == 0) | 
-                    #         (num_pixels_range[None, :] >= (num_pixels_scalar - 1)) |
-                    #         # ((idx_tdst[:, None]) <= idx_tsrc[None, :]) |
-                    #         False
-                    #     ) &
-                    #     ((idx_tdst[:, None] + T_SRC - T_DST) >= idx_tsrc[None, :]) &
-                    #     (mask_tsrc[None, :] & mask_tdst[:, None]) &
-                    #     (scores_partial != 0) &
-                    #     True
-                    # )
-                    scores_partial_force_mask = False
-                    
-                    # tl.device_print("", idx_tdst)
-                    # tl.device_print("", idx_tsrc)
-                    
-                    scores_partial_ignore_mask = scores_partial_ignore_mask & (~scores_partial_force_mask)
-                    
-                    # NOTE: reduce
-                    if REDUCE_METHOD == 'max':
-                        scores_partial = scores_partial + scores_partial_ignore_mask * 32000.0
-                        scores_partial = scores_partial + scores_partial_force_mask * (-32000.0)
-                        # scores_partial = scores_partial * (~scores_partial_force_mask)
-                        scores_partial = tl.min(scores_partial, axis=0)
-                        scores = tl.minimum(scores, scores_partial)
-                    elif REDUCE_METHOD == 'sum':
-                        scores_partial = scores_partial + scores_partial_ignore_mask * 10000.0
-                        scores_partial = scores_partial + scores_partial_force_mask * (-10000.0)
-                        scores_partial = tl.sum(scores_partial, axis=0)
-                        scores = scores + scores_partial
-            else:
-                raise Exception()
-            # tl.debug_barrier()
-            # scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
+                
+                if ATTEN_MASK is not None:
+                    scores_partial_ignore_mask |= (
+                        (~key_mask[None, :]) |
+                        (~query_mask[:, None]) |
+                        False
+                    )
+                
+                if CONTEXT_LENGTH is not None:
+                    scores_partial_ignore_mask |= (
+                        (idx_tsrc[None, :] >= context_length)
+                    )
+                
+                # NOTE: owo powerful dark magic. select first / last block always. testing sink attention.
+                # scores_partial_force_mask = (
+                #     (
+                #         (idx_tsrc[None, :] == 0) | 
+                #         (num_pixels_range[None, :] >= (num_pixels_scalar - 1)) |
+                #         # ((idx_tdst[:, None]) <= idx_tsrc[None, :]) |
+                #         False
+                #     ) &
+                #     ((idx_tdst[:, None] + T_SRC - T_DST) >= idx_tsrc[None, :]) &
+                #     (mask_tsrc[None, :] & mask_tdst[:, None]) &
+                #     (scores_partial != 0) &
+                #     True
+                # )
+                scores_partial_force_mask = False
+                
+                scores_partial_ignore_mask = scores_partial_ignore_mask & (~scores_partial_force_mask)
+                
+                # NOTE: reduce
+                scores_partial = scores_partial + scores_partial_ignore_mask * 32000.0
+                scores_partial = scores_partial + scores_partial_force_mask * (-32000.0)
+                # scores_partial = scores_partial * (~scores_partial_force_mask)
+                scores_partial = tl.min(scores_partial, axis=0)
+                scores = tl.minimum(scores, scores_partial)
+            
+            # done compute reduced scores
             
             """
             _, topk_indices = torch.topk(scores[i, j, :num_pixels], k=k_new, largest=False)
@@ -608,17 +515,13 @@ def _masking_iteration_compute(
             # tl.device_print("", scores)
             
             # select min-k from negative scores -> select top-k
-            # masked_scores = scores + (~num_pixels_mask) * 32000.0
             masked_scores = scores
             
             scores_kth_large = _triton_kth_large(masked_scores, k_new, BLOCK_TMASK_K)
             topk_mask = masked_scores <= scores_kth_large
-            # topk_mask = tl.arange(0, BLOCK_TMASK_K) <= k_new
             
             topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
-            # tl.debug_barrier()
             topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, k_new - 1).to(tl.int64)
-            # tl.debug_barrier()
             
             temp_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
             temp_mask = temp_range < num_pixels_scalar
@@ -630,7 +533,6 @@ def _masking_iteration_compute(
                 mask=mask_w & temp_mask,
                 other=0
             )
-            # tl.debug_barrier()
             tl.store(
                 MASK +\
                     idx_n * stride_mask_n +\
@@ -647,36 +549,12 @@ def _masking_iteration_compute(
             else:
                 mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
             """
-            # temp1_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
-            # temp1_mask = temp1_range < num_pixels_scalar
-            # # tl.debug_barrier()
-            # temp1 = tl.load(
-            #     TMASK +\
-            #         idx_n * stride_tmask_n +\
-            #         idx_bdst * stride_tmask_bdst +\
-            #         temp1_range * stride_tmask_k,
-            #     mask=mask_w & temp1_mask,
-            #     other=0,
-            # )
-            
-            # tl.store(
-            #     MASK +\
-            #         idx_n * stride_mask_n +\
-            #         idx_bdst * stride_mask_bdst +\
-            #         temp1_range * stride_mask_k,
-            #     mask=mask_w & temp1_mask,
-            #     value=temp1,
-            # )
-            
-            # tl.device_print('a', num_pixels_scalar)
-            
             for _idx in range(BLOCK_MAX_DUP):
                 idx_mask_out = ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64)
                 mask_mask_out = (idx_mask_out < BLOCK_MASK_K) & (idx_mask_out < num_pixels_scalar) & (_idx <= dup_pixels_vec) & k_old_mask
                 value_mask_out = (loc_idx_start_vec + _idx).to(tl.float64)
                 value_mask_out = value_mask_out / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
                 
-                # tl.debug_barrier()
                 tl.store(
                     MASK +\
                         idx_n * stride_mask_n +\
@@ -685,14 +563,11 @@ def _masking_iteration_compute(
                     mask=mask_w & mask_mask_out,
                     value=value_mask_out,
                 )
-                # tl.debug_barrier()
-                # del temp1, temp1_range, temp1_mask
         
         """
         ws[i, j, 0] = w_new
         ks[i, j, 0] = min(k_new, num_pixels)
         """
-        # tl.debug_barrier()
         tl.store(
             WS +\
                 idx_n * stride_ws_n +\
@@ -700,15 +575,12 @@ def _masking_iteration_compute(
             mask = mask_w,
             value = w_new
         )
-        # tl.debug_barrier()
         tl.store(
             KS +\
                 idx_n * stride_ks_n +\
                 idx_bdst * stride_ks_bdst,
             mask = mask_w,
             value = tl.minimum(k_new, num_pixels_scalar)
-            # value = k_new,
-            # value = num_pixels_scalar,
         )
         tl.debug_barrier()
     tl.debug_barrier()
@@ -903,11 +775,11 @@ def masking_iteration(
         # vLLM compat inputs
         *stride_keys_vllm,
         
-        VLLM_NUM_BLOCKS, 
+        VLLM_NUM_BLOCKS,
         VLLM_NUM_KV_HEADS,
         VLLM_HEAD_SIZE_X,
         VLLM_BLOCK_SIZE,
-        VLLM_X, 
+        VLLM_X,
         VLLM_HEAD_SIZE,
         
         block_tables, *block_tables_stride,
