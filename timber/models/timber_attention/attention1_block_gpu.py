@@ -32,7 +32,7 @@ import os
 import math
 from torch.autograd import Function
 
-assert triton.__version__ in ['2.2.0']
+assert (triton.__version__ in ['2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 
 from timber.utils import get_bench, seed
 from timber.models.timber_attention.common import load_checkouts
@@ -272,19 +272,6 @@ def _masking_iteration_compute(
         # interp_loc_vec_padded = tl.reshape(interp_loc_vec_padded, BLOCK_MASK_K * BLOCK_MAX_DUP)
         
         
-        for _idx in range(BLOCK_MAX_DUP):
-            # _idx = BLOCK_MAX_DUP - _idx - 1
-            tl.store(
-                TMASK + \
-                    idx_n * stride_tmask_n +\
-                    idx_bdst * stride_tmask_bdst +\
-                    ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) * stride_tmask_k,
-                mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
-                value=(
-                    (loc_idx_start_vec + _idx).to(tl.float32) / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float32)
-                )
-            )
-        
         # idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
         # mask_block_k = idx_block_k < BLOCK_SIZE_K
         idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64)
@@ -306,6 +293,20 @@ def _masking_iteration_compute(
                 score = torch.dot(vec_q, vec_k)
                 scores[i, j, k] = -score # NOTE: store negative store
             """
+            
+            for _idx in range(BLOCK_MAX_DUP):
+                # _idx = BLOCK_MAX_DUP - _idx - 1
+                tl.store(
+                    TMASK + \
+                        idx_n * stride_tmask_n +\
+                        idx_bdst * stride_tmask_bdst +\
+                        ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) * stride_tmask_k,
+                    mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
+                    value=(
+                        (loc_idx_start_vec + _idx).to(tl.float32) / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float32)
+                    )
+                )
+            
             scores = tl.zeros((BLOCK_TMASK_K,), dtype=tl.float32)
             
             if REDUCE_METHOD == 'first':
@@ -646,29 +647,46 @@ def _masking_iteration_compute(
             else:
                 mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
             """
-            temp1_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
-            temp1_mask = temp1_range < num_pixels_scalar
-            # tl.debug_barrier()
-            temp1 = tl.load(
-                TMASK +\
-                    idx_n * stride_tmask_n +\
-                    idx_bdst * stride_tmask_bdst +\
-                    temp1_range * stride_tmask_k,
-                mask=mask_w & temp1_mask,
-                other=0,
-            )
+            # temp1_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
+            # temp1_mask = temp1_range < num_pixels_scalar
+            # # tl.debug_barrier()
+            # temp1 = tl.load(
+            #     TMASK +\
+            #         idx_n * stride_tmask_n +\
+            #         idx_bdst * stride_tmask_bdst +\
+            #         temp1_range * stride_tmask_k,
+            #     mask=mask_w & temp1_mask,
+            #     other=0,
+            # )
             
-            # tl.debug_barrier()
-            tl.store(
-                MASK +\
-                    idx_n * stride_mask_n +\
-                    idx_bdst * stride_mask_bdst +\
-                    temp1_range * stride_mask_k,
-                mask=mask_w & temp1_mask,
-                value=temp1,
-            )
-            # tl.debug_barrier()
-            # del temp1, temp1_range, temp1_mask
+            # tl.store(
+            #     MASK +\
+            #         idx_n * stride_mask_n +\
+            #         idx_bdst * stride_mask_bdst +\
+            #         temp1_range * stride_mask_k,
+            #     mask=mask_w & temp1_mask,
+            #     value=temp1,
+            # )
+            
+            # tl.device_print('a', num_pixels_scalar)
+            
+            for _idx in range(BLOCK_MAX_DUP):
+                idx_mask_out = ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64)
+                mask_mask_out = (idx_mask_out < BLOCK_MASK_K) & (idx_mask_out < num_pixels_scalar) & (_idx <= dup_pixels_vec) & k_old_mask
+                value_mask_out = (loc_idx_start_vec + _idx).to(tl.float64)
+                value_mask_out = value_mask_out / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
+                
+                # tl.debug_barrier()
+                tl.store(
+                    MASK +\
+                        idx_n * stride_mask_n +\
+                        idx_bdst * stride_mask_bdst +\
+                        idx_mask_out * stride_mask_k,
+                    mask=mask_w & mask_mask_out,
+                    value=value_mask_out,
+                )
+                # tl.debug_barrier()
+                # del temp1, temp1_range, temp1_mask
         
         """
         ws[i, j, 0] = w_new
@@ -911,7 +929,7 @@ def masking_iteration(
         REDUCE_STRIDE,
         
         num_warps=min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4,
-        # num_warps=16,
+        # num_warps=8,
         num_stages=2,
         enable_warp_specialization=False,
     )
@@ -1953,7 +1971,7 @@ class CalcScoreAutoGradFn(Function):
         # BLOCK_BK = 1
         BLOCK_HID = triton.next_power_of_2(HID)
         # BLOCK_HID = max(BLOCK_SIZE_Q_PADDED, BLOCK_SIZE_K_PADDED)
-        # BLOCK_HID = 32
+        BLOCK_HID = 32
         
         if isinstance(keys, Tensor):
             KEY_CACHE_METHOD = 'cont'
@@ -2185,58 +2203,6 @@ def calc_score_return_prob(
     
     return scores, probs
 
-def to_dense_blocked(
-    indices: np.ndarray, 
-    ks: np.ndarray, 
-    value,
-    mask, 
-    N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
-):
-    out = np.zeros((N, triton.cdiv(T_DST, BLOCK_SIZE_Q), triton.cdiv(T_SRC, BLOCK_SIZE_K)))
-    for idx_n in range(1):
-        for idx_bdst in range(out.shape[1]):
-            for k in range(indices.shape[2]):
-                if k < ks[idx_n, idx_bdst]:
-                    idx_bsrc = indices[idx_n, idx_bdst, k]
-                    if idx_bsrc < out.shape[2]:
-                        # assert out[idx_n, idx_bdst, idx_bsrc] == 0, f"{out[idx_n, idx_bdst, idx_bsrc]}, {ks[idx_n, idx_bdst]}, {idx_bsrc}, {mask[idx_n, idx_bdst, :]}"
-                        out[idx_n, idx_bdst, idx_bsrc] = 1
-    return out
-
-def to_dense(
-    indices: np.ndarray, 
-    ks: np.ndarray, 
-    value: np.ndarray,
-    N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K,
-):
-    # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
-    out = np.zeros((N, T_DST, T_SRC))
-    for idx_n in range(1):
-        for idx_bdst in range(indices.shape[1]):
-            for idx_k in range(indices.shape[2]):
-                if idx_k < ks[idx_n, idx_bdst]:
-                    # print(idx_n, idx_bdst, idx_k)
-                    idx_tsrc = indices[idx_n, idx_bdst, idx_k]
-                    if idx_tsrc < T_SRC:
-                        # print(
-                        #     idx_n, 
-                        #     idx_bdst * BLOCK_SIZE_Q, (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                        #     idx_tsrc, idx_tsrc + BLOCK_SIZE_K,
-                        #     idx_n,
-                        #     idx_bdst * BLOCK_SIZE_Q, (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                        #     idx_k * BLOCK_SIZE_K, idx_k * BLOCK_SIZE_K + min(BLOCK_SIZE_K, out.shape[-1] - idx_tsrc)
-                        # )
-                        out[
-                            idx_n, 
-                            idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                            idx_tsrc: idx_tsrc + BLOCK_SIZE_K
-                        ] = value[
-                            idx_n,
-                            idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                            idx_k * BLOCK_SIZE_K: idx_k * BLOCK_SIZE_K + min(BLOCK_SIZE_K, out.shape[-1] - idx_tsrc)
-                        ]
-    return out
-
 def debug_print(
     w_curr,
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
@@ -2244,19 +2210,19 @@ def debug_print(
     plt.clf()
     indices = safe_indices(mask, ws, BLOCK_SIZE_K)
     # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
-    x = to_dense_blocked(
+    x = to_dense(
         indices.cpu().numpy(),
         ks.cpu().unsqueeze(-1).numpy(), 
         None,
-        mask,
         N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K,
     )[0]
     x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-    x = np.repeat(x, BLOCK_SIZE_Q, 0)
-    x = np.repeat(x, BLOCK_SIZE_K, 1)
+    # x = np.repeat(x, BLOCK_SIZE_Q, 0)
+    # x = np.repeat(x, 1, 1)
     if x.shape[0] == 1:
         x = x.repeat(32, 0)
     plt.imshow(x)
+    plt.colorbar()
     path = f'saves/models/timber_attention/block_{w_curr}.png'
     # path = f'saves/models/timber_attention/block.png'
     print('saved', path, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K, x.shape)
@@ -2337,7 +2303,7 @@ def attention_matrix(
             .view(1, -1)\
             .expand(N, -1)\
             .contiguous()
-        # tsrcs.clamp_max_(T_SRC)
+        tsrcs.clamp_max_(T_SRC)
         if not is_causal:
             tsrcs.fill_(T_SRC)
         # NOTE: store non blocked width
@@ -2351,7 +2317,7 @@ def attention_matrix(
         # matrices
         # NOTE: float16 -> int64 seems not possible
         mask = torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
-        tmask = torch.empty(
+        tmask = torch.zeros(
             (mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), 
             dtype=torch.float32, 
             device=device
@@ -3093,21 +3059,28 @@ def to_dense(
     N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
-    out = np.zeros((N, T_DST, T_SRC), dtype=value.dtype)
+    out = np.zeros((N, T_DST, T_SRC), dtype=np.float32)
     for idx_n in numba.prange(N):
         for idx_bdst in range(indices.shape[1]):
             for idx_k in range(indices.shape[2]):
                 if idx_k < ks[idx_n, idx_bdst]:
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
-                    out[
-                        idx_n, 
-                        idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                        idx_tsrc: idx_tsrc + BLOCK_SIZE_K
-                    ] = value[
-                        idx_n,
-                        idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
-                        idx_k * BLOCK_SIZE_K: (idx_k + 1) * BLOCK_SIZE_K
-                    ]
+                    if value is not None:
+                        out[
+                            idx_n, 
+                            idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
+                            idx_tsrc: idx_tsrc + BLOCK_SIZE_K
+                        ] = value[
+                            idx_n,
+                            idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
+                            idx_k * BLOCK_SIZE_K: (idx_k + 1) * BLOCK_SIZE_K
+                        ]
+                    else:
+                        out[
+                            idx_n, 
+                            idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
+                            idx_tsrc: idx_tsrc + BLOCK_SIZE_K
+                        ] = 1
     return out
 
 class VllmCompat:
@@ -3618,11 +3591,11 @@ def main_debug():
     DEBUG = True
     
     block = 1024
-    # block = 8
+    block = 128
     q, k, v, out = load_checkouts(
         dtype=torch.float32, 
         seq_len=block * 4, 
-        idx=26, 
+        idx=6, 
         window=1
     )
     
@@ -3642,9 +3615,10 @@ def main_debug():
         q,
         k,
         v,
-        mask_k=512,
-        block_size_q=16,
-        block_size_k=2,
+        mask_k=128,
+        block_size_q=4,
+        block_size_k=4,
+        is_flash=False,
     )
     
     stderr = (out - context).abs().mean().item()
