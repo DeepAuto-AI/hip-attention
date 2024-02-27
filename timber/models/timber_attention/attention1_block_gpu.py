@@ -63,7 +63,6 @@ def _safe_indices_compute(
     ALLOW_COLLISION: tl.constexpr,
     BLOCK_N_TDST: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    COLLISION_METHOD: tl.constexpr = 'unbiased'
 ):
     if not ALLOW_COLLISION:
         pids = tl.program_id(0) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
@@ -76,130 +75,41 @@ def _safe_indices_compute(
         
         mask = mask_n & mask_tdst
         
-        if COLLISION_METHOD == 'biased':
-            last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
-            for idx_k in range(K):
-                mask_vec = tl.load(
-                    MASK +\
-                        idx_n * stride_mask_n +\
-                        idx_tdst * stride_mask_tdst +\
-                        idx_k * stride_mask_k,
-                    mask = mask,
-                    other = 0
-                ).to(tl.float32)
-                ws_vec = tl.load(
-                    WS +\
-                        idx_n * stride_ws_n +\
-                        idx_tdst * stride_ws_tdst +\
-                        idx_k * stride_ws_k,
-                    mask = mask,
-                    other = 0
-                ).to(tl.float32)
-                indices_float = mask_vec * ws_vec
-                col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
+        last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
+        for idx_k in range(K):
+            mask_vec = tl.load(
+                MASK +\
+                    idx_n * stride_mask_n +\
+                    idx_tdst * stride_mask_tdst +\
+                    idx_k * stride_mask_k,
+                mask = mask,
+                other = 0
+            ).to(tl.float32)
+            ws_vec = tl.load(
+                WS +\
+                    idx_n * stride_ws_n +\
+                    idx_tdst * stride_ws_tdst +\
+                    idx_k * stride_ws_k,
+                mask = mask,
+                other = 0
+            ).to(tl.float32)
+            indices_float = mask_vec * ws_vec
+            col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
 
-                # avoid collision
-                col = tl.maximum(last_col + 1, col)
-                last_col = col
-                
-                col = col * BLOCK_SIZE_K
-                
-                tl.store(
-                    INDICES +\
-                        idx_n * stride_indices_n +\
-                        idx_tdst * stride_indices_tdst +\
-                        idx_k * stride_indices_k,
-                    value = col,
-                    mask = mask
-                )
-        elif COLLISION_METHOD == 'unbiased':
-            for _idx_k in range(K):
-                mask_vec = tl.load(
-                    MASK +\
-                        idx_n * stride_mask_n +\
-                        idx_tdst * stride_mask_tdst +\
-                        _idx_k * stride_mask_k,
-                    mask = mask,
-                    other = 0
-                ).to(tl.float32)
-                ws_vec = tl.load(
-                    WS +\
-                        idx_n * stride_ws_n +\
-                        idx_tdst * stride_ws_tdst +\
-                        _idx_k * stride_ws_k,
-                    mask = mask,
-                    other = 0
-                ).to(tl.float32)
-                indices_float = mask_vec * ws_vec
-                col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
-                
-                tl.store(
-                    INDICES +\
-                        idx_n * stride_indices_n +\
-                        idx_tdst * stride_indices_tdst +\
-                        _idx_k * stride_indices_k,
-                    value = col,
-                    mask = mask
-                )
+            # avoid collision
+            col = tl.maximum(last_col + 1, col)
+            last_col = col
             
-            for idx_iteration in range(16):
-                last_col = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int64) - 1
-                is_collided = tl.zeros((BLOCK_N_TDST, ), dtype=tl.int1)
-                direction = idx_iteration % 2
-                for _idx_k in range(K):
-                    if direction:
-                        idx_k = K - _idx_k - 1
-                    else:
-                        idx_k = _idx_k
-                    
-                    col = tl.load(
-                        INDICES +\
-                            idx_n * stride_indices_n +\
-                            idx_tdst * stride_indices_tdst +\
-                            idx_k * stride_indices_k,
-                        mask = mask
-                    )
-                    
-                    # avoid collision
-                    new_collided = last_col == col
-                    
-                    updated_last_col = tl.where(
-                        (~new_collided) & is_collided, 
-                        last_col + (direction * 2 - 1),
-                        last_col
-                    )
-                    
-                    is_collided = new_collided
-                    last_col = col.to(last_col.dtype)
-                    
-                    tl.store(
-                        INDICES +\
-                            idx_n * stride_indices_n +\
-                            idx_tdst * stride_indices_tdst +\
-                            (idx_k + (direction * 2 - 1)) * stride_indices_k,
-                        value = updated_last_col,
-                        mask = (_idx_k > 0) & mask
-                    )
+            col = col * BLOCK_SIZE_K
             
-            for _idx_k in range(K):
-                col = tl.load(
-                    INDICES +\
-                        idx_n * stride_indices_n +\
-                        idx_tdst * stride_indices_tdst +\
-                        _idx_k * stride_indices_k,
-                    mask = mask
-                )
-                col = col * BLOCK_SIZE_K
-                tl.store(
-                    INDICES +\
-                        idx_n * stride_indices_n +\
-                        idx_tdst * stride_indices_tdst +\
-                        _idx_k * stride_indices_k,
-                    value = col,
-                    mask = mask
-                )
-        else:
-            raise Exception()
+            tl.store(
+                INDICES +\
+                    idx_n * stride_indices_n +\
+                    idx_tdst * stride_indices_tdst +\
+                    idx_k * stride_indices_k,
+                value = col,
+                mask = mask
+            )
     else:
         pids_ntdst = tl.program_id(1) * BLOCK_N_TDST + tl.arange(0, BLOCK_N_TDST)
     
@@ -277,7 +187,7 @@ def safe_indices(mask, ws, block_size_k, allow_collision=False):
         BLOCK_N_TDST,
         BLOCK_K,
         
-        num_warps=4 if allow_collision else 4,
+        num_warps=4 if allow_collision else 1,
     )
     
     # indices = indices.reshape(N, TDST, K)
@@ -2683,7 +2593,7 @@ def main_debug():
     DEBUG = True
     
     block = 1024
-    block = 128
+    block = 256
     q, k, v, out = load_checkouts(
         dtype=torch.float32, 
         seq_len=block * 4, 
@@ -2708,10 +2618,9 @@ def main_debug():
         k,
         v,
         mask_k=256,
-        block_size_q=2,
-        block_size_k=2,
+        block_size_q=16,
+        block_size_k=4,
         is_flash=False,
-        reduce_method='max',
     )
     
     stderr = (out - context).abs().mean().item()
