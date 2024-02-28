@@ -254,14 +254,14 @@ def _masking_iteration_compute(
         
         # idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
         # mask_block_k = idx_block_k < BLOCK_SIZE_K
-        idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64)
+        idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64) * REDUCE_STRDIE
         mask_block_q = idx_block_q < BLOCK_SIZE_Q
         
         """
         # t_mask -> mask (using scores)
         if k_new < num_pixels:
         """
-        if (k_new < num_pixels_scalar) or (grid_kstride > 1):
+        if ((k_new < num_pixels_scalar) or (grid_kstride > 1)) or (REDUCE_STRDIE > 1):
         # if True:
             """
             # need top_k, so compute scores
@@ -327,12 +327,12 @@ def _masking_iteration_compute(
                 # tl.device_print('ff', tl.sum(mask_tsrc_block_reuse.to(tl.float32)) / BLOCK_TMASK_K)
                 idx_tsrc_block = tl.math.abs(idx_tsrc_block)
             
-            for _idx_block_k in range(BLOCK_SIZE_K):
+            for _idx_block_k in range(0, BLOCK_SIZE_K, REDUCE_STRDIE):
                 scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
                 
                 # [BLOCK_TMASK_K, ]
                 idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
-                mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & ((_idx_block_k % REDUCE_STRDIE) == 0) & mask_tsrc_block
+                mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & mask_tsrc_block
                 
                 # if CONTEXT_LENGTH is not None:
                 #     mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
@@ -348,7 +348,7 @@ def _masking_iteration_compute(
                     ).to(tl.int1)
                 # mask_tsrc = mask_tsrc & key_mask
                 
-                mask_strided_block_q = (idx_block_q % REDUCE_STRDIE) == 0
+                mask_strided_block_q = True #(idx_block_q % REDUCE_STRDIE) == 0
                 hidden_size = SPARQ_HID if SPARQ else HID
                 for pid_hid in range(tl.cdiv(hidden_size, BLOCK_HID)):
                     idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
@@ -818,7 +818,7 @@ def masking_iteration(
         triton.next_power_of_2(math.ceil(scale_up)),
         int(BLOCK_HID),
         int(BLOCK_SIZE_Q),
-        next_multiple_of(BLOCK_SIZE_Q, 16),
+        next_multiple_of(triton.cdiv(BLOCK_SIZE_Q, REDUCE_STRIDE), 16),
         int(BLOCK_SIZE_K),
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,

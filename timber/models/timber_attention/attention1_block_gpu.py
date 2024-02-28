@@ -2518,7 +2518,7 @@ def timber_attention(
     block_size_q: int = 8,
     block_size_k: int = 1,
     reduce_method: str = 'max',
-    reduce_stride: int = 1,
+    reduce_stride: int = 2,
     
     chunking: bool = False,
     chunk_size: int = 2048,
