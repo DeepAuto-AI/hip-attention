@@ -281,30 +281,14 @@ def _masking_iteration_compute(
                 if (_idx == 0) and (SCORES is not None):
                     _value *= -1.0
                 
-                # tl.atomic_and(
-                #     TMASK + \
-                #         idx_n * stride_tmask_n +\
-                #         idx_bdst * stride_tmask_bdst +\
-                #         (((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) + grid_kstride * idx_kstride) * stride_tmask_k,
-                #     mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
-                #     val=0
-                # )
-                tl.atomic_xchg(
+                tl.store(
                     TMASK + \
                         idx_n * stride_tmask_n +\
                         idx_bdst * stride_tmask_bdst +\
                         (((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) + grid_kstride * idx_kstride) * stride_tmask_k,
                     mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
-                    val=_value
+                    value=_value
                 )
-                # tl.store(
-                #     TMASK + \
-                #         idx_n * stride_tmask_n +\
-                #         idx_bdst * stride_tmask_bdst +\
-                #         (((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) + grid_kstride * idx_kstride) * stride_tmask_k,
-                #     mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
-                #     value=_value
-                # )
             tl.debug_barrier()
             
             assert REDUCE_METHOD == 'max'
@@ -559,47 +543,23 @@ def _masking_iteration_compute(
                 mask=mask_w & temp_mask,
                 other=0
             )
-            # tl.atomic_and(
-            #     MASK +\
-            #         idx_n * stride_mask_n +\
-            #         idx_bdst * stride_mask_bdst +\
-            #         (topk_range * grid_kstride + idx_kstride) * stride_mask_k,
-            #     mask=mask_w & topk_mask & temp_mask,
-            #     val=0,
-            # )
-            tl.atomic_xchg(
+            tl.store(
                 MASK +\
                     idx_n * stride_mask_n +\
                     idx_bdst * stride_mask_bdst +\
                     (topk_range * grid_kstride + idx_kstride) * stride_mask_k,
                 mask=mask_w & topk_mask & temp_mask,
-                val=temp,
+                value=temp,
+                # value=0.1,
             )
-            # tl.store(
-            #     MASK +\
-            #         idx_n * stride_mask_n +\
-            #         idx_bdst * stride_mask_bdst +\
-            #         (topk_range * grid_kstride + idx_kstride) * stride_mask_k,
-            #     mask=mask_w & topk_mask & temp_mask,
-            #     value=temp,
-            #     # value=0.1,
-            # )
             if SCORES is not None:
-                # tl.atomic_and(
-                #     SCORES +\
-                #         idx_n * stride_mask_n +\
-                #         idx_bdst * stride_mask_bdst +\
-                #         (topk_range * grid_kstride + idx_kstride) * stride_mask_k,
-                #     mask=mask_w & topk_mask & temp_mask,
-                #     val=0,
-                # )
-                tl.atomic_xchg(
+                tl.store(
                     SCORES +\
                         idx_n * stride_mask_n +\
                         idx_bdst * stride_mask_bdst +\
                         (topk_range * grid_kstride + idx_kstride) * stride_mask_k,
                     mask=mask_w & topk_mask & temp_mask,
-                    val=scores,
+                    value=scores,
                 )
             # tl.debug_barrier()
         else:
@@ -613,22 +573,14 @@ def _masking_iteration_compute(
                 value_mask_out = (loc_idx_start_vec + _idx).to(tl.float64)
                 value_mask_out = value_mask_out / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
                 
-                tl.atomic_xchg(
+                tl.store(
                     MASK +\
                         idx_n * stride_mask_n +\
                         idx_bdst * stride_mask_bdst +\
                         (idx_mask_out * grid_kstride + idx_kstride) * stride_mask_k,
                     mask=mask_w & mask_mask_out,
-                    val=value_mask_out,
+                    value=value_mask_out,
                 )
-                # tl.store(
-                #     MASK +\
-                #         idx_n * stride_mask_n +\
-                #         idx_bdst * stride_mask_bdst +\
-                #         (idx_mask_out * grid_kstride + idx_kstride) * stride_mask_k,
-                #     mask=mask_w & mask_mask_out,
-                #     value=value_mask_out,
-                # )
             tl.debug_barrier()
         
         """
@@ -641,19 +593,19 @@ def _masking_iteration_compute(
         tl.debug_barrier()
     tl.debug_barrier()
     if idx_kstride == (grid_kstride - 1):
-        tl.atomic_xchg(
+        tl.store(
             WS +\
                 idx_n * stride_ws_n +\
                 idx_bdst * stride_ws_bdst,
             # mask = mask_w,
-            val = w_old
+            value = w_old
         )
-        tl.atomic_xchg(
+        tl.store(
             KS +\
                 idx_n * stride_ks_n +\
                 idx_bdst * stride_ks_bdst,
             # mask = mask_w,
-            val = k_old
+            value = k_old
         )
 
 def masking_iteration(
