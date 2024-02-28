@@ -395,7 +395,9 @@ def _safe_indices_compute(
             mask = mask
         )
 
-def safe_indices(mask, ws, block_size_k, allow_collision=False):
+def safe_indices(mask: Tensor, ws, block_size_k, allow_collision=False):
+    # mask = mask.sort(dim=-1, descending=False)[0]
+    
     N, TDST, K = mask.shape
     ws = ws.unsqueeze(-1).expand(N, TDST, K)
 
@@ -2411,15 +2413,18 @@ def to_dense(
                 if idx_k < ks[idx_n, idx_bdst]:
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
                     if value is not None:
-                        out[
+                        dst = out[
                             idx_n, 
                             idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
                             idx_tsrc: idx_tsrc + BLOCK_SIZE_K
-                        ] = value[
+                        ]
+                        src = value[
                             idx_n,
                             idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
                             idx_k * BLOCK_SIZE_K: (idx_k + 1) * BLOCK_SIZE_K
                         ]
+                        if src.shape == dst.shape:
+                            dst[:, :] = src[:, :]
                     else:
                         out[
                             idx_n, 
@@ -2860,7 +2865,7 @@ def main_debug():
         v,
         mask_k=256,
         block_size_q=16,
-        block_size_k=4,
+        block_size_k=2,
         is_flash=False,
     )
     
