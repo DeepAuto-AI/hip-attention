@@ -742,6 +742,7 @@ def debug_print(
     # x = np.repeat(x, 1, 1)
     if x.shape[0] == 1:
         x = x.repeat(32, 0)
+    plt.title(f'sum:{x.sum()}')
     plt.imshow(x)
     plt.colorbar()
     path = f'saves/models/timber_attention/block_{w_curr}.png'
@@ -1641,7 +1642,7 @@ def paged_timber_attention(
     block_size_q: int = 8,
     block_size_k: int = 1,
     reduce_method: str = 'max',
-    reduce_stride: int = 1,
+    reduce_stride: int = 2,
 ):
     """
     vLLM compatible paged attention
