@@ -8,34 +8,36 @@ import pypareto
 
 os.environ['PYTHONPATH'] = './'
 
-block_sizes = [1, 2, 4, 8, 16]
-ks = [128, 256, 512, 1024]
+block_size_qs = [8, 16, 32]
+block_size_ks = [1, 2, 4]
+ks = [256, 512, 1024]
 
 def samples():
     results = {}
     cache_path = './cache/llama_eval/ppl.json'
-    for block_size, k in tqdm.tqdm(
-        list(itertools.product(block_sizes, ks)), 
+    for block_size_q, block_size_k, k in tqdm.tqdm(
+        list(itertools.product(block_size_qs, block_size_ks, ks)), 
         desc='exam', dynamic_ncols=True
     ):
-        print(f'ppl measure b{block_size}, k{k}')
+        print(f'ppl measure bq{block_size_q}, bk{block_size_k}, k{k}')
         subprocess.call([
             'python', 'timber/main/llama_eval.py', 
             '--model', 'llama13b',
             '--method', 'timber',
             '--stride', '4096',
-            '--block_size_q', str(block_size),
-            '--block_size_k', str(block_size),
+            '--block_size_q', str(block_size_q),
+            '--block_size_k', str(block_size_k),
             '--k', str(k),
         ])
         with open(cache_path, 'r') as f:
             ppl = json.load(f)['ppl']
         os.remove(cache_path)
-        print(f'ppl measured {ppl} (b{block_size}, k{k})')
-        results[f'b{block_size}_k{k}'] = {
-            'block_size': block_size,
+        print(f'ppl measured {ppl} (bq{block_size_q}, bk{block_size_k}, k{k})')
+        results[f'bq{block_size_q}_bk{block_size_k}_k{k}'] = {
+            'block_size_q': block_size_q,
+            'block_size_k': block_size_k,
             'k': k,
-            'num_blocks': math.ceil(k / block_size),
+            'num_blocks': math.ceil(k / block_size_k),
             'ppl': ppl,
         }
     
@@ -82,7 +84,7 @@ def plots():
     sns.lineplot(x=xs_front, y=ys_front)
     for idx in range(len(idxs_front)):
         plt.annotate(
-            f'k:{entries[idxs_front[idx]]["k"]}, b:{entries[idxs_front[idx]]["block_size"]}', 
+            f'k:{entries[idxs_front[idx]]["k"]}, bq:{entries[idxs_front[idx]]["block_size_q"]}, bk:{entries[idxs_front[idx]]["block_size_k"]}', 
             (xs_front[idx], ys_front[idx]),
             horizontalalignment='center',
             verticalalignment='bottom',
