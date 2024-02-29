@@ -770,7 +770,7 @@ def attention_matrix(
     
     SPARQ: bool = True,
     SPARQ_START_TSRC: int = 2048,
-    SPARQ_START_BK: int = 256,
+    SPARQ_START_BK: int = 128,
     SPARQ_HID: int = 32,
     SPARQ_REDUCE_METHOD: Literal['sum', 'max'] = 'sum',
     
@@ -778,6 +778,7 @@ def attention_matrix(
     
     # NOTE: this improve latency quite well, but hurt accuracy
     ESTIMATOR_LOWER_RESOLUTION: int = 2,
+    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -788,6 +789,9 @@ def attention_matrix(
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
     assert T_DST <= T_SRC
+    
+    if triton.cdiv(mask_k, BLOCK_SIZE_K) <= ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS:
+        ESTIMATOR_LOWER_RESOLUTION = 1
     
     if ESTIMATOR_LOWER_RESOLUTION > 1:
         mask_k = mask_k // ESTIMATOR_LOWER_RESOLUTION
