@@ -41,8 +41,9 @@ conda activate llm
 conda install nvidia/label/cuda-12.1.0::cuda-toolkit
 cd lightweight-lm
 pip install -e .
-pip install numba
+pip install numba packaging
 cd third_party/vllm-timber
+pip install -r requirements-build.txt
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -e . --no-build-isolation --verbose
 ```

@@ -40,6 +40,7 @@ def eval_args(
     parser.add_argument('--do_sample', default=False, action='store_true')
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
+    parser.add_argument('--no_quantize', default=False, action='store_true')
     args = parser.parse_args()
     print(args)
     return args

@@ -38,9 +38,11 @@ def load_vllm_model(args: ArgsType):
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
     }
-    assert args.model in MODELS
-    assert args.job in ['stream']
-    model_id = MODELS[args.model]
+    if args.model in MODELS:
+        model_id = MODELS[args.model]
+    else:
+        model_id = args.model.replace('vllm_', '')
+    print(f'Loading model {model_id}')
     
     assert args.checkpoint is None
     
@@ -75,9 +77,12 @@ def load_model(args):
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
-    assert args.model in MODELS, MODELS.keys()
-    model_id = MODELS[args.model]
-    
+    if args.model in MODELS:
+        model_id = MODELS[args.model]
+    else:
+        model_id = args.model
+    print(f'Loading model {model_id}')
+
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
     
@@ -99,7 +104,7 @@ def load_model(args):
             bnb_4bit_compute_dtype=infer_dtype,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-        ),
+        ) if not args.no_quantize else None,
         torch_dtype=infer_dtype,
         trust_remote_code=True,
     )

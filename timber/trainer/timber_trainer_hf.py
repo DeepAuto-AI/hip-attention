@@ -24,6 +24,7 @@ from timber.dataset.labdataset import LabDataset
 from timber.dataset.booksum import BookSumDataset
 from timber.dataset.alpaca import AlpacaDataset
 from timber.dataset.openwebtext import OpenWebTextDataset
+from timber.dataset.lmsys import LmsysChatDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')
@@ -94,6 +95,10 @@ class LabDataModule:
                 tokenizer=self.tokenizer,
                 stride=self.block_size,
             )
+        elif self.config.dataset == 'lmsys':
+            dataset = LmsysChatDataset(
+                tokenizer=self.tokenizer,
+            )
         else:
             raise Exception()
         return dataset
@@ -110,7 +115,7 @@ class LabDataModule:
                 self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
             if stage == "test" or stage is None:
                 self.test_data = self.val_data
-        elif self.config.dataset in ['booksum', 'alpaca', 'openwebtext']:
+        elif self.config.dataset in ['booksum', 'alpaca', 'openwebtext', 'lmsys']:
             if stage == "fit" or stage is None:
                 def train_val_dataset(dataset, val_split=0.05):
                     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
@@ -338,8 +343,8 @@ class Trainer(Seq2SeqTrainer):
         logits = output.logits
 
         loss_model = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.shape[-1]).to(torch.float32),
-            target.view(-1)
+            logits.reshape(-1, logits.shape[-1]).to(torch.float32),
+            target.reshape(-1)
         )
 
         loss_kd_hidden = 0
@@ -456,6 +461,7 @@ def main(config: TrainConfig):
         per_device_train_batch_size=config.batch_size,
         per_device_eval_batch_size=config.batch_size,
         learning_rate=config.lr,
+        ignore_data_skip=True
     )
 
     trainer = Trainer(
