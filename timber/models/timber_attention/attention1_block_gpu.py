@@ -1992,6 +1992,8 @@ def main_latency_benchmark():
             s.wait_stream(torch.cuda.current_stream())
             sample()
             torch.cuda.current_stream().wait_stream(s)
+        elif args.trace:
+            sample()
         elif graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
