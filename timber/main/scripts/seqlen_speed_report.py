@@ -9,7 +9,7 @@ dups = range(1, 17)
 
 def samples():
     block_size = 16
-    block_size_ks = [1, 2, 4, 8, 16]
+    block_size_ks = [1, 2, 4]
     query_size = 1
     k = 512
     batch_sizes = {

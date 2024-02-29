@@ -61,11 +61,11 @@ def job_stream(args, model, tokenizer, device):
                 prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
                     temperature=0.7,
-                    top_p=0.3,
+                    top_p=0.9,
                     top_k=500,
                     max_tokens=512,
                     # max_tokens=16,
-                    frequency_penalty=0.1,
+                    frequency_penalty=0.0,
                     repetition_penalty=1.0,
                     ignore_eos=True,
                     skip_special_tokens=False,

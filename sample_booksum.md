@@ -1,9 +1,5 @@
-Below is an instruction that describes a task. Write a response that appropriately completes the request.
+Summarize the following text in about 300 words:
 
-### Instruction:
-Summarize the following text in about 300 words
-
-### Input:
 "Mine ear is open, and my heart prepared:
   The worst is worldly loss thou canst unfold:
   Say, is my kingdom lost?"
@@ -657,4 +653,4 @@ necessary; for it did not cease until the preposition which the poet had
 selected for the close of his verse, had been duly delivered like a word
 of two syllables.
 
-### Response:
+Summary of the story (about 300 words): 

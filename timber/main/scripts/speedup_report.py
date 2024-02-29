@@ -8,9 +8,10 @@ import matplotlib.pyplot as plt
 
 os.environ['PYTHONPATH'] = './'
 
-block_sizes = [1, 2, 4, 8, 16]
 query_sizes = [1, 2, 4, 8, 16]
-ks = [128, 256, 512, 1024]
+block_size_qs = [8, 16, 32]
+block_size_ks = [1, 2, 4]
+ks = [256, 512, 1024]
 
 def samples():
     num_samples = 200
@@ -36,15 +37,15 @@ def samples():
             'method': 'none'
         }
     
-    for query_size, block_size, k in tqdm.tqdm(
-        list(itertools.product(query_sizes, block_sizes, ks)),
+    for query_size, block_size_q, block_size_k, k in tqdm.tqdm(
+        list(itertools.product(query_sizes, block_size_qs, block_size_ks, ks)),
         dynamic_ncols=True, desc='eval',
     ):
         subprocess.call([
             'python', 'timber/models/timber_attention/attention1_block_gpu.py',
             '--method', 'timber',
-            '--block_size_q', str(block_size),
-            '--block_size_k', str(block_size),
+            '--block_size_q', str(block_size_q),
+            '--block_size_k', str(block_size_k),
             '--k', str(k),
             '--query_size', str(query_size),
             '--dups', '4',
@@ -54,11 +55,11 @@ def samples():
         with open(cache_path, 'r') as f:
             latency = json.load(f)['mean']
         os.remove(cache_path)
-        results[f'timber_q{query_size}_b{block_size}_k{k}'] = {
+        results[f'timber_q{query_size}_bq{block_size_q}_bk{block_size_k}_k{k}'] = {
             'query_size': query_size,
             'k': k,
-            'block_size': block_size,
-            'block_size_k': block_size,
+            'block_size_q': block_size_q,
+            'block_size_k': block_size_k,
             'latency': latency,
             'method': 'timber',
         }
@@ -79,16 +80,16 @@ def plot():
     for query_size in query_sizes:
         xs = []
         ys = []
-        for block_size, k in itertools.product(block_sizes, ks):
-            timber_entry = data[f'timber_q{query_size}_b{block_size}_k{k}']
+        for block_size_q, block_size_k, k in itertools.product(block_size_qs, block_size_ks, ks):
+            timber_entry = data[f'timber_q{query_size}_bq{block_size_q}_bk{block_size_k}_k{k}']
             base_entry = data[f'none_q{query_size}']
-            num_blocks = k / block_size
+            num_blocks = k / block_size_k
             speedup = base_entry['latency'] / timber_entry['latency']
             xs.append(num_blocks)
             ys.append(speedup)
         sns.scatterplot(x=xs, y=ys, label=f'Query Length: {query_size}')
     
-    plt.title('Single Query Speedup / Num. Blocks')
+    plt.title('Decode Speedup / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('Speedup')
     plt.axhline(1.0, color='#555', linestyle='--', linewidth=1)
@@ -125,12 +126,14 @@ def plot_ppl(query_size=1):
     for entry_ppl in data_ppl.values():
         ys.append(entry_ppl['ppl'])
         k = entry_ppl["k"]
-        block_size = entry_ppl["block_size"]
-        latency_timber = data_latency[f'timber_q{query_size}_b{block_size}_k{k}']['latency']
+        block_size_q = entry_ppl["block_size_q"]
+        block_size_k = entry_ppl["block_size_k"]
+        latency_timber = data_latency[f'timber_q{query_size}_bq{block_size_q}_bk{block_size_k}_k{k}']['latency']
         latency_base = data_latency[f'none_q{query_size}']['latency']
         entries.append({
             'k': k,
-            'block_size': block_size,
+            'block_size_q': block_size_q,
+            'block_size_k': block_size_k,
         })
         xs.append(latency_base / latency_timber)
     
@@ -150,7 +153,7 @@ def plot_ppl(query_size=1):
     sns.lineplot(x=xs_front, y=ys_front)
     for idx in range(len(idxs_front)):
         plt.annotate(
-            f'k:{entries[idxs_front[idx]]["k"]}, b:{entries[idxs_front[idx]]["block_size"]}', 
+            f'k:{entries[idxs_front[idx]]["k"]}, bq:{entries[idxs_front[idx]]["block_size_q"]}, bk:{entries[idxs_front[idx]]["block_size_k"]}', 
             (xs_front[idx], ys_front[idx] + 0.2),
             horizontalalignment='center',
             verticalalignment='bottom',
