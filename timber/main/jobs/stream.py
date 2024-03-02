@@ -62,7 +62,7 @@ def job_stream(args, model, tokenizer, device):
                     temperature=0.7,
                     top_p=0.9,
                     top_k=500,
-                    max_tokens=512,
+                    max_tokens=args.max_tokens,
                     # max_tokens=16,
                     frequency_penalty=0.0,
                     repetition_penalty=1.0,

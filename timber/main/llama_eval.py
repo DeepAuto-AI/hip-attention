@@ -53,7 +53,8 @@ def load_vllm_model(args: ArgsType):
         dtype='half',
         gpu_memory_utilization=0.85,
         tensor_parallel_size=torch.cuda.device_count(),
-        enforce_eager=False
+        enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
+        trust_remote_code=True,
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)

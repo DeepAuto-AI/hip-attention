@@ -37,3 +37,5 @@ hello*.png
 data/
 save/
 *.ttf
+*.qdstrm
+*.nsys-rep
