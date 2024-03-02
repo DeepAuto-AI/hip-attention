@@ -62,7 +62,7 @@ def job_stream(args, model, tokenizer, device):
                     temperature=0.7,
                     top_p=0.9,
                     top_k=500,
-                    max_tokens=512,
+                    max_tokens=args.max_tokens,
                     # max_tokens=16,
                     frequency_penalty=0.0,
                     repetition_penalty=1.0,
@@ -80,7 +80,7 @@ def job_stream(args, model, tokenizer, device):
                     n_tokens = len(tokenizer([generated_text]).input_ids[0])
                     n_generated += n_tokens
                     if len(outputs) > 1:
-                        print(generated_text[:150] + ' [...]', n_tokens)
+                        print(generated_text.replace('\n', '')[:150] + ' [...]', n_tokens)
                     else:
                         print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
