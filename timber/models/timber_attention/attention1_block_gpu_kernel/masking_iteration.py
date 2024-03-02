@@ -589,7 +589,12 @@ def _masking_iteration_compute(
         k_old_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
         k_old_mask = tl.arange(0, BLOCK_MASK_K) < tl.cdiv(k_old, grid_kstride)
         # tl.debug_barrier()
-        loc_vec = tl.load(
+        loc_vec = tl.load( 
+            # mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
+            # w_curr = round(w_start / scale_up)
+            # ws = torch.clamp(tsrcs, 0, w_curr)
+            # ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
+            # MASK : torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
             MASK +\
                 idx_n * stride_mask_n +\
                 idx_bdst * stride_mask_bdst +\
