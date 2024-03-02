@@ -343,8 +343,7 @@ def _masking_iteration_topk(
     
     if USING_SCORE_CACHE:
         if idx_iteration > 0:
-            idx_cache_score = tl.cumsum(mask_tsrc_block_reuse.to(tl.int64)) - 1
-            tl.debug_barrier()
+            idx_cache_score = tl.maximum(0, tl.cumsum(mask_tsrc_block_reuse) - 1).to(tl.int64)
             scores = tl.load(
                 SCORES +\
                     idx_n * stride_scores_n +\
@@ -353,7 +352,6 @@ def _masking_iteration_topk(
                 mask=mask_tsrc_block_reuse & num_pixels_mask,
                 other=scores,
             ).to(scores.dtype)
-            tl.debug_barrier()
     
     # done compute reduced scores
     
@@ -376,7 +374,7 @@ def _masking_iteration_topk(
     topk_mask = masked_scores <= scores_kth_large
     
     topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
-    topk_range = tl.minimum((topk_mask_cumsum - 1) * topk_mask, kth - 1).to(tl.int64)
+    topk_range = tl.maximum(tl.minimum((topk_mask_cumsum - 1) * topk_mask, kth - 1), 0).to(tl.int64)
     
     temp_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
     temp_mask = temp_range < num_pixels_scalar
@@ -397,13 +395,14 @@ def _masking_iteration_topk(
         value=temp,
         # value=0.1,
     )
-    if SCORES is not None:
+    if USING_SCORE_CACHE:
         tl.store(
             SCORES +\
                 idx_n * stride_scores_n +\
                 idx_bdst * stride_scores_bdst +\
                 (topk_range * grid_kstride + idx_kstride) * stride_scores_k,
-            mask=mask_w & topk_mask & temp_mask,
+            # mask=mask_w & topk_mask & temp_mask,
+            mask=mask_w & topk_mask,
             value=scores,
         )
     # tl.debug_barrier()
@@ -976,7 +975,7 @@ def masking_iteration(
     # NOTE: may improve latency, but hurt performance too much
     USING_SCORE_CACHE = False
     if USING_SCORE_CACHE:
-        scores = torch.zeros_like(mask, dtype=torch.float32)
+        scores = torch.zeros_like(mask, dtype=torch.float16)
     else:
         scores = None
     
@@ -1060,7 +1059,7 @@ def masking_iteration(
         REDUCE_STRIDE,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
-        num_warps=4,
-        num_stages=2,
+        num_warps=1,
+        num_stages=1,
         enable_warp_specialization=False,
     )
