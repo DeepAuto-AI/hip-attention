@@ -781,6 +781,9 @@ def attention_matrix(
     ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',
+    
+    USING_SLIDING_WINDOW=True,
+    SLIDING_WINDOW_SIZE=256,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -966,6 +969,8 @@ def attention_matrix(
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 IS_CAUSAL=is_causal,
+                USING_SLIDING_WINDOW=USING_SLIDING_WINDOW,
+                SLIDING_WINDOW_SIZE=SLIDING_WINDOW_SIZE,
             )
 
             return indices, ks, context, None
@@ -1722,6 +1727,9 @@ def timber_attention(
     enable_sparq: bool = True,
     
     sampling_method: str = 'random',
+    
+    using_sliding_window: bool = True,
+    sliding_window_size: int = 256,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1758,6 +1766,8 @@ def timber_attention(
                 is_flash=is_flash,
                 enable_sparq=enable_sparq,
                 sampling_method=sampling_method,
+                using_sliding_window=using_sliding_window,
+                sliding_window_size=sliding_window_size,
             )
             contexts.append(context)
             
@@ -1832,6 +1842,9 @@ def timber_attention(
                 IS_FLASH=is_flash,
                 SPARQ=enable_sparq,
                 SAMPLING_METHOD=sampling_method,
+                
+                USING_SLIDING_WINDOW=using_sliding_window,
+                SLIDING_WINDOW_SIZE=sliding_window_size,
             )
             
             if is_flash:

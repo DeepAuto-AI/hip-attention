@@ -253,10 +253,10 @@ def _calc_prob_return_context_compute(
     VLLM_HEAD_SIZE,
     
     # sliding window support
-    USING_SLIDING_WINDOW,
-    SLIDING_WINDOW_SIZE,
-    SLIDING_WINDOW_MASK,
+    USING_SLIDING_WINDOW: tl.constexpr,
+    SLIDING_WINDOW_SIZE: tl.constexpr,
     
+    SLIDING_WINDOW_MASK,
     stride_sliding_window_mask_n,
     stride_sliding_window_mask_bdst,
     stride_sliding_window_mask_tsrc,
@@ -498,6 +498,8 @@ def calc_prob_return_context(
     BLOCK_SIZE_Q: int,
     BLOCK_SIZE_K: int,
     IS_CAUSAL: bool,
+    USING_SLIDING_WINDOW: bool,
+    SLIDING_WINDOW_SIZE: int,
 ):
     """
     implement flash attention 1, not 2.
@@ -585,8 +587,6 @@ def calc_prob_return_context(
     else:
         raise Exception("not supported")
     
-    USING_SLIDING_WINDOW = True
-    SLIDING_WINDOW_SIZE = 256
     if USING_SLIDING_WINDOW:
         sliding_window_mask = torch.zeros(
             (N, BDST, SLIDING_WINDOW_SIZE), 

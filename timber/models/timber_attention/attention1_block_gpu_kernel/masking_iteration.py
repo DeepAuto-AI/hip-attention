@@ -212,7 +212,8 @@ def _masking_iteration_topk(
     
     idx_tsrc_block = idx_tsrc_block.to(tl.float32)
     if SAMPLING_METHOD == 'random':
-        if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
+        # if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
+        if (idx_iteration > 0) and (idx_iteration == (N_ITERATION // 2)):
             idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
     idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
     idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
