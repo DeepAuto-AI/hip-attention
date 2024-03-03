@@ -91,6 +91,8 @@ def _masking_iteration_topk(
     
     REDUCE_METHOD,
     
+    SAMPLING_METHOD,
+    
     HID, 
     SPARQ, 
     SPARQ_HID,
@@ -208,7 +210,13 @@ def _masking_iteration_topk(
             pass
         idx_tsrc_block = tl.math.abs(idx_tsrc_block)
     
-    idx_tsrc_block = (idx_tsrc_block.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
+    idx_tsrc_block = idx_tsrc_block.to(tl.float32)
+    if SAMPLING_METHOD == 'random':
+        if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
+            idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+    idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
+    idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
+    idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
     
     for _idx_block_k in range(0, BLOCK_SIZE_K, 1):
         scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
@@ -542,6 +550,7 @@ def _masking_iteration_compute(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
+    SAMPLING_METHOD: tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -767,6 +776,8 @@ def _masking_iteration_compute(
                     
                     REDUCE_METHOD,
                     
+                    SAMPLING_METHOD,
+                    
                     HID, 
                     SPARQ, 
                     SPARQ_HID,
@@ -840,6 +851,8 @@ def _masking_iteration_compute(
                     KV_REPEAT_INTERLEAVE, 
                     
                     REDUCE_METHOD,
+                    
+                    SAMPLING_METHOD,
                     
                     HID, 
                     SPARQ, 
@@ -936,6 +949,7 @@ def masking_iteration(
     BLOCK_SIZE_K: int, 
     REDUCE_METHOD: str,
     REDUCE_STRIDE: int,
+    SAMPLING_METHOD: str,
     DEBUG: bool = False,
 ):  
     if DEBUG:
@@ -1129,6 +1143,7 @@ def masking_iteration(
         int(BLOCK_SIZE_K),
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
+        SAMPLING_METHOD,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
