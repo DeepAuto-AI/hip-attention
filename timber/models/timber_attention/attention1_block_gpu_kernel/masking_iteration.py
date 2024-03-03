@@ -504,7 +504,18 @@ def _masking_iteration_compute(
     else:
         context_length = None
     
-    w_old = tl.load(
+    w_old = tl.load( 
+        # tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
+        # tsrcs = torch.arange(
+        #     tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, BLOCK_SIZE_Q, 
+        #     dtype=torch.int64,
+        #     device=device,
+        # )\
+        #     .view(1, -1)\
+        #     .expand(N, -1)\
+        #     .contiguous() # size (N, T_DST(Q)//BLOCK_SIZE_Q)
+        # tsrcs.clamp_max_(T_SRC)
+        # ws = torch.clamp(tsrcs, 0, w_curr)
         WS + \
             idx_n * stride_ws_n + \
             idx_bdst * stride_ws_bdst,
@@ -518,12 +529,25 @@ def _masking_iteration_compute(
     if CONTEXT_LENGTH is not None:
         t_src = tl.minimum(context_length, t_src)
     
-    k_old = tl.load(
+    k_old = tl.load( # ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
         KS + \
             idx_n * stride_ks_n +\
             idx_bdst * stride_ks_bdst,
     ).to(tl.int64)
-    
+    # print("=======")
+    # print("idx_n : ", idx_n)
+    # print("idx_bdst : ", idx_bdst)
+    # print("idx_kstride : ", idx_kstride)
+    # print("grid_kstride : ", grid_kstride)
+
+    # print("w_old : ", w_old)
+    # print("WS : ", WS)
+    # print("t_src : ", t_src)
+    # print("TSRCS : ", TSRCS)
+    # print("k_old : ", k_old)
+    # print("KS : ", KS)
+
+    # breakpoint()
     for idx_iteration in range(N_ITERATION):
         tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
@@ -584,7 +608,7 @@ def _masking_iteration_compute(
                 t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
             num_pixels += dup_pixels
         """
-        
+        # print("k_new : ", k_new)
         k_old_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
         k_old_mask = tl.arange(0, BLOCK_MASK_K) < tl.cdiv(k_old, grid_kstride)
         # tl.debug_barrier()
@@ -602,7 +626,7 @@ def _masking_iteration_compute(
             other = 0
         )
         k_old_mask = k_old_mask & (loc_vec < 1.0)
-        
+        # print("loc_vec : ", loc_vec)
         # w_old_fp = w_old.to(tl.float32)
         # w_new_fp = w_new.to(tl.float32)
         b_old_fp = tl.cdiv(w_old, BLOCK_SIZE_K).to(tl.float32)
