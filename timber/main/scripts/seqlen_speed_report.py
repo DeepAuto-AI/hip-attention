@@ -143,7 +143,7 @@ def plot():
     sns.lineplot(x=xs, y=ys_base, label='Torch')
     sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2')
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'TimberAttention (bk={block_size_k})')
+        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP-Attention (bk={block_size_k})')
     plt.legend()
     plt.title('Single Query Latency (k=512, bq=16)')
     plt.xlabel('Seq. Length')
@@ -161,7 +161,7 @@ def plot():
     sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch')
     sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2')
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'TimberAttention (bk={block_size_k})')
+        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
     plt.xlabel('Seq. Length')
     plt.ylabel('Decoding Speedup')
     plt.xlim(0, 17*1024)

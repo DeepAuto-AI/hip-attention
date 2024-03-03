@@ -1729,7 +1729,7 @@ def timber_attention(
     sampling_method: str = 'random',
     
     using_sliding_window: bool = True,
-    sliding_window_size: int = 256,
+    sliding_window_size: int = 128,
 ):
     assert sampling_method in ['random', 'first']
     
