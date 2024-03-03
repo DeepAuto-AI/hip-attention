@@ -1,20 +1,24 @@
-from setuptools import setup, find_packages
+import setuptools
 
-setup(
-    name='HiPAttention',
-    version='0.0.1',
-    description='Hierarchically Pruned Attention: HiP-Attention',
-    author='gmlwns2000',
-    author_email='gmlwns5176@gmail.com',
-    url='https://github.com/gmlwns2000',
-    install_requires=['torch', 'triton', 'transformers'],
-    packages=find_packages(exclude=[]),
-    keywords=['hip_attention'],
-    python_requires='>=3.9',
-    package_data={},
-    zip_safe=False,
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
+setuptools.setup(
+    name="hip_attention",
+    version="0.0.1",
+    author="Heejun Lee",
+    author_email="gmlwns5176@gmail.com",
+    description="HiP Attention",
+    long_description=long_description,
+    long_description_content_type="gmlwns2000/hip-attention",
+    url="https://github.com/gmlwns2000",
+    project_urls={
+        "Bug Tracker": "https://github.com/gmlwns2000",
+    },
     classifiers=[
-        'Programming Language :: Python :: 3.9',
-        'Programming Language :: Python :: 3.10',
+        "Programming Language :: Python :: 3",
     ],
+    package_dir={"timber": "timber"},
+    packages=["timber"],
+    python_requires=">=3.6",
 )

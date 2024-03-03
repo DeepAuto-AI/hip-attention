@@ -8,8 +8,6 @@ from tqdm import tqdm
 import argparse
 from transformers import TextStreamer
 
-from vllm import LLM
-from vllm.model_executor.layers.attention import PagedAttention
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
@@ -22,6 +20,8 @@ from timber.main.jobs.mmlu import job_mmlu
 from timber.main.eval_args import eval_args, ArgsType
 
 def load_vllm_model(args: ArgsType):
+    from vllm import LLM
+    
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',

@@ -20,7 +20,7 @@ def _safe_indices_compute(
     # output tensors
     INDICES, stride_indices_n, stride_indices_tdst, stride_indices_k,
     
-    N, TDST, K, BLOCK_SIZE_K,
+    N, TDST, K: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     
     ALLOW_COLLISION: tl.constexpr,
     BLOCK_N_TDST: tl.constexpr,
@@ -51,7 +51,7 @@ def _safe_indices_compute(
                         _idx_k * stride_mask_k,
                     mask = mask,
                     other = 0
-                ).to(tl.float32)
+                )#.to(tl.float32)
                 ws_vec = tl.load(
                     WS +\
                         idx_n * stride_ws_n +\
@@ -59,7 +59,7 @@ def _safe_indices_compute(
                         _idx_k * stride_ws_k,
                     mask = mask,
                     other = 0
-                ).to(tl.float32)
+                )#.to(tl.float32)
                 indices_float = mask_vec * ws_vec
                 col = tl.math.ceil(indices_float / BLOCK_SIZE_K).to(tl.int32)
 

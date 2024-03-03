@@ -39,3 +39,4 @@ save/
 *.ttf
 *.qdstrm
 *.nsys-rep
+*.egg-info
