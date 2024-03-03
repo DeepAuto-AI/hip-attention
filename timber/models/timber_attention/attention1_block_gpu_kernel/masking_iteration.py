@@ -65,10 +65,12 @@ def _masking_iteration_topk(
     k_old_mask,
     
     k_new, 
+    w_old,
     w_new,
     t_src,
     context_length,
     loc_idx_start_vec,
+    loc_idx_start_origin,
     num_pixels_vec,
     num_pixels_scalar,
     dup_pixels_vec,
@@ -77,7 +79,9 @@ def _masking_iteration_topk(
     # block constant
     IS_CAUSAL,
     
-    USING_SCORE_CACHE,
+    USING_SCORE_CACHE: tl.constexpr,
+    
+    N_ITERATION,
     
     T_DST,
     T_SRC,
@@ -87,6 +91,8 @@ def _masking_iteration_topk(
     
     REDUCE_METHOD,
     
+    SAMPLING_METHOD,
+    
     HID, 
     SPARQ, 
     SPARQ_HID,
@@ -95,6 +101,7 @@ def _masking_iteration_topk(
     BLOCK_SIZE_Q,
     BLOCK_SIZE_Q_PADDED,
     BLOCK_SIZE_K,
+    BLOCK_MASK_K,
     BLOCK_TMASK_K,
     BLOCK_HID, 
     
@@ -120,18 +127,41 @@ def _masking_iteration_topk(
         scores[i, j, k] = -score # NOTE: store negative store
     """
     
-    for _idx in range(BLOCK_MAX_DUP):
+    for _idx in tl.static_range(BLOCK_MAX_DUP):
         # _idx = BLOCK_MAX_DUP - _idx - 1
-        _value = (loc_idx_start_vec + _idx).to(tl.float32) / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float32)
-        if (_idx == 0) and (SCORES is not None):
-            _value *= -1.0
+        b_old_fp = tl.cdiv(w_old, BLOCK_SIZE_K).to(tl.float32)
+        b_new_fp = tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float32)
+        _value = (loc_idx_start_vec + _idx).to(tl.float32) / b_new_fp
+        if USING_SCORE_CACHE:
+            if (idx_iteration > 0) and ((idx_iteration < (N_ITERATION - 1)) and (_idx == 0)):
+                _mask = (loc_idx_start_origin.to(tl.float32) / b_old_fp) - _value
+                _mask = tl.math.abs(_mask)
+                _mask = _mask <= ((1.0 / N_ITERATION) / b_new_fp)
+                # _value = tl.minimum(1.0, tl.maximum(0.0, _value))
+                # tl.device_print('aa', tl.sum(_mask.to(tl.int32)))
+                _value *= tl.where(_mask, -1.0, 1.0)
+                
+                score_cached = tl.load(
+                    SCORES +\
+                        idx_n * stride_scores_n +\
+                        idx_bdst * stride_scores_bdst +\
+                        tl.arange(0, BLOCK_MASK_K) * stride_scores_k,
+                )
+                tl.store(
+                    SCORES +\
+                        idx_n * stride_scores_n +\
+                        idx_bdst * stride_scores_bdst +\
+                        tl.maximum(0, tl.cumsum(_mask.to(tl.int32)) - 1) * stride_scores_k,
+                    mask = _mask,
+                    value = score_cached,
+                )
         
         tl.store(
             TMASK + \
                 idx_n * stride_tmask_n +\
                 idx_bdst * stride_tmask_bdst +\
                 (((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) + grid_kstride * idx_kstride) * stride_tmask_k,
-            mask=mask_w & (_idx <= dup_pixels_vec) & k_old_mask,
+            mask=mask_w & (_idx < dup_pixels_vec) & k_old_mask,
             value=_value
         )
     tl.debug_barrier()
@@ -163,15 +193,30 @@ def _masking_iteration_topk(
         other = 0,
     )
     # NOTE: random key selection with in the block
-    idx_tsrc_block = (idx_tsrc_block.to(tl.float32) * t_src.to(tl.float32)).to(tl.int64)
     mask_tsrc_block = num_pixels_mask
     
     if USING_SCORE_CACHE:
-        mask_tsrc_block_reuse = idx_tsrc_block < 0
-        if idx_iteration > 0:
-            mask_tsrc_block = (~mask_tsrc_block_reuse) & mask_tsrc_block
-        # tl.device_print('ff', tl.sum(mask_tsrc_block_reuse.to(tl.float32)) / BLOCK_TMASK_K)
+        # scores_cached = tl.load(
+        #     SCORES +\
+        #         idx_n * stride_scores_n +\
+        #         idx_bdst * stride_scores_bdst +\
+        #         tl.arange(0, BLOCK_MASK) * stride_scores_k,
+        #     other=32000.0,
+        # ).to(scores.dtype)
+        
+        mask_tsrc_block_reuse = (idx_tsrc_block < 0)
+        if (idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1)):
+            # mask_tsrc_block = (~mask_tsrc_block_reuse) & mask_tsrc_block
+            pass
         idx_tsrc_block = tl.math.abs(idx_tsrc_block)
+    
+    idx_tsrc_block = idx_tsrc_block.to(tl.float32)
+    if SAMPLING_METHOD == 'random':
+        if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
+            idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+    idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
+    idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
+    idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
     
     for _idx_block_k in range(0, BLOCK_SIZE_K, 1):
         scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
@@ -342,16 +387,21 @@ def _masking_iteration_topk(
         scores = tl.minimum(scores, scores_partial)
     
     if USING_SCORE_CACHE:
-        if idx_iteration > 0:
+        if (idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1)):
             idx_cache_score = tl.maximum(0, tl.cumsum(mask_tsrc_block_reuse) - 1).to(tl.int64)
-            scores = tl.load(
+            tl.debug_barrier()
+            scores_ignored = (scores > 10000.0) & mask_tsrc_block_reuse
+            scores_ignored = mask_tsrc_block_reuse
+            scores_cached = tl.load(
                 SCORES +\
                     idx_n * stride_scores_n +\
                     idx_bdst * stride_scores_bdst +\
                     idx_cache_score * stride_scores_k,
-                mask=mask_tsrc_block_reuse & num_pixels_mask,
-                other=scores,
+                mask=scores_ignored,
+                other=32000.0,
             ).to(scores.dtype)
+            scores = tl.minimum(scores_cached, scores)
+            tl.debug_barrier()
     
     # done compute reduced scores
     
@@ -400,13 +450,32 @@ def _masking_iteration_topk(
             SCORES +\
                 idx_n * stride_scores_n +\
                 idx_bdst * stride_scores_bdst +\
+                tl.arange(0, BLOCK_MASK_K) * stride_scores_k,
+            mask=mask_w ,
+            value=32000.0,
+        )
+        tl.store(
+            SCORES +\
+                idx_n * stride_scores_n +\
+                idx_bdst * stride_scores_bdst +\
                 (topk_range * grid_kstride + idx_kstride) * stride_scores_k,
             # mask=mask_w & topk_mask & temp_mask,
-            mask=mask_w & topk_mask,
+            mask=mask_w & topk_mask & (~mask_tsrc_block_reuse),
             value=scores,
         )
     # tl.debug_barrier()
 
+@triton.autotune(
+    configs=[
+        triton.Config(kwargs={}, num_warps=16),
+        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=4),
+        triton.Config(kwargs={}, num_warps=2),
+    ],
+    key=['BLOCK_MASK_K'],
+    warmup=2,
+    rep=20,
+)
 @triton.jit
 def _masking_iteration_compute(
     # input matrices
@@ -481,6 +550,7 @@ def _masking_iteration_compute(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
+    SAMPLING_METHOD: tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -632,6 +702,7 @@ def _masking_iteration_compute(
         b_old_fp = tl.cdiv(w_old, BLOCK_SIZE_K).to(tl.float32)
         b_new_fp = tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float32)
         loc_idx_start_vec = (loc_vec * b_old_fp).to(tl.int64)
+        loc_idx_start_origin = loc_idx_start_vec
         loc_idx_end_vec = loc_idx_start_vec + 1
         loc_idx_start_vec = (loc_idx_start_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
         loc_idx_end_vec = (loc_idx_end_vec.to(tl.float32) / b_old_fp * b_new_fp).to(tl.int64)
@@ -708,10 +779,12 @@ def _masking_iteration_compute(
                     k_old_mask,
                     
                     k_new, 
+                    w_old,
                     w_new,
                     t_src,
                     context_length,
                     loc_idx_start_vec,
+                    loc_idx_start_origin,
                     num_pixels_vec,
                     num_pixels_scalar,
                     dup_pixels_vec,
@@ -722,6 +795,8 @@ def _masking_iteration_compute(
                     
                     USING_SCORE_CACHE,
                     
+                    N_ITERATION,
+                    
                     T_DST,
                     T_SRC,
                     
@@ -729,6 +804,8 @@ def _masking_iteration_compute(
                     KV_REPEAT_INTERLEAVE, 
                     
                     REDUCE_METHOD,
+                    
+                    SAMPLING_METHOD,
                     
                     HID, 
                     SPARQ, 
@@ -738,6 +815,7 @@ def _masking_iteration_compute(
                     BLOCK_SIZE_Q,
                     BLOCK_SIZE_Q_PADDED,
                     BLOCK_SIZE_K,
+                    BLOCK_MASK_K,
                     BLOCK_TMASK_K,
                     BLOCK_HID, 
                     
@@ -777,10 +855,12 @@ def _masking_iteration_compute(
                     k_old_mask,
                     
                     k_new, 
+                    w_old,
                     w_new,
                     t_src,
                     context_length,
                     loc_idx_start_vec,
+                    loc_idx_start_origin,
                     num_pixels_vec,
                     num_pixels_scalar,
                     dup_pixels_vec,
@@ -791,6 +871,8 @@ def _masking_iteration_compute(
                     
                     USING_SCORE_CACHE,
                     
+                    N_ITERATION,
+                    
                     T_DST,
                     T_SRC,
                     
@@ -798,6 +880,8 @@ def _masking_iteration_compute(
                     KV_REPEAT_INTERLEAVE, 
                     
                     REDUCE_METHOD,
+                    
+                    SAMPLING_METHOD,
                     
                     HID, 
                     SPARQ, 
@@ -807,6 +891,7 @@ def _masking_iteration_compute(
                     BLOCK_SIZE_Q,
                     BLOCK_SIZE_Q_PADDED,
                     BLOCK_SIZE_K,
+                    BLOCK_MASK_K,
                     BLOCK_TMASK_K_HALF,
                     BLOCK_HID, 
                     
@@ -893,6 +978,7 @@ def masking_iteration(
     BLOCK_SIZE_K: int, 
     REDUCE_METHOD: str,
     REDUCE_STRIDE: int,
+    SAMPLING_METHOD: str,
     DEBUG: bool = False,
 ):  
     if DEBUG:
@@ -1004,7 +1090,7 @@ def masking_iteration(
     # NOTE: may improve latency, but hurt performance too much
     USING_SCORE_CACHE = False
     if USING_SCORE_CACHE:
-        scores = torch.zeros_like(mask, dtype=torch.float16)
+        scores = torch.full_like(mask, 32000.0, dtype=torch.float16)
     else:
         scores = None
     
@@ -1086,9 +1172,10 @@ def masking_iteration(
         int(BLOCK_SIZE_K),
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
+        SAMPLING_METHOD,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
-        num_warps=1,
-        num_stages=1,
-        enable_warp_specialization=False,
+        # num_warps=1,
+        # num_stages=2,
+        # enable_warp_specialization=False,
     )

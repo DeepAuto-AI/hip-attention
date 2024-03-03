@@ -11,6 +11,17 @@ from timber.models.timber_attention.attention1_block_gpu_kernel.paged_cache_vllm
 def next_multiple_of(x: int, multiple_by: int = 16):
     return triton.next_power_of_2(max(x, multiple_by))
 
+@triton.autotune(
+    configs=[
+        triton.Config(kwargs={}, num_warps=16),
+        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=4),
+        triton.Config(kwargs={}, num_warps=2),
+    ],
+    key=['BLOCK_HID', 'BLOCK_BK'],
+    warmup=3,
+    rep=50,
+)
 @triton.jit
 def _calc_prob_return_context_compute(
     # input matrices
@@ -103,6 +114,15 @@ def _calc_prob_return_context_compute(
     m_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), -float("inf"), dtype=tl.float32)
     l_i = tl.full((BLOCK_SIZE_Q_PADDED, 1), 1.0, dtype=tl.float32)
     
+    queries = tl.load(
+        Q +\
+            idx_n * stride_q_n +\
+            idx_tdst[:, None] * stride_q_tdst +\
+            idx_hid[None, :] * stride_q_hid,
+        mask = mask_tdst[:, None] & mask_hid[None, :],
+        other = 0
+    )
+    
     for idx_bbk in range(tl.cdiv(ks, BLOCK_BK)):
         idx_bk = (tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK).to(tl.int64)
         mask_bk = (idx_bk < ks) & (idx_bk < BK)
@@ -130,14 +150,6 @@ def _calc_prob_return_context_compute(
         # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
         # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
         # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-        queries = tl.load(
-            Q +\
-                idx_n * stride_q_n +\
-                idx_tdst[:, None] * stride_q_tdst +\
-                idx_hid[None, :] * stride_q_hid,
-            mask = mask_tdst[:, None] & mask_hid[None, :],
-            other = 0
-        )
 
         if CACHE_METHOD == 'cont':
             keys = tl.load(
@@ -444,8 +456,8 @@ def calc_prob_return_context(
         BLOCK_BK,
         IS_CAUSAL,
         
-        num_warps=8,
-        num_stages=2,
+        # num_warps=8,
+        # num_stages=2,
     )
     
     return context

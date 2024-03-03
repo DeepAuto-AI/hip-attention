@@ -34,6 +34,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
+        'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
     }
     assert args.model in MODELS
     assert args.job in ['stream']

@@ -778,7 +778,9 @@ def attention_matrix(
     
     # NOTE: this improve latency quite well, but hurt accuracy
     ESTIMATOR_LOWER_RESOLUTION: int = 2,
-    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64
+    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
+    
+    SAMPLING_METHOD: str = 'first',
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -931,7 +933,8 @@ def attention_matrix(
             BLOCK_SIZE_K,
             REDUCE_METHOD,
             REDUCE_STRIDE,
-            DEBUG
+            SAMPLING_METHOD,
+            DEBUG,
         )
         if DEBUG:
             debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
@@ -1717,7 +1720,11 @@ def timber_attention(
     
     is_flash: bool = True,
     enable_sparq: bool = True,
+    
+    sampling_method: str = 'random',
 ):
+    assert sampling_method in ['random', 'first']
+    
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
     
@@ -1750,6 +1757,7 @@ def timber_attention(
                 reduce_stride=reduce_stride,
                 is_flash=is_flash,
                 enable_sparq=enable_sparq,
+                sampling_method=sampling_method,
             )
             contexts.append(context)
             
@@ -1823,6 +1831,7 @@ def timber_attention(
                 
                 IS_FLASH=is_flash,
                 SPARQ=enable_sparq,
+                SAMPLING_METHOD=sampling_method,
             )
             
             if is_flash:
