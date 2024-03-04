@@ -1751,7 +1751,7 @@ def timber_attention(
         dense_k = dense_k.unsqueeze(-2)
         dense_v = dense_v.unsqueeze(-2)
 
-        dense_context = flash_attention(
+        dense_context, _ = flash_attention(
             dense_q,
             dense_k,
             dense_v,
