@@ -26,6 +26,9 @@ def samples(query_size = 1, step_size = 1):
         13: 48,
         14: 40,
         16: 32,
+        24: 16,
+        32: 8,
+        48: 4,
     }
     num_samples = 200
     cache_path = './cache/attention1_block_gpu/result.json'
@@ -152,7 +155,7 @@ def plot(query_size=1, step_size=1):
         plt.title('Prompt Latency (k=1024, bq=32)')
     plt.xlabel('Seq. Length (k)')
     plt.ylabel('Latency (us)')
-    plt.xlim(0, 17*1024*step_size)
+    plt.xlim(0, 17*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_latency_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
@@ -171,7 +174,7 @@ def plot(query_size=1, step_size=1):
         sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
     plt.xlabel('Seq. Length (k)')
     plt.ylabel('Speedup')
-    plt.xlim(0, 17*1024*step_size)
+    plt.xlim(0, 17*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_speedup_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
