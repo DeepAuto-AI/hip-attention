@@ -30,14 +30,19 @@ def test_sparse_attention():
         indices, ks, probs, scores = attention_matrix(
             q,
             k,
+            v,
             mask,
+            1,
             
-            w_start,
-            n_patches,
-            mask_k,
-            scale_up,
-            block_size_q,
-            block_size_k,
+            w_start=w_start,
+            n_patches=n_patches,
+            mask_k=mask_k,
+            scale_up=scale_up,
+            BLOCK_SIZE_Q=block_size_q,
+            BLOCK_SIZE_K=block_size_k,
+            
+            is_causal=False,
+            IS_FLASH=False,
         )
         
     v = nn.Parameter(v)
@@ -50,6 +55,7 @@ def test_sparse_attention():
             indices,
             ks,
             probs,
+            1,
             block_size_q,
             block_size_k,
         )
@@ -94,14 +100,19 @@ def test_attention_mask():
         indices, ks, probs, scores = attention_matrix(
             q,
             k,
+            v,
             mask,
+            1,
             
-            w_start,
-            n_patches,
-            mask_k,
-            scale_up,
-            block_size_q,
-            block_size_k,
+            w_start=w_start,
+            n_patches=n_patches,
+            mask_k=mask_k,
+            scale_up=scale_up,
+            BLOCK_SIZE_Q=block_size_q,
+            BLOCK_SIZE_K=block_size_k,
+            
+            is_causal=False,
+            IS_FLASH=False,
         )
         
         loss = probs.std() * 1000
