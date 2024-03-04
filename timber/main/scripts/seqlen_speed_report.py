@@ -129,7 +129,7 @@ def plot(query_size=1, step_size=1):
         for dup in dups:
             dup = dup * step_size
             entry = data[f's{dup * 1024}']
-            xs.append(entry['seq_len'])
+            xs.append(entry['seq_len'] / 1024)
             ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
             ys_flash.append(entry['latency_flash'] / entry['batch_size'] * 1000)
             ys_timber.append(entry['latency_timbers'][iks] / entry['batch_size'] * 1000)
@@ -150,7 +150,7 @@ def plot(query_size=1, step_size=1):
         plt.title('Decoding Latency (k=1024, bq=32)')
     else:
         plt.title('Prompt Latency (k=1024, bq=32)')
-    plt.xlabel('Seq. Length')
+    plt.xlabel('Seq. Length (k)')
     plt.ylabel('Latency (us)')
     plt.xlim(0, 17*1024*step_size)
     
@@ -169,7 +169,7 @@ def plot(query_size=1, step_size=1):
     sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2')
     for iks, block_size_k in enumerate(block_size_ks):
         sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
-    plt.xlabel('Seq. Length')
+    plt.xlabel('Seq. Length (k)')
     plt.ylabel('Speedup')
     plt.xlim(0, 17*1024*step_size)
     
@@ -179,8 +179,8 @@ def plot(query_size=1, step_size=1):
     print(f'saved {fig_path}.png')
 
 def main():
-    samples(query_size=1)
-    plot(query_size=1)
+    samples(query_size=1, step_size=4)
+    plot(query_size=1, step_size=4)
     
     samples(query_size=1024, step_size=4)
     plot(query_size=1024, step_size=4)
