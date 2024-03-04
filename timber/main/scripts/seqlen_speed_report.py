@@ -7,7 +7,7 @@ sns.set_style('whitegrid')
 
 dups = range(1, 17)
 
-def samples(query_size = 1):
+def samples(query_size = 1, step_size = 1):
     block_size = 32
     block_size_ks = [1, 2, 4]
     k = 1024
@@ -30,9 +30,10 @@ def samples(query_size = 1):
     num_samples = 200
     cache_path = './cache/attention1_block_gpu/result.json'
     
-    batch_size = max(list(batch_sizes.values()))
+    batch_size = max(1, max(list(batch_sizes.values())) // query_size)
     results = {}
     for dup in dups:
+        dup *= step_size
         if dup in batch_sizes:
             batch_size = max(1, batch_sizes[dup] // query_size)
         
@@ -107,7 +108,7 @@ def samples(query_size = 1):
         json.dump(results, f, indent=2)
     print('dumped', path)
 
-def plot(query_size=1):
+def plot(query_size=1, step_size=1):
     path = f'./saves/seqlen_speed_report/result_q{query_size}.json'
     with open(path, 'r') as f:
         data = json.load(f)
@@ -126,6 +127,7 @@ def plot(query_size=1):
         ys_speedup = []
         ys_speedup_flash = []
         for dup in dups:
+            dup = dup * step_size
             entry = data[f's{dup * 1024}']
             xs.append(entry['seq_len'])
             ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
@@ -150,7 +152,7 @@ def plot(query_size=1):
         plt.title('Prompt Latency (k=1024, bq=32)')
     plt.xlabel('Seq. Length')
     plt.ylabel('Latency (us)')
-    plt.xlim(0, 17*1024)
+    plt.xlim(0, 17*1024*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_latency_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
@@ -168,8 +170,8 @@ def plot(query_size=1):
     for iks, block_size_k in enumerate(block_size_ks):
         sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
     plt.xlabel('Seq. Length')
-    plt.ylabel('Decoding Speedup')
-    plt.xlim(0, 17*1024)
+    plt.ylabel('Speedup')
+    plt.xlim(0, 17*1024*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_speedup_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
@@ -180,8 +182,8 @@ def main():
     samples(query_size=1)
     plot(query_size=1)
     
-    samples(query_size=1024)
-    plot(query_size=1024)
+    samples(query_size=1024, step_size=4)
+    plot(query_size=1024, step_size=4)
 
 if __name__ == '__main__':
     main()

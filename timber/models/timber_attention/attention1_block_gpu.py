@@ -1736,6 +1736,70 @@ def timber_attention(
     if q.requires_grad:
         is_flash = False
     
+    is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
+    dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
+    dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
+    print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
+    if is_prompt and is_causal and (dense_queries > 0):
+        contexts = []
+        
+        dense_q = q[:, :dense_queries, :]
+        dense_k = k[:, :dense_queries + k.shape[1] - q.shape[1], :]
+        dense_v = v[:, :dense_queries + k.shape[1] - q.shape[1], :]
+        
+        dense_q = dense_q.unsqueeze(-2)
+        dense_k = dense_k.unsqueeze(-2)
+        dense_v = dense_v.unsqueeze(-2)
+
+        dense_context = flash_attention(
+            dense_q,
+            dense_k,
+            dense_v,
+        is_causal=True)
+        contexts.append(dense_context)
+        
+        if dense_queries < q.shape[1]:
+            sparse_q = q[:, dense_queries:, :]
+            sparse_k = k[:, :, :]
+            sparse_v = v[:, :, :]
+            sparse_context, _ = timber_attention(
+                sparse_q,
+                sparse_k,
+                sparse_v,
+                
+                attention_mask=attention_mask,
+                
+                w_start=w_start,
+                n_patches=n_patches,
+                mask_k=mask_k,
+                scale_up=scale_up,
+                
+                is_causal=is_causal,
+                
+                block_size_q=block_size_q,
+                block_size_k=block_size_k,
+                
+                reduce_method=reduce_method,
+                reduce_stride=reduce_stride,
+                
+                chunking=chunking,
+                chunk_size=chunk_size,
+                
+                is_flash=is_flash,
+                
+                enable_sparq=enable_sparq,
+                sampling_method=sampling_method,
+                
+                using_sliding_window=using_sliding_window,
+                sliding_window_size=sliding_window_size,
+            )
+            contexts.append(sparse_context)
+        
+        if len(contexts) > 1:
+            return torch.cat(contexts, dim=1)
+        else:
+            return contexts[0]
+    
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
     if q.shape[1] > CHUNK_SIZE and CHUNKING:
@@ -1776,7 +1840,7 @@ def timber_attention(
             
         contexts = torch.cat(contexts, dim=1)    
         
-        return contexts, None    
+        return contexts, None
     
     global DEBUG
     DENSE_SPARSE_ATTENTION = False
