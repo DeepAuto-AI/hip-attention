@@ -1797,9 +1797,9 @@ def timber_attention(
             contexts.append(sparse_context)
         
         if len(contexts) > 1:
-            return torch.cat(contexts, dim=1)
+            return torch.cat(contexts, dim=1), None
         else:
-            return contexts[0]
+            return contexts[0], None
     
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
