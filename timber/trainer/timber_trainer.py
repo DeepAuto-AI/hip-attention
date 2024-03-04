@@ -178,9 +178,9 @@ def load_model(
 
     model = ModelClass.from_pretrained(
         model_id,
-        config=config, 
+        config=config,
         device_map={"" : device} if device != 'cpu' else 'cpu',
-        load_in_4bit=quant_config is not None,
+        load_in_4bit=None if quant_config is not None else True,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
