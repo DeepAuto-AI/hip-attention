@@ -34,7 +34,7 @@ def samples(query_size = 1):
     results = {}
     for dup in dups:
         if dup in batch_sizes:
-            batch_size = batch_sizes[dup]
+            batch_size = max(1, batch_sizes[dup] // query_size)
         
         latency_timbers = []
         for block_size_k in block_size_ks:

@@ -889,7 +889,7 @@ def attention_matrix(
                     queries_scores, 
                     k=SPARQ_HID, 
                     dim=-1, 
-                    sorted=False
+                    sorted=True
                 )
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
@@ -1733,7 +1733,7 @@ def timber_attention(
 ):
     assert sampling_method in ['random', 'first']
     
-    if q.requires_grad or k.requires_grad or v.requires_grad:
+    if q.requires_grad:
         is_flash = False
     
     CHUNKING = chunking
