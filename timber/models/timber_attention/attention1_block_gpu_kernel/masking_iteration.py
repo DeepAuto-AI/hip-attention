@@ -220,15 +220,21 @@ def _masking_iteration_topk(
     idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
     
     mask_strided_block_q = True #(idx_block_q % REDUCE_STRDIE) == 0
-    hidden_size = SPARQ_HID if SPARQ else HID
-    need_reload_vec_q = hidden_size != BLOCK_HID
-    vec_q = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID), dtype=QUERIES.dtype.element_ty)
+    if SPARQ:
+        hidden_size = SPARQ_HID
+        vec_q = tl.zeros((BLOCK_SIZE_Q_PADDED, SPARQ_HID), dtype=QUERIES.dtype.element_ty)
+        need_reload_vec_q = False
+    else:
+        hidden_size = HID
+        vec_q = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID), dtype=QUERIES.dtype.element_ty)
+        need_reload_vec_q = hidden_size != BLOCK_HID
+    
+    # reuse q
     if not need_reload_vec_q:
         pid_hid = 0
-        idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
-        mask_hid = mask_w & (idx_hid < hidden_size)
-        
         if SPARQ:
+            idx_hid = (tl.arange(0, SPARQ_HID) + pid_hid * SPARQ_HID).to(tl.int64)
+            mask_hid = mask_w & (idx_hid < hidden_size)
             idx_hid = tl.load(
                 SPARQ_INDICES +\
                     idx_n * stride_sparq_indices_n +\
@@ -237,6 +243,9 @@ def _masking_iteration_topk(
                 mask = mask_hid,
                 other = HID,
             )
+        else:
+            idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
+            mask_hid = mask_w & (idx_hid < hidden_size)
         # mask_hid = idx_hid < hidden_size
         
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
@@ -279,9 +288,13 @@ def _masking_iteration_topk(
             ).to(tl.int1)
         # mask_tsrc = mask_tsrc & key_mask
         
-        for pid_hid in range(tl.cdiv(hidden_size, BLOCK_HID)):
-            idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
-            mask_hid = mask_w & (idx_hid < hidden_size)
+        for pid_hid in range(tl.cdiv(hidden_size, BLOCK_HID if not SPARQ else SPARQ_HID)):
+            if SPARQ:
+                idx_hid = (tl.arange(0, SPARQ_HID) + pid_hid * SPARQ_HID).to(tl.int64)
+                mask_hid = mask_w & (idx_hid < hidden_size)
+            else:
+                idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
+                mask_hid = mask_w & (idx_hid < hidden_size)
             
             if SPARQ:
                 idx_hid = tl.load(
@@ -546,7 +559,8 @@ def _masking_iteration_compute(
     B_DST: int, 
     B_SRC: int, 
     HID: int, 
-    SPARQ_HID: int,
+    SPARQ_HID: tl.constexpr,
+    SPARQ_HID_HALF: tl.constexpr,
     N_COMPLETED: int,
     N_ITERATION: int,
     
@@ -560,7 +574,7 @@ def _masking_iteration_compute(
     VLLM_NUM_BLOCKS: int, 
     VLLM_NUM_KV_HEADS: int,
     VLLM_HEAD_SIZE_X: int,
-    VLLM_BLOCK_SIZE: int,
+    VLLM_BLOCK_SIZE: tl.constexpr,
     VLLM_X: int, 
     VLLM_HEAD_SIZE: int,
     
@@ -765,6 +779,9 @@ def _masking_iteration_compute(
         if ((k_new < num_pixels_scalar) or (grid_kstride > 1)) or (REDUCE_STRDIE > 1):
             # if (idx_iteration == 0) or (idx_iteration == (N_ITERATION - 1)):
             if (idx_iteration == 0):
+                # first iteration should use 
+                # - full block_tmask_k
+                # - half sparq hid
                 _masking_iteration_topk(
                     # buffers
                     QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
@@ -820,7 +837,7 @@ def _masking_iteration_compute(
                     
                     HID, 
                     SPARQ, 
-                    SPARQ_HID,
+                    SPARQ_HID_HALF, # NOTE: this hurt accuracy little
                     
                     BLOCK_MAX_DUP,
                     BLOCK_SIZE_Q,
@@ -841,6 +858,9 @@ def _masking_iteration_compute(
                     stride_keys_vllm_x, 
                 )
             else:
+                # otherwise
+                # - use half block_tmask_k
+                # - use full sparq_hid
                 _masking_iteration_topk(
                     # buffers
                     QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
@@ -1150,6 +1170,7 @@ def masking_iteration(
         int(B_SRC), 
         HID, 
         SPARQ_HID, 
+        SPARQ_HID // 2,
         N_COMPLETED,
         n_iteration,
         

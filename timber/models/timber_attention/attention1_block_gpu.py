@@ -18,6 +18,7 @@ w_start = 512 (32 block)
 import json
 import random
 import gc
+import warnings
 from matplotlib import pyplot as plt
 import numpy as np
 import skimage.measure
@@ -807,6 +808,8 @@ def attention_matrix(
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
+    
+    warnings.warn('sparq is enabled')
     
     # SPARQ = False
     # SPARQ_HID = 16
