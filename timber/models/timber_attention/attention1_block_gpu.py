@@ -1730,6 +1730,8 @@ def timber_attention(
     
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
+    
+    dense_queries_exp: Optional[int] = None,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1737,7 +1739,8 @@ def timber_attention(
         is_flash = False
     
     is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
-    dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
+    if dense_queries_exp is None:
+        dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
     dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
     # print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
     if is_prompt and is_causal and (dense_queries > 0):
@@ -1793,6 +1796,8 @@ def timber_attention(
                 
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
+                
+                dense_queries_exp=dense_queries_exp,
             )
             contexts.append(sparse_context)
         
@@ -1836,6 +1841,7 @@ def timber_attention(
                 sampling_method=sampling_method,
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
+                dense_queries_exp=dense_queries_exp,
             )
             contexts.append(context)
             
@@ -1970,6 +1976,7 @@ def timber_attention(
 
 import torch.nn.functional as F
 
+
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
     probs = torch.softmax(scores, dim=-1)
@@ -1983,7 +1990,7 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     # return context, None
     from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
 
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal), None
+    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """

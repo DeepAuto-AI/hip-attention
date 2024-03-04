@@ -808,7 +808,7 @@ class LlamaCustomAttention(LlamaAttention):
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
                     
-                TARGET_DENSE_QUERIES = self.tree_dense_queries
+                TARGET_DENSE_QUERIES = 0
                 current_query_index = TSRC - TDST
                 DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
                 LAST_DENSE_QUERIES = self.tree_last_dense_queries
@@ -857,6 +857,7 @@ class LlamaCustomAttention(LlamaAttention):
                                 mask_k=self.tree_k,
                                 block_size_q=self.tree_block_size_q,
                                 block_size_k=self.tree_block_size_k,
+                                dense_queries_exp=self.tree_dense_queries,
                             )
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
