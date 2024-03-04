@@ -1888,6 +1888,18 @@ def timber_attention(
                     BLOCK_SIZE_Q=block_size_q,
                     BLOCK_SIZE_K=block_size_k,
                 )
+                
+                # v_cumsum = v.cumsum(dim=1)
+                # v_avg = v_cumsum / torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None]
+                
+                # exp_norm = torch.exp(scores - torch.max(scores, dim=-1, keepdim=True)[0])
+                # min_exp_norm = torch.where(scores > -100, exp_norm, 1000.0).min(dim=-1, keepdim=True)[0]
+                # sum_exp_norm = exp_norm.sum(dim=-1, keepdim=True)
+                # ctx_exp_norm = min_exp_norm * torch.clamp_min(torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None] - mask_k, 0)
+                # sum_exp_norm = sum_exp_norm + ctx_exp_norm
+                # ctx_ratio = (ctx_exp_norm / sum_exp_norm) * 0.1
+                
+                # context = context * (1 - ctx_ratio) + v_avg * ctx_ratio
     
     return context, (indices, ks, probs)
 
