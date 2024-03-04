@@ -2019,7 +2019,7 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
     assert k.shape[0] == v.shape[0]
     
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+    return flash_attn_with_kvcache(q.half(), k.half(), v.half(), causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
