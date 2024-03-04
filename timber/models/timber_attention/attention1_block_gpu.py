@@ -1733,6 +1733,9 @@ def timber_attention(
 ):
     assert sampling_method in ['random', 'first']
     
+    if q.requires_grad or k.requires_grad or v.requires_grad:
+        is_flash = False
+    
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
     if q.shape[1] > CHUNK_SIZE and CHUNKING:
