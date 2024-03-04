@@ -1739,7 +1739,7 @@ def timber_attention(
     is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
     dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
     dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
-    print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
+    # print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
     if is_prompt and is_causal and (dense_queries > 0):
         contexts = []
         
