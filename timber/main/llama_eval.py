@@ -25,6 +25,8 @@ from timber.main.jobs.merge_lora import job_merge_lora
 from timber.main.eval_args import eval_args, ArgsType
 
 def load_vllm_model(args: ArgsType):
+    from vllm import LLM
+    
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
@@ -37,6 +39,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
+        'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
@@ -58,7 +61,8 @@ def load_vllm_model(args: ArgsType):
         dtype='half',
         gpu_memory_utilization=0.85,
         tensor_parallel_size=torch.cuda.device_count(),
-        enforce_eager=False
+        enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
+        trust_remote_code=True,
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)

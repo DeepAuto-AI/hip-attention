@@ -18,6 +18,7 @@ w_start = 512 (32 block)
 import json
 import random
 import gc
+import warnings
 import numpy as np
 import torch
 from torch import Tensor
@@ -781,7 +782,12 @@ def attention_matrix(
     
     # NOTE: this improve latency quite well, but hurt accuracy
     ESTIMATOR_LOWER_RESOLUTION: int = 2,
-    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64
+    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
+    
+    SAMPLING_METHOD: str = 'first',
+    
+    USING_SLIDING_WINDOW=True,
+    SLIDING_WINDOW_SIZE=256,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -791,7 +797,7 @@ def attention_matrix(
     
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
-    assert T_DST <= T_SRC
+    assert T_DST <= T_SRC, f"{queries.shape}, {keys.shape}"
     
     if triton.cdiv(mask_k, BLOCK_SIZE_K) <= ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS:
         ESTIMATOR_LOWER_RESOLUTION = 1
@@ -805,6 +811,8 @@ def attention_matrix(
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
+    
+    warnings.warn('sparq is enabled')
     
     # SPARQ = False
     # SPARQ_HID = 16
@@ -887,7 +895,7 @@ def attention_matrix(
                     queries_scores, 
                     k=SPARQ_HID, 
                     dim=-1, 
-                    sorted=False
+                    sorted=True
                 )
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
@@ -934,7 +942,8 @@ def attention_matrix(
             BLOCK_SIZE_K,
             REDUCE_METHOD,
             REDUCE_STRIDE,
-            DEBUG
+            SAMPLING_METHOD,
+            DEBUG,
         )
         if DEBUG:
             debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
@@ -966,6 +975,8 @@ def attention_matrix(
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 IS_CAUSAL=is_causal,
+                USING_SLIDING_WINDOW=USING_SLIDING_WINDOW,
+                SLIDING_WINDOW_SIZE=SLIDING_WINDOW_SIZE,
             )
 
             return indices, ks, context, None
@@ -1676,6 +1687,8 @@ def paged_timber_attention(
         q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
     
     with timer('compat'):
+        if max_context_len < 0:
+            max_context_len = block_tables.shape[1] * k.shape[3]
         paged_k = PagedKeyCacheVllmCompat(
             key_cache=k,
             block_table=block_tables,
@@ -1703,6 +1716,7 @@ def paged_timber_attention(
         block_size_k=block_size_k,
         reduce_method=reduce_method,
         reduce_stride=reduce_stride,
+        dense_queries_exp=0,
     )
 
 def timber_attention(
@@ -1730,7 +1744,94 @@ def timber_attention(
 
     is_flash: bool = True,
     enable_sparq: bool = True,
+    
+    sampling_method: str = 'random',
+    
+    using_sliding_window: bool = True,
+    sliding_window_size: int = 128,
+    
+    dense_queries_exp: Optional[int] = None,
 ):
+    assert sampling_method in ['random', 'first']
+    
+    if q.requires_grad:
+        is_flash = False
+    
+    is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
+    if is_prompt:
+        if dense_queries_exp is None:
+            dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
+        dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
+        # print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
+        if is_causal and (dense_queries > 0):
+            contexts = []
+            
+            dense_q = q[:, :dense_queries, :]
+            dense_k = k[:, :dense_queries + k.shape[1] - q.shape[1], :]
+            dense_v = v[:, :dense_queries + k.shape[1] - q.shape[1], :]
+            
+            dense_q = dense_q.unsqueeze(-2)
+            dense_k = dense_k.unsqueeze(-2)
+            dense_v = dense_v.unsqueeze(-2)
+            
+            if dense_q.shape[0] != dense_k.shape[0]:
+                kv_repeat = dense_q.shape[0] // dense_k.shape[0]
+                dense_k = torch.repeat_interleave(dense_k, kv_repeat, 0)
+                dense_v = torch.repeat_interleave(dense_v, kv_repeat, 0)
+
+            dense_context, _ = flash_attention(
+                dense_q,
+                dense_k,
+                dense_v,
+                is_causal=True
+            )
+            dense_context = dense_context.squeeze(-2)
+            contexts.append(dense_context)
+            
+            if dense_queries < q.shape[1]:
+                sparse_q = q[:, dense_queries:, :]
+                sparse_k = k[:, :, :]
+                sparse_v = v[:, :, :]
+                sparse_context, _ = timber_attention(
+                    sparse_q,
+                    sparse_k,
+                    sparse_v,
+                    
+                    attention_mask=attention_mask,
+                    
+                    w_start=w_start,
+                    n_patches=n_patches,
+                    mask_k=mask_k,
+                    scale_up=scale_up,
+                    
+                    is_causal=is_causal,
+                    
+                    block_size_q=block_size_q,
+                    block_size_k=block_size_k,
+                    
+                    reduce_method=reduce_method,
+                    reduce_stride=reduce_stride,
+                    
+                    chunking=chunking,
+                    chunk_size=chunk_size,
+                    
+                    is_flash=is_flash,
+                    
+                    enable_sparq=enable_sparq,
+                    sampling_method=sampling_method,
+                    
+                    using_sliding_window=using_sliding_window,
+                    sliding_window_size=sliding_window_size,
+                    
+                    dense_queries_exp=dense_queries_exp,
+                )
+                contexts.append(sparse_context)
+            
+            if len(contexts) > 1:
+                return torch.cat(contexts, dim=1), None
+            else:
+                return contexts[0], None
+        
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
     if q.shape[1] > CHUNK_SIZE and CHUNKING:
@@ -1763,12 +1864,16 @@ def timber_attention(
                 reduce_stride=reduce_stride,
                 is_flash=is_flash,
                 enable_sparq=enable_sparq,
+                sampling_method=sampling_method,
+                using_sliding_window=using_sliding_window,
+                sliding_window_size=sliding_window_size,
+                dense_queries_exp=dense_queries_exp,
             )
             contexts.append(context)
             
         contexts = torch.cat(contexts, dim=1)    
         
-        return contexts, None    
+        return contexts, None
     
     global DEBUG
     DENSE_SPARSE_ATTENTION = False
@@ -1836,6 +1941,10 @@ def timber_attention(
                 
                 IS_FLASH=is_flash,
                 SPARQ=enable_sparq,
+                SAMPLING_METHOD=sampling_method,
+                
+                USING_SLIDING_WINDOW=using_sliding_window,
+                SLIDING_WINDOW_SIZE=sliding_window_size,
             )
             
             if is_flash:
@@ -1876,10 +1985,23 @@ def timber_attention(
                     BLOCK_SIZE_Q=block_size_q,
                     BLOCK_SIZE_K=block_size_k,
                 )
+                
+                # v_cumsum = v.cumsum(dim=1)
+                # v_avg = v_cumsum / torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None]
+                
+                # exp_norm = torch.exp(scores - torch.max(scores, dim=-1, keepdim=True)[0])
+                # min_exp_norm = torch.where(scores > -100, exp_norm, 1000.0).min(dim=-1, keepdim=True)[0]
+                # sum_exp_norm = exp_norm.sum(dim=-1, keepdim=True)
+                # ctx_exp_norm = min_exp_norm * torch.clamp_min(torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None] - mask_k, 0)
+                # sum_exp_norm = sum_exp_norm + ctx_exp_norm
+                # ctx_ratio = (ctx_exp_norm / sum_exp_norm) * 0.1
+                
+                # context = context * (1 - ctx_ratio) + v_avg * ctx_ratio
     
     return context, (indices, ks, probs)
 
 import torch.nn.functional as F
+
 
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
@@ -1893,8 +2015,11 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     # )
     # return context, None
     from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
-
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal), None
+    
+    assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
+    assert k.shape[0] == v.shape[0]
+    
+    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
