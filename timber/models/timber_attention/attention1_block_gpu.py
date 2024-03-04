@@ -1756,6 +1756,7 @@ def timber_attention(
             dense_k,
             dense_v,
         is_causal=True)
+        dense_context = dense_context.squeeze(-2)
         contexts.append(dense_context)
         
         if dense_queries < q.shape[1]:
