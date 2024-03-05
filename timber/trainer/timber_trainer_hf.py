@@ -426,13 +426,13 @@ def main(config: TrainConfig):
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
 
     if config.method == 'timber':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}'
+        filename = f'{config.model}-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}'
     elif config.method == 'none':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}'
+        filename = f'{config.model}-{config.dataset}-{config.seq_len}'
     elif config.method == 'reformer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}'
+        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}'
     elif config.method == 'performer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}'
+        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}'
     else:
         raise Exception()
 
