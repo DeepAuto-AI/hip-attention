@@ -30,6 +30,8 @@ def load_vllm_model(args: ArgsType):
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
+        'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
         'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
@@ -40,6 +42,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
         'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
+        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
