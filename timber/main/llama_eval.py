@@ -85,6 +85,9 @@ def load_model(args):
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
+        'qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
+        'qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
