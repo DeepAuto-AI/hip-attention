@@ -1,41 +1,23 @@
-# TreeAttention
+# TimberAttention
 
-w   p   k   s   ppl
-64  32  256 2   16.67
+## How to Install
 
-32  32  256 2   16.75
+```bash
+pip install -e .
+```
 
-64  32  128 2   18.72
+## Note
 
-64  16  256 2   19.94
-64  64  256 2   12.52
-64  128 256 2   8.975
+```bash
+CUDA_VISIBLE_DEVICES=0 python src/trainer/timber_trainer.py --batch_size 1 --gradient_accumulation_steps 2 --dataset wikitext2 --lora_r 512 --max_steps 10000 --block_size 4 --k 256
 
-64  32  256 1.5 55.97 <-- seems bug
-64  32  256 3   34.73 <-- seems bug
-64  32  256 4   13.41
+python src/trainer/timber_trainer.py --disable_kd --lora_r 512 --batch_size 1 --block_size 8 --k 512 --init_checkpoint ./saves/dev/llama32k-wikitext103-4096-block8-k512-epoch-00-step-8400.pth --dataset booksum --using_fsdp --max_steps 10000
 
-64  16  256 4   17.77
-64  64  256 4   9.714
+CUDA_VISIBLE_DEVICES=0 PROMPT_ATTENTION_BACKEND=timber PAGED_ATTENTION_BACKEND=timber BENCHMARK_PAGED_ATTENTION=0 FORCE_SINGLE_LAYER=0 python timber/main/llama_eval.py --model vllm_llama32k --job stream --batch_size 1 --input sample_booksum.md
 
-w   p   k   s   ppl     latency(4k)
-64  32  256 4   13.41   11.54
-64  64  256 4   9.714   8.868
-64  32  256 2   16.67   2.146
-64  64  256 2   12.52   2.441
-64  128 256 2   9.013   3.397 <-- definatly go to this
-torch                   9.093
+TIMBER_DEBUG=0 CUDA_VISIBLE_DEVICES=0 CUDA_LAUNCH_BLOCKING=0 python timber/main/llama_eval.py --model llama32k --method timber --dense_queries 0 --k 512 --block_size_q 32 --block_size_k 2 --job ppl --stride 8192
 
-64
-128
-256
-512
-1024
-2048
-4096
+python timber/models/timber_attention/attention1_block_gpu.py --method timber --k 1024 --block_size_q 32 --block_size_k 4 --dups 16 --batch_size 16
 
-7*256
-
-CUDA_VISIBLE_DEVICES=0 python src/trainer/tree_trainer.py --batch_size 1 --gradient_accumulation_steps 2 --dataset wikitext2 --lora_r 512 --max_steps 10000 --block_size 4 --k 256
-
-python src/trainer/tree_trainer.py --disable_kd --lora_r 512 --batch_size 1 --block_size 8 --k 512 --init_checkpoint ./saves/dev/llama32k-wikitext103-4096-block8-k512-epoch-00-step-8400.pth --dataset booksum --using_fsdp --max_steps 10000
+HIP_K=256 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROMPT_ATTENTION_BACKEND=vllm PAGED_ATTENTION_BACKEND=vllm python3 benchmarks/benchmark_throughput.py --input-len 1000 --output-len 1000 --model Qwen/Qwen1.5-7B-Chat-GPTQ-Int4 --num-prompts 10 --dtype float16 --kv-cache-dtype fp8_e5m2 --max-model-len 2000
+```

@@ -27,6 +27,7 @@ wandb/
 *.csv
 
 src/utils/secrets.*
+timber/utils/secrets.*
 plots/
 submission/
 submission*.zip
@@ -35,3 +36,7 @@ hello.png
 hello*.png
 data/
 save/
+*.ttf
+*.qdstrm
+*.nsys-rep
+*.egg-info
