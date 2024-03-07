@@ -14,6 +14,12 @@ from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
 def job_ppl(args, model, tokenizer, device):
+    outfile = f'./cache/llama_eval/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+    print("Will write to", outfile)
+    if os.path.exists(outfile):
+        print(f'PPL already computed, skipping: {outfile}')
+        return
+
     os.makedirs('./cache', exist_ok=True)
     cache_path = './cache/llama_eval.pth'
     if not os.path.exists(cache_path):
@@ -57,7 +63,7 @@ def job_ppl(args, model, tokenizer, device):
     ppl = torch.exp(torch.stack(nlls).mean()).item()
     
     os.makedirs('./cache/llama_eval/', exist_ok=True)
-    with open('./cache/llama_eval/ppl.json', 'w') as f:
+    with open(outfile, 'w') as f:
         json.dump({'ppl': ppl}, f)
 
     print(f'PPL: {ppl:.4f}')
