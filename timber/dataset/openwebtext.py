@@ -1,12 +1,14 @@
 import random
 import datasets
 from torch.utils.data import Dataset
+from tqdm import tqdm
+
 
 class OpenWebTextDataset(Dataset):
     def __init__(self, tokenizer, stride):
         self.tokenizer = tokenizer
         self.dataset = datasets.load_dataset('Skylion007/openwebtext')['train']
-        self.window_size = 10
+        self.window_size = 30
         self.stride = stride
     
     def __len__(self):
@@ -27,7 +29,9 @@ class OpenWebTextDataset(Dataset):
 if __name__ == '__main__':
     import transformers
     tokenizer = transformers.AutoTokenizer.from_pretrained('togethercomputer/LLaMA-2-7B-32K')
-    ds = OpenWebTextDataset(tokenizer, 4096)
-    
-    for ids, labels in ds:
-        print(ids.shape)
+    ds = OpenWebTextDataset(tokenizer, 32000)
+
+    lengths = []
+    for ids, labels in tqdm(ds, total=len(ds)):
+        lengths.append(ids.shape[-1])
+        print('max', max(lengths))
