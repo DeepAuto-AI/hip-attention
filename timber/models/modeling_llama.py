@@ -669,14 +669,8 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_using_context_avg = True
         self.tree_dense_queries = 2048
         self.tree_last_dense_queries = None
-        self.tree_dense_layers = [0,1,2]
-        self.tree_high_k_layers = {
-            0: None,
-            1: None,
-            2: None,
-            # 3: 4,
-            # 4: 2
-        }
+        self.tree_dense_layers = []
+        self.tree_high_k_layers = {}
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
