@@ -7,7 +7,7 @@ from tqdm import tqdm
 class OpenWebTextDataset(Dataset):
     def __init__(self, tokenizer, stride):
         self.tokenizer = tokenizer
-        self.dataset = datasets.load_dataset('Skylion007/openwebtext')['train']
+        self.dataset = datasets.load_dataset('Skylion007/openwebtext', trust_remote_code=True)['train']
         self.window_size = 30
         self.stride = stride
     

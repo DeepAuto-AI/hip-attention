@@ -21,6 +21,7 @@
 import math
 import os
 import warnings
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -97,6 +98,25 @@ def _make_causal_mask(
     return AttentionMaskConverter._make_causal_mask(
         input_ids_shape=input_ids_shape, dtype=dtype, device=device, past_key_values_length=past_key_values_length
     )
+
+
+@dataclass
+class BaseModelOutputWithPastAndL1(BaseModelOutputWithPast):
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    attn_sparsity_loss: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class CausalLMOutputWithPastAndL1(CausalLMOutputWithPast):
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    attn_sparsity_loss: Optional[torch.FloatTensor] = None
 
 
 class LlamaRMSNorm(nn.Module):
@@ -709,8 +729,11 @@ class LlamaCustomAttention(LlamaAttention):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional["TimberCache"] = None,
         output_attentions: bool = False,
+        output_attn_sparsity_loss: bool = False,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        attn_sparsity_loss = None
+
         with timer("attention_layer"):
             bsz, q_len, _ = hidden_states.size()
             # assert hidden_states.dtype == torch.bfloat16
@@ -740,12 +763,6 @@ class LlamaCustomAttention(LlamaAttention):
                 key_states = repeat_kv(key_states, self.num_key_value_groups)
                 value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            if attention_mask is not None:
-                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                    raise ValueError(
-                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                    )
-            
             if self.attention_method == 'none' or (self.layer_idx in self.tree_dense_layers):
                 # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
                 # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -817,7 +834,16 @@ class LlamaCustomAttention(LlamaAttention):
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
                     if attention_mask is not None:
                         attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
-                    
+
+                # For L1 loss of attention map
+                if output_attn_sparsity_loss:
+                    # q: shape [bsz, num_heads, q_len, head_dim]
+                    # k: shape [bsz, num_heads, kv_len, head_dim]
+                    # v: shape [bsz, num_heads, kv_len, head_dim]
+                    attn_scores = torch.einsum("bhqd,bhkd->bhqk", q, k)  # shape [bsz, num_heads, q_len, kv_len]
+                    attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+                    attn_sparsity_loss = torch.mean(torch.norm(attn_probs, p=1, dim=-1))
+
                 TARGET_DENSE_QUERIES = 0
                 current_query_index = TSRC - TDST
                 DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
@@ -967,7 +993,7 @@ class LlamaCustomAttention(LlamaAttention):
 
             attn_output = self.o_proj(attn_output)
 
-            return attn_output, None, past_key_value
+            return attn_output, None, past_key_value, attn_sparsity_loss
 
 class LlamaSdpaAttention(LlamaAttention):
     """
@@ -1120,6 +1146,7 @@ class LlamaDecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
+        output_attn_sparsity_loss: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -1141,7 +1168,9 @@ class LlamaDecoderLayer(nn.Module):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
-        
+
+        attn_sparsity_loss = None
+
         with timer("decoder_layer"):
             residual = hidden_states
 
@@ -1149,8 +1178,10 @@ class LlamaDecoderLayer(nn.Module):
                 hidden_states = self.input_layernorm(hidden_states)
 
             with timer("decoder_layer.self_attn"):
+                if output_attn_sparsity_loss is not None:
+                    kwargs = kwargs | {"output_attn_sparsity_loss": output_attn_sparsity_loss}
                 # Self Attention
-                hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                outputs = self.self_attn(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -1159,6 +1190,10 @@ class LlamaDecoderLayer(nn.Module):
                     use_cache=use_cache,
                     **kwargs,
                 )
+                if output_attn_sparsity_loss:
+                    hidden_states, self_attn_weights, present_key_value, attn_sparsity_loss = outputs
+                else:
+                    hidden_states, self_attn_weights, present_key_value = outputs
                 hidden_states = residual + hidden_states
 
             # Fully Connected
@@ -1176,6 +1211,9 @@ class LlamaDecoderLayer(nn.Module):
 
             if use_cache:
                 outputs += (present_key_value,)
+
+            if output_attn_sparsity_loss:
+                outputs += (attn_sparsity_loss,)
 
             return outputs
 
@@ -1341,8 +1379,9 @@ class LlamaModel(LlamaPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> Union[Tuple, BaseModelOutputWithPastAndL1]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1367,6 +1406,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
                 )
                 use_cache = False
+
+        attn_sparsity_loss = None
 
         past_key_values_length = 0
         if use_cache:
@@ -1408,6 +1449,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     position_ids,
                     past_key_values,
                     output_attentions,
+                    output_attn_sparsity_loss,
                     use_cache,
                 )
             else:
@@ -1417,6 +1459,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
+                    output_attn_sparsity_loss=output_attn_sparsity_loss,
                     use_cache=use_cache,
                 )
 
@@ -1427,6 +1470,9 @@ class LlamaModel(LlamaPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+            if output_attn_sparsity_loss:
+                attn_sparsity_loss = layer_outputs[-1]
 
         hidden_states = self.norm(hidden_states)
 
@@ -1439,11 +1485,12 @@ class LlamaModel(LlamaPreTrainedModel):
             next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastAndL1(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            attn_sparsity_loss=attn_sparsity_loss,
         )
 
 
@@ -1490,8 +1537,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPastAndL1]:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1533,6 +1581,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_attn_sparsity_loss=output_attn_sparsity_loss,
             return_dict=return_dict,
         )
 
@@ -1562,12 +1611,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastAndL1(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            attn_sparsity_loss=outputs.attn_sparsity_loss,
         )
 
     def prepare_inputs_for_generation(

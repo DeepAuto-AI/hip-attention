@@ -17,7 +17,9 @@ from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorF
 
 # torch.autograd.set_detect_anomaly(True)
 
-from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.models.qwen.modeling_qwen import QWenLMHeadModel
+from timber.models.qwen.configuration_qwen import QWenConfig
 
 from timber.utils import seed
 from timber.dataset.labdataset import LabDataset
@@ -51,6 +53,8 @@ class TrainConfig:
     init_from_checkpoint: str = None
     method: str = 'timber'
     model: str = 'llama32k'
+    warmup_steps: int = 20
+    l1_coeff: float = 0.0
 
 
 class LabDataModule:
@@ -70,7 +74,7 @@ class LabDataModule:
         self.num_workers = num_workers
         self.train_size = train_size
         self.dataset = None
-        self.tokenizer = load_tokenizer()
+        self.tokenizer = load_tokenizer(config.model)
         self.bsize = config.batch_size
 
     def get_dataset(self):
@@ -152,6 +156,14 @@ def get_hf_dataset(ds):
     return datasets.IterableDataset.from_generator(gen)
 
 
+MODELS = {
+    'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+    'llama13b': 'meta-llama/Llama-2-13b-hf',
+    'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+    'qwen14b': 'Qwen/Qwen1.5-14B',
+}
+
+
 def load_model(
         train_config: TrainConfig = None,
         method='timber',
@@ -161,15 +173,15 @@ def load_model(
     if train_config.using_fsdp:
         device = 'cpu'
 
-    MODELS = {
-        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-        'llama13b': 'meta-llama/Llama-2-13b-hf',
-    }
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
 
-    config = LlamaConfig.from_pretrained(model_id)
-    config._attn_implementation = config.attn_implementation = 'sdpa'
+    ConfigClass = LlamaConfig
+    if 'qwen' in train_config.model:
+        ConfigClass = QWenConfig
+
+    config = ConfigClass.from_pretrained(model_id)
+    config._attn_implementation = config.attn_implementation = 'eager' if 'qwen' in train_config.model else 'sdpa'
 
     quant_config = transformers.BitsAndBytesConfig(
         load_in_4bit=True,
@@ -182,9 +194,12 @@ def load_model(
         quant_config = None
 
     if method == 'timber':
-        ModelClass = LlamaForCausalLM
+        if 'qwen' in train_config.model:
+            ModelClass = QWenLMHeadModel
+        else:
+            ModelClass = LlamaForCausalLM
     else:
-        ModelClass = transformers.LlamaForCausalLM
+        ModelClass = transformers.AutoModelForCausalLM
 
     print(ModelClass)
 
@@ -272,9 +287,11 @@ def load_model(
     return model
 
 
-def load_tokenizer():
-    model_id = 'togethercomputer/LLaMA-2-7B-32K'
+def load_tokenizer(model):
+    assert model in MODELS, MODELS.keys()
+    model_id = MODELS[model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'right'
     return tokenizer
 
@@ -338,7 +355,8 @@ class Trainer(Seq2SeqTrainer):
             inputs,
             attention_mask=(inputs.ne(self.pad_token_id)).to(inputs.dtype),
             labels=target,
-            output_hidden_states=not self.config.disable_kd
+            output_hidden_states=not self.config.disable_kd,
+            output_attn_sparsity_loss=self.config.l1_coeff != 0,
         )
         logits = output.logits
 
@@ -461,7 +479,8 @@ def main(config: TrainConfig):
         per_device_train_batch_size=config.batch_size,
         per_device_eval_batch_size=config.batch_size,
         learning_rate=config.lr,
-        ignore_data_skip=True
+        ignore_data_skip=True,
+        warmup_steps=config.warmup_steps,
     )
 
     trainer = Trainer(
@@ -475,7 +494,7 @@ def main(config: TrainConfig):
         data_collator=DataCollatorForSeq2Seq(
             tokenizer=datamodule.tokenizer,
             padding='longest',
-            pad_to_multiple_of=16,
+            pad_to_multiple_of=config.seq_len,
         ),
     )
 
@@ -507,6 +526,8 @@ def run():
     parser.add_argument('--k', default=512, type=int)
     parser.add_argument('--block_size_q', default=16, type=int)
     parser.add_argument('--block_size_k', default=2, type=int)
+    parser.add_argument('--warmup_steps', default=None, type=int)
+    parser.add_argument('--l1', default=None, type=float)
 
     args = parser.parse_args()
 
@@ -539,6 +560,10 @@ def run():
         train_config.dense_queries = args.dense_queries
     if args.init_checkpoint is not None:
         train_config.init_from_checkpoint = args.init_checkpoint
+    if args.warmup_steps is not None:
+        train_config.warmup_steps = args.warmup_steps
+    if args.l1 is not None:
+        train_config.l1_coeff = args.l1
 
     main(train_config)
 
