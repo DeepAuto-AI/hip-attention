@@ -22,5 +22,5 @@ python timber/models/timber_attention/attention1_block_gpu.py --method timber --
 HIP_K=256 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PROMPT_ATTENTION_BACKEND=vllm PAGED_ATTENTION_BACKEND=vllm python3 benchmarks/benchmark_throughput.py --input-len 1000 --output-len 1000 --model Qwen/Qwen1.5-7B-Chat-GPTQ-Int4 --num-prompts 10 --dtype float16 --kv-cache-dtype fp8_e5m2 --max-model-len 2000
 
 # for vllm dev
-CUDA_VISIBLE_DEVICES=0 python timber/main/llama_eval.py --model vllm_llama1b --job stream --batch_size 4 --input sample4k.md
+HIP_DENSE_LAYERS=3 HIP_K=256 CUDA_VISIBLE_DEVICES=0 python timber/main/llama_eval.py --model vllm_llama1b --job stream --batch_size 4 --input sample4k.md --stride 4096
 ```
