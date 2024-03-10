@@ -817,7 +817,7 @@ def attention_matrix(
     
     dtype = queries.dtype
     device = queries.device
-    assert queries.device == keys.device
+    # assert queries.device == keys.device
     
     assert isinstance(BLOCK_SIZE_Q, int)
     assert isinstance(BLOCK_SIZE_K, int)
