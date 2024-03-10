@@ -54,7 +54,7 @@ class TrainConfig:
     method: str = 'timber'
     model: str = 'llama32k'
     warmup_steps: int = 20
-    l1_coeff: float = 0.0
+    sparsity_reg: float = 0.0
 
 
 class LabDataModule:
@@ -356,7 +356,7 @@ class Trainer(Seq2SeqTrainer):
             attention_mask=(inputs.ne(self.pad_token_id)).to(inputs.dtype),
             labels=target,
             output_hidden_states=not self.config.disable_kd,
-            output_attn_sparsity_loss=self.config.l1_coeff != 0,
+            output_attn_sparsity_loss=self.config.sparsity_reg != 0,
         )
         logits = output.logits
 
@@ -384,6 +384,14 @@ class Trainer(Seq2SeqTrainer):
         else:
             loss = loss_model
 
+        sparsity_loss = None
+        if self.config.sparsity_reg != 0:
+            sparsity_loss = sum(
+                layer_sparsity.mean()
+                for layer_sparsity in output.attn_sparsity_loss
+            ) / len(output.attn_sparsity_loss)
+            loss = loss + self.config.sparsity_reg * sparsity_loss
+
         log_dict = dict()
         log_dict["training/loss_model"] = loss_model.item()
         if not self.config.disable_kd:
@@ -391,6 +399,8 @@ class Trainer(Seq2SeqTrainer):
                 log_dict["training/loss_kd_hidden"] = loss_kd_hidden.item()
             if loss_kd_logits > 0:
                 log_dict["training/loss_kd_logits"] = loss_kd_logits.item()
+        if sparsity_loss is not None:
+            log_dict["training/sparsity_loss"] = sparsity_loss.item()
         log_dict["training/loss"] = loss.item()
         self.log(log_dict)
 
@@ -527,7 +537,7 @@ def run():
     parser.add_argument('--block_size_q', default=16, type=int)
     parser.add_argument('--block_size_k', default=2, type=int)
     parser.add_argument('--warmup_steps', default=None, type=int)
-    parser.add_argument('--l1', default=None, type=float)
+    parser.add_argument('--sparsity_reg', default=None, type=float)
 
     args = parser.parse_args()
 
@@ -562,8 +572,8 @@ def run():
         train_config.init_from_checkpoint = args.init_checkpoint
     if args.warmup_steps is not None:
         train_config.warmup_steps = args.warmup_steps
-    if args.l1 is not None:
-        train_config.l1_coeff = args.l1
+    if args.sparsity_reg is not None:
+        train_config.sparsity_reg = args.sparsity_reg
 
     main(train_config)
 

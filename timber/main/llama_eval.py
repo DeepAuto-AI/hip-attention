@@ -77,6 +77,7 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
         'qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
@@ -97,8 +98,8 @@ def load_model(args):
     # infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
-    if args.method == 'none':
-        ModelClass = transformers.LlamaForCausalLM
+    #if args.method == 'none':
+    #    ModelClass = transformers.LlamaForCausalLM
 
     model = ModelClass.from_pretrained(
         model_id,

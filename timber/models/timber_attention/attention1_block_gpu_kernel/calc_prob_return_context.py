@@ -610,7 +610,9 @@ def calc_prob_return_context(
     assert indices.ndim == 3
     assert ks.ndim == 2
     assert context.ndim == 3
-    
+
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(queries.device)
     _calc_prob_return_context_compute[grid](
         queries, *queries.stride(),
         keys, *keys.stride(),
@@ -665,5 +667,6 @@ def calc_prob_return_context(
         # num_warps=8,
         # num_stages=2,
     )
+    torch.cuda.set_device(orig_device)
     
     return context
