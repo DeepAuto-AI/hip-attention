@@ -46,8 +46,8 @@ def job_stream(args, model, tokenizer, device):
             continue
         
         if os.path.exists(input_text):
-            print('loaded', input_text)
-            with open(input_text, 'r') as f:
+            print('loading', input_text)
+            with open(input_text, 'r', encoding='utf8') as f:
                 input_text = f.read()
         
         inputs = tokenizer([input_text, ] * args.batch_size, return_tensors='pt').to(device)
