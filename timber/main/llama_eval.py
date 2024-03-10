@@ -56,7 +56,7 @@ def load_vllm_model(args: ArgsType):
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
         dtype='half',
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.8,
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
         trust_remote_code=True,
