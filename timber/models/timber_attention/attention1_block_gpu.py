@@ -1690,7 +1690,12 @@ def paged_timber_attention(
     
     # print('paged qkv cache shape', q.shape, paged_k.shape, paged_v.shape)
     
-    return timber_attention(
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_start'):
+    #     k.readonly_start()
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(v, 'readonly_start'):
+    #     v.readonly_start()
+    
+    out = timber_attention(
         q=q,
         k=paged_k,
         v=paged_v,
@@ -1705,6 +1710,13 @@ def paged_timber_attention(
         reduce_stride=reduce_stride,
         dense_queries_exp=0,
     )
+    
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_end'):
+    #     k.readonly_end()
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(v, 'readonly_end'):
+    #     v.readonly_end()
+    
+    return out
 
 def timber_attention(
     q: Tensor, 
