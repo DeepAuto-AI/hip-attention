@@ -74,6 +74,7 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -88,8 +89,7 @@ def load_model(args):
     # infer_dtype = torch.float32
     model = LlamaForCausalLM.from_pretrained(
         model_id,
-        config=config, 
-        load_in_4bit=True,
+        config=config,
         device_map={"" : device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,

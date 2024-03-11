@@ -15,7 +15,7 @@ class ArgsType:
     block_size_k: int = 2
     batch_size: int = 1
     k: int = 512
-    dense_queries: int = 2048
+    dense_queries: int = 0
     dense_layers: int = 3
 
 def eval_args(
