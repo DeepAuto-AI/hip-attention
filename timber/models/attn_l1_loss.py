@@ -15,6 +15,7 @@ def compute_attn_lp_loss_kernel(
         H: int, TDST: int, TSRC: int, HDIM: int,
         HDIM_MAX: tl.constexpr,
         KV_BLOCK_SIZE: tl.constexpr, Q_BLOCK_SIZE: tl.constexpr,
+        IS_CAUSAL: tl.constexpr,
         l, l_stride_n, l_stride_h, l_stride_t,
         m, m_stride_n, m_stride_h, m_stride_t,
         output, output_stride_n, output_stride_h, output_stride_t,
@@ -82,6 +83,12 @@ def compute_attn_lp_loss_kernel(
             other=-1e9
         )  # [q_blk, 1]
         attn_scores = tl.dot(q_chunk.to(tl.float16), k_chunk.to(tl.float16)).to(tl.float32)  # [q_blk, kv_blk]
+        if IS_CAUSAL:
+            attn_scores = tl.where(
+                (kv_begin + kv_idx)[None, :] > (q_begin + q_idx)[:, None],
+                -1e9,
+                attn_scores
+            )
         m_tilde = tl.max(attn_scores, axis=1)[:, None]  # [q_blk, 1]
         P_tilde = tl.exp(attn_scores - m_tilde)  # [q_blk, kv_blk]
         l_tilde = tl.sum(P_tilde, axis=1)[:, None]  # [q_blk, 1]
@@ -93,7 +100,7 @@ def compute_attn_lp_loss_kernel(
 
         loss_new = tl.exp(tl.log(l_new) * -p) * (
                 tl.exp(p * (tl.log(l_chunk) + m_chunk - m_new)) * output_chunk +
-                tl.exp(p * (m_tilde - m_new)) * tl.sum(tl.exp(tl.log(P_tilde) * p), axis=1)[:, None]
+                tl.exp(p * (m_tilde - m_new)) * tl.sum(tl.exp((attn_scores - m_tilde) * p), axis=1)[:, None]
         )  # [q_blk, 1]
         tl.store(
             output +
@@ -131,6 +138,7 @@ def compute_attn_lp_loss_kernel_backward(
         H: int, TDST: int, TSRC: int, HDIM: int,
         HDIM_MAX: tl.constexpr,
         KV_BLOCK_SIZE: tl.constexpr, Q_BLOCK_SIZE: tl.constexpr,
+        IS_CAUSAL: tl.constexpr,
         l, l_stride_n, l_stride_h, l_stride_t,
         m, m_stride_n, m_stride_h, m_stride_t,
         grad_q, grad_q_stride_n, grad_q_stride_h, grad_q_stride_t, grad_q_stride_hdim,
@@ -210,12 +218,17 @@ def compute_attn_lp_loss_kernel_backward(
         )  # [1, q_blk]
 
         attn_scores = tl.dot(k_chunk, q_chunk).to(tl.float32)  # [kv_blk, q_blk]
-        P = (1 / l_chunk) * tl.exp(attn_scores - m_chunk)  # [kv_blk, q_blk]
-        P = tl.maximum(P, 1e-6)
-        grad_P = grad_output_chunk * p * tl.exp(tl.log(P) * (p-1))  # [kv_blk, q_blk]
+        logP = attn_scores - m_chunk - tl.log(l_chunk)  # [kv_blk, q_blk]
+        grad_P = grad_output_chunk * p * tl.exp(logP * (p-1))  # [kv_blk, q_blk]
 
         D = grad_output_chunk * p * output_chunk  # [1, q_blk]
-        grad_S = P * (grad_P - D)  # [kv_blk, q_blk]
+        grad_S = tl.exp(logP) * (grad_P - D)  # [kv_blk, q_blk]
+        if IS_CAUSAL:
+            grad_S = tl.where(
+                (kv_begin + kv_idx)[:, None] > (q_begin + q_idx)[None, :],
+                0.0,
+                grad_S
+            )
 
         grad_q_new = tl.dot(tl.trans(grad_S), k_chunk).to(tl.float32)  # [q_blk, hd]
         tl.atomic_add(
@@ -249,8 +262,8 @@ class AttnLpLoss(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx,  # noqa
-                q, k, N, H, TDST, TSRC, HDIM, p,
-                KV_BLOCK_SIZE=4096, Q_BLOCK_SIZE=4096):
+                q, k, N, H, TDST, TSRC, HDIM, p, is_causal,
+                KV_BLOCK_SIZE, Q_BLOCK_SIZE):
         assert q.ndim == 4
         assert k.ndim == 4
         l = torch.full((N, H, TDST), 0.0, device=q.device)  # [bsz, num_heads, q_len]
@@ -266,6 +279,7 @@ class AttnLpLoss(torch.autograd.Function):
             H, TDST, TSRC, HDIM,
             triton.next_power_of_2(HDIM),
             KV_BLOCK_SIZE, Q_BLOCK_SIZE,
+            is_causal,
             l, *l.stride(),
             m, *m.stride(),
             result, *result.stride(),
@@ -273,7 +287,8 @@ class AttnLpLoss(torch.autograd.Function):
         torch.cuda.set_device(orig_device)
 
         ctx.save_for_backward(q, k, l, m, result)
-        ctx.N, ctx.H, ctx.TDST, ctx.TSRC, ctx.HDIM, ctx.p = N, H, TDST, TSRC, HDIM, p
+        ctx.N, ctx.H, ctx.TDST, ctx.TSRC, ctx.HDIM = N, H, TDST, TSRC, HDIM
+        ctx.p, ctx.is_causal = p, is_causal
         ctx.KV_BLOCK_SIZE, ctx.Q_BLOCK_SIZE = KV_BLOCK_SIZE, Q_BLOCK_SIZE
 
         result = result ** (1/p)
@@ -282,7 +297,8 @@ class AttnLpLoss(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # noqa
         q, k, l, m, result = ctx.saved_tensors
-        N, H, TDST, TSRC, HDIM, p = ctx.N, ctx.H, ctx.TDST, ctx.TSRC, ctx.HDIM, ctx.p
+        N, H, TDST, TSRC, HDIM = ctx.N, ctx.H, ctx.TDST, ctx.TSRC, ctx.HDIM
+        p, is_causal = ctx.p, ctx.is_causal
         KV_BLOCK_SIZE, Q_BLOCK_SIZE = ctx.KV_BLOCK_SIZE, ctx.Q_BLOCK_SIZE
 
         grad_output *= ((1/p) * result**(1/p - 1))
@@ -301,6 +317,7 @@ class AttnLpLoss(torch.autograd.Function):
             H, TDST, TSRC, HDIM,
             triton.next_power_of_2(HDIM),
             KV_BLOCK_SIZE, Q_BLOCK_SIZE,
+            is_causal,
             l, *l.stride(),
             m, *m.stride(),
             grad_q, *grad_q.stride(),
@@ -310,20 +327,29 @@ class AttnLpLoss(torch.autograd.Function):
 
         return (
             grad_q, grad_k,
-            None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             None, None
         )
 
 
-def compute_attn_lp_loss_triton(q, k, N, H, TDST, TSRC, HDIM, p,
+def compute_attn_lp_loss_triton(q, k, p, is_causal=True, do_average=True,
                                 KV_BLOCK_SIZE=64, Q_BLOCK_SIZE=64):
-    result = AttnLpLoss.apply(q, k, N, H, TDST, TSRC, HDIM, p, KV_BLOCK_SIZE, Q_BLOCK_SIZE)
-    result = result.mean(dim=-1)  # [bsz, num_heads]
+    assert q.ndim == 4 and k.ndim == 4
+    N, H, TDST, TSRC, HDIM = q.shape[0], q.shape[1], q.shape[2], k.shape[2], q.shape[3]
+    result = AttnLpLoss.apply(q, k, N, H, TDST, TSRC, HDIM, p, is_causal, KV_BLOCK_SIZE, Q_BLOCK_SIZE)
+    if do_average:
+        result = result.mean(dim=-1)  # [bsz, num_heads]
     return result
 
 
-def process_block(q_chunk, k_chunk, m_chunk, l_chunk, loss_chunk, p: float):
+def process_block(q_chunk, k_chunk, m_chunk, l_chunk, loss_chunk, p: float, is_causal: bool, offset: int):
     attn_scores = torch.einsum("bhqd,bhkd->bhqk", q_chunk, k_chunk)
+    if is_causal:
+        invalid_mask = torch.triu(
+            torch.ones(attn_scores.shape[-2:], device=q_chunk.device, dtype=torch.bool),
+            offset + 1
+        )
+        attn_scores = attn_scores.masked_fill(invalid_mask, -1e9)
     m_tilde = attn_scores.amax(dim=-1, keepdim=True)  # [*, q_blk, 1]
     P_tilde = torch.exp(attn_scores - m_tilde)  # [*, q_blk, kv_blk]
     l_tilde = P_tilde.sum(dim=-1, keepdim=True)  # [*, q_blk, 1]
@@ -335,12 +361,15 @@ def process_block(q_chunk, k_chunk, m_chunk, l_chunk, loss_chunk, p: float):
 
     loss_new = torch.exp(torch.log(l_new) * -p) * (
             torch.exp(p * (torch.log(l_chunk) + m_chunk - m_new)) * loss_chunk +
-            torch.exp(p * (m_tilde - m_new)) * torch.exp(torch.log(P_tilde) * p).sum(dim=-1, keepdim=True)
+            torch.exp(p * (m_tilde - m_new)) * torch.exp((attn_scores - m_tilde) * p).sum(dim=-1, keepdim=True)
     )
     return loss_new, m_new, l_new
 
 
-def compute_attn_lp_loss(q, k, N, H, TDST, TSRC, HDIM, p, KV_BLOCK_SIZE=4096, Q_BLOCK_SIZE=4096, use_checkpoint=True):
+def compute_attn_lp_loss(q, k, p, is_causal=True, do_average=True,
+                         KV_BLOCK_SIZE=4096, Q_BLOCK_SIZE=4096, use_checkpoint=True):
+    assert q.ndim == 4 and k.ndim == 4
+    N, H, TDST, TSRC, HDIM = q.shape[0], q.shape[1], q.shape[2], k.shape[2], q.shape[3]
     # q: shape [bsz, num_heads, q_len, head_dim]
     # k: shape [bsz, num_heads, kv_len, head_dim]
     m = torch.full((N, H, TDST), -1e9, device=q.device)  # [bsz, num_heads, q_len]
@@ -352,40 +381,50 @@ def compute_attn_lp_loss(q, k, N, H, TDST, TSRC, HDIM, p, KV_BLOCK_SIZE=4096, Q_
     l_chunks    = list(torch.split(l.unsqueeze(-1), Q_BLOCK_SIZE, dim=2))
     loss_chunks = list(torch.split(attn_sparsity_loss.unsqueeze(-1), Q_BLOCK_SIZE, dim=2))
 
-    for k_chunk in torch.split(k, KV_BLOCK_SIZE, dim=2):
+    for i, k_chunk in enumerate(torch.split(k, KV_BLOCK_SIZE, dim=2)):
         for j in range(len(q_chunks)):
+            offset = j * Q_BLOCK_SIZE - i * KV_BLOCK_SIZE
             if use_checkpoint:
                 loss_new, m_new, l_new = torch.utils.checkpoint.checkpoint(
-                    process_block, q_chunks[j], k_chunk, m_chunks[j], l_chunks[j], loss_chunks[j], p,
+                    process_block,
+                    q_chunks[j], k_chunk, m_chunks[j], l_chunks[j], loss_chunks[j],
+                    p, is_causal, offset,
                     use_reentrant=False
                 )
             else:
                 loss_new, m_new, l_new = process_block(
-                    q_chunks[j], k_chunk, m_chunks[j], l_chunks[j], loss_chunks[j], p
+                    q_chunks[j], k_chunk, m_chunks[j], l_chunks[j], loss_chunks[j],
+                    p, is_causal, offset,
                 )
             loss_chunks[j] = loss_new
             m_chunks[j] = m_new
             l_chunks[j] = l_new
 
     attn_sparsity_loss = torch.cat(loss_chunks, dim=2).squeeze(-1)**(1/p)
-    attn_sparsity_loss = attn_sparsity_loss.mean(dim=-1)  # [bsz, num_heads]
+    if do_average:
+        attn_sparsity_loss = attn_sparsity_loss.mean(dim=-1)  # [bsz, num_heads]
     return attn_sparsity_loss
 
 
-def compute_attn_lp_loss_orig(q, k, N, H, TDST, TSRC, HDIM, p):
+def compute_attn_lp_loss_orig(q, k, p, is_causal=True, do_average=True):
+    assert q.ndim == 4 and k.ndim == 4
     attn_scores = torch.einsum("bhqd,bhkd->bhqk", q, k)  # shape [bsz, num_heads, q_len, kv_len]
-    attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
-    attn_sparsity_loss = (attn_probs**p).sum(dim=-1)
+    if is_causal:
+        invalid_mask = torch.triu(torch.ones(attn_scores.shape[-2:], device=q.device, dtype=torch.bool), 1)
+        attn_scores = attn_scores.masked_fill(invalid_mask, -1e9)
+    attn_log_probs = torch.nn.functional.log_softmax(attn_scores, dim=-1)
+    attn_sparsity_loss = torch.exp(attn_log_probs * p).sum(dim=-1)
     attn_sparsity_loss = attn_sparsity_loss**(1/p)
-    attn_sparsity_loss = attn_sparsity_loss.mean(dim=-1)  # [bsz, num_heads]
+    if do_average:
+        attn_sparsity_loss = attn_sparsity_loss.mean(dim=-1)  # [bsz, num_heads]
     return attn_sparsity_loss
 
 
 def test_correctness():
-    torch.autograd.set_detect_anomaly(True)
+    #torch.autograd.set_detect_anomaly(True)
     N = 1
     H = 40
-    TDST, TSRC = 16000, 32000
+    TDST, TSRC = 64, 64
     HDIM = 64
     KV_BLOCK_SIZE, Q_BLOCK_SIZE = 64, 64
     p = 0.5
@@ -393,7 +432,9 @@ def test_correctness():
     k = torch.randn(N, H, TSRC, HDIM, device='cuda', requires_grad=True)
     do_backward = True
     do_compare = True
-    noise = torch.randn(N, H, device='cuda')
+    do_average = False
+    is_causal = False
+    noise = torch.randn(N, H, device='cuda') if do_average else torch.randn(N, H, TDST, device='cuda')
 
     for _ in range(3):
         torch.cuda.synchronize()
@@ -401,8 +442,10 @@ def test_correctness():
         if do_compare:
             torch.cuda.reset_peak_memory_stats()
             time_begin = time.time()
-            l1_loss_orig = compute_attn_lp_loss(q, k, N, H, TDST, TSRC, HDIM, p,
-                                                KV_BLOCK_SIZE=1024, Q_BLOCK_SIZE=1024)
+            l1_loss_orig = compute_attn_lp_loss(
+                q, k, p, is_causal=is_causal, do_average=do_average,
+                KV_BLOCK_SIZE=KV_BLOCK_SIZE,
+                Q_BLOCK_SIZE=Q_BLOCK_SIZE)
             if do_backward:
                 (l1_loss_orig * noise).sum().backward()
                 grad_q_orig = q.grad.detach()
@@ -417,7 +460,7 @@ def test_correctness():
         torch.cuda.reset_peak_memory_stats()
         time_begin = time.time()
         l1_loss = compute_attn_lp_loss_triton(
-            q, k, N, H, TDST, TSRC, HDIM, p,
+            q, k, p, is_causal=is_causal, do_average=do_average,
             KV_BLOCK_SIZE=KV_BLOCK_SIZE,
             Q_BLOCK_SIZE=Q_BLOCK_SIZE
         )

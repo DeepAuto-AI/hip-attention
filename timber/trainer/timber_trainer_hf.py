@@ -53,8 +53,9 @@ class TrainConfig:
     init_from_checkpoint: str = None
     method: str = 'timber'
     model: str = 'llama32k'
-    warmup_steps: int = 20
+    warmup_steps: int = 5
     sparsity_reg: float = 0.0
+    dense_layers: int = 0
 
 
 class LabDataModule:
@@ -224,6 +225,7 @@ def load_model(
             if train_config.dense_queries is None:
                 train_config.dense_queries = train_config.k
             m.tree_dense_queries = train_config.dense_queries
+            m.tree_dense_layers = list(range(train_config.dense_layers))
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
@@ -389,6 +391,7 @@ class Trainer(Seq2SeqTrainer):
             sparsity_loss = sum(
                 layer_sparsity.mean()
                 for layer_sparsity in output.attn_sparsity_loss
+                if layer_sparsity is not None
             ) / len(output.attn_sparsity_loss)
             loss = loss + self.config.sparsity_reg * sparsity_loss
 
@@ -538,6 +541,7 @@ def run():
     parser.add_argument('--block_size_k', default=2, type=int)
     parser.add_argument('--warmup_steps', default=None, type=int)
     parser.add_argument('--sparsity_reg', default=None, type=float)
+    parser.add_argument('--dense_layers', type=int, default=None)
 
     args = parser.parse_args()
 
@@ -574,6 +578,8 @@ def run():
         train_config.warmup_steps = args.warmup_steps
     if args.sparsity_reg is not None:
         train_config.sparsity_reg = args.sparsity_reg
+    if args.dense_layers is not None:
+        train_config.dense_layers = args.dense_layers
 
     main(train_config)
 

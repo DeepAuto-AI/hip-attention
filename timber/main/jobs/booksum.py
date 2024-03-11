@@ -132,7 +132,7 @@ def job_booksum(args, model, tokenizer, device):
     outputs = []
 
     out_dir = pathlib.Path(f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
-                           f"_bk{args.block_size_k}_k{args.k}_gl{args.gen_tokens}")
+                           f"_bk{args.block_size_k}_k{args.k}_gl{args.gen_tokens}_s{args.do_sample}")
     out_dir.mkdir(parents=True, exist_ok=True)
     pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
 
