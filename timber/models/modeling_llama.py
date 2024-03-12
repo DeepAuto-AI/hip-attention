@@ -676,6 +676,19 @@ class LlamaCustomAttention(LlamaAttention):
             nn.Linear(config.hidden_size // 4,  config.num_attention_heads)
         )
         
+        self.sampling_method = 'random'
+
+        ### ensemble
+        self.ensemble = False
+        self.ensemble_model_setting = "random_pruning"
+        self.ensemble_method = "final_attn"
+        self.ensemble_method_final = "all_agree"
+        self.ensemble_per_layer_n = 1
+        self.ensemble_per_attn_iter_n = 5
+        self.ensemble_model_n = 5
+        self.ensemble_particular_layer = None
+        self.sparsity_per_layer = None
+        
         from reformer_pytorch import LSHAttention
         self.tree_reformer = LSHAttention(
             dropout=config.attention_dropout,
@@ -850,14 +863,30 @@ class LlamaCustomAttention(LlamaAttention):
                     q_timber = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
                     with timer("layer.timber"):
                         try:
-                            attn_output_timber, _ = timber_attention(
+                            attn_output_timber, (indices, ks, probs_or_non, sparsity_per_layer_or_none) = timber_attention(
                                 q_timber,
                                 k[:, :LAST_DENSE_QUERIES, :],
                                 v[:, :LAST_DENSE_QUERIES, :],
                                 mask_k=self.tree_k,
                                 block_size_q=self.tree_block_size_q,
                                 block_size_k=self.tree_block_size_k,
+                                
+                                sampling_method = self.sampling_method,
+
+                                # ENSEMBLE
+                                ensemble = self.ensemble,
+                                ensemble_model_setting = self.ensemble_model_setting,
+                                ensemble_method = self.ensemble_method,
+                                ensemble_method_final = self.ensemble_method_final,
+                                ensemble_per_layer_n = self.ensemble_per_layer_n,
+                                ensemble_per_attn_iter_n = self.ensemble_per_attn_iter_n,
+                                ensemble_model_n = self.ensemble_model_n,
+                                ensemble_particular_layer = self.ensemble_particular_layer,
+
+                                layer_id = self.layer_idx,
                             )
+                            if sparsity_per_layer_or_none != None:
+                                self.sparsity_per_layer = sparsity_per_layer_or_none
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
                             torch.save({

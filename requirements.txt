@@ -25,7 +25,7 @@ lightning-utilities==0.9.0
 local-attention==1.8.4
 matplotlib==3.7.2
 matplotlib-inline==0.1.6
-mpi4py==3.1.4
+# mpi4py==3.1.4
 multidict==6.0.2
 nbclient==0.8.0
 nbconvert==7.10.0

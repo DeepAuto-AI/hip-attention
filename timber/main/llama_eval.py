@@ -70,6 +70,7 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b-chat' : 'meta-llama/Llama-2-13b-chat-hf',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -85,7 +86,7 @@ def load_model(args):
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config, 
-        load_in_4bit=True,
+        # load_in_4bit=True, # CHECK 
         device_map={"" : device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
@@ -106,6 +107,18 @@ def load_model(args):
             m.tree_block_size_k = args.block_size_k
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
+
+            m.sampling_method = args.sampling_method
+
+            ### ensemble # NOTE check: right place? -  working though
+            m.ensemble = args.ensemble
+            m.ensemble_model_setting = args.ensemble_model_setting
+            m.ensemble_method = args.ensemble_method
+            m.ensemble_method_final = args.ensemble_method_final
+            m.ensemble_per_layer_n = args.ensemble_per_layer_n
+            m.ensemble_per_attn_iter_n = args.ensemble_per_attn_iter_n
+            m.ensemble_model_n = args.ensemble_model_n
+            m.ensemble_particular_layer = args.ensemble_particular_layer
     
     if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(
@@ -160,7 +173,7 @@ def main():
     model, tokenizer, device = load_model(args)
 
     if args.job == 'ppl':
-        job_ppl(args, model, tokenizer, device)
+        job_ppl(args, model, tokenizer, device, args.visualize)
     elif args.job == 'stream':
         job_stream(args, model, tokenizer, device)
     elif args.job == 'mmlu':
@@ -169,6 +182,6 @@ def main():
         job_bench_single_layer(args, model, tokenizer, device)
     else:
         raise Exception()
-
+    
 if __name__ == '__main__':
     main()

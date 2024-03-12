@@ -114,6 +114,8 @@ def _masking_iteration_topk(
     stride_keys_vllm_head_size_x, 
     stride_keys_vllm_block_size, 
     stride_keys_vllm_x, 
+
+    MODEL_I
 ):
     """
     # need top_k, so compute scores
@@ -161,7 +163,7 @@ def _masking_iteration_topk(
                 idx_n * stride_tmask_n +\
                 idx_bdst * stride_tmask_bdst +\
                 (((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64) + grid_kstride * idx_kstride) * stride_tmask_k,
-            mask=mask_w & (_idx < dup_pixels_vec) & k_old_mask,
+            mask=mask_w & (_idx < dup_pixels_vec) & k_old_mask, # mask_w = w_old != w_new
             value=_value
         )
     tl.debug_barrier()
@@ -189,7 +191,7 @@ def _masking_iteration_topk(
             idx_n * stride_tmask_n +\
             idx_bdst * stride_tmask_bdst +\
             (num_pixels_range + grid_kstride * idx_kstride) * stride_tmask_k,
-        mask = mask_w & num_pixels_mask,
+        mask = mask_w & num_pixels_mask, # mask_w = w_old != w_new
         other = 0,
     )
     # NOTE: random key selection with in the block
@@ -213,7 +215,7 @@ def _masking_iteration_topk(
     idx_tsrc_block = idx_tsrc_block.to(tl.float32)
     if SAMPLING_METHOD == 'random':
         if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
-            idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+            idx_tsrc_block += tl.random.rand(idx_bdst + MODEL_I, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
     idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
     idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
     idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
@@ -551,6 +553,8 @@ def _masking_iteration_compute(
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     REDUCE_STRDIE: tl.constexpr,
     SAMPLING_METHOD: tl.constexpr,
+    ENSEMBLE_PER_ATTN_ITER_N: tl.constexpr,
+    MODEL_I: tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -619,6 +623,7 @@ def _masking_iteration_compute(
 
     # breakpoint()
     for idx_iteration in range(N_ITERATION):
+        # if N_ITERATION % ENSEMBLE_PER_ATTN_ITER_N ==0: TODO : do this once needed
         tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
         
@@ -828,6 +833,9 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+
+                    # ensemble
+                    MODEL_I
                 )
             else:
                 _masking_iteration_topk(
@@ -904,6 +912,9 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+
+                    # ensemble
+                    MODEL_I
                 )
         else:
             """
@@ -979,6 +990,8 @@ def masking_iteration(
     REDUCE_METHOD: str,
     REDUCE_STRIDE: int,
     SAMPLING_METHOD: str,
+    ENSEMBLE_PER_ATTN_ITER_N: int,
+    MODEL_I: int = 0,
     DEBUG: bool = False,
 ):  
     if DEBUG:
@@ -1173,6 +1186,8 @@ def masking_iteration(
         next_multiple_of(BLOCK_SIZE_K, 1),
         REDUCE_STRIDE,
         SAMPLING_METHOD,
+        ENSEMBLE_PER_ATTN_ITER_N,
+        MODEL_I
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
