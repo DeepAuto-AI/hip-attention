@@ -38,6 +38,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
         'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
+        'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
     }
     assert args.model in MODELS
     assert args.job in ['stream']
@@ -55,7 +56,7 @@ def load_vllm_model(args: ArgsType):
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
         dtype='half',
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.8,
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
         trust_remote_code=True,
@@ -73,6 +74,7 @@ def load_model(args):
     MODELS = {
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -87,8 +89,7 @@ def load_model(args):
     # infer_dtype = torch.float32
     model = LlamaForCausalLM.from_pretrained(
         model_id,
-        config=config, 
-        load_in_4bit=True,
+        config=config,
         device_map={"" : device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
@@ -109,6 +110,7 @@ def load_model(args):
             m.tree_block_size_k = args.block_size_k
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
+            m.tree_dense_layers = list(range(args.dense_layers))
     
     if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(

@@ -611,6 +611,14 @@ def calc_prob_return_context(
     assert ks.ndim == 2
     assert context.ndim == 3
     
+    # print(f'{queries.data_ptr():X}')
+    # print(f'{keys.data_ptr():X} {vllm_keys_strides}')
+    # print(f'{values.data_ptr():X} {vllm_values_strides}')
+    # print(f'{context.data_ptr():X}')
+    # print(f'{block_tables.data_ptr():X} {block_tables_strides}')
+    # print(f'{context_length.data_ptr():X} {sliding_window_mask_strides}')
+    # print(f'{sliding_window_mask.data_ptr():X} {sliding_window_mask_strides}')
+    
     _calc_prob_return_context_compute[grid](
         queries, *queries.stride(),
         keys, *keys.stride(),
