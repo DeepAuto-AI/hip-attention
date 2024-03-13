@@ -72,6 +72,8 @@ def load_model(args):
     
     device = 'cuda:0'
     MODELS = {
+        'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+        'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
