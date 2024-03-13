@@ -810,6 +810,8 @@ def attention_matrix(
     ROPE_COS=None,
     ROPE_SIN=None,
     POSITION_IDS=None,
+    SELF_EXTEND_SCALE=None,
+    SELF_EXTEND_WINDOW=None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -833,9 +835,10 @@ def attention_matrix(
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
-    if ROPE_METHOD in 'self_extend':
-        assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
-        # SPARQ = False
+    if ROPE_METHOD in ['self_extend']:
+        # assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
+        # SPARQ_HID = 16
+        SPARQ = False
     # SPARQ = True
     # SPARQ_HID = 128
     
@@ -903,6 +906,7 @@ def attention_matrix(
         if SPARQ:
             with timer('matrix.setup.sparq'):
                 q_scale = 1 / math.sqrt(HID)
+                queries_scores = queries
                 if ROPE_METHOD in ['self_extend']:
                     queries_scores, _ = apply_rotary_pos_emb(
                         queries / q_scale, 
@@ -973,6 +977,8 @@ def attention_matrix(
             ROPE_COS,
             ROPE_SIN,
             POSITION_IDS,
+            SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW,
             
             # input constant
             kv_repeat_interleave,
@@ -1035,6 +1041,8 @@ def attention_matrix(
                 ROPE_COS=ROPE_COS,
                 ROPE_SIN=ROPE_SIN,
                 POSITION_IDS=POSITION_IDS,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
             )
 
             return indices, ks, context, None
@@ -1816,6 +1824,9 @@ def timber_attention(
     rope_cos: Optional[Tensor] = None,
     rope_sin: Optional[Tensor] = None,
     position_ids: Optional[Tensor] = None,
+    
+    self_extend_scale: int = 8,
+    self_extend_window: int = 1024,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1900,6 +1911,9 @@ def timber_attention(
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     position_ids=position_ids,
+                    
+                    self_extend_scale=self_extend_scale,
+                    self_extend_window=self_extend_window,
                 )
                 contexts.append(sparse_context)
             
@@ -1959,6 +1973,9 @@ def timber_attention(
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
                 position_ids=position_ids,
+                
+                self_extend_scale=self_extend_scale,
+                self_extend_window=self_extend_window,
             )
             contexts.append(context)
             
@@ -2041,6 +2058,8 @@ def timber_attention(
                 ROPE_COS=rope_cos,
                 ROPE_SIN=rope_sin,
                 POSITION_IDS=position_ids,
+                SELF_EXTEND_SCALE=self_extend_scale,
+                SELF_EXTEND_WINDOW=self_extend_window,
             )
             
             if is_flash:
