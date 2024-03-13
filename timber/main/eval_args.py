@@ -38,6 +38,7 @@ def eval_args(
     parser.add_argument('--dense_queries', type=int, default=2048)
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--max_tokens', type=int, default=512)
+    parser.add_argument('--rope_method', type=str, default='none')
     args = parser.parse_args()
     print(args)
     return args

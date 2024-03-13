@@ -111,6 +111,7 @@ def load_model(args):
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
             m.tree_dense_layers = list(range(args.dense_layers))
+            m.tree_rope_method = args.rope_method
     
     if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(

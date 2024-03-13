@@ -468,11 +468,16 @@ def _masking_iteration_topk(
                 raise Exception()
             
             # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-            scores_micro = -tl.where(
-                mask_tsrc_neighbor[None, :],
-                tl.dot(vec_q, vec_k),
-                tl.dot(vec_q_grouped, vec_k),
-            )
+            if ROPE_METHOD == 'self_extend':
+                scores_micro = -tl.where(
+                    mask_tsrc_neighbor[None, :],
+                    tl.dot(vec_q, vec_k),
+                    tl.dot(vec_q_grouped, vec_k),
+                )
+            elif ROPE_METHOD == 'none':
+                scores_micro = -tl.dot(vec_q, vec_k)
+            else:
+                raise Exception()
             scores_partial += scores_micro.to(scores_partial.dtype)
         
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
@@ -605,17 +610,17 @@ def _masking_iteration_topk(
         )
     # tl.debug_barrier()
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config(kwargs={}, num_warps=16),
-#         triton.Config(kwargs={}, num_warps=8),
-#         triton.Config(kwargs={}, num_warps=4),
-#         triton.Config(kwargs={}, num_warps=2),
-#     ],
-#     key=['BLOCK_MASK_K'],
-#     warmup=2,
-#     rep=20,
-# )
+@triton.autotune(
+    configs=[
+        triton.Config(kwargs={}, num_warps=16),
+        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=4),
+        triton.Config(kwargs={}, num_warps=2),
+    ],
+    key=['BLOCK_MASK_K'],
+    warmup=2,
+    rep=20,
+)
 @triton.jit
 def _masking_iteration_compute(
     # input matrices
@@ -1302,7 +1307,7 @@ def masking_iteration(
         assert ROPE_COS.ndim == 2
         assert ROPE_SIN.ndim == 2
         assert POSITION_IDS.ndim == 2
-        assert POSITION_IDS.shape == (N, T_DST), POSITION_IDS.shape
+        assert POSITION_IDS.shape == (N, T_DST), f'{POSITION_IDS.shape} == {(N, T_DST)}, did you forget to repeat interleave?'
         rope_cos_stride = ROPE_COS.stride()
         rope_sin_stride = ROPE_SIN.stride()
         position_ids_stride = POSITION_IDS.stride()

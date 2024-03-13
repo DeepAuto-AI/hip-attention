@@ -839,14 +839,9 @@ def attention_matrix(
         # assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
         # SPARQ_HID = 16
         SPARQ = False
-    # SPARQ = True
-    # SPARQ_HID = 128
     
-    warnings.warn('sparq is enabled')
-    
-    # SPARQ = False
-    # SPARQ_HID = 16
-    # SPARQ = True
+    if SPARQ:
+        warnings.warn('sparq is enabled')
     
     dtype = queries.dtype
     device = queries.device
@@ -1820,7 +1815,7 @@ def timber_attention(
     
     dense_queries_exp: Optional[int] = None,
     
-    rope_method: str = 'none',
+    rope_method: Literal['none', 'self_extend'] = 'none',
     rope_cos: Optional[Tensor] = None,
     rope_sin: Optional[Tensor] = None,
     position_ids: Optional[Tensor] = None,
@@ -1832,7 +1827,8 @@ def timber_attention(
     
     if q.requires_grad:
         is_flash = False
-        
+    
+    assert rope_method in ['none', 'self_extend']
     if rope_method == 'self_extend':
         assert dense_queries_exp == 0
         assert rope_sin is not None

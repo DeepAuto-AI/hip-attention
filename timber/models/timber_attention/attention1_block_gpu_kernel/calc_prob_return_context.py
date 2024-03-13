@@ -170,11 +170,16 @@ def _calc_prob_return_context_acc_compute(
     else:
         raise Exception()
     
-    qk = tl.where(
-        mask_tsrc_neighbor[None, :],
-        tl.dot(queries, keys),
-        tl.dot(queries_grouped, keys),
-    ).to(tl.float32) * 1.44269504
+    if ROPE_METHOD == 'self_extend':
+        qk = tl.where(
+            mask_tsrc_neighbor[None, :],
+            tl.dot(queries, keys),
+            tl.dot(queries_grouped, keys),
+        ).to(tl.float32) * 1.44269504
+    elif ROPE_METHOD == 'none':
+        qk = tl.dot(queries, keys).to(tl.float32) * 1.44269504
+    else:
+        raise Exception()
     
     if IS_CAUSAL:
         qk += (
