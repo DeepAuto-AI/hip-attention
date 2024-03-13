@@ -27,6 +27,7 @@ def samples():
             '--stride', '4096',
             '--block_size_q', str(block_size_q),
             '--block_size_k', str(block_size_k),
+            '--dense_layers', str(4),
             '--k', str(k),
         ])
         with open(cache_path, 'r') as f:

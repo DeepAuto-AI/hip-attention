@@ -26,6 +26,8 @@ class PagedKeyCacheVllmCompat(VllmCompat):
         context_length: Tensor,
         max_context_length: int,
     ):
+        assert max_context_length > 0
+        
         self.key_cache = key_cache
         self.block_table = block_table
         self.context_length = context_length

@@ -38,7 +38,10 @@ def job_ppl(args, model, tokenizer, device):
             target_ids[:, :-trg_len] = -100
 
             with torch.no_grad():
-                outputs = model(input_ids, labels=target_ids)
+                outputs = model(
+                    input_ids,
+                    labels=target_ids,
+                )
                 neg_log_likelihood = outputs.loss
 
             nlls.append(neg_log_likelihood.cpu())

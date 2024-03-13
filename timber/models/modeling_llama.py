@@ -669,6 +669,8 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_using_context_avg = False # True
         self.tree_dense_queries = 0 #2048
         self.tree_last_dense_queries = None
+        self.tree_dense_layers = []
+        self.tree_high_k_layers = {}
 
         assert layer_idx is not None
         if layer_idx < 3:
@@ -745,8 +747,8 @@ class LlamaCustomAttention(LlamaAttention):
                     raise ValueError(
                         f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                     )
-
-            if self.attention_method == 'none':
+            
+            if self.attention_method == 'none' or (self.layer_idx in self.tree_dense_layers):
                 # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
                 # Reference: https://github.com/pytorch/pytorch/issues/112577.
                 if query_states.device.type == "cuda" and attention_mask is not None:
@@ -799,6 +801,10 @@ class LlamaCustomAttention(LlamaAttention):
                     attn_output = self.tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
                 attn_output = attn_output.to(q.dtype)                
             elif self.attention_method == 'timber':
+                mask_k = self.tree_k
+                if self.layer_idx in self.tree_high_k_layers:
+                    mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
+                
                 with timer("layer.timber.prepare"):
                     q = query_states / (query_states.shape[-1] ** 0.5)
                     k = key_states
@@ -812,7 +818,7 @@ class LlamaCustomAttention(LlamaAttention):
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
                     
-                TARGET_DENSE_QUERIES = self.tree_dense_queries
+                TARGET_DENSE_QUERIES = 0
                 current_query_index = TSRC - TDST
                 DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
                 LAST_DENSE_QUERIES = self.tree_last_dense_queries
@@ -858,9 +864,10 @@ class LlamaCustomAttention(LlamaAttention):
                                 q_timber,
                                 k[:, :LAST_DENSE_QUERIES, :],
                                 v[:, :LAST_DENSE_QUERIES, :],
-                                mask_k=self.tree_k,
+                                mask_k=mask_k,
                                 block_size_q=self.tree_block_size_q,
                                 block_size_k=self.tree_block_size_k,
+                                dense_queries_exp=self.tree_dense_queries,
                             )
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
@@ -868,7 +875,7 @@ class LlamaCustomAttention(LlamaAttention):
                                 'q': q_timber,
                                 'k': k[:, :LAST_DENSE_QUERIES, :],
                                 'v': v[:, :LAST_DENSE_QUERIES, :],
-                                'mask_k': self.tree_k,
+                                'mask_k': mask_k,
                                 'block_size_q': self.tree_block_size_q,
                                 'block_size_k': self.tree_block_size_k,
                             }, 'cache/timber/qkv.pth')
@@ -922,7 +929,7 @@ class LlamaCustomAttention(LlamaAttention):
                             # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
                             scale_avg = torch.sigmoid(
                                 self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1, -2).reshape(N*H, -1, 1)
-                            ) * 0.25 * torch.clamp(1.0 - (self.tree_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
+                            ) * 0.25 * torch.clamp(1.0 - (mask_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
                             # NOTE: 0.25 is just heuristic
                             # NOTE: 256 is top-k value
                             attn_output_timber = attn_output_timber * (1 - scale_avg) + context_avg * scale_avg
