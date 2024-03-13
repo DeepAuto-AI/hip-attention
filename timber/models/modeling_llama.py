@@ -670,7 +670,9 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_dense_queries = 2048
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
-        self.tree_high_k_layers = {}
+        self.tree_high_k_layers = {
+            # 0:4, 1:4, 2:4,
+        }
         self.tree_rope_method = 'none'
         
         self.tree_avgpool_scaler = nn.Sequential(
