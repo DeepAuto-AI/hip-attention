@@ -751,6 +751,26 @@ def debug_print(
     print('saved', path, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K, x.shape)
     plt.savefig(path, dpi=96, bbox_inches='tight')
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    q_embed = (q * cos) + (rotate_half(q) * sin) 
+    
+    if k is not None:
+        sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+        sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+    else:
+        k_embed = None
+    return q_embed, k_embed
+
 def attention_matrix(
     queries: Tensor, 
     keys: Tensor,
@@ -785,6 +805,11 @@ def attention_matrix(
     
     USING_SLIDING_WINDOW=True,
     SLIDING_WINDOW_SIZE=256,
+    
+    ROPE_METHOD='none',
+    ROPE_COS=None,
+    ROPE_SIN=None,
+    POSITION_IDS=None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -808,6 +833,11 @@ def attention_matrix(
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
+    if ROPE_METHOD in 'self_extend':
+        assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
+        # SPARQ = False
+    # SPARQ = True
+    # SPARQ_HID = 128
     
     warnings.warn('sparq is enabled')
     
@@ -872,7 +902,17 @@ def attention_matrix(
         sparq_indices_strides = (1, 1, 1)
         if SPARQ:
             with timer('matrix.setup.sparq'):
-                queries_scores = queries.abs()
+                q_scale = 1 / math.sqrt(HID)
+                if ROPE_METHOD in ['self_extend']:
+                    queries_scores, _ = apply_rotary_pos_emb(
+                        queries / q_scale, 
+                        None, 
+                        ROPE_COS, 
+                        ROPE_SIN, 
+                        POSITION_IDS
+                    )
+                    queries_scores *= q_scale
+                queries_scores = queries_scores.abs()
                 if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST:
                     queries_scores = F.pad(
                         queries_scores.unsqueeze(0), 
@@ -915,14 +955,25 @@ def attention_matrix(
         masking_iteration(
             # input matrices
             queries, keys, attention_mask,
+            
             # input metrices (blocked) 
             mask, tmask, sparq_indices, sparq_indices_strides,
+            
             # temp vectors (blocked)
             ws, ks, tsrcs, 
+            
             # operator variables
             scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
+            
             # iteration controls
             i_iteration, n_iteration,
+            
+            # rope config
+            ROPE_METHOD,
+            ROPE_COS,
+            ROPE_SIN,
+            POSITION_IDS,
+            
             # input constant
             kv_repeat_interleave,
             N,
@@ -934,12 +985,15 @@ def attention_matrix(
             SPARQ, 
             SPARQ_HID, 
             max(0, triton.cdiv(n_completed, BLOCK_SIZE_Q) - (triton.cdiv(T_SRC, BLOCK_SIZE_Q) - triton.cdiv(T_DST, BLOCK_SIZE_Q))),
+            
             # kernel constant
             BLOCK_SIZE_Q,
             BLOCK_SIZE_K,
             REDUCE_METHOD,
             REDUCE_STRIDE,
+            
             SAMPLING_METHOD,
+            
             DEBUG,
         )
         if DEBUG:
@@ -955,6 +1009,7 @@ def attention_matrix(
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score" if not IS_FLASH else "flash_atten"):
         if not IS_FLASH:
+            assert ROPE_METHOD in ['none']
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
@@ -965,8 +1020,10 @@ def attention_matrix(
             )
             assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
         else:
+            assert ROPE_METHOD in ['self_extend', 'none']
             context = calc_prob_return_context(
-                queries=queries, keys=keys, values=values, attention_mask=attention_mask,
+                queries=queries, keys=keys, values=values, 
+                attention_mask=attention_mask,
                 indices=indices, ks=ks,
                 KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
@@ -974,6 +1031,10 @@ def attention_matrix(
                 IS_CAUSAL=is_causal,
                 USING_SLIDING_WINDOW=USING_SLIDING_WINDOW,
                 SLIDING_WINDOW_SIZE=SLIDING_WINDOW_SIZE,
+                ROPE_METHOD=ROPE_METHOD,
+                ROPE_COS=ROPE_COS,
+                ROPE_SIN=ROPE_SIN,
+                POSITION_IDS=POSITION_IDS,
             )
 
             return indices, ks, context, None
@@ -1733,8 +1794,8 @@ def timber_attention(
     scale_up: float = 2,
     is_causal: bool = True,
     
-    block_size_q: int = 8,
-    block_size_k: int = 1,
+    block_size_q: int = 32,
+    block_size_k: int = 2,
     reduce_method: str = 'max',
     reduce_stride: int = 2,
     
@@ -1750,11 +1811,22 @@ def timber_attention(
     sliding_window_size: int = 128,
     
     dense_queries_exp: Optional[int] = None,
+    
+    rope_method: str = 'none',
+    rope_cos: Optional[Tensor] = None,
+    rope_sin: Optional[Tensor] = None,
+    position_ids: Optional[Tensor] = None,
 ):
     assert sampling_method in ['random', 'first']
     
     if q.requires_grad:
         is_flash = False
+        
+    if rope_method == 'self_extend':
+        assert dense_queries_exp == 0
+        assert rope_sin is not None
+        assert rope_cos is not None
+        assert position_ids is not None
     
     is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
     if is_prompt:
@@ -1823,6 +1895,11 @@ def timber_attention(
                     sliding_window_size=sliding_window_size,
                     
                     dense_queries_exp=dense_queries_exp,
+                    
+                    rope_method=rope_method,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    position_ids=position_ids,
                 )
                 contexts.append(sparse_context)
             
@@ -1850,23 +1927,38 @@ def timber_attention(
                 attention_mask_chunk = None
             
             context, _ = timber_attention(
-                q_chunk, k_chunk, v_chunk, 
+                q_chunk, 
+                k_chunk, 
+                v_chunk, 
                 attention_mask=attention_mask_chunk,
+                
                 w_start=w_start,
                 n_patches=n_patches,
                 mask_k=mask_k,
                 scale_up=scale_up,
+                
                 is_causal=is_causal,
+                
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
+                
                 reduce_method=reduce_method,
                 reduce_stride=reduce_stride,
+                
                 is_flash=is_flash,
                 enable_sparq=enable_sparq,
+                
                 sampling_method=sampling_method,
+                
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
+                
                 dense_queries_exp=dense_queries_exp,
+                
+                rope_method=rope_method,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                position_ids=position_ids,
             )
             contexts.append(context)
             
@@ -1944,12 +2036,18 @@ def timber_attention(
                 
                 USING_SLIDING_WINDOW=using_sliding_window,
                 SLIDING_WINDOW_SIZE=sliding_window_size,
+                
+                ROPE_METHOD=rope_method,
+                ROPE_COS=rope_cos,
+                ROPE_SIN=rope_sin,
+                POSITION_IDS=position_ids,
             )
             
             if is_flash:
                 return probs_or_context, (indices, ks, None)
             else:
                 probs = probs_or_context
+                assert rope_method in ['none'] # self_extend is not supported
             
             # assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
         

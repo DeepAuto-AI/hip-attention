@@ -105,6 +105,7 @@ def _masking_iteration_topk(
     BLOCK_TMASK_K,
     BLOCK_HID, 
     
+    # vllm compat
     VLLM_NUM_KV_HEADS, 
     VLLM_BLOCK_SIZE,
     VLLM_X, 
@@ -114,6 +115,12 @@ def _masking_iteration_topk(
     stride_keys_vllm_head_size_x, 
     stride_keys_vllm_block_size, 
     stride_keys_vllm_x, 
+    
+    # rope support
+    ROPE_METHOD,
+    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
 ):
     """
     # need top_k, so compute scores
@@ -245,27 +252,77 @@ def _masking_iteration_topk(
             )
         else:
             idx_hid = (tl.arange(0, BLOCK_HID) + pid_hid * BLOCK_HID).to(tl.int64)
-            mask_hid = mask_w & (idx_hid < hidden_size)
-        # mask_hid = idx_hid < hidden_size
-        
         # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
         mask_vec_q = (
-            mask_hid[None, :] &
-            mask_tdst[:, None] &
-            mask_block_q[:, None] &
-            mask_strided_block_q[:, None] &
+            mask_tdst &
+            mask_block_q &
+            mask_strided_block_q &
             True
         )
         if ATTEN_MASK is not None:
-            mask_vec_q = mask_vec_q & query_mask[:, None]
+            mask_vec_q = mask_vec_q & query_mask
+        mask_hid = mask_w & (idx_hid < HID)
         vec_q = tl.load(
             QUERIES +\
                 idx_n * stride_queries_n +\
                 idx_tdst[:, None] * stride_queries_tdst +\
                 idx_hid[None, :] * stride_queries_hid,
-            mask = mask_w & mask_vec_q,
+            mask = mask_w & mask_vec_q[:, None] & mask_hid[None, :],
             other = 0,
         )
+        
+        # apply RoPE
+        if ROPE_METHOD == 'none':
+            pass
+        elif ROPE_METHOD == 'self_extend':
+            assert ROPE_SIN is not None
+            assert ROPE_COS is not None
+            assert POSITION_IDS is not None
+            
+            idx_hid_rot = (idx_hid + HID // 2) % HID
+            mask_hid_rot = mask_w & mask_hid
+            vec_q_rot = tl.load(
+                QUERIES +\
+                    idx_n * stride_queries_n +\
+                    idx_tdst[:, None] * stride_queries_tdst +\
+                    idx_hid_rot[None, :] * stride_queries_hid,
+                mask = mask_w & mask_vec_q[:, None] & mask_hid_rot[None, :],
+                other = 0,
+            )
+            vec_q_rot = tl.where(idx_hid[None, :] < (HID // 2), -vec_q_rot, vec_q_rot)
+            
+            # vec_q += vec_q_rot
+            
+            if POSITION_IDS is not None:
+                position_ids = tl.load(
+                    POSITION_IDS +\
+                        idx_n * stride_position_ids_n +\
+                        idx_tdst * stride_position_ids_tdst,
+                    mask = mask_w & mask_vec_q,
+                    other = 0,
+                ).to(tl.int64)
+            else:
+                position_ids = idx_tdst + T_SRC - T_DST
+            
+            cos_q = tl.load(
+                ROPE_COS +\
+                    position_ids[:, None] * stride_rope_cos_idx +\
+                    idx_hid[None, :] * stride_rope_cos_hid,
+                mask=mask_w & mask_vec_q[:, None] & mask_hid[None, :],
+                other=0,
+            )
+            sin_q = tl.load(
+                ROPE_SIN +\
+                    position_ids[:, None] * stride_rope_sin_idx +\
+                    idx_hid[None, :] * stride_rope_sin_hid,
+                mask=mask_w & mask_vec_q[:, None] & mask_hid[None, :],
+                other=0,
+            )
+            
+            q_scale = 1.0 / tl.sqrt(HID.to(tl.float32))
+            vec_q = (((vec_q.to(tl.float32) / q_scale * cos_q) + (vec_q_rot.to(tl.float32) / q_scale * sin_q)) * q_scale).to(vec_q.dtype)
+        else:
+            raise Exception()
     
     for _idx_block_k in range(0, BLOCK_SIZE_K):
         scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
@@ -309,6 +366,8 @@ def _masking_iteration_topk(
             
             # [BLOCK_SIZE_PADDED: tdst, BLOCK_HID: hid]
             if need_reload_vec_q:
+                assert ROPE_METHOD == 'none'
+                
                 mask_vec_q = (
                     mask_hid[None, :] &
                     mask_tdst[:, None] &
@@ -329,15 +388,15 @@ def _masking_iteration_topk(
             
             # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
             vec_k_mask = (
-                num_pixels_mask[None, :] &
-                mask_hid[:, None] &
-                mask_tsrc[None, :] &
+                num_pixels_mask &
+                # mask_hid[:, None] &
+                mask_tsrc &
                 # key_mask[None, :] &
                 True
             )
             if CONTEXT_LENGTH is not None:
                 vec_k_mask &= (
-                    (idx_tsrc < context_length)[None, :]
+                    (idx_tsrc < context_length)
                 )
             if KEY_CACHE_METHOD == 'cont':
                 # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
@@ -346,9 +405,47 @@ def _masking_iteration_topk(
                         (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
                         idx_tsrc[None, :] * stride_keys_tsrc + \
                         idx_hid[:, None] * stride_keys_hid,
-                    mask = mask_w & vec_k_mask,
+                    mask = mask_w & vec_k_mask[None, :] & mask_hid[:, None],
                     other = 0,
                 )
+                
+                if ROPE_METHOD == 'none':
+                    pass
+                elif ROPE_METHOD == 'self_extend':
+                    assert ROPE_SIN is not None
+                    assert ROPE_COS is not None
+                    assert POSITION_IDS is not None
+                    
+                    idx_hid_rot = (idx_hid + HID // 2) % HID
+                    mask_hid_rot = mask_w & (idx_hid_rot < HID) & mask_hid
+                    vec_k_rot = tl.load(
+                        KEYS +\
+                            (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
+                            idx_tsrc[None, :] * stride_keys_tsrc +\
+                            idx_hid_rot[:, None] * stride_keys_hid,
+                        mask = mask_w & vec_k_mask[None, :] & mask_hid_rot[:, None],
+                        other = 0,
+                    )
+                    vec_k_rot = tl.where(idx_hid[:, None] < HID // 2, -vec_k_rot, vec_k_rot)
+                    
+                    cos_k = tl.load(
+                        ROPE_COS +\
+                            idx_tsrc[None, :] * stride_rope_cos_idx +\
+                            idx_hid[:, None] * stride_rope_cos_hid,
+                        mask=mask_w & vec_k_mask[None, :] & mask_hid[:, None],
+                        other=0,
+                    )
+                    sin_k = tl.load(
+                        ROPE_SIN +\
+                            idx_tsrc[None, :] * stride_rope_sin_idx +\
+                            idx_hid[:, None] * stride_rope_sin_hid,
+                        mask=mask_w & vec_k_mask[None, :] & mask_hid[:, None],
+                        other=0,
+                    )
+                    
+                    vec_k = ((vec_k.to(tl.float32) * cos_k) + (vec_k_rot.to(tl.float32) * sin_k)).to(vec_k.dtype)
+                else:
+                    raise Exception()
             elif KEY_CACHE_METHOD == 'vllm':
                 """
                 idx_block = block_tables[idx_batch, idx_tsrc // block_size]
@@ -373,15 +470,23 @@ def _masking_iteration_topk(
                         (idx_hid[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
                         offset_block[None, :] * stride_keys_vllm_block_size +\
                         (idx_hid[:, None] % VLLM_X) * stride_keys_vllm_x,
-                    mask = mask_w & vec_k_mask,
+                    mask = mask_w & vec_k_mask[None, :] & mask_hid[:, None],
                     other = 0,
                 )
+                
+                if vec_k.dtype == tl.uint8:
+                    vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
+                
+                if ROPE_METHOD == 'none':
+                    pass
+                elif ROPE_METHOD == 'self_extend':
+                    raise Exception()
+                else:
+                    raise Exception()
             else:
                 raise Exception()
             
             # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
-            if vec_k.dtype == tl.uint8:
-                vec_k = vec_k.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
             scores_micro = -tl.dot(vec_q, vec_k)
             scores_partial += scores_micro.to(scores_partial.dtype)
         
@@ -515,17 +620,17 @@ def _masking_iteration_topk(
         )
     # tl.debug_barrier()
 
-@triton.autotune(
-    configs=[
-        triton.Config(kwargs={}, num_warps=16),
-        triton.Config(kwargs={}, num_warps=8),
-        triton.Config(kwargs={}, num_warps=4),
-        triton.Config(kwargs={}, num_warps=2),
-    ],
-    key=['BLOCK_MASK_K'],
-    warmup=2,
-    rep=20,
-)
+# @triton.autotune(
+#     configs=[
+#         triton.Config(kwargs={}, num_warps=16),
+#         triton.Config(kwargs={}, num_warps=8),
+#         triton.Config(kwargs={}, num_warps=4),
+#         triton.Config(kwargs={}, num_warps=2),
+#     ],
+#     key=['BLOCK_MASK_K'],
+#     warmup=2,
+#     rep=20,
+# )
 @triton.jit
 def _masking_iteration_compute(
     # input matrices
@@ -584,6 +689,12 @@ def _masking_iteration_compute(
     
     CONTEXT_LENGTH,
     stride_context_length_num_seqs,
+    
+    # rope methods
+    ROPE_METHOD: tl.constexpr,
+    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
     
     # block constant
     USING_SCORE_CACHE: tl.constexpr,
@@ -856,6 +967,11 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+                    
+                    ROPE_METHOD,
+                    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+                    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+                    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
                 )
             else:
                 # otherwise
@@ -935,6 +1051,11 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+                    
+                    ROPE_METHOD,
+                    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+                    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+                    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
                 )
         else:
             """
@@ -985,14 +1106,25 @@ def _masking_iteration_compute(
 def masking_iteration(
     # input matrices
     queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], attention_mask: Tensor,
+    
     # input metrices (blocked) 
     mask: Tensor, t_mask: Tensor, sparq_indices, sparq_indices_strides,
+    
     # temp vectors (blocked)
     ws: Tensor, ks: Tensor, t_srcs: Tensor, 
+    
     # operator variables
     scale_up: float, n_patches: int, mask_k: int, is_causal: bool,
+    
     # iteration controls
     i_iteration: int, n_iteration: int,
+    
+    # rope_config
+    ROPE_METHOD: str,
+    ROPE_COS: Optional[Tensor],
+    ROPE_SIN: Optional[Tensor],
+    POSITION_IDS: Optional[Tensor],
+    
     # input constant
     KV_REPEAT_INTERLEAVE: int,
     N: int, 
@@ -1004,6 +1136,7 @@ def masking_iteration(
     SPARQ: bool, 
     SPARQ_HID: int,
     N_COMPLETED: int,
+    
     # kernel constant
     BLOCK_SIZE_Q: int, 
     BLOCK_SIZE_K: int, 
@@ -1125,6 +1258,22 @@ def masking_iteration(
     else:
         scores = None
     
+    assert ROPE_METHOD in ['none', 'self_extend']
+    if ROPE_COS is not None:
+        assert ROPE_SIN is not None
+        assert POSITION_IDS is not None
+        assert ROPE_COS.ndim == 2
+        assert ROPE_SIN.ndim == 2
+        assert POSITION_IDS.ndim == 2
+        assert POSITION_IDS.shape == (N, T_DST), POSITION_IDS.shape
+        rope_cos_stride = ROPE_COS.stride()
+        rope_sin_stride = ROPE_SIN.stride()
+        position_ids_stride = POSITION_IDS.stride()
+    else:
+        rope_cos_stride = (0, 0)
+        rope_sin_stride = (0, 0)
+        position_ids_stride = (0, 0)
+    
     grid = (GRID_KSTRIDE, B_DST - N_COMPLETED, N)
     
     # HID cannot be chunked if use reduce
@@ -1188,6 +1337,12 @@ def masking_iteration(
         
         context_length, *context_length_stride,
         
+        # rope methods
+        ROPE_METHOD,
+        ROPE_COS, *rope_cos_stride,
+        ROPE_SIN, *rope_sin_stride,
+        POSITION_IDS, *position_ids_stride,
+        
         # block constant
         USING_SCORE_CACHE,
         KEY_CACHE_METHOD,
@@ -1208,6 +1363,6 @@ def masking_iteration(
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
-        # num_stages=2,
+        # num_stages=1,
         # enable_warp_specialization=False,
     )

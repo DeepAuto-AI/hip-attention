@@ -34,6 +34,7 @@ def _calc_prob_return_context_acc_compute(
     IS_CAUSAL,
     TDST,
     TSRC,
+    HID,
     
     CACHE_METHOD,
     
@@ -55,12 +56,27 @@ def _calc_prob_return_context_acc_compute(
     BLOCK_TABLES,
     stride_block_tables_num_seqs,
     stride_block_tables_max_num_blocks_per_seq,
+    
+    ROPE_METHOD,
+    
+    ROPE_COS,
+    stride_rope_cos_idx, 
+    stride_rope_cos_hid,
+    
+    ROPE_SIN,
+    stride_rope_sin_idx, 
+    stride_rope_sin_hid,
+    
+    POSITION_IDS,
+    stride_position_ids_n,
+    stride_position_ids_tdst,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
     # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
 
     if CACHE_METHOD == 'cont':
+        assert ROPE_METHOD in ['none', 'self_extend']
         keys = tl.load(
             K +\
                 (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
@@ -69,7 +85,46 @@ def _calc_prob_return_context_acc_compute(
             mask = mask_tsrc[None, :] & mask_hid[:, None],
             other = 0,
         )
+        
+        if ROPE_METHOD == 'none':
+            pass
+        elif ROPE_METHOD == 'self_extend':
+            assert ROPE_SIN is not None
+            assert ROPE_COS is not None
+            assert POSITION_IDS is not None
+            
+            idx_hid_rot = (idx_hid + HID // 2) % HID
+            mask_hid_rot = (idx_hid_rot < HID) & mask_hid
+            keys_rot = tl.load(
+                K +\
+                    (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
+                    idx_tsrc[None, :] * stride_k_tsrc +\
+                    idx_hid_rot[:, None] * stride_k_hid,
+                mask = mask_tsrc[None, :] & mask_hid_rot[:, None],
+                other = 0,
+            )
+            keys_rot = tl.where(idx_hid[:, None] < HID // 2, -keys_rot, keys_rot)
+            
+            cos_k = tl.load(
+                ROPE_COS +\
+                    idx_tsrc[None, :] * stride_rope_cos_idx +\
+                    idx_hid[:, None] * stride_rope_cos_hid,
+                mask=mask_tsrc[None, :] & mask_hid[:, None],
+                other=0,
+            )
+            sin_k = tl.load(
+                ROPE_SIN +\
+                    idx_tsrc[None, :] * stride_rope_sin_idx +\
+                    idx_hid[:, None] * stride_rope_sin_hid,
+                mask=mask_tsrc[None, :] & mask_hid[:, None],
+                other=0,
+            )
+            
+            keys = ((keys.to(tl.float32) * cos_k) + (keys_rot.to(tl.float32) * sin_k)).to(keys.dtype)
+        else:
+            raise Exception()
     elif CACHE_METHOD == 'vllm':
+        assert ROPE_METHOD == 'none'
         """
         idx_block = block_tables[idx_batch, idx_tsrc // block_size]
         offset_block = idx_tsrc - ((idx_tsrc // block_size) * block_size)
@@ -261,6 +316,12 @@ def _calc_prob_return_context_compute(
     stride_sliding_window_mask_bdst,
     stride_sliding_window_mask_tsrc,
     
+    # rope methods
+    ROPE_METHOD: tl.constexpr,
+    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
+    
     # block constant
     CACHE_METHOD: tl.constexpr,
     BLOCK_SIZE_Q,
@@ -324,6 +385,55 @@ def _calc_prob_return_context_compute(
         mask = mask_tdst[:, None] & mask_hid[None, :],
         other = 0
     )
+    if ROPE_METHOD == 'none':
+        pass
+    elif ROPE_METHOD == 'self_extend':
+        assert ROPE_SIN is not None
+        assert ROPE_COS is not None
+        assert POSITION_IDS is not None
+        
+        idx_hid_rot = (idx_hid + HID // 2) % HID
+        mask_hid_rot = (idx_hid_rot < HID) & mask_hid
+        queries_rot = tl.load(
+            Q +\
+                idx_n * stride_q_n +\
+                idx_tdst[:, None] * stride_q_tdst +\
+                idx_hid_rot[None, :] * stride_q_hid,
+            mask = mask_tdst[:, None] & mask_hid_rot[None, :],
+            other = 0,
+        )
+        queries_rot = tl.where(idx_hid[None, :] < (HID // 2), -queries_rot, queries_rot)
+        
+        if POSITION_IDS is not None:
+            position_ids = tl.load(
+                POSITION_IDS +\
+                    idx_n * stride_position_ids_n +\
+                    idx_tdst * stride_position_ids_tdst,
+                mask = mask_tdst,
+                other = 0,
+            ).to(tl.int64)
+        else:
+            position_ids = idx_tdst + TSRC - TDST
+        
+        cos_q = tl.load(
+            ROPE_COS +\
+                position_ids[:, None] * stride_rope_cos_idx +\
+                idx_hid[None, :] * stride_rope_cos_hid,
+            mask=mask_tdst[:, None] & mask_hid[None, :],
+            other=0,
+        )
+        sin_q = tl.load(
+            ROPE_SIN +\
+                position_ids[:, None] * stride_rope_sin_idx +\
+                idx_hid[None, :] * stride_rope_sin_hid,
+            mask=mask_tdst[:, None] & mask_hid[None, :],
+            other=0,
+        )
+        
+        q_scale = 1.0 / tl.sqrt(HID * 1.0)
+        queries = (((queries.to(tl.float32) / q_scale * cos_q) + (queries_rot.to(tl.float32) / q_scale * sin_q)) * q_scale).to(queries.dtype)
+    else:
+        raise Exception()
     
     # perform main flash attention
     for idx_bbk in range(tl.cdiv(ks, BLOCK_BK)):
@@ -386,6 +496,7 @@ def _calc_prob_return_context_compute(
             IS_CAUSAL,
             TDST,
             TSRC,
+            HID,
             
             CACHE_METHOD,
             
@@ -407,6 +518,18 @@ def _calc_prob_return_context_compute(
             BLOCK_TABLES,
             stride_block_tables_num_seqs,
             stride_block_tables_max_num_blocks_per_seq,
+            
+            # rope methods
+            ROPE_METHOD,
+            ROPE_COS, 
+            stride_rope_cos_idx, 
+            stride_rope_cos_hid,
+            ROPE_SIN, 
+            stride_rope_sin_idx, 
+            stride_rope_sin_hid,
+            POSITION_IDS, 
+            stride_position_ids_n, 
+            stride_position_ids_tdst,
         )
     
     # perform longformer flash attention
@@ -449,6 +572,7 @@ def _calc_prob_return_context_compute(
                 IS_CAUSAL,
                 TDST,
                 TSRC,
+                HID,
                 
                 CACHE_METHOD,
                 
@@ -470,6 +594,20 @@ def _calc_prob_return_context_compute(
                 BLOCK_TABLES,
                 stride_block_tables_num_seqs,
                 stride_block_tables_max_num_blocks_per_seq,
+                
+                ROPE_METHOD,
+    
+                ROPE_COS,
+                stride_rope_cos_idx, 
+                stride_rope_cos_hid,
+                
+                ROPE_SIN,
+                stride_rope_sin_idx, 
+                stride_rope_sin_hid,
+                
+                POSITION_IDS,
+                stride_position_ids_n,
+                stride_position_ids_tdst,
             )
     
     # epilogue
@@ -500,6 +638,10 @@ def calc_prob_return_context(
     IS_CAUSAL: bool,
     USING_SLIDING_WINDOW: bool,
     SLIDING_WINDOW_SIZE: int,
+    ROPE_METHOD: str,
+    ROPE_COS: Optional[Tensor],
+    ROPE_SIN: Optional[Tensor],
+    POSITION_IDS: Optional[Tensor],
 ):
     """
     implement flash attention 1, not 2.
@@ -599,6 +741,22 @@ def calc_prob_return_context(
         sliding_window_mask_strides = (0, 0, 0)
     assert len(sliding_window_mask_strides) == 3
     
+    assert ROPE_METHOD in ['none', 'self_extend']
+    if ROPE_COS is not None:
+        assert ROPE_SIN is not None
+        assert POSITION_IDS is not None
+        assert ROPE_COS.ndim == 2
+        assert ROPE_SIN.ndim == 2
+        assert POSITION_IDS.ndim == 2
+        assert POSITION_IDS.shape == (N, TDST), POSITION_IDS.shape
+        rope_cos_stride = ROPE_COS.stride()
+        rope_sin_stride = ROPE_SIN.stride()
+        position_ids_stride = POSITION_IDS.stride()
+    else:
+        rope_cos_stride = (0, 0)
+        rope_sin_stride = (0, 0)
+        position_ids_stride = (0, 0)
+    
     # grid = (N, BDST, )
     grid = (N * BDST, )
     
@@ -661,6 +819,12 @@ def calc_prob_return_context(
         SLIDING_WINDOW_SIZE,
         sliding_window_mask,
         *sliding_window_mask_strides,
+        
+        #rope support
+        ROPE_METHOD,
+        ROPE_COS, *rope_cos_stride,
+        ROPE_SIN, *rope_sin_stride,
+        POSITION_IDS, *position_ids_stride,
         
         CACHE_METHOD,
         BLOCK_SIZE_Q,
