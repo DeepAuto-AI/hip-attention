@@ -50,8 +50,8 @@ def load_vllm_model(args: ArgsType):
     # seq_len = 10600
     model = LLM(
         model_id,
-        max_context_len_to_capture=seq_len,
         max_num_seqs=args.batch_size,
+        max_context_len_to_capture=seq_len,
         max_model_len=seq_len,
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',

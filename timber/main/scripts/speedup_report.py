@@ -154,7 +154,7 @@ def plot_ppl(query_size=1):
     for idx in range(len(idxs_front)):
         plt.annotate(
             f'k:{entries[idxs_front[idx]]["k"]}, bq:{entries[idxs_front[idx]]["block_size_q"]}, bk:{entries[idxs_front[idx]]["block_size_k"]}', 
-            (xs_front[idx], ys_front[idx] + 0.2),
+            (xs_front[idx], ys_front[idx] + 0.01),
             horizontalalignment='center',
             verticalalignment='bottom',
             fontsize=9,
@@ -164,7 +164,7 @@ def plot_ppl(query_size=1):
     baseline_ppl = 4.682
     plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=1)
     plt.axvline(1.0, color='#555', linestyle='--', linewidth=1)
-    plt.yscale('log', base=2)
+    # plt.yscale('log', base=2)
     # plt.xscale('log', base=2)
     
     plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight')
@@ -172,7 +172,7 @@ def plot_ppl(query_size=1):
     print('saved', f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png')
 
 def main():
-    samples()
+    # samples()
     plot()
     for q in query_sizes: plot_ppl(q)
 

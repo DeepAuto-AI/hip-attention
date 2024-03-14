@@ -172,7 +172,7 @@ def load_model(
         model_id,
         config=config, 
         device_map={"" : device} if device != 'cpu' else 'cpu',
-        load_in_4bit=quant_config is not None,
+        # load_in_4bit=quant_config is not None,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,

@@ -111,7 +111,7 @@ def _masking_iteration_topk(
     VLLM_BLOCK_SIZE,
     VLLM_X, 
     
-    stride_keys_vllm_num_blcoks, 
+    stride_keys_vllm_num_blocks, 
     stride_keys_vllm_num_kv_heads, 
     stride_keys_vllm_head_size_x, 
     stride_keys_vllm_block_size, 
@@ -446,7 +446,7 @@ def _masking_iteration_topk(
                 # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
                 vec_k = tl.load(
                     KEYS +\
-                        idx_block[None, :] * stride_keys_vllm_num_blcoks +\
+                        idx_block[None, :] * stride_keys_vllm_num_blocks +\
                         idx_head * stride_keys_vllm_num_kv_heads +\
                         (idx_hid[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
                         offset_block[None, :] * stride_keys_vllm_block_size +\
@@ -461,7 +461,47 @@ def _masking_iteration_topk(
                 if ROPE_METHOD == 'none':
                     pass
                 elif ROPE_METHOD == 'self_extend':
-                    raise Exception()
+                    assert ROPE_SIN is not None
+                    assert ROPE_COS is not None
+                    assert POSITION_IDS is not None
+                    
+                    idx_hid_rot = (idx_hid + HID // 2) % HID
+                    mask_hid_rot = mask_w & (idx_hid_rot < HID) & mask_hid
+                    vec_k_rot = tl.load(
+                        KEYS +\
+                            idx_block[None, :] * stride_keys_vllm_num_blocks +\
+                            idx_head * stride_keys_vllm_num_kv_heads +\
+                            (idx_hid_rot[:, None] // VLLM_X) * stride_keys_vllm_head_size_x +\
+                            offset_block[None, :] * stride_keys_vllm_block_size +\
+                            (idx_hid_rot[:, None] % VLLM_X) * stride_keys_vllm_x,
+                        mask = mask_w & vec_k_mask[None, :] & mask_hid_rot[:, None],
+                        other = 0,
+                    )
+                    
+                    if vec_k_rot.dtype == tl.uint8:
+                        vec_k_rot = vec_k_rot.to(tl.float8e5, bitcast=True).to(vec_q.dtype)
+                    
+                    vec_k_rot = tl.where(idx_hid[:, None] < HID // 2, -vec_k_rot, vec_k_rot)
+                    
+                    idx_last_tdst = ((idx_bdst + 1) * BLOCK_SIZE_Q + T_SRC - T_DST)
+                    idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
+                    
+                    cos_k = tl.load(
+                        ROPE_COS +\
+                            idx_rope[None, :] * stride_rope_cos_idx +\
+                            idx_hid[:, None] * stride_rope_cos_hid,
+                        mask=mask_w & vec_k_mask[None, :] & mask_hid[:, None],
+                        other=0,
+                    )
+                    sin_k = tl.load(
+                        ROPE_SIN +\
+                            idx_rope[None, :] * stride_rope_sin_idx +\
+                            idx_hid[:, None] * stride_rope_sin_hid,
+                        mask=mask_w & vec_k_mask[None, :] & mask_hid[:, None],
+                        other=0,
+                    )
+                    
+                    vec_k = ((vec_k.to(tl.float32) * cos_k) + (vec_k_rot.to(tl.float32) * sin_k)).to(vec_k.dtype)
                 else:
                     raise Exception()
             else:
@@ -615,7 +655,7 @@ def _masking_iteration_topk(
         triton.Config(kwargs={}, num_warps=16),
         triton.Config(kwargs={}, num_warps=8),
         triton.Config(kwargs={}, num_warps=4),
-        triton.Config(kwargs={}, num_warps=2),
+        # triton.Config(kwargs={}, num_warps=2),
     ],
     key=['BLOCK_MASK_K'],
     warmup=2,
@@ -686,8 +726,8 @@ def _masking_iteration_compute(
     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
     ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
     POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
-    SELF_EXTEND_SCALE: int,
-    SELF_EXTEND_WINDOW: int,
+    SELF_EXTEND_SCALE,
+    SELF_EXTEND_WINDOW,
     
     # block constant
     USING_SCORE_CACHE: tl.constexpr,

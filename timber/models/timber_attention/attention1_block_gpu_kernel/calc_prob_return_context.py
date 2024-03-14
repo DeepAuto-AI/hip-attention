@@ -167,6 +167,54 @@ def _calc_prob_return_context_acc_compute(
         )
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
+        
+        if ROPE_METHOD == 'self_extend':
+            idx_last_tdst = tl.min(idx_tdst) + TSRC - TDST
+            mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
+        
+        if ROPE_METHOD == 'none':
+            pass
+        elif ROPE_METHOD == 'self_extend':
+            assert ROPE_SIN is not None
+            assert ROPE_COS is not None
+            assert POSITION_IDS is not None
+            
+            idx_hid_rot = (idx_hid + HID // 2) % HID
+            mask_hid_rot = (idx_hid_rot < HID) & mask_hid
+            keys_rot = tl.load(
+                K +\
+                    idx_block[None, :] * stride_k_vllm_num_blocks +\
+                    idx_head * stride_k_vllm_num_kv_heads +\
+                    (idx_hid_rot[:, None] // VLLM_X) * stride_k_vllm_head_size_x +\
+                    offset_block[None, :] * stride_k_vllm_block_size +\
+                    (idx_hid_rot[:, None] % VLLM_X) * stride_k_vllm_x,
+                mask = mask_tsrc[None, :] & mask_hid_rot[:, None],
+                other = 0,
+            )
+            if keys_rot.dtype == tl.uint8:
+                keys_rot = keys_rot.to(tl.float8e5, bitcast=True).to(keys.dtype)
+            keys_rot = tl.where(idx_hid[:, None] < HID // 2, -keys_rot, keys_rot)
+            
+            idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
+            
+            cos_k = tl.load(
+                ROPE_COS +\
+                    idx_rope[None, :] * stride_rope_cos_idx +\
+                    idx_hid[:, None] * stride_rope_cos_hid,
+                mask=mask_tsrc[None, :] & mask_hid[:, None],
+                other=0,
+            )
+            sin_k = tl.load(
+                ROPE_SIN +\
+                    idx_rope[None, :] * stride_rope_sin_idx +\
+                    idx_hid[:, None] * stride_rope_sin_hid,
+                mask=mask_tsrc[None, :] & mask_hid[:, None],
+                other=0,
+            )
+            
+            keys = ((keys.to(tl.float32) * cos_k) + (keys_rot.to(tl.float32) * sin_k)).to(keys.dtype)
+        else:
+            raise Exception()
     else:
         raise Exception()
     

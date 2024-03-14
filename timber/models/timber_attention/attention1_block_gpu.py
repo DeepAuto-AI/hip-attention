@@ -810,6 +810,7 @@ def attention_matrix(
     ROPE_COS=None,
     ROPE_SIN=None,
     POSITION_IDS=None,
+    
     SELF_EXTEND_SCALE=None,
     SELF_EXTEND_WINDOW=None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
@@ -1722,6 +1723,14 @@ def paged_timber_attention(
     block_size_k: int = 1,
     reduce_method: str = 'max',
     reduce_stride: int = 2,
+    
+    rope_method: str = 'none',
+    rope_cos: Tensor = None,
+    rope_sin: Tensor = None,
+    position_ids: Tensor = None,
+    
+    self_extend_scale: int = 8,
+    self_extend_window: int = 1024,
 ):
     """
     vLLM compatible paged attention
@@ -1764,15 +1773,26 @@ def paged_timber_attention(
         k=paged_k,
         v=paged_v,
         attention_mask=attention_mask,
+        
         w_start=w_start,
         n_patches=n_patches,
         mask_k=mask_k,
         scale_up=scale_up,
         block_size_q=block_size_q,
         block_size_k=block_size_k,
+        
         reduce_method=reduce_method,
         reduce_stride=reduce_stride,
+        
         dense_queries_exp=0,
+        
+        rope_method=rope_method,
+        rope_cos=rope_cos,
+        rope_sin=rope_sin,
+        position_ids=position_ids,
+        
+        self_extend_scale=self_extend_scale,
+        self_extend_window=self_extend_window,
     )
     
     # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_end'):
@@ -1833,7 +1853,8 @@ def timber_attention(
         assert dense_queries_exp == 0
         assert rope_sin is not None
         assert rope_cos is not None
-        assert position_ids is not None
+        # assert position_ids is not None
+        assert is_flash
     
     is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
     if is_prompt:
@@ -1841,7 +1862,7 @@ def timber_attention(
             dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
         dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
         # print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
-        if is_causal and (dense_queries > 0):
+        if is_causal and (dense_queries > 0) and (dense_queries_exp > 0):
             contexts = []
             
             dense_q = q[:, :dense_queries, :]
@@ -2054,6 +2075,7 @@ def timber_attention(
                 ROPE_COS=rope_cos,
                 ROPE_SIN=rope_sin,
                 POSITION_IDS=position_ids,
+                
                 SELF_EXTEND_SCALE=self_extend_scale,
                 SELF_EXTEND_WINDOW=self_extend_window,
             )

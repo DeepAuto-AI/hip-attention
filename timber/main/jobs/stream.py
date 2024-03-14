@@ -59,9 +59,9 @@ def job_stream(args, model, tokenizer, device):
             if isinstance(model, LLM):
                 prompts = [input_text, ] * args.batch_size
                 sampling_params = SamplingParams(
-                    temperature=0.7,
-                    top_p=0.9,
-                    top_k=500,
+                    temperature=0.9,
+                    top_p=0.5,
+                    top_k=10,
                     max_tokens=args.max_tokens,
                     # max_tokens=16,
                     frequency_penalty=0.0,
