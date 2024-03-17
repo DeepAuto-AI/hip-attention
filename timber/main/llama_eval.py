@@ -39,6 +39,8 @@ def load_vllm_model(args: ArgsType):
         'vllm_yi6b': '01-ai/Yi-6B-200K',
         'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
         'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
+        'vllm_gemma2b': 'google/gemma-2b-it',
+        'vllm_gemma7b': 'google/gemma-7b-it',
     }
     assert args.model in MODELS
     assert args.job in ['stream']
@@ -50,8 +52,8 @@ def load_vllm_model(args: ArgsType):
     # seq_len = 10600
     model = LLM(
         model_id,
-        max_context_len_to_capture=seq_len,
         max_num_seqs=args.batch_size,
+        max_context_len_to_capture=seq_len,
         max_model_len=seq_len,
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
@@ -72,6 +74,8 @@ def load_model(args):
     
     device = 'cuda:0'
     MODELS = {
+        'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+        'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
@@ -111,6 +115,7 @@ def load_model(args):
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
             m.tree_dense_layers = list(range(args.dense_layers))
+            m.tree_rope_method = args.rope_method
     
     if args.method != 'none' and args.checkpoint is not None:
         peft_config = LoraConfig(

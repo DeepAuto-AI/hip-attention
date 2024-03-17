@@ -61,7 +61,7 @@ def job_stream(args, model, tokenizer, device):
                 sampling_params = SamplingParams(
                     temperature=0.7,
                     top_p=0.9,
-                    top_k=500,
+                    top_k=1000,
                     max_tokens=args.max_tokens,
                     # max_tokens=16,
                     frequency_penalty=0.0,

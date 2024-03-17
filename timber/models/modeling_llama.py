@@ -670,7 +670,10 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_dense_queries = 2048
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
-        self.tree_high_k_layers = {}
+        self.tree_high_k_layers = {
+            # 0:4, 1:4, 2:4,
+        }
+        self.tree_rope_method = 'none'
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -728,7 +731,8 @@ class LlamaCustomAttention(LlamaAttention):
                     kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
                 cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+                if self.tree_rope_method == 'none':
+                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
             with timer("layer.kv_update"):
                 if past_key_value is not None:
@@ -864,6 +868,10 @@ class LlamaCustomAttention(LlamaAttention):
                                 block_size_q=self.tree_block_size_q,
                                 block_size_k=self.tree_block_size_k,
                                 dense_queries_exp=self.tree_dense_queries,
+                                rope_method=self.tree_rope_method,
+                                rope_cos=cos,
+                                rope_sin=sin,
+                                position_ids=position_ids.repeat_interleave(self.num_heads, 0),
                             )
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
