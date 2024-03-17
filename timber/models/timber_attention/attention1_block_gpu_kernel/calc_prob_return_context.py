@@ -93,8 +93,7 @@ def _calc_prob_return_context_acc_compute(
             keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
         
         if ROPE_METHOD == 'self_extend':
-            idx_last_tdst = tl.min(idx_tdst) + TSRC - TDST
-            mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
+            mask_tsrc_neighbor = tl.zeros_like(mask_tsrc)
         
         if ROPE_METHOD == 'none':
             pass
@@ -116,6 +115,9 @@ def _calc_prob_return_context_acc_compute(
             if keys.dtype == tl.uint8:
                 keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
             keys_rot = tl.where(idx_hid[:, None] < HID // 2, -keys_rot, keys_rot)
+            
+            idx_last_tdst = (tl.min(idx_tdst) + TSRC - TDST)
+            mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
             
             idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
             
@@ -168,10 +170,6 @@ def _calc_prob_return_context_acc_compute(
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(queries.dtype)
         
-        if ROPE_METHOD == 'self_extend':
-            idx_last_tdst = tl.min(idx_tdst) + TSRC - TDST
-            mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
-        
         if ROPE_METHOD == 'none':
             pass
         elif ROPE_METHOD == 'self_extend':
@@ -194,6 +192,9 @@ def _calc_prob_return_context_acc_compute(
             if keys_rot.dtype == tl.uint8:
                 keys_rot = keys_rot.to(tl.float8e5, bitcast=True).to(keys.dtype)
             keys_rot = tl.where(idx_hid[:, None] < HID // 2, -keys_rot, keys_rot)
+            
+            idx_last_tdst = (tl.max(idx_tdst) + context_length - TDST)
+            mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
             
             idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
             
@@ -673,9 +674,13 @@ def rotate_half(x):
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
     cos = cos  # [seq_len, dim]
-    cos = cos[position_ids]  # [bs, 1, seq_len, dim]
     sin = sin  # [seq_len, dim]
+    assert cos.ndim == 2
+    cos = cos[position_ids]  # [bs, 1, seq_len, dim]
     sin = sin[position_ids]  # [bs, 1, seq_len, dim]
+    assert position_ids.ndim == 2
+    assert cos.ndim == 3
+    
     q_embed = (q * cos) + (rotate_half(q) * sin) 
     
     if k is not None:
@@ -723,6 +728,8 @@ def calc_prob_return_context(
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
     BLOCK_BK = triton.cdiv(64 if queries.dtype == torch.float32 else 128, BLOCK_SIZE_K)
+    if HID >= 256:
+        BLOCK_BK = BLOCK_BK // math.ceil(HID / 128)
     # print(256 // BLOCK_SIZE_K, BK)
     BLOCK_HID = triton.next_power_of_2(HID)
     BLOCK_SIZE_Q_PADDED = next_multiple_of(BLOCK_SIZE_Q, 16)
@@ -733,13 +740,21 @@ def calc_prob_return_context(
         q_scale = 1 / math.sqrt(HID)
         
         queries_neighbor = apply_rotary_pos_emb(
-            queries / q_scale, None, ROPE_COS, ROPE_SIN, POSITION_IDS,
+            queries / q_scale, 
+            None, 
+            ROPE_COS, 
+            ROPE_SIN, 
+            POSITION_IDS,
         )[0] * q_scale
         queries_grouped = apply_rotary_pos_emb(
-            queries / q_scale, None, ROPE_COS, ROPE_SIN, 
+            queries / q_scale, 
+            None, 
+            ROPE_COS, 
+            ROPE_SIN, 
             POSITION_IDS // SELF_EXTEND_SCALE + SELF_EXTEND_WINDOW - SELF_EXTEND_WINDOW // SELF_EXTEND_SCALE,
         )[0] * q_scale
         queries = queries_neighbor
+        # queries_grouped = queries_neighbor
         assert queries.stride() == queries_grouped.stride()
     else:
         queries_grouped = None

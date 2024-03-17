@@ -39,6 +39,8 @@ def load_vllm_model(args: ArgsType):
         'vllm_yi6b': '01-ai/Yi-6B-200K',
         'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
         'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
+        'vllm_gemma2b': 'google/gemma-2b-it',
+        'vllm_gemma7b': 'google/gemma-7b-it',
     }
     assert args.model in MODELS
     assert args.job in ['stream']

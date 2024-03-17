@@ -373,8 +373,7 @@ def _masking_iteration_topk(
                 )
             
             if ROPE_METHOD == 'self_extend':
-                idx_last_tdst = (idx_bdst * BLOCK_SIZE_Q + T_SRC - T_DST)
-                mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
+                mask_tsrc_neighbor = tl.zeros((BLOCK_TMASK_K, ), dtype=tl.int1)
             
             if KEY_CACHE_METHOD == 'cont':
                 # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
@@ -406,7 +405,9 @@ def _masking_iteration_topk(
                     )
                     vec_k_rot = tl.where(idx_hid[:, None] < HID // 2, -vec_k_rot, vec_k_rot)
                     
-                    idx_last_tdst = ((idx_bdst + 1) * BLOCK_SIZE_Q + T_SRC - T_DST)
+                    idx_last_tdst = (idx_bdst * BLOCK_SIZE_Q + T_SRC - T_DST)
+                    mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
+                    
                     idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
                     
                     cos_k = tl.load(
@@ -483,7 +484,9 @@ def _masking_iteration_topk(
                     
                     vec_k_rot = tl.where(idx_hid[:, None] < HID // 2, -vec_k_rot, vec_k_rot)
                     
-                    idx_last_tdst = ((idx_bdst + 1) * BLOCK_SIZE_Q + T_SRC - T_DST)
+                    idx_last_tdst = (idx_bdst * BLOCK_SIZE_Q + context_length - T_DST)
+                    mask_tsrc_neighbor = idx_tsrc >= (idx_last_tdst - SELF_EXTEND_WINDOW)
+                    
                     idx_rope = tl.where(mask_tsrc_neighbor, idx_tsrc, idx_tsrc // SELF_EXTEND_SCALE)
                     
                     cos_k = tl.load(
@@ -1244,9 +1247,13 @@ def masking_iteration(
         q_scale = 1 / math.sqrt(HID)
         
         queries_neighbor = apply_rotary_pos_emb(
-            queries / q_scale, None, ROPE_COS, ROPE_SIN, POSITION_IDS
+            queries / q_scale, 
+            None, 
+            ROPE_COS, 
+            ROPE_SIN, 
+            POSITION_IDS
         )[0] * q_scale
-        queries_grouped_rope = apply_rotary_pos_emb(
+        queries_grouped = apply_rotary_pos_emb(
             queries / q_scale, 
             None, 
             ROPE_COS, 
@@ -1254,9 +1261,10 @@ def masking_iteration(
             POSITION_IDS // SELF_EXTEND_SCALE + SELF_EXTEND_WINDOW - SELF_EXTEND_WINDOW // SELF_EXTEND_SCALE
         )[0] * q_scale
         queries = queries_neighbor
-        # queries_grouped_rope = queries_neighbor
+        # queries_grouped = queries_neighbor
+        assert queries.stride() == queries_grouped.stride()
     else:
-        queries_grouped_rope = None
+        queries_grouped = None
     
     BLOCK_MASK_K = triton.next_power_of_2(mask.shape[-1])
     BLOCK_TMASK_K = triton.next_power_of_2(t_mask.shape[-1])
@@ -1375,7 +1383,7 @@ def masking_iteration(
     _masking_iteration_compute[grid](
         # input matrices
         queries, *queries.stride(),
-        queries_grouped_rope,
+        queries_grouped,
         keys, *keys.stride(),
         attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
         sparq_indices, *sparq_indices_strides,
