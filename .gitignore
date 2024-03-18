@@ -37,6 +37,11 @@ hello*.png
 data/
 save/
 *.ttf
+.idea/*
+
+timber.egg-info/
+timber/timber.egg-info/
+
 *.qdstrm
 *.nsys-rep
 *.egg-info

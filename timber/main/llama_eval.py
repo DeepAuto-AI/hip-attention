@@ -11,18 +11,23 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
+from timber.main.eval_args import eval_args, ArgsType
 from timber.main.jobs.bench_single_layer import job_bench_single_layer
+from timber.main.jobs.booksum import job_booksum
+from timber.main.jobs.merge_lora import job_merge_lora
+from timber.main.jobs.mmlu import job_mmlu
 from timber.main.jobs.ppl import job_ppl
 from timber.main.jobs.stream import job_stream
-from timber.main.jobs.mmlu import job_mmlu
-from timber.main.eval_args import eval_args, ArgsType
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.utils import seed
+
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
     
     device = 'cuda:0'
     MODELS = {
-        'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama32k': './LLaMA-2-7B-32K',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
@@ -30,6 +35,10 @@ def load_vllm_model(args: ArgsType):
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
+        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+        'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
+        'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
+        'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
         'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
@@ -41,9 +50,11 @@ def load_vllm_model(args: ArgsType):
         'vllm_gemma2b': 'google/gemma-2b-it',
         'vllm_gemma7b': 'google/gemma-7b-it',
     }
-    assert args.model in MODELS
-    assert args.job in ['stream']
-    model_id = MODELS[args.model]
+    if args.model in MODELS:
+        model_id = MODELS[args.model]
+    else:
+        model_id = args.model.replace('vllm_', '')
+    print(f'Loading model {model_id}')
     
     assert args.checkpoint is None
     
@@ -79,18 +90,29 @@ def load_model(args):
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
+        'qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
+        'qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
-    assert args.model in MODELS, MODELS.keys()
-    model_id = MODELS[args.model]
-    
+    if args.model in MODELS:
+        model_id = MODELS[args.model]
+    else:
+        model_id = args.model
+    print(f'Loading model {model_id}')
+
     config = LlamaConfig.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'sdpa'
     
     infer_dtype = torch.bfloat16
     # infer_dtype = torch.float32
-    model = LlamaForCausalLM.from_pretrained(
+
+    ModelClass = LlamaForCausalLM
+    #if args.method == 'none':
+    #    ModelClass = transformers.LlamaForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config,
         #load_in_4bit=True,
@@ -101,7 +123,7 @@ def load_model(args):
             bnb_4bit_compute_dtype=infer_dtype,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-        ),
+        ) if not args.no_quantize else None,
         torch_dtype=infer_dtype,
         trust_remote_code=True,
     )
@@ -160,6 +182,7 @@ def load_model(args):
 
         # model = model.to(infer_dtype)
         print('lora checkpoint loaded from', args.checkpoint)
+
     elif args.method != 'none':
         for m in model.modules():
             if hasattr(m, 'attention_method'):
@@ -176,7 +199,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora']
     
     model, tokenizer, device = load_model(args)
 
@@ -188,6 +211,10 @@ def main():
         job_mmlu(args, model, tokenizer, device)
     elif args.job == 'bench_single_layer':
         job_bench_single_layer(args, model, tokenizer, device)
+    elif args.job == 'booksum':
+        job_booksum(args, model, tokenizer, device)
+    elif args.job == 'merge_lora':
+        job_merge_lora(args, model, tokenizer, device)
     else:
         raise Exception()
 

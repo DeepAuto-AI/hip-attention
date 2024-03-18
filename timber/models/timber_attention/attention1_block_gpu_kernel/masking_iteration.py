@@ -1380,6 +1380,9 @@ def masking_iteration(
     assert ws.ndim == 2
     assert ks.ndim == 2
     assert t_srcs.ndim == 2
+
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(queries.device)
     _masking_iteration_compute[grid](
         # input matrices
         queries, *queries.stride(),
@@ -1460,3 +1463,4 @@ def masking_iteration(
         # num_stages=1,
         # enable_warp_specialization=False,
     )
+    torch.cuda.set_device(orig_device)

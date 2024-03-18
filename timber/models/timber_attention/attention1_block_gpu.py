@@ -19,10 +19,7 @@ import json
 import random
 import gc
 import warnings
-from matplotlib import pyplot as plt
 import numpy as np
-import skimage.measure
-import skimage
 import torch
 from torch import Tensor
 import tqdm
@@ -553,6 +550,8 @@ class CalcScoreAutoGradFn(Function):
         assert ks.ndim == 2
         assert scores.ndim == 3
         with timer("_calc_score_compute"):
+            orig_device = torch.cuda.current_device()
+            torch.cuda.set_device(queries.device)
             _calc_score_compute[grid](
                 # input matrix
                 queries, *queries.stride(),
@@ -602,6 +601,7 @@ class CalcScoreAutoGradFn(Function):
                 num_stages=2,
                 enable_warp_specialization=False,
             )
+            torch.cuda.set_device(orig_device)
             
         # print(scores[0, 300, :])
         return scores
@@ -729,6 +729,9 @@ def debug_print(
     w_curr,
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
+    from matplotlib import pyplot as plt
+    import skimage.measure
+    import skimage
     plt.clf()
     indices = safe_indices(mask, ws, BLOCK_SIZE_K)
     # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
@@ -937,7 +940,7 @@ def attention_matrix(
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
                 sparq_indices_strides = sparq_indices.stride()
-    
+
     if DEBUG:
         debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
         
@@ -1044,6 +1047,9 @@ def attention_matrix(
             return indices, ks, context, None
     
     if DEBUG:
+        from matplotlib import pyplot as plt
+        import skimage.measure
+        import skimage
         x = to_dense(
             indices.cpu().numpy(),
             ks.cpu().numpy(),
@@ -1522,6 +1528,9 @@ class SparseAttentionAutoGradFn(Function):
         assert context.ndim == 3
         # assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
         # assert values.dtype == context.dtype
+
+        orig_device = torch.cuda.current_device()
+        torch.cuda.set_device(indices.device)
         _sdbmm_compute[grid](
             # inputs
             indices, *indices.stride(),
@@ -1555,6 +1564,7 @@ class SparseAttentionAutoGradFn(Function):
             
             num_warps=BLOCK_HID//32,
         )
+        torch.cuda.set_device(orig_device)
         
         return context
     
@@ -1587,6 +1597,8 @@ class SparseAttentionAutoGradFn(Function):
             )
             
             if ENABLED_VALUES:
+                orig_device = torch.cuda.current_device()
+                torch.cuda.set_device(indices.device)
                 _sdbmm_compute_bwd_values[grid](
                     probs, probs.stride(0), probs.stride(1), probs.stride(2),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
@@ -1603,6 +1615,7 @@ class SparseAttentionAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                 )
+                torch.cuda.set_device(orig_device)
             
             # print(grad_values.abs().sum())
         
@@ -1824,7 +1837,7 @@ def timber_attention(
     
     chunking: bool = False,
     chunk_size: int = 2048,
-    
+
     is_flash: bool = True,
     enable_sparq: bool = True,
     
@@ -2153,7 +2166,7 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
     assert k.shape[0] == v.shape[0]
     
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+    return flash_attn_with_kvcache(q.half(), k.half(), v.half(), causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """

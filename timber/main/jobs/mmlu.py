@@ -21,7 +21,7 @@ D. {choice_d}
 Answer:"""
 
 MMLU_SUBJECTS = [
-    'business_ethics', 
+    'business_ethics',
     'clinical_knowledge', 
     'medical_genetics', 
     'high_school_us_history', 
@@ -193,11 +193,12 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
     accuracy = (n_correct / len(results)) * 100
     avg_seq_len = seq_len_sum / len(results)
     print(f'{subject_name} = Accuracy: {accuracy:.4f} %, avg_seq_len: {avg_seq_len:.2f}. elapsed: {elapsed:.1f} s')
-    
-    os.makedirs('./saves/llama_eval/mmlu/', exist_ok=True)
-    json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}.json'
+
+    folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}'
     if args.method == 'timber':
-        json_path = f'./saves/llama_eval/mmlu/{subject_name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}.json'
+        folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}'
+    os.makedirs(folder, exist_ok=True)
+    json_path = f'{folder}/{subject_name}.json'
         
     with open(json_path, 'w') as f:
         json.dump({

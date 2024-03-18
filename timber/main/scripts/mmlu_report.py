@@ -6,9 +6,10 @@ def main():
     os.makedirs('./saves/mmlu_report', exist_ok=True)
     
     configs = [
-        'none', 
-        'llama32k_timber_bq32_bk2_k512',
-        'llama13b_timber_bq32_bk2_k512'
+        'mmlu_dl3_13b_32k_notrain_llama13b_32k_timber_bq16_bk2_k1024',
+        'mmlu_dl3_13b_32k_retrain_llama13b_32k_timber_bq16_bk2_k1024',
+        'mmlu_dl3_7b_notrain_llama32k_timber_bq16_bk2_k1024',
+        'mmlu_dl3_7b_32k_retrain_llama32k_timber_bq16_bk2_k1024',
     ]
     header = ['config',] + MMLU_SUBJECTS + ['avg',]
     lines = [','.join(header)]
@@ -18,7 +19,11 @@ def main():
         row = [config]
         acc_len = acc_sum = 0
         for subject in MMLU_SUBJECTS:
-            json_path = f'./saves/llama_eval/mmlu/{subject}_{config}.json'
+            json_path = f'./saves/llama_eval/mmlu/{config}/{subject}.json'
+            if not os.path.exists(json_path):
+                row.append('N/A')
+                print(f'not found: {json_path}. skipping')
+                continue
             with open(json_path, 'r') as f:
                 data = json.load(f)
                 row.append(str(data['accuracy']))

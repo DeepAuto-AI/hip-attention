@@ -1,39 +1,36 @@
-import gc
 import os
-from dataclasses import asdict, dataclass
-from os import PathLike
+import pathlib
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Dict, Union, Any
 
+import datasets
 import torch
 import torch.onnx
-import lightning as pl
 import transformers
-from lightning import Trainer
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.loggers.wandb import WandbLogger
-from pytorch_lightning.profilers import PyTorchProfiler
+from torch import nn
 from torch.utils.data import Subset
 from sklearn.model_selection import train_test_split
 import torch.utils.checkpoint
-from deepspeed.ops.adam import DeepSpeedCPUAdam
-import deepspeed.checkpoint
-import deepspeed
 import torch.autograd
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
 
 # torch.autograd.set_detect_anomaly(True)
 
-from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
+from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.models.qwen.modeling_qwen import QWenLMHeadModel
+from timber.models.qwen.configuration_qwen import QWenConfig
 
 from timber.utils import seed
 from timber.dataset.labdataset import LabDataset
 from timber.dataset.booksum import BookSumDataset
 from timber.dataset.alpaca import AlpacaDataset
 from timber.dataset.openwebtext import OpenWebTextDataset
+from timber.dataset.lmsys import LmsysChatDataset
 from torch.utils.data import DataLoader, random_split
 
 torch.set_float32_matmul_precision('high')
+
 
 @dataclass
 class TrainConfig:
@@ -46,7 +43,7 @@ class TrainConfig:
     save_steps: int = 100
     dense_queries: int = None
     seq_len: int = 4096
-    max_steps: int = -1
+    max_steps: int = 1000000
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
     dataset: str = 'wikitext103'
     load_from_checkpoint: str = None
@@ -56,16 +53,20 @@ class TrainConfig:
     init_from_checkpoint: str = None
     method: str = 'timber'
     model: str = 'llama32k'
-    disable_global_context: bool = False
+    warmup_steps: int = 5
+    sparsity_reg: float = 0.0
+    dense_layers: int = 0
+    name: str = 'default'
 
-class LabDataModule(pl.LightningDataModule):
+
+class LabDataModule:
     def __init__(
-        self,
-        config: TrainConfig,
-        num_workers: int = 0,
-        data_dir: Path ="data",
-        download: bool = True,
-        train_size: float = 0.9,
+            self,
+            config: TrainConfig,
+            num_workers: int = 0,
+            data_dir: Path = "data",
+            download: bool = True,
+            train_size: float = 0.9,
     ):
         super().__init__()
         self.config = config
@@ -75,12 +76,12 @@ class LabDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.train_size = train_size
         self.dataset = None
-        self.tokenizer = load_tokenizer()
+        self.tokenizer = load_tokenizer(config.model)
         self.bsize = config.batch_size
-    
-    def prepare_data(self):
+
+    def get_dataset(self):
         if self.config.dataset in ['wikitext2', 'wikitext103']:
-            self.dataset = LabDataset(
+            dataset = LabDataset(
                 data_dir=self.data_dir,
                 block_size=self.block_size,
                 download=self.download,
@@ -88,24 +89,31 @@ class LabDataModule(pl.LightningDataModule):
                 dataset=self.config.dataset,
             )
         elif self.config.dataset in ['alpaca']:
-            self.dataset = AlpacaDataset(
+            dataset = AlpacaDataset(
                 tokenizer=self.tokenizer,
             )
         elif self.config.dataset in ['booksum']:
-            self.dataset = BookSumDataset(
+            dataset = BookSumDataset(
                 tokenizer=self.tokenizer,
             )
         elif self.config.dataset in ['openwebtext']:
-            self.dataset = OpenWebTextDataset(
+            dataset = OpenWebTextDataset(
                 tokenizer=self.tokenizer,
                 stride=self.block_size,
             )
+        elif self.config.dataset == 'lmsys':
+            dataset = LmsysChatDataset(
+                tokenizer=self.tokenizer,
+            )
         else:
             raise Exception()
-    
+        return dataset
+
+    def prepare_data(self):
+        self.get_dataset()
+
     def setup(self, stage: str):
-        if self.dataset is None:
-            self.prepare_data()
+        self.dataset = self.get_dataset()
         if self.config.dataset in ['wikitext2', 'wikitext103']:
             if stage == "fit" or stage is None:
                 test_size = min(100, len(self.dataset) * (1 - self.train_size))
@@ -113,13 +121,14 @@ class LabDataModule(pl.LightningDataModule):
                 self.train_data, self.val_data = random_split(self.dataset, lengths=[train_size, test_size])
             if stage == "test" or stage is None:
                 self.test_data = self.val_data
-        elif self.config.dataset in ['booksum', 'alpaca', 'openwebtext']:
+        elif self.config.dataset in ['booksum', 'alpaca', 'openwebtext', 'lmsys']:
             if stage == "fit" or stage is None:
                 def train_val_dataset(dataset, val_split=0.05):
                     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
                     train = Subset(dataset, train_idx)
                     valid = Subset(dataset, val_idx)
                     return train, valid
+
                 self.train_data, self.val_data = train_val_dataset(self.dataset)
             if stage == "test" or stage is None:
                 self.test_data = self.val_data
@@ -135,32 +144,47 @@ class LabDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test_data, num_workers=self.num_workers, batch_size=self.bsize)
 
-from peft import LoraConfig, TaskType
+
+from peft import LoraConfig, TaskType, PeftModel
 from peft import get_peft_model, prepare_model_for_kbit_training
 
+
+def get_hf_dataset(ds):
+    def gen():
+        for idx in range(len(ds)):
+            inputs, targets = ds[idx]
+            yield {'input_ids': inputs, 'labels': targets}
+
+    return datasets.IterableDataset.from_generator(gen)
+
+
+MODELS = {
+    'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+    'llama13b': 'meta-llama/Llama-2-13b-hf',
+    'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+    'qwen14b': 'Qwen/Qwen1.5-14B',
+}
+
+
 def load_model(
-    train_config: TrainConfig = None, 
-    method = 'timber', 
-    device = 'cuda:0',
-    trainable: bool = True,
+        train_config: TrainConfig = None,
+        method='timber',
+        device='cuda:0',
+        is_teacher=False,
 ):
     if train_config.using_fsdp:
         device = 'cpu'
-    
-    MODELS = {
-        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-        'llama13b': 'meta-llama/Llama-2-13b-hf',
-        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
-        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-        'yi6b': '01-ai/Yi-6B-200K',
-        'yi34b': '01-ai/Yi-34B-200K',
-    }
+
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
-    
-    config = LlamaConfig.from_pretrained(model_id)
-    config._attn_implementation = config.attn_implementation = 'sdpa'
-    
+
+    ConfigClass = LlamaConfig
+    if 'qwen' in train_config.model:
+        ConfigClass = QWenConfig
+
+    config = ConfigClass.from_pretrained(model_id)
+    config._attn_implementation = config.attn_implementation = 'eager' if 'qwen' in train_config.model else 'sdpa'
+
     quant_config = transformers.BitsAndBytesConfig(
         load_in_4bit=True,
         llm_int8_skip_modules=['tree_avgpool_scaler'],
@@ -172,21 +196,27 @@ def load_model(
         quant_config = None
 
     if method == 'timber':
-        ModelClass = LlamaForCausalLM
+        if 'qwen' in train_config.model:
+            ModelClass = QWenLMHeadModel
+        else:
+            ModelClass = LlamaForCausalLM
     else:
-        ModelClass = transformers.models.llama.LlamaForCausalLM
+        ModelClass = transformers.AutoModelForCausalLM
+
+    print(ModelClass)
 
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map={"" : device} if device != 'cpu' else 'cpu',
+        device_map="auto",
+        # device_map={"" : device} if device != 'cpu' else 'cpu',
         load_in_4bit=None if quant_config is not None else True,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
-    
+
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = method
@@ -196,7 +226,7 @@ def load_model(
             if train_config.dense_queries is None:
                 train_config.dense_queries = train_config.k
             m.tree_dense_queries = train_config.dense_queries
-            m.tree_using_context_avg = not train_config.disable_global_context
+            m.tree_dense_layers = list(range(train_config.dense_layers))
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
@@ -204,17 +234,17 @@ def load_model(
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
-    
-    if trainable:
+
+    if not is_teacher:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
             r=train_config.lora_r,
-            lora_alpha=train_config.lora_r//2, 
+            lora_alpha=train_config.lora_r // 2,
             lora_dropout=0.05,
             target_modules=[
-                'q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                'gate_proj', 'up_proj', 'down_proj', 
+                'q_proj', 'k_proj', 'v_proj', 'o_proj',
+                'gate_proj', 'up_proj', 'down_proj',
                 # 'input_layernorm', 'post_attention_layernorm'
             ],
             modules_to_save=[
@@ -222,89 +252,130 @@ def load_model(
                 'input_layernorm', 'post_attention_layernorm'
             ]
         )
-        
+
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
-        
+
         if train_config.init_from_checkpoint is not None:
-            print('loading from', train_config.init_from_checkpoint)
-            state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')['state_dict']
-            keys = list(state_dict.keys())
-            for key in keys:
-                x = state_dict[key]
-                new_key = key.strip('model.')
-                state_dict[new_key] = x
-                del state_dict[key]
-            try:
-                model.load_state_dict(state_dict, strict=False)
-            except RuntimeError as e:
-                pass
-            print('lora checkpoint loaded from', train_config.init_from_checkpoint)
-    
+
+            print(f"Loading peft model from {train_config.init_from_checkpoint}")
+
+            if pathlib.Path(train_config.init_from_checkpoint).is_dir():
+                model = PeftModel.from_pretrained(model, train_config.init_from_checkpoint)
+                model.print_trainable_parameters()
+
+            else:
+                model = get_peft_model(model, peft_config)
+                model.print_trainable_parameters()
+
+                print('loading from', train_config.init_from_checkpoint)
+                state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')
+                if 'state_dict' in state_dict:
+                    state_dict = state_dict['state_dict']
+                keys = list(state_dict.keys())
+                for key in keys:
+                    x = state_dict[key]
+                    state_dict[key.strip('model.')] = x
+                    del state_dict[key]
+                try:
+                    result = model.load_state_dict(state_dict, strict=False)
+                    print('load result', result)
+                except RuntimeError as e:
+                    pass
+                print('lora checkpoint loaded from', train_config.init_from_checkpoint)
+
+        else:
+            model = get_peft_model(model, peft_config)
+            model.print_trainable_parameters()
+
     return model
 
-def load_tokenizer():
-    model_id = 'togethercomputer/LLaMA-2-7B-32K'
+
+def load_tokenizer(model):
+    assert model in MODELS, MODELS.keys()
+    model_id = MODELS[model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'right'
     return tokenizer
 
-class LabModule(pl.LightningModule):
-    def __init__(self, config: TrainConfig):
-        super().__init__()
-        
-        self.model = load_model(train_config=config, method=config.method)
-        if not config.disable_kd:
-            self.teacher = load_model(train_config=config, method='none', trainable=False)
-        else:
-            self.teacher = None
-        
-        self.validation_preds = []
-        self.validation_targets = []
-        self.pad_token_id = self.model.base_model.config.pad_token_id
-        self.config = config
 
-    def forward(self, inputs, target, output_hidden_states=False):
-        return self.model(
-            inputs,
-            attention_mask=(inputs != self.pad_token_id).to(inputs.dtype),
-            labels=target,
-            output_hidden_states=output_hidden_states
+class Trainer(Seq2SeqTrainer):
+    def __init__(
+            self,
+            config=None,
+            model=None,
+            teacher=None,
+            args=None,
+            data_collator=None,
+            train_dataset=None,
+            eval_dataset=None,
+            tokenizer=None,
+            model_init=None,
+            compute_metrics=None,
+            callbacks=None,
+            optimizers=(None, None),
+            preprocess_logits_for_metrics=None,
+    ):
+        super().__init__(
+            model, args, data_collator, train_dataset, eval_dataset,
+            tokenizer, model_init, compute_metrics, callbacks,
+            optimizers, preprocess_logits_for_metrics
         )
 
-    def training_step(self, batch, batch_idx):
+        self.model = model
+        self.teacher = teacher
+
+        self.validation_preds = []
+        self.validation_targets = []
+
+        self.config = config
+        self.pad_token_id = tokenizer.pad_token_id
+
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        result = super().training_step(model, inputs)
+
+        total_max_mem = sum(
+            torch.cuda.max_memory_allocated(device)
+            for device in range(torch.cuda.device_count())
+        )
+
+        return result
+
+    def compute_loss(self, model, inputs, return_outputs=False):
         if self.teacher is not None:
             self.teacher.eval()
         self.model.train()
-        
-        inputs, target = batch
 
-        inputs = inputs[:, :self.config.seq_len]
-        target = target[:, :self.config.seq_len]
-
-        # pad inputs and target
-        inputs = torch.nn.functional.pad(inputs, (0, self.config.seq_len - inputs.shape[1]), value=self.pad_token_id)
-        target = torch.nn.functional.pad(target, (0, self.config.seq_len - target.shape[1]), value=-100)
+        inputs, target = inputs['input_ids'], inputs['labels']
+        inputs = inputs[..., :self.config.seq_len]
+        target = target[..., :self.config.seq_len]
 
         if not self.config.disable_kd:
-            with torch.no_grad(): #, torch.autocast('cuda', torch.bfloat16):
+            with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
                 output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
         # with torch.autocast('cuda', torch.bfloat16):
-        output = self(inputs, target, output_hidden_states=not self.config.disable_kd)
-        logits = output.logits
-        
-        loss_model = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.shape[-1]).to(torch.float32),
-            target.view(-1)
+        output = self.model(
+            inputs,
+            attention_mask=(inputs.ne(self.pad_token_id)).to(inputs.dtype),
+            labels=target,
+            output_hidden_states=not self.config.disable_kd,
+            output_attn_sparsity_loss=self.config.sparsity_reg != 0,
         )
-        
+        logits = output.logits
+
+        loss_model = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]).to(torch.float32),
+            target.reshape(-1)
+        )
+
         loss_kd_hidden = 0
         loss_kd_logits = 0
         if not self.config.disable_kd:
             for teacher_layer, student_layer in zip(output_teacher.hidden_states, output.hidden_states):
-                loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32), teacher_layer.to(torch.float32))
+                loss_kd_hidden += torch.nn.functional.mse_loss(student_layer.to(torch.float32),
+                                                               teacher_layer.to(torch.float32))
             loss_kd_hidden = loss_kd_hidden / len(output_teacher.hidden_states)
-            
+
             loss_kd_logits = torch.nn.functional.kl_div(
                 output.logits.view(-1, logits.shape[-1]).to(torch.float32).log_softmax(-1),
                 output_teacher.logits.view(-1, logits.shape[-1]).to(torch.float32).softmax(-1),
@@ -315,35 +386,53 @@ class LabModule(pl.LightningModule):
             loss = loss_model * 0.1 + (loss_kd_hidden + loss_kd_logits) * 2.5
         else:
             loss = loss_model
-        
-        self.log("training/loss_model", loss_model.item())
+
+        sparsity_loss = None
+        if self.config.sparsity_reg != 0:
+            sparsity_loss = sum(
+                layer_sparsity.mean()
+                for layer_sparsity in output.attn_sparsity_loss
+                if layer_sparsity is not None
+            ) / len(output.attn_sparsity_loss)
+            loss = loss + self.config.sparsity_reg * sparsity_loss
+
+        log_dict = dict()
+        log_dict["training/loss_model"] = loss_model.item()
         if not self.config.disable_kd:
             if loss_kd_hidden > 0:
-                self.log("training/loss_kd_hidden", loss_kd_hidden.item())
+                log_dict["training/loss_kd_hidden"] = loss_kd_hidden.item()
             if loss_kd_logits > 0:
-                self.log("training/loss_kd_logits", loss_kd_logits.item())
-        self.log("training/loss", loss.item())
-        
+                log_dict["training/loss_kd_logits"] = loss_kd_logits.item()
+        if sparsity_loss is not None:
+            log_dict["training/sparsity_loss"] = sparsity_loss.item()
+        log_dict["training/loss"] = loss.item()
+        self.log(log_dict)
+
         return loss
-    
+
     def validation_step(self, batch, batch_idx):
         self.model.eval()
-        
+
         inputs, target = batch
-        inputs = inputs[:, :self.config.seq_len]
-        target = target[:, :self.config.seq_len]
+        inputs = inputs[..., :self.config.seq_len]
+        target = target[..., :self.config.seq_len]
+
         with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
             # print('asdfasdf', inputs.shape, target.shape, flush=True)
-            output = self(inputs, target).logits
+            output = self.model(
+                inputs,
+                attention_mask=(inputs != self.pad_token_id).to(inputs.dtype),
+                labels=target,
+            ).logits
             loss = torch.nn.functional.cross_entropy(
-                output.view(-1, output.shape[-1]), 
+                output.view(-1, output.shape[-1]),
                 target.view(-1)
             )
-        self.log("val/loss", loss.item())
-        
+        self.log({"val/loss": loss.item()})
+
         self.validation_preds.append(output.cpu())
         self.validation_targets.append(target.cpu())
-    
+
     def on_validation_epoch_end(self):
         from torchmetrics.text.perplexity import Perplexity
         with torch.no_grad():
@@ -356,121 +445,88 @@ class LabModule(pl.LightningModule):
             ppl = calculator.compute()
         ppl = ppl.item()
         print('val/ppl', ppl)
-        self.log("val/ppl", ppl)
-        
+        self.log({"val/ppl": ppl})
+
         self.validation_preds.clear()
         self.validation_targets.clear()
-        
-    def configure_optimizers(self):
-        params = []
-        for name, p in self.model.named_parameters():
-            # print(name, p.requires_grad, p.shape, p.dtype)
-            if p.requires_grad:
-                params.append(p)
-        if self.config.using_fsdp:
-            return DeepSpeedCPUAdam(params, lr=self.config.lr)
-        # return DeepSpeedCPUAdam(params, lr=self.config.lr)
-        return torch.optim.AdamW(params, lr=self.config.lr)
 
-from lightning.pytorch.strategies import FSDPStrategy
-from lightning.pytorch.strategies import DeepSpeedStrategy
 
 def main(config: TrainConfig):
+    os.environ["WANDB_PROJECT"] = "timber-attention"
+
     os.makedirs('./saves/dev/wandb', exist_ok=True)
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
-    
-    if config.using_fsdp:
-        devices = torch.cuda.device_count()
-        policy = {LlamaDecoderLayer}
-        # strategy = FSDPStrategy(
-        #     auto_wrap_policy=policy,
-        #     activation_checkpointing_policy=policy,
-        #     cpu_offload=True,
-        # )
-        # strategy = 'deepspeed_stage_3'
-        deepspeed_config = {
-            "zero_allow_untested_optimizer": True,
-            "zero_optimization": {
-                "stage": 3,
-                "offload_param": {"device": "cpu"},
-                "offload_optimizer": {"device": "cpu"},
-                "max_live_parameters": 5e8,
-                "max_reuse_distance": 1e8,
-                "contiguous_gradients": True,
-                "overlap_comm": False, 
-                "allgather_bucket_size": 1e7,
-                "reduce_bucket_size": 1e7,
-            },
-        }
-        strategy = DeepSpeedStrategy(config=deepspeed_config)
-    else:
-        devices = "1"
-        strategy = "auto"
-    
+
     if config.method == 'timber':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.dataset}-{config.name}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-sp{config.sparsity_reg}'
     elif config.method == 'none':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.dataset}-{config.name}-{config.seq_len}'
     elif config.method == 'reformer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.method}-{config.name}-{config.dataset}-{config.seq_len}-k{config.k}'
     elif config.method == 'performer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.method}-{config.name}-{config.dataset}-{config.seq_len}'
     else:
         raise Exception()
-    
-    checkpoint_callback = ModelCheckpoint(
-        save_top_k=3,
-        monitor="step",
-        mode="max",
-        dirpath=config.model_checkpoint_dir,
-        filename=filename,
-        every_n_train_steps=config.save_steps,
-        enable_version_counter=False,
-    )
-    checkpoint_callback.CHECKPOINT_EQUALS_CHAR = '-'
-    checkpoint_callback.FILE_EXTENSION = '.pth'
-    
-    trainer = pl.Trainer(
-        log_every_n_steps=1,
-        devices=devices,
-        accelerator="gpu",
-        strategy=strategy,
-        precision=16,
-        default_root_dir=config.model_checkpoint_dir,
-        accumulate_grad_batches=config.accumulation_steps,
-        max_epochs=20,
-        max_steps=config.max_steps,
-        logger=WandbLogger(
-            save_dir="saves/dev/wandb", 
-            project="timber-attention"
-        ),
-        enable_checkpointing=True,
-        callbacks=[
-            checkpoint_callback
-        ],
-    )
-    
-    datamodule = LabDataModule(config=config)
-    model = LabModule(config=config)
-    kwargs = dict(
-        model=model,
-        datamodule=datamodule, 
-    )
-    if config.load_from_checkpoint is not None:
-        kwargs['ckpt_path'] = config.load_from_checkpoint
-    trainer.fit(**kwargs)
 
-if __name__ == "__main__":
+    config.model_checkpoint_dir = config.model_checkpoint_dir + '/' + filename
+
+    model = load_model(train_config=config, method=config.method)
+    if not config.disable_kd:
+        teacher = load_model(train_config=config, method='none', is_teacher=True)
+    else:
+        teacher = None
+
+    datamodule = LabDataModule(config=config)
+    datamodule.setup("fit")
+
+    trainer_config = Seq2SeqTrainingArguments(
+        logging_steps=1,
+        fp16=True,
+        output_dir=config.model_checkpoint_dir,
+        gradient_accumulation_steps=config.accumulation_steps,
+        #num_train_epochs=20,
+        max_steps=config.max_steps,
+        report_to=["wandb"],
+        gradient_checkpointing=True,
+        save_total_limit=3,
+        save_steps=config.save_steps,
+        per_device_train_batch_size=config.batch_size,
+        per_device_eval_batch_size=config.batch_size,
+        learning_rate=config.lr,
+        ignore_data_skip=True,
+        warmup_steps=config.warmup_steps,
+    )
+
+    trainer = Trainer(
+        config=config,
+        model=model,
+        teacher=teacher,
+        args=trainer_config,
+        train_dataset=get_hf_dataset(datamodule.train_data),
+        eval_dataset=get_hf_dataset(datamodule.val_data),
+        tokenizer=datamodule.tokenizer,
+        data_collator=DataCollatorForSeq2Seq(
+            tokenizer=datamodule.tokenizer,
+            padding='longest',
+            pad_to_multiple_of=config.seq_len,
+        ),
+    )
+
+    trainer.train(resume_from_checkpoint=config.load_from_checkpoint)
+
+
+def run():
     seed()
-    
+
     import argparse
-    
+
     parser = argparse.ArgumentParser()
-    
+
     parser.add_argument('--model', default='llama32k', type=str)
+    parser.add_argument('--method', default='timber', type=str)
+    parser.add_argument('--dense_queries', default=None, type=int)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
-    parser.add_argument('--disable_global_context', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
     parser.add_argument('--batch_size', default=-1, type=int)
     parser.add_argument('--lora_r', default=-1, type=int)
@@ -484,10 +540,13 @@ if __name__ == "__main__":
     parser.add_argument('--k', default=512, type=int)
     parser.add_argument('--block_size_q', default=16, type=int)
     parser.add_argument('--block_size_k', default=2, type=int)
-    parser.add_argument('--method', default='timber', type=str)
-    
+    parser.add_argument('--warmup_steps', default=None, type=int)
+    parser.add_argument('--sparsity_reg', default=None, type=float)
+    parser.add_argument('--dense_layers', type=int, default=None)
+    parser.add_argument('--name', type=str, default='default')
+
     args = parser.parse_args()
-    
+
     train_config = TrainConfig(
         using_fsdp=args.using_fsdp,
         disable_kd=args.disable_kd,
@@ -498,7 +557,7 @@ if __name__ == "__main__":
         block_size_k=args.block_size_k,
         method=args.method,
         model=args.model,
-        disable_global_context=args.disable_global_context,
+        name=args.name,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
@@ -514,7 +573,19 @@ if __name__ == "__main__":
         train_config.seq_len = args.seq_len
     if args.save_steps > 0:
         train_config.save_steps = args.save_steps
+    if args.dense_queries is not None:
+        train_config.dense_queries = args.dense_queries
     if args.init_checkpoint is not None:
         train_config.init_from_checkpoint = args.init_checkpoint
+    if args.warmup_steps is not None:
+        train_config.warmup_steps = args.warmup_steps
+    if args.sparsity_reg is not None:
+        train_config.sparsity_reg = args.sparsity_reg
+    if args.dense_layers is not None:
+        train_config.dense_layers = args.dense_layers
 
     main(train_config)
+
+
+if __name__ == "__main__":
+    run()

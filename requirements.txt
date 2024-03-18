@@ -140,3 +140,9 @@ xmltodict==0.13.0
 # flash-attn==2.3.3
 torch==2.2.0
 triton==2.2.0
+numba~=0.59.0
+html2text~=2024.2.26
+pypdf~=4.0.2
+PyMuPDF~=1.23.25
+tiktoken~=0.6.0
+pillow~=10.2.0

@@ -380,6 +380,8 @@ def safe_indices(mask: Tensor, ws, block_size_k, allow_collision=False):
     assert indices.ndim == 3
     assert mask.ndim == 3
     assert indices.ndim == 3
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(mask.device)
     _safe_indices_compute[grid](
         mask, *mask.stride(),
         ws, *ws.stride(),
@@ -394,6 +396,7 @@ def safe_indices(mask: Tensor, ws, block_size_k, allow_collision=False):
         
         num_warps=4 if allow_collision else 1,
     )
+    torch.cuda.set_device(orig_device)
     
     # indices = indices.reshape(N, TDST, K)
     
