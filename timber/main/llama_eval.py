@@ -34,6 +34,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
         'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
         'vllm_pythia70m': 'EleutherAI/pythia-70m',
         'vllm_yi6b': '01-ai/Yi-6B-200K',
