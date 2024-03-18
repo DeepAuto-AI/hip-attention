@@ -1,12 +1,10 @@
 import os
-import time
-import traceback
+import pathlib
+
 import torch
 import transformers
-from datasets import load_dataset
-from tqdm import tqdm
-import argparse
-from transformers import TextStreamer
+from peft import LoraConfig, TaskType, PeftModel
+from peft import get_peft_model
 
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
@@ -59,7 +57,7 @@ def load_vllm_model(args: ArgsType):
         swap_space=0,
         kv_cache_dtype='fp8_e5m2',
         dtype='half',
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.85,
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
         trust_remote_code=True,
@@ -95,7 +93,8 @@ def load_model(args):
     model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config,
-        device_map={"" : device},
+        #load_in_4bit=True,
+        device_map="auto",
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],
@@ -119,36 +118,47 @@ def load_model(args):
             m.tree_rope_method = args.rope_method
     
     if args.method != 'none' and args.checkpoint is not None:
-        peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            inference_mode=True,
-            r=args.lora_r,
-            lora_alpha=args.lora_r//2, 
-            lora_dropout=0.0,
-            target_modules=[
-                'q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                'gate_proj', 'up_proj', 'down_proj', 
-                # 'input_layernorm', 'post_attention_layernorm'
-            ],
-            modules_to_save=[
-                'tree_avgpool_scaler',
-                'input_layernorm', 'post_attention_layernorm'
-            ]
-        )
-        
-        model = prepare_model_for_kbit_training(model)
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
-        
-        state_dict = torch.load(args.checkpoint, map_location='cpu')['state_dict']
-        keys = list(state_dict.keys())
-        for key in keys:
-            x = state_dict[key]
-            state_dict[key.strip('model.')] = x
-            del state_dict[key]
-        result = model.load_state_dict(state_dict, strict=False)
-        print('load result', result)
-        model = model.to(infer_dtype)
+        if pathlib.Path(args.checkpoint).is_dir():
+            # is peft checkpoint
+            # Load peft pretrained
+            print(f"Loading peft model from {args.checkpoint}")
+            model = PeftModel.from_pretrained(model, args.checkpoint)
+
+        else:
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=True,
+                r=args.lora_r,
+                lora_alpha=args.lora_r//2,
+                lora_dropout=0.0,
+                target_modules=[
+                    'q_proj', 'k_proj', 'v_proj', 'o_proj',
+                    'gate_proj', 'up_proj', 'down_proj',
+                    # 'input_layernorm', 'post_attention_layernorm'
+                ],
+                modules_to_save=[
+                    'tree_avgpool_scaler',
+                    'input_layernorm', 'post_attention_layernorm'
+                ]
+            )
+
+            model = get_peft_model(model, peft_config)
+
+            state_dict = torch.load(args.checkpoint, map_location='cpu')
+            if 'state_dict' in state_dict:
+                state_dict = state_dict['state_dict']
+            keys = list(state_dict.keys())
+            for key in keys:
+                x = state_dict[key]
+                state_dict[key.strip('model.')] = x
+                del state_dict[key]
+            try:
+                result = model.load_state_dict(state_dict, strict=False)
+                print('load result', result)
+            except RuntimeError as e:
+                pass
+
+        # model = model.to(infer_dtype)
         print('lora checkpoint loaded from', args.checkpoint)
     elif args.method != 'none':
         for m in model.modules():
