@@ -776,7 +776,7 @@ class LlamaCustomAttention(LlamaAttention):
                 
                 with timer("layer.flash"):
                     with torch.backends.cuda.sdp_kernel(enable_math=False, enable_mem_efficient=False):
-                        if attention_mask is not None:
+                        if attention_mask is not None and self.training:
                             print(self.layer_idx, "attention_mask is not None", attention_mask.shape)
                             attention_mask = None
                         attn_output = torch.nn.functional.scaled_dot_product_attention(
@@ -838,10 +838,13 @@ class LlamaCustomAttention(LlamaAttention):
 
                     # For L1 loss of attention map
                     if output_attn_sparsity_loss:
+                        # select random `select_n` queries for speedup
                         select_n = 1024
+                        selection = torch.randperm(TDST, device=q.device)[:select_n]
                         attn_sparsity_loss = compute_attn_lp_loss_triton(
-                            q[..., torch.randperm(TDST)[:select_n], :],  # select random 1024 queries for speedup
-                            k, N, H, select_n, TSRC, HID, self.tree_lp_norm_coeff
+                            q[..., selection, :], k,
+                            p=self.tree_lp_norm_coeff,
+                            attend_lengths=selection.expand(N, select_n)
                         ).mean(-1)
 
                     q = q.reshape(N*H, TDST, HID) #.contiguous()

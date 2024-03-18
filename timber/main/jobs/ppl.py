@@ -1,4 +1,5 @@
 import os
+import pathlib
 import time
 import traceback
 import torch
@@ -8,13 +9,15 @@ from tqdm import tqdm
 import argparse, json
 from transformers import TextStreamer
 
+from vllm import LLM, SamplingParams
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
-def job_ppl(args, model, tokenizer, device):
-    outfile = f'./cache/llama_eval/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
+    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+    pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     print("Will write to", outfile)
     if os.path.exists(outfile):
         print(f'PPL already computed, skipping: {outfile}')
@@ -29,8 +32,8 @@ def job_ppl(args, model, tokenizer, device):
     else:
         encodings = torch.load(cache_path)
 
-    max_length = model.config.max_position_embeddings
-    max_length = stride = args.stride if args.stride > 0 else model.config.max_position_embeddings
+    max_length = model.config.max_position_embeddings if hasattr(model, 'config') else 2048
+    max_length = stride = args.stride if args.stride > 0 else max_length
     seq_len = encodings.size(1)
 
     nlls = []
@@ -44,11 +47,22 @@ def job_ppl(args, model, tokenizer, device):
             target_ids[:, :-trg_len] = -100
 
             with torch.no_grad():
-                outputs = model(
-                    input_ids,
-                    labels=target_ids,
-                )
-                neg_log_likelihood = outputs.loss
+
+                if isinstance(model, LLM):
+                    sampling_params = SamplingParams(
+                        max_tokens=1,
+                        ignore_eos=True,
+                        only_return_logits=True,
+                    )
+                    prompt = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    outputs = model.generate(prompt, sampling_params)
+
+                else:
+                    outputs = model(
+                        input_ids,
+                        labels=target_ids,
+                    )
+                    neg_log_likelihood = outputs.loss
 
             nlls.append(neg_log_likelihood.cpu())
 

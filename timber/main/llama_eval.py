@@ -22,7 +22,7 @@ def load_vllm_model(args: ArgsType):
     
     device = 'cuda:0'
     MODELS = {
-        'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama32k': './LLaMA-2-7B-32K',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',

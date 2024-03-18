@@ -56,6 +56,7 @@ class TrainConfig:
     warmup_steps: int = 5
     sparsity_reg: float = 0.0
     dense_layers: int = 0
+    name: str = 'default'
 
 
 class LabDataModule:
@@ -457,13 +458,13 @@ def main(config: TrainConfig):
     os.makedirs('./saves/dev/checkpoint', exist_ok=True)
 
     if config.method == 'timber':
-        filename = f'{config.model}-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}'
+        filename = f'{config.model}-{config.dataset}-{config.name}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-sp{config.sparsity_reg}'
     elif config.method == 'none':
-        filename = f'{config.model}-{config.dataset}-{config.seq_len}'
+        filename = f'{config.model}-{config.dataset}-{config.name}-{config.seq_len}'
     elif config.method == 'reformer':
-        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}'
+        filename = f'{config.model}-{config.method}-{config.name}-{config.dataset}-{config.seq_len}-k{config.k}'
     elif config.method == 'performer':
-        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}'
+        filename = f'{config.model}-{config.method}-{config.name}-{config.dataset}-{config.seq_len}'
     else:
         raise Exception()
 
@@ -542,6 +543,7 @@ def run():
     parser.add_argument('--warmup_steps', default=None, type=int)
     parser.add_argument('--sparsity_reg', default=None, type=float)
     parser.add_argument('--dense_layers', type=int, default=None)
+    parser.add_argument('--name', type=str, default='default')
 
     args = parser.parse_args()
 
@@ -555,6 +557,7 @@ def run():
         block_size_k=args.block_size_k,
         method=args.method,
         model=args.model,
+        name=args.name,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
