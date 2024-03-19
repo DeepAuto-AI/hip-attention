@@ -778,19 +778,19 @@ class LlamaCustomAttention(LlamaAttention):
                     value_states = value_states.contiguous()
                 
                 with timer("layer.flash"):
-                    with torch.backends.cuda.sdp_kernel(enable_math=False, enable_mem_efficient=False):
-                        if attention_mask is not None and self.training:
-                            print(self.layer_idx, "attention_mask is not None", attention_mask.shape)
-                            attention_mask = None
-                        attn_output = torch.nn.functional.scaled_dot_product_attention(
-                            query_states,
-                            key_states,
-                            value_states,
-                            #attn_mask=attention_mask,
-                            dropout_p=self.attention_dropout if self.training else 0.0,
-                            # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                            is_causal=self.is_causal and attention_mask is None and q_len > 1,
-                        )
+                    #with torch.backends.cuda.sdp_kernel(enable_math=False, enable_mem_efficient=False):
+                        #if attention_mask is not None and self.training:
+                        #    print(self.layer_idx, "attention_mask is not None", attention_mask.shape)
+                        #    attention_mask = None
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=attention_mask,
+                        dropout_p=self.attention_dropout if self.training else 0.0,
+                        # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+                        is_causal=self.is_causal and attention_mask is None and q_len > 1,
+                    )
                 if os.environ.get('CHECKOUT_STATES', '0') == '1':
                     os.makedirs('./cache/llama/', exist_ok=True)
                     torch.save({
@@ -853,8 +853,8 @@ class LlamaCustomAttention(LlamaAttention):
                     q = q.reshape(N*H, TDST, HID) #.contiguous()
                     k = k.reshape(N*H, TSRC, HID) #.contiguous()
                     v = v.reshape(N*H, TSRC, HID) #.contiguous()
-                    if attention_mask is not None:
-                        attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
+                    #if attention_mask is not None:
+                    #    attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
 
                 TARGET_DENSE_QUERIES = 0
                 current_query_index = TSRC - TDST
@@ -975,7 +975,7 @@ class LlamaCustomAttention(LlamaAttention):
                             # N, H, TDST
                             # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
                             scale_avg = torch.sigmoid(
-                                self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :].bfloat16()).float().transpose(-1, -2).reshape(N*H, -1, 1)
+                                self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1, -2).reshape(N*H, -1, 1)
                             ) * 0.25 * torch.clamp(1.0 - (mask_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
                             # NOTE: 0.25 is just heuristic
                             # NOTE: 256 is top-k value
@@ -1444,8 +1444,23 @@ class LlamaModel(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        # 2d mask is passed through the layers
-        attention_mask = attention_mask.bool() if attention_mask is not None else None
+        if self._use_flash_attention_2:
+            # 2d mask is passed through the layers
+            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+        elif self._use_sdpa and not output_attentions:
+            # output_attentions=True can not be supported when using SDPA, and we fall back on
+            # the manual implementation that requires a 4D causal mask in all cases.
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                past_key_values_length,
+            )
+        else:
+            # 4d mask is passed through the layers
+            attention_mask = _prepare_4d_causal_attention_mask(
+                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+            )
 
         # embed positions
         hidden_states = inputs_embeds

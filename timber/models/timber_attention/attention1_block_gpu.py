@@ -801,7 +801,7 @@ def attention_matrix(
     IS_FLASH: bool = False,
     
     # NOTE: this improve latency quite well, but hurt accuracy
-    ESTIMATOR_LOWER_RESOLUTION: int = 2,
+    ESTIMATOR_LOWER_RESOLUTION: int = 1,
     ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',
