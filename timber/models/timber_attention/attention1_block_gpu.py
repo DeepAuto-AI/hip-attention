@@ -806,7 +806,7 @@ def attention_matrix(
     
     SAMPLING_METHOD: str = 'first',
     
-    USING_SLIDING_WINDOW=True,
+    USING_SLIDING_WINDOW=False,
     SLIDING_WINDOW_SIZE=256,
     
     ROPE_METHOD='none',

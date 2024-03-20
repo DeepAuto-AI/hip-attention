@@ -696,6 +696,7 @@ class LlamaCustomAttention(LlamaAttention):
             # 0:4, 1:4, 2:4,
         }
         self.tree_rope_method = 'none'
+        self.tree_enable_sparq = False
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -910,6 +911,7 @@ class LlamaCustomAttention(LlamaAttention):
                                 rope_cos=cos,
                                 rope_sin=sin,
                                 position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+                                enable_sparq=self.tree_enable_sparq,
                             )
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
