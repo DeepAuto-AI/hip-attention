@@ -1843,7 +1843,7 @@ def timber_attention(
     
     sampling_method: str = 'random',
     
-    using_sliding_window: bool = False,
+    using_sliding_window: bool = True,
     sliding_window_size: int = 128,
     
     dense_queries_exp: Optional[int] = None,
