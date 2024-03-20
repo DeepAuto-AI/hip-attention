@@ -21,9 +21,9 @@ D. {choice_d}
 Answer:"""
 
 MMLU_SUBJECTS = [
-    #'business_ethics',
-    #'clinical_knowledge',
-    #'medical_genetics',
+    'business_ethics',
+    'clinical_knowledge',
+    'medical_genetics',
     'high_school_us_history', 
     'high_school_physics', 
     'high_school_world_history', 

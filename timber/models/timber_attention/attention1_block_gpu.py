@@ -1838,12 +1838,12 @@ def timber_attention(
     chunking: bool = False,
     chunk_size: int = 2048,
 
-    is_flash: bool = True,
+    is_flash: bool = False,
     enable_sparq: bool = True,
     
     sampling_method: str = 'random',
     
-    using_sliding_window: bool = True,
+    using_sliding_window: bool = False,
     sliding_window_size: int = 128,
     
     dense_queries_exp: Optional[int] = None,
