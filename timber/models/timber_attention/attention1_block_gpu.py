@@ -1839,7 +1839,7 @@ def timber_attention(
     chunk_size: int = 2048,
 
     is_flash: bool = False,
-    enable_sparq: bool = True,
+    enable_sparq: bool = False,
     
     sampling_method: str = 'random',
     
