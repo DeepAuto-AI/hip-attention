@@ -40,3 +40,6 @@ save/
 *.qdstrm
 *.nsys-rep
 *.egg-info
+profile.*
+*.nsys-rep
+*.ncu-rep

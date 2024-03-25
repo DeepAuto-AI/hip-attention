@@ -1349,7 +1349,7 @@ def masking_iteration(
         scores = None
     
     assert ROPE_METHOD in ['none', 'self_extend']
-    if ROPE_COS is not None:
+    if ROPE_METHOD in ['self_extend']:
         assert ROPE_SIN is not None
         assert POSITION_IDS is not None
         assert ROPE_COS.ndim == 2
