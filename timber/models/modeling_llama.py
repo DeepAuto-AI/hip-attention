@@ -663,18 +663,14 @@ class LlamaCustomAttention(LlamaAttention):
         super().__init__(config, layer_idx)
         
         self.attention_method = 'timber'
-        self.tree_k = 512
-        self.tree_block_size_q = 32 #8
-        self.tree_block_size_k = 2 # 1
+        self.tree_k = int(os.getenv('TREE_K', 256))
+        self.tree_block_size_q = int(os.getenv('TRE_bq', 32)) # 32 #8
+        self.tree_block_size_k = int(os.getenv('TRE_bk', 2)) # 2 # 1
         self.tree_using_context_avg = False # True
         self.tree_dense_queries = 0 #2048
         self.tree_last_dense_queries = None
-        self.tree_dense_layers = []
+        self.tree_dense_layers = [0, 1, 2]
         self.tree_high_k_layers = {}
-
-        assert layer_idx is not None
-        if layer_idx < 3:
-            self.attention_method = 'none'
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
