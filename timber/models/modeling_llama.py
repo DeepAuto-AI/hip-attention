@@ -664,8 +664,8 @@ class LlamaCustomAttention(LlamaAttention):
         
         self.attention_method = 'timber'
         self.tree_k = int(os.getenv('TREE_K', 256))
-        self.tree_block_size_q = int(os.getenv('TRE_bq', 32)) # 32 #8
-        self.tree_block_size_k = int(os.getenv('TRE_bk', 2)) # 2 # 1
+        self.tree_block_size_q = int(os.getenv('TREE_bq', 32)) # 32 #8
+        self.tree_block_size_k = int(os.getenv('TREE_bk', 2)) # 2 # 1
         self.tree_using_context_avg = False # True
         self.tree_dense_queries = 0 #2048
         self.tree_last_dense_queries = None
