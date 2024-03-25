@@ -730,7 +730,7 @@ def debug_print(
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
     plt.clf()
-    indices = safe_indices(mask, ws, BLOCK_SIZE_K)
+    indices = safe_indices(mask, ws, BLOCK_SIZE_K, allow_collision=True)
     # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
     x = to_dense(
         indices.cpu().numpy(),
@@ -813,6 +813,9 @@ def attention_matrix(
     
     SELF_EXTEND_SCALE=None,
     SELF_EXTEND_WINDOW=None,
+    
+    GRID_SRC_STRIDE=1,
+    GRID_K_STRIDE=1,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -862,7 +865,6 @@ def attention_matrix(
     assert w_curr <= mask_k, f'{w_curr} <= {mask_k}'
     
     with timer('matrix.setup'):
-        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
         
         # vectors
         tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
@@ -880,16 +882,31 @@ def attention_matrix(
         # NOTE: store non blocked width
         ws = torch.clamp(tsrcs, 0, w_curr)
         # NOTE: store num blocks
-        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
         # assert tsrcs.dtype == torch.int64
         # assert ws.dtype == torch.int64
         # assert ks.dtype == torch.int64
         
         # matrices
         # NOTE: float16 -> int64 seems not possible
-        mask = torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
+        bws = torch.ceil(ws / BLOCK_SIZE_K)
+        ks = torch.ceil(bws / GRID_SRC_STRIDE).to(torch.int64)
+        mask_k_block = triton.cdiv(triton.cdiv(mask_k, BLOCK_SIZE_K), GRID_K_STRIDE)
+        mask = torch.arange(
+            mask_k_block, device=device, dtype=torch.float32
+        )\
+            .view(1, 1, 1, mask_k_block)\
+            .expand(1, 1, GRID_SRC_STRIDE, mask_k_block) \
+                / ks.unsqueeze(-1).unsqueeze(-1)
+        mask = mask + (
+            torch.arange(GRID_SRC_STRIDE, device=device, dtype=torch.float32).view(1, 1, GRID_SRC_STRIDE, 1)
+        ) * (1 / bws.unsqueeze(-1).unsqueeze(-1))
         tmask = torch.zeros(
-            (mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), 
+            (
+                mask.shape[0], 
+                mask.shape[1], 
+                GRID_SRC_STRIDE,
+                mask_k_block * math.ceil(scale_up)
+            ), 
             dtype=torch.float32, 
             device=device
         )
@@ -938,8 +955,8 @@ def attention_matrix(
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
                 sparq_indices_strides = sparq_indices.stride()
     
-    if DEBUG:
-        debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+    # if DEBUG:
+    #     debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
         
     # NOTE: Calc. Mask
     n_iteration = 0
@@ -952,18 +969,22 @@ def attention_matrix(
     n_completed = _w_curr
     with timer("iterations"):
         i_iteration = 0
-        masking_iteration(
+        mask, ws, ks = masking_iteration(
             # input matrices
             queries, keys, attention_mask,
             
             # input metrices (blocked) 
-            mask, tmask, sparq_indices, sparq_indices_strides,
+            mask, tmask, 
+            sparq_indices, sparq_indices_strides,
             
             # temp vectors (blocked)
             ws, ks, tsrcs, 
             
             # operator variables
-            scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
+            scale_up, 
+            triton.cdiv(n_patches, BLOCK_SIZE_K), 
+            triton.cdiv(mask_k, BLOCK_SIZE_K), 
+            is_causal,
             
             # iteration controls
             i_iteration, n_iteration,
@@ -995,6 +1016,9 @@ def attention_matrix(
             REDUCE_STRIDE,
             
             SAMPLING_METHOD,
+            
+            GRID_SRC_STRIDE,
+            GRID_K_STRIDE,
             
             DEBUG,
         )
@@ -2046,6 +2070,9 @@ def timber_attention(
     
     with timer('timber_attention'):
         with timer('attention_matrix'):
+            estimated_ksrc_stride = min(32, max(1, round(mask_k / block_size_k / 32)))
+            # estimated_ksrc_stride = 1
+            
             indices, ks, probs_or_context, scores = attention_matrix(
                 queries=q,
                 keys=k,
@@ -2078,6 +2105,9 @@ def timber_attention(
                 
                 SELF_EXTEND_SCALE=self_extend_scale,
                 SELF_EXTEND_WINDOW=self_extend_window,
+                
+                GRID_SRC_STRIDE=estimated_ksrc_stride,
+                GRID_K_STRIDE=estimated_ksrc_stride,
             )
             
             if is_flash:
@@ -2331,7 +2361,8 @@ def main_debug():
         v,
         mask_k=256,
         block_size_q=16,
-        block_size_k=2,
+        block_size_k=4,
+        dense_queries_exp=0,
         is_flash=False,
     )
     
