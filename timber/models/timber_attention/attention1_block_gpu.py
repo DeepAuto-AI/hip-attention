@@ -730,7 +730,7 @@ def debug_print(
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
     plt.clf()
-    indices = safe_indices(mask, ws, BLOCK_SIZE_K, allow_collision=True)
+    indices = safe_indices(mask, ws, BLOCK_SIZE_K)
     # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
     x = to_dense(
         indices.cpu().numpy(),
@@ -743,7 +743,7 @@ def debug_print(
     # x = np.repeat(x, 1, 1)
     if x.shape[0] == 1:
         x = x.repeat(32, 0)
-    plt.title(f'sum:{x.sum()} (collision allowed)')
+    plt.title(f'sum:{x.sum()}')
     plt.imshow(x)
     plt.colorbar()
     path = f'saves/models/timber_attention/block_{w_curr}.png'
@@ -799,7 +799,7 @@ def attention_matrix(
     
     # NOTE: this improve latency quite well, but hurt accuracy
     ESTIMATOR_LOWER_RESOLUTION: int = 2,
-    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 512,
+    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',
     
@@ -813,9 +813,6 @@ def attention_matrix(
     
     SELF_EXTEND_SCALE=None,
     SELF_EXTEND_WINDOW=None,
-    
-    GRID_SRC_STRIDE=1,
-    GRID_K_STRIDE=1,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -865,6 +862,8 @@ def attention_matrix(
     assert w_curr <= mask_k, f'{w_curr} <= {mask_k}'
     
     with timer('matrix.setup'):
+        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
+        
         # vectors
         tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
         tsrcs = torch.arange(
@@ -881,22 +880,19 @@ def attention_matrix(
         # NOTE: store non blocked width
         ws = torch.clamp(tsrcs, 0, w_curr)
         # NOTE: store num blocks
-        ks = torch.ceil(ws / (BLOCK_SIZE_K)).to(torch.int64)
+        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
         # assert tsrcs.dtype == torch.int64
         # assert ws.dtype == torch.int64
         # assert ks.dtype == torch.int64
         
         # matrices
         # NOTE: float16 -> int64 seems not possible
-        """
-        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
         mask = torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
         tmask = torch.zeros(
             (mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), 
             dtype=torch.float32, 
             device=device
         )
-        """
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
         B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
@@ -942,11 +938,10 @@ def attention_matrix(
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
                 sparq_indices_strides = sparq_indices.stride()
     
-    # NOTE: mask is not available from here.
-    # if DEBUG:
-    #     debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
-    
-    # NOTE: Calc. num iteration. this should be replaced with log_base. but i am lazy haha
+    if DEBUG:
+        debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+        
+    # NOTE: Calc. Mask
     n_iteration = 0
     _w_curr = w_curr
     while w_curr < T_SRC:
@@ -957,22 +952,18 @@ def attention_matrix(
     n_completed = _w_curr
     with timer("iterations"):
         i_iteration = 0
-        mask, ks = masking_iteration(
+        masking_iteration(
             # input matrices
             queries, keys, attention_mask,
             
             # input metrices (blocked) 
-            # mask, tmask,
-            sparq_indices, sparq_indices_strides,
+            mask, tmask, sparq_indices, sparq_indices_strides,
             
             # temp vectors (blocked)
             ws, ks, tsrcs, 
             
             # operator variables
-            scale_up,
-            triton.cdiv(n_patches, BLOCK_SIZE_K), 
-            triton.cdiv(mask_k, BLOCK_SIZE_K), 
-            is_causal,
+            scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
             
             # iteration controls
             i_iteration, n_iteration,
@@ -1004,9 +995,6 @@ def attention_matrix(
             REDUCE_STRIDE,
             
             SAMPLING_METHOD,
-            
-            GRID_SRC_STRIDE,
-            GRID_K_STRIDE,
             
             DEBUG,
         )
@@ -1090,7 +1078,7 @@ def attention_matrix(
             print('saved', path)
             plt.savefig(path, dpi=200, bbox_inches='tight')
             # print(ks)
-            input('>>>')
+            # input('>>>')
     
     return indices, ks, probs, scores
 
@@ -2319,7 +2307,7 @@ def main_debug():
     block = 1024
     block = 256
     q, k, v, out = load_checkouts(
-        dtype=torch.float16, 
+        dtype=torch.float32, 
         seq_len=block * 4, 
         idx=6, 
         window=1
@@ -2333,7 +2321,11 @@ def main_debug():
     print('v', v.shape)
     print('out', out.shape)
     
-    context, _ = timber_attention(
+    context, (
+        atten_indices, 
+        atten_ks, 
+        atten_probs
+    ) = timber_attention(
         q,
         k,
         v,
@@ -2341,7 +2333,6 @@ def main_debug():
         block_size_q=16,
         block_size_k=2,
         is_flash=False,
-        dense_queries_exp=0,
     )
     
     stderr = (out - context).abs().mean().item()
