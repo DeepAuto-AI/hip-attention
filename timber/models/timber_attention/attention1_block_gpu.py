@@ -249,7 +249,7 @@ def _calc_score_compute_bwd_queries(
     GRAD_QUERIES, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
     
     # input variables
-    N, TDST, TSRC, HID, BK, K,
+    N, N_QUERIES, N_KEYS, HID, BLOCK_K, K,
     
     # block constant
     BLOCK_SIZE_Q: tl.constexpr,
@@ -257,6 +257,7 @@ def _calc_score_compute_bwd_queries(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
 ):
     """
     ks: int[N, TDST]
@@ -279,71 +280,72 @@ def _calc_score_compute_bwd_queries(
     """
     
     idx_n = tl.program_id(0)
-    idx_bdst = tl.program_id(1)
-    
-    scalar_ks = tl.load(
-        KS +\
-            idx_n * stride_ks_n +\
-            idx_bdst * stride_ks_bdst
-    )
-    
+    idx_query_block = tl.program_id(1)
+
     idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED)
-    mask_block_q = idx_block_q < BLOCK_SIZE_Q
     idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
-    mask_block_k = idx_block_k < BLOCK_SIZE_K
-    
-    idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q)
-    mask_tdst = (idx_tdst < TDST) & mask_block_q
-    
     idx_hid = tl.arange(0, BLOCK_HID)
-    mask_hid = idx_hid < HID
-    
+
+    scalar_ks = tl.load(
+        KS +
+        idx_n.to(tl.int64) * stride_ks_n +
+        idx_query_block.to(tl.int64) * stride_ks_bdst
+    )
+
     accumulator = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID,), dtype=tl.float32)
-    for idx_bk in range(BK):
-        idx_tsrc = tl.load(
-            INDICES + \
-                idx_n * stride_indices_n + \
-                idx_bdst * stride_indices_bdst + \
-                idx_bk * stride_indices_bk,
+    for idx_key_block in range(scalar_ks):
+        idx_key_start = tl.load(
+            INDICES +
+            idx_n.to(tl.int64) * stride_indices_n +
+            idx_query_block.to(tl.int64) * stride_indices_bdst +
+            idx_key_block.to(tl.int64) * stride_indices_bk,
         )
-        
-        idx_tsrc = idx_tsrc + idx_block_k
-        mask_tsrc = (idx_tsrc < TSRC) & mask_block_k & (idx_tsrc < scalar_ks)
-        
-        idx_k = idx_bk * BLOCK_SIZE_K + idx_block_k
-        mask_k = (idx_k < K) & mask_block_k
-        
+
+        if IS_CAUSAL:
+            causal_mask = ((idx_key_start + idx_block_k)[None, :] <= (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None])
+        else:
+            causal_mask = True
+
         # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: score]
         grad_score = tl.load(
-            GRAD_SCORES +\
-                idx_n * stride_grad_scores_n +\
-                idx_tdst[:, None] * stride_grad_scores_tdst + \
-                idx_k[None, :] * stride_grad_scores_k,
-            mask = mask_tdst[:, None] & (mask_tsrc & mask_k)[None, :],
-            other = 0,
+            GRAD_SCORES +
+            idx_n.to(tl.int64) * stride_grad_scores_n +
+            (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_scores_tdst +
+            (idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :].to(tl.int64) * stride_grad_scores_k,
+            mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < N_QUERIES) &
+                 (idx_block_q[:, None] < BLOCK_SIZE_Q) &
+                 ((idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :] < K) &
+                 (idx_block_k[None, :] < BLOCK_SIZE_K) &
+                 causal_mask,
+            other=0,
         )
-        
+
         # [BLOCK_SIZE_K_PADDED: score, BLOCK_HID: hid]
         key = tl.load(
-            KEYS +\
-                idx_n * stride_keys_n +\
-                idx_tsrc[:, None] * stride_keys_tsrc +\
-                idx_hid[None, :] * stride_keys_hid,
-            mask = mask_hid[None, :] & (mask_tsrc & mask_k)[:, None],
-            other = 0
+            KEYS +
+            idx_n.to(tl.int64) * stride_keys_n +
+            (idx_key_start + idx_block_k)[:, None].to(tl.int64) * stride_keys_tsrc +
+            idx_hid[None, :].to(tl.int64) * stride_keys_hid,
+            mask=((idx_key_start + idx_block_k)[:, None] < N_KEYS) &
+                 (idx_block_k[:, None] < BLOCK_SIZE_K) &
+                 (idx_hid[None, :] < HID),
+            other=0,
         )
         
         # tl.device_print("", idx_tsrc)
         accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
     
     tl.store(
-        GRAD_QUERIES +\
-            idx_n * stride_grad_queries_n +\
-            idx_tdst[:, None] * stride_grad_queries_tdst +\
-            idx_hid[None, :] * stride_grad_queries_hid,
-        mask = mask_hid[None, :] & mask_tdst[:, None],
-        value = accumulator
+        GRAD_QUERIES +
+        idx_n.to(tl.int64) * stride_grad_queries_n +
+        (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_queries_tdst +
+        idx_hid[None, :].to(tl.int64) * stride_grad_queries_hid,
+        mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < N_QUERIES) &
+             (idx_block_q[:, None] < BLOCK_SIZE_Q) &
+             (idx_hid[None, :] < HID),
+        value=accumulator
     )
+
 
 @triton.jit
 def _calc_score_compute_bwd_keys(
@@ -464,6 +466,7 @@ class CalcScoreAutoGradFn(Function):
         ctx.save_for_backward(queries, keys, indices, ks)
         ctx.BLOCK_SIZE_Q = BLOCK_SIZE_Q
         ctx.BLOCK_SIZE_K = BLOCK_SIZE_K
+        ctx.IS_CAUSAL = IS_CAUSAL
         
         N, TDST, HID = queries.shape
         _N, TSRC, _ = keys.shape
@@ -651,6 +654,7 @@ class CalcScoreAutoGradFn(Function):
                     BLOCK_SIZE_K,
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
+                    ctx.IS_CAUSAL,
                 )
         
         # for keys

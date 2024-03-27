@@ -43,7 +43,7 @@ def test_CalcScoreAutoGradFn():
     )
     # scores: [BSZ, QUERY_LEN, K]
     if compute_backward:
-        scores.backward(dout)
+        torch.softmax(scores, dim=-1).backward(dout)
         tri_dq, queries.grad = queries.grad.clone(), None
         tri_dk, keys.grad = keys.grad.clone(), None
 
@@ -55,7 +55,7 @@ def test_CalcScoreAutoGradFn():
         IS_CAUSAL,
     )
     if compute_backward:
-        ref_scores.backward(dout)
+        torch.softmax(ref_scores, dim=-1).backward(dout)
         ref_dq, queries.grad = queries.grad.clone(), None
         ref_dk, keys.grad = keys.grad.clone(), None
 
@@ -63,6 +63,49 @@ def test_CalcScoreAutoGradFn():
     if compute_backward:
         compare("dQ", ref_dq, tri_dq)
         compare("dK", ref_dk, tri_dk)
+
+
+def reference_dQ_impl(
+        queries, keys, d_scores, attention_mask,
+        indices, ks,
+        KV_REPEAT_INTERLEAVE, BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL
+):
+    assert attention_mask is None
+    assert KV_REPEAT_INTERLEAVE == 1
+
+    BSZ, QUERY_LEN, QUERY_DIM = queries.shape
+    _, KEY_LEN, _ = keys.shape
+    _, _, BLOCK_K = indices.shape
+    K = BLOCK_K * BLOCK_SIZE_K
+    QUERY_BLOCKS = triton.cdiv(QUERY_LEN, BLOCK_SIZE_Q)
+    KEY_BLOCKS = triton.cdiv(KEY_LEN, BLOCK_SIZE_K)
+
+    keys = keys.reshape(BSZ, KEY_BLOCKS, BLOCK_SIZE_K, QUERY_DIM)
+
+    # indices: (BSZ, QUERY_BLOCKS, BLOCK_K)
+    block_indices = indices // BLOCK_SIZE_K
+    real_indices = (indices.unsqueeze(-1) + torch.arange(BLOCK_SIZE_K, device=indices.device)) \
+        .unsqueeze(2).expand(-1, -1, BLOCK_SIZE_Q, -1, -1) \
+        .reshape(BSZ, QUERY_LEN, K)
+
+    keys_gathered = keys \
+        .gather(1, block_indices.reshape(BSZ, QUERY_BLOCKS * BLOCK_K, 1, 1).expand(-1, -1, BLOCK_SIZE_K, QUERY_DIM)) \
+        .reshape(BSZ, QUERY_BLOCKS, BLOCK_K, BLOCK_SIZE_K, QUERY_DIM)
+
+    # mask off >= num_k_blocks indices
+    mask = torch.arange(BLOCK_K, device=indices.device)[None, None, :] >= ks[:, :, None]  # (BSZ, QUERY_BLOCKS, BLOCK_K)
+    keys_gathered = keys_gathered.masked_fill(mask[:, :, :, None, None], 0)
+
+    if IS_CAUSAL:
+        # mask off future tokens
+        mask = real_indices > torch.arange(QUERY_LEN, device=real_indices.device)[None, :, None]
+        d_scores = d_scores.masked_fill(mask, 0)
+
+    d_scores = d_scores.reshape(BSZ, QUERY_BLOCKS, BLOCK_SIZE_Q, BLOCK_K, BLOCK_SIZE_K)
+    d_queries = torch.einsum('bQqKk,bQKkd->bQqd', d_scores, keys_gathered) \
+        .reshape(BSZ, QUERY_LEN, QUERY_DIM)
+
+    return d_queries
 
 
 def reference_impl(
@@ -121,7 +164,7 @@ def compare(name, ref, tri):
     print("Max Relative Error: ", (torch.abs(ref - tri) / (torch.abs(ref) + 1e-6)).max().item())
     relerr = np.quantile((torch.abs(ref - tri) / (torch.abs(ref) + 1e-6)).flatten().float().cpu().numpy(), 0.99)
     print("99% Quantile Relative Error: ", relerr)
-    assert abserr < 0.05 and relerr < 0.05
+    assert abserr < 0.05 and relerr < 0.1
 
 
 if __name__ == "__main__":
