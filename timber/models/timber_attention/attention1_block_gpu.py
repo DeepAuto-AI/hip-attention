@@ -449,7 +449,7 @@ def _calc_score_compute_bwd_keys(
 class CalcScoreAutoGradFn(Function):
     @staticmethod
     # ctx is the first argument to forward
-    def forward(
+    def forward(  # noqa
         ctx, 
         # matrices
         queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], attention_mask: Tensor,
@@ -607,7 +607,7 @@ class CalcScoreAutoGradFn(Function):
         return scores
 
     @staticmethod
-    def backward(ctx, grad_scores):
+    def backward(ctx, grad_scores):  # noqa
         ENABLED = True
         
         queries, keys, indices, ks = ctx.saved_tensors
