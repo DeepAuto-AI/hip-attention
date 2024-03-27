@@ -57,6 +57,9 @@ class TrainConfig:
     sparsity_reg: float = 0.0
     dense_layers: int = 0
     name: str = 'default'
+    enable_sparq: bool = False
+    enable_flash: bool = False
+    use_sliding_window: bool = False
 
 
 class LabDataModule:
@@ -195,17 +198,7 @@ def load_model(
     if train_config.using_fsdp:
         quant_config = None
 
-    if method == 'timber':
-        if 'qwen' in train_config.model:
-            ModelClass = QWenLMHeadModel
-        else:
-            ModelClass = LlamaForCausalLM
-    else:
-        ModelClass = transformers.AutoModelForCausalLM
-
-    print(ModelClass)
-
-    model = ModelClass.from_pretrained(
+    model = LlamaForCausalLM.from_pretrained(
         model_id,
         config=config,
         device_map="auto",
@@ -227,6 +220,9 @@ def load_model(
                 train_config.dense_queries = train_config.k
             m.tree_dense_queries = train_config.dense_queries
             m.tree_dense_layers = list(range(train_config.dense_layers))
+            m.tree_enable_sparq = train_config.enable_sparq
+            m.tree_enable_flash = train_config.enable_flash
+            m.tree_use_sliding_window = train_config.use_sliding_window
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:

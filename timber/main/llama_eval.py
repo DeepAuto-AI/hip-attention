@@ -139,7 +139,9 @@ def load_model(args):
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method
             m.tree_enable_sparq = args.enable_sparq
-    
+            m.tree_enable_flash = args.enable_flash
+            m.tree_use_sliding_window = args.use_sliding_window
+
     if args.method != 'none' and args.checkpoint is not None:
         if pathlib.Path(args.checkpoint).is_dir():
             # is peft checkpoint

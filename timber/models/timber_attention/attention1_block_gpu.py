@@ -29,6 +29,7 @@ from typing import Literal, Optional, Tuple, List, Union
 import os
 import math
 from torch.autograd import Function
+from transformers.utils import logging
 
 assert (triton.__version__ in ['2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
@@ -42,6 +43,7 @@ from timber.models.timber_attention.attention1_block_gpu_kernel.masking_iteratio
 from timber.models.timber_attention.attention1_block_gpu_kernel.safe_indices import safe_indices
 from timber.models.timber_attention.attention1_block_gpu_kernel.calc_prob_return_context import calc_prob_return_context
 
+logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)
 
 DEBUG = os.environ.get('TIMBER_DEBUG', '0') == '1'
@@ -1019,6 +1021,8 @@ def attention_matrix(
     with timer("score" if not IS_FLASH else "flash_atten"):
         if not IS_FLASH:
             assert ROPE_METHOD in ['none']
+            assert not USING_SLIDING_WINDOW
+            assert not SPARQ
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
@@ -1863,6 +1867,7 @@ def timber_attention(
     assert sampling_method in ['random', 'first']
     
     if q.requires_grad:
+        logger.warning_once('q requires grad, turning off flash')
         is_flash = False
     
     assert rope_method in ['none', 'self_extend']

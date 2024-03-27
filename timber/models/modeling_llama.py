@@ -697,6 +697,9 @@ class LlamaCustomAttention(LlamaAttention):
         }
         self.tree_rope_method = 'none'
         self.tree_enable_sparq = False
+        self.tree_enable_flash = False
+        self.tree_use_sliding_window = False
+        self.tree_lp_norm_coeff = 0.5
         
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -912,6 +915,8 @@ class LlamaCustomAttention(LlamaAttention):
                                 rope_sin=sin,
                                 position_ids=position_ids.repeat_interleave(self.num_heads, 0),
                                 enable_sparq=self.tree_enable_sparq,
+                                is_flash=self.tree_enable_flash,
+                                using_sliding_window=self.tree_use_sliding_window,
                             )
                         except RuntimeError as ex:
                             os.makedirs('cache/timber', exist_ok=True)
@@ -981,7 +986,7 @@ class LlamaCustomAttention(LlamaAttention):
                             ) * 0.25 * torch.clamp(1.0 - (mask_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
                             # NOTE: 0.25 is just heuristic
                             # NOTE: 256 is top-k value
-                            attn_output_timber = attn_output_timber * (1 - scale_avg) + context_avg * scale_avg
+                            attn_output_timber = (attn_output_timber * (1 - scale_avg) + context_avg * scale_avg).to(v.dtype)
                             # """
                         # assert scale_avg.dtype == torch.bfloat16
                         # assert attn_output_timber.dtype == torch.bfloat16
