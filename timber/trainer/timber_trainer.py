@@ -110,7 +110,7 @@ class LabModule(pl.LightningModule):
     def __init__(self, config: TrainConfig):
         super().__init__()
 
-        self.model = load_model(train_config=config, method=config.method, device=torch.cuda.current_device())
+        self.model = load_model(train_config=config, method=config.method)
         if not config.disable_kd:
             self.teacher = load_model(train_config=config, method='none', is_teacher=True)
         else:

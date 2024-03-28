@@ -316,6 +316,7 @@ def main(config: TrainConfig):
         learning_rate=config.lr,
         ignore_data_skip=True,
         warmup_steps=config.warmup_steps,
+        local_rank=config.local_rank,
     )
 
     trainer = Trainer(

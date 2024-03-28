@@ -44,6 +44,7 @@ class TrainConfig:
     enable_sparq: bool = False
     enable_flash: bool = False
     use_sliding_window: bool = False
+    local_rank: int = None
 
 
 def parse_args():
@@ -76,6 +77,7 @@ def parse_args():
     parser.add_argument('--dense_layers', type=int, default=None)
     parser.add_argument('--name', type=str, default='default')
     parser.add_argument('--model_parallel', default=False, action='store_true')
+    parser.add_argument('--local-rank', default=None, type=int)
 
     args = parser.parse_args()
 
@@ -93,6 +95,7 @@ def parse_args():
         model=args.model,
         name=args.name,
         disable_global_context=args.disable_global_context,
+        local_rank=args.local_rank,
     )
     if args.gradient_accumulation_steps > 0:
         train_config.accumulation_steps = args.gradient_accumulation_steps
@@ -136,9 +139,14 @@ MODELS = {
 def load_model(
         train_config: TrainConfig = None,
         method='timber',
-        device=torch.cuda.current_device(),
+        device=None,
         is_teacher=False,
 ):
+    if device is None:
+        if train_config.local_rank is not None:
+            device = f'cuda:{train_config.local_rank}'
+        else:
+            device = torch.cuda.current_device()
     if train_config.using_fsdp:
         device = 'cpu'
 
