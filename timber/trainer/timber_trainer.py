@@ -8,7 +8,7 @@ import torch.onnx
 import torch.utils.checkpoint
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.strategies import DeepSpeedStrategy
+from lightning.pytorch.strategies import DeepSpeedStrategy, FSDPStrategy
 from pytorch_lightning.loggers.wandb import WandbLogger
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, random_split
@@ -110,7 +110,7 @@ class LabModule(pl.LightningModule):
     def __init__(self, config: TrainConfig):
         super().__init__()
 
-        self.model = load_model(train_config=config, method=config.method)
+        self.model = load_model(train_config=config, method=config.method, device=torch.cuda.current_device())
         if not config.disable_kd:
             self.teacher = load_model(train_config=config, method='none', is_teacher=True)
         else:
@@ -121,12 +121,14 @@ class LabModule(pl.LightningModule):
         self.pad_token_id = self.model.base_model.config.pad_token_id
         self.config = config
 
-    def forward(self, inputs, target, output_hidden_states=False):
+    def forward(self, inputs, target, output_hidden_states=False,
+                output_attn_sparsity_loss=False):
         return self.model(
             inputs,
             attention_mask=(inputs != self.pad_token_id).to(inputs.dtype),
             labels=target,
-            output_hidden_states=output_hidden_states
+            output_hidden_states=output_hidden_states,
+            output_attn_sparsity_loss=output_attn_sparsity_loss,
         )
 
     def training_step(self, batch, batch_idx):
@@ -147,7 +149,8 @@ class LabModule(pl.LightningModule):
             with torch.no_grad():  # , torch.autocast('cuda', torch.bfloat16):
                 output_teacher = self.teacher(inputs, output_hidden_states=not self.config.disable_kd)
         # with torch.autocast('cuda', torch.bfloat16):
-        output = self(inputs, target, output_hidden_states=not self.config.disable_kd)
+        output = self(inputs, target, output_hidden_states=not self.config.disable_kd,
+                      output_attn_sparsity_loss=self.config.sparsity_reg != 0)
         logits = output.logits
 
         loss_model = torch.nn.functional.cross_entropy(
@@ -174,12 +177,23 @@ class LabModule(pl.LightningModule):
         else:
             loss = loss_model
 
+        sparsity_loss = None
+        if self.config.sparsity_reg != 0:
+            sparsity_loss = sum(
+                layer_sparsity.mean()
+                for layer_sparsity in output.attn_sparsity_loss
+                if layer_sparsity is not None
+            ) / len(output.attn_sparsity_loss)
+            loss = loss + self.config.sparsity_reg * sparsity_loss
+
         self.log("training/loss_model", loss_model.item())
         if not self.config.disable_kd:
             if loss_kd_hidden > 0:
                 self.log("training/loss_kd_hidden", loss_kd_hidden.item())
             if loss_kd_logits > 0:
                 self.log("training/loss_kd_logits", loss_kd_logits.item())
+        if sparsity_loss is not None:
+            self.log("training/sparsity_loss", sparsity_loss.item())
         self.log("training/loss", loss.item())
 
         return loss
@@ -238,12 +252,12 @@ def main(config: TrainConfig):
     if config.using_fsdp:
         devices = torch.cuda.device_count()
         policy = {LlamaDecoderLayer}
-        # strategy = FSDPStrategy(
-        #     auto_wrap_policy=policy,
-        #     activation_checkpointing_policy=policy,
-        #     cpu_offload=True,
-        # )
-        # strategy = 'deepspeed_stage_3'
+        strategy = FSDPStrategy(
+            auto_wrap_policy=policy,
+            activation_checkpointing_policy=policy,
+            cpu_offload=True,
+        )
+    elif config.using_deepspeed:
         deepspeed_config = {
             "zero_allow_untested_optimizer": True,
             "zero_optimization": {
@@ -260,17 +274,17 @@ def main(config: TrainConfig):
         }
         strategy = DeepSpeedStrategy(config=deepspeed_config)
     else:
-        devices = "1"
+        devices = torch.cuda.device_count()
         strategy = "auto"
 
     if config.method == 'timber':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.dataset}-{config.seq_len}-bq{config.block_size_q}-bk{config.block_size_k}-k{config.k}-sp{config.sparsity_reg}-{{epoch:02d}}-{{step}}'
     elif config.method == 'none':
-        filename = f'llama32k-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
     elif config.method == 'reformer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}-k{config.k}-{{epoch:02d}}-{{step}}'
     elif config.method == 'performer':
-        filename = f'llama32k-{config.method}-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
+        filename = f'{config.model}-{config.method}-{config.dataset}-{config.seq_len}-{{epoch:02d}}-{{step}}'
     else:
         raise Exception()
 

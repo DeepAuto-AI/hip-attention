@@ -618,353 +618,6 @@ class LlamaFlashAttention2(LlamaAttention):
         )
 
 
-from timber.models.timber_attention.attention1_gpu import flash_attention
-from timber.models.timber_attention.attention1_block_gpu import timber_attention
-from .attn_l1_loss import compute_attn_lp_loss_triton
-
-
-class LlamaCustomAttention(LlamaAttention):
-    def __init__(self, config: LlamaConfig, layer_idx=None):
-        super().__init__(config, layer_idx)
-        
-        self.attention_method = 'none'
-        self.tree_k = 512
-        self.tree_block_size_q = 8
-        self.tree_block_size_k = 1
-        self.tree_using_context_avg = True
-        self.tree_dense_queries = 2048
-        self.tree_last_dense_queries = None
-        self.tree_dense_layers = []
-        self.tree_high_k_layers = {
-            # 0:4, 1:4, 2:4,
-        }
-        self.tree_rope_method = 'none'
-        self.tree_enable_sparq = False
-        self.tree_enable_flash = False
-        self.tree_use_sliding_window = False
-        self.tree_lp_norm_coeff = 0.5
-        
-        self.tree_avgpool_scaler = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size // 4),
-            nn.ReLU(),
-            nn.Linear(config.hidden_size // 4,  config.num_attention_heads)
-        )
-
-        if self.attention_method == 'reformer':
-            try:
-                from reformer_pytorch import LSHAttention
-                self.tree_reformer = LSHAttention(
-                    dropout=config.attention_dropout,
-                    bucket_size=self.tree_k,
-                    n_hashes=8,
-                    causal=True,
-                )
-            except ImportError:
-                logger.error("Please install reformer-pytorch to use Reformer attention.")
-                raise
-
-        elif self.attention_method == 'performer':
-            try:
-                from performer_pytorch import FastAttention
-                if not os.environ.get('IGNORE_PERFORMER', '1') == '1':
-                    dim_heads = config.hidden_size // config.num_attention_heads
-                    default_dtype = torch.get_default_dtype()
-                    torch.set_default_dtype(torch.float32)
-                    self.tree_performer = FastAttention(
-                        dim_heads=dim_heads,
-                        nb_features=int(dim_heads * (dim_heads ** 0.5)), # NOTE: this may lead OOM
-                        # nb_features=dim_heads,
-                        causal=True,
-                    )
-                    torch.set_default_dtype(default_dtype)
-            except ImportError:
-                logger.error("Please install performer-pytorch to use Performer attention.")
-                raise
-
-    # Adapted from LlamaAttention.forward
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional["TimberCache"] = None,
-        output_attentions: bool = False,
-        output_attn_sparsity_loss: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        attn_sparsity_loss = None
-
-        bsz, q_len, _ = hidden_states.size()
-        # assert hidden_states.dtype == torch.bfloat16
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-
-        if self.tree_rope_method == 'none':
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        if self.attention_method == 'none' or (self.layer_idx in self.tree_dense_layers):
-            # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-            # Reference: https://github.com/pytorch/pytorch/issues/112577.
-            if query_states.device.type == "cuda" and attention_mask is not None:
-                query_states = query_states.contiguous()
-                key_states = key_states.contiguous()
-                value_states = value_states.contiguous()
-
-            #with torch.backends.cuda.sdp_kernel(enable_math=False, enable_mem_efficient=False):
-                #if attention_mask is not None and self.training:
-                #    print(self.layer_idx, "attention_mask is not None", attention_mask.shape)
-                #    attention_mask = None
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=attention_mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                is_causal=self.is_causal and attention_mask is None and q_len > 1,
-            )
-            if os.environ.get('CHECKOUT_STATES', '0') == '1':
-                os.makedirs('./cache/llama/', exist_ok=True)
-                torch.save({
-                    'q': query_states,
-                    'k': key_states,
-                    'v': value_states,
-                    'out': attn_output,
-                }, './cache/llama/qkvout.pth')
-                input('stored. press enter to continue >>> ')
-        elif self.attention_method == 'reformer':
-            q = query_states # / (query_states.shape[-1] ** 0.5)
-            k = key_states
-            v = value_states
-
-            N, H, TDST, HID = q.shape
-            _, _, TSRC, _ = k.shape
-            assert k.shape == v.shape
-
-            q = q.reshape(N*H, TDST, HID) #.contiguous()
-            # k = k.reshape(N*H, TSRC, HID) #.contiguous()
-            v = v.reshape(N*H, TSRC, HID) #.contiguous()
-
-            self.tree_reformer.bucket_size = self.tree_k
-
-            attn_output, attn, buckets = self.tree_reformer(q, v) # (10, 1024, 128)
-            attn_output = attn_output.view(N, H, TDST, HID)#.to(hidden_states.dtype)
-        elif self.attention_method == 'performer':
-            q = query_states # / (query_states.shape[-1] ** 0.5)
-            k = key_states
-            v = value_states
-
-            with torch.autocast('cuda', enabled=False):
-                attn_output = self.tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
-            attn_output = attn_output.to(q.dtype)
-        elif self.attention_method == 'timber':
-            mask_k = self.tree_k
-            if self.layer_idx in self.tree_high_k_layers:
-                mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
-
-            q = query_states / (query_states.shape[-1] ** 0.5)
-            k = key_states
-            v = value_states
-
-            N, H, TDST, HID = q.shape
-            _, _, TSRC, _ = k.shape
-            assert k.shape == v.shape
-
-            # For L1 loss of attention map
-            if output_attn_sparsity_loss:
-                # select random `select_n` queries for speedup
-                select_n = 1024
-                selection = torch.randperm(TDST, device=q.device)[:select_n]
-                attn_sparsity_loss = compute_attn_lp_loss_triton(
-                    q[..., selection, :], k,
-                    p=self.tree_lp_norm_coeff,
-                    attend_lengths=selection.expand(N, select_n)
-                ).mean(-1)
-
-            q = q.reshape(N*H, TDST, HID) #.contiguous()
-            k = k.reshape(N*H, TSRC, HID) #.contiguous()
-            v = v.reshape(N*H, TSRC, HID) #.contiguous()
-            #if attention_mask is not None:
-            #    attention_mask = attention_mask[:, None].expand(N, H, -1).reshape(N*H, -1)
-
-            TARGET_DENSE_QUERIES = 0
-            current_query_index = TSRC - TDST
-            DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
-            LAST_DENSE_QUERIES = self.tree_last_dense_queries
-
-            if LAST_DENSE_QUERIES == 0:
-                LAST_DENSE_QUERIES = None
-            if isinstance(LAST_DENSE_QUERIES, int):
-                assert LAST_DENSE_QUERIES < 0
-            else:
-                assert LAST_DENSE_QUERIES == None
-
-            attn_outputs = []
-
-            # if DENSE_QUERIES == 0:
-            #     print("converted to TIMBER")
-
-            if DENSE_QUERIES > 0:
-                if min(DENSE_QUERIES, TDST) != min(TSRC, DENSE_QUERIES):
-                    flash_attention_mask = torch.ones((N*H, min(DENSE_QUERIES, TDST), min(TSRC, DENSE_QUERIES)), device=q.device, dtype=q.dtype)
-                    flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index)
-                    flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
-                else:
-                    flash_attention_mask = None
-                attn_output_flash, _ = flash_attention(
-                    q[:, :min(DENSE_QUERIES, TDST), :],
-                    k[:, :min(TSRC, DENSE_QUERIES), :],
-                    v[:, :min(TSRC, DENSE_QUERIES), :],
-                    flash_attention_mask,
-                )
-                attn_outputs.append(attn_output_flash)
-            else:
-                DENSE_QUERIES = 0
-
-            if q.shape[1] > DENSE_QUERIES:
-                # print(q.dtype)
-                # input()
-
-                q_timber = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
-                try:
-                    attn_output_timber, _ = timber_attention(
-                        q_timber,
-                        k[:, :LAST_DENSE_QUERIES, :],
-                        v[:, :LAST_DENSE_QUERIES, :],
-                        mask_k=mask_k,
-                        block_size_q=self.tree_block_size_q,
-                        block_size_k=self.tree_block_size_k,
-                        dense_queries_exp=self.tree_dense_queries,
-                        rope_method=self.tree_rope_method,
-                        rope_cos=cos,
-                        rope_sin=sin,
-                        position_ids=position_ids.repeat_interleave(self.num_heads, 0),
-                        enable_sparq=self.tree_enable_sparq,
-                        is_flash=self.tree_enable_flash,
-                        using_sliding_window=self.tree_use_sliding_window,
-                    )
-                except RuntimeError as ex:
-                    os.makedirs('cache/timber', exist_ok=True)
-                    torch.save({
-                        'q': q_timber,
-                        'k': k[:, :LAST_DENSE_QUERIES, :],
-                        'v': v[:, :LAST_DENSE_QUERIES, :],
-                        'mask_k': mask_k,
-                        'block_size_q': self.tree_block_size_q,
-                        'block_size_k': self.tree_block_size_k,
-                    }, 'cache/timber/qkv.pth')
-                    raise Exception('oops timber is dead, check cache/timber/qkv.pth') from ex
-
-                # flash_attention_mask = torch.ones((N*H, TDST-DENSE_QUERIES, TSRC), device=q.device, dtype=q.dtype)
-                # flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index+DENSE_QUERIES)
-                # flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
-                # # print(q.shape, flash_attention_mask, TSRC-current_query_index)
-                # attn_output_timber_truth, _ = flash_attention(
-                #     q[:, min(DENSE_QUERIES, TDST):, :],
-                #     # q,
-                #     k,
-                #     v,
-                #     flash_attention_mask,
-                # )
-                # attn_output_timber = attn_output_timber_truth
-
-                # """
-                # NOTE: accumulation should be done with fp32
-
-                if self.tree_using_context_avg:
-                    last_cumsum = None
-                    if past_key_value is not None:
-                        assert hasattr(past_key_value, "cumsum")
-                        last_cumsum = past_key_value.get_cumsum(self.layer_idx)
-                        if last_cumsum is not None:
-                            last_cumsum = last_cumsum.flatten(0, 1)
-
-                    if last_cumsum is None:
-                        # print('cache miss')
-                        last_cumsum = v.cumsum(-2, dtype=torch.float32)
-                        last_cumsum = last_cumsum[:, TSRC-TDST+DENSE_QUERIES:LAST_DENSE_QUERIES, :]
-                    else:
-                        # print('cache hit')
-                        curr_v = v[:, -q_timber.shape[-2]:LAST_DENSE_QUERIES, :]
-                        curr_v = curr_v.cumsum(-2, dtype=torch.float32)
-                        last_cumsum = curr_v + last_cumsum[:, -1:, :]
-
-                    if past_key_value is not None:
-                        past_key_value.update_cumsum(
-                            last_cumsum.unflatten(0, (N, H)),
-                            self.layer_idx
-                        )
-
-                    context_avg = last_cumsum / torch.arange(
-                        current_query_index+DENSE_QUERIES+1,
-                        current_query_index+DENSE_QUERIES+1+q_timber.shape[1],
-                        device=v.device
-                    )[None, :, None]
-                    context_avg = context_avg.to(v.dtype)
-                    # assert context_avg.dtype == torch.bfloat16
-
-                    # N, H, TDST
-                    # print(hidden_states[:, DENSE_QUERIES:, :].dtype)
-                    scale_avg = torch.sigmoid(
-                        self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1, -2).reshape(N*H, -1, 1)
-                    ) * 0.25 * torch.clamp(1.0 - (mask_k / torch.arange(TSRC-TDST+DENSE_QUERIES, TSRC-TDST+DENSE_QUERIES + q_timber.shape[1], device=v.device)), 0.0, 1.0)[None, :, None].to(v.dtype)
-                    # NOTE: 0.25 is just heuristic
-                    # NOTE: 256 is top-k value
-                    attn_output_timber = (attn_output_timber * (1 - scale_avg) + context_avg * scale_avg).to(v.dtype)
-                    # """
-                    # assert scale_avg.dtype == torch.bfloat16
-                    # assert attn_output_timber.dtype == torch.bfloat16
-                attn_outputs.append(attn_output_timber)
-
-            if LAST_DENSE_QUERIES is not None:
-                flash_attention_mask = torch.zeros((N*H, abs(LAST_DENSE_QUERIES), TSRC), dtype=q.dtype, device=q.device)
-                attn_output_last_flash, _ = flash_attention(
-                    q[:, LAST_DENSE_QUERIES:, :],
-                    k[:, :, :],
-                    v[:, :, :],
-                    flash_attention_mask,
-                )
-                attn_outputs.append(attn_output_last_flash)
-
-            if len(attn_outputs) > 1:
-                attn_output = torch.cat(attn_outputs, dim=-2)
-            else:
-                attn_output = attn_outputs[0]
-
-            attn_output = attn_output.view(N, H, TDST, HID)#.to(hidden_states.dtype)
-        else:
-            raise Exception(self.attention_method)
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-        attn_output = self.o_proj(attn_output)
-
-        if output_attn_sparsity_loss:
-            return attn_output, None, past_key_value, attn_sparsity_loss
-
-        return attn_output, None, past_key_value
-
-
 class LlamaSdpaAttention(LlamaAttention):
     """
     Llama attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
@@ -1057,6 +710,334 @@ class LlamaSdpaAttention(LlamaAttention):
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
+
+
+from timber.models.timber_attention.attention1_gpu import flash_attention
+from timber.models.timber_attention.attention1_block_gpu import timber_attention
+from .attn_l1_loss import compute_attn_lp_loss_triton
+
+
+class LlamaCustomAttention(LlamaAttention):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
+        super().__init__(config, layer_idx)
+
+        self.attention_method = 'none'
+        self.tree_k = 512
+        self.tree_block_size_q = 8
+        self.tree_block_size_k = 1
+        self.tree_using_context_avg = True
+        self.tree_dense_queries = 2048
+        self.tree_last_dense_queries = None
+        self.tree_dense_layers = []
+        self.tree_high_k_layers = {
+            # 0:4, 1:4, 2:4,
+        }
+        self.tree_rope_method = 'none'
+        self.tree_enable_sparq = False
+        self.tree_enable_flash = False
+        self.tree_use_sliding_window = False
+        self.tree_lp_norm_coeff = 0.5
+
+        self.tree_avgpool_scaler = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size // 4),
+            nn.ReLU(),
+            nn.Linear(config.hidden_size // 4, config.num_attention_heads)
+        )
+
+        if self.attention_method == 'reformer':
+            try:
+                from reformer_pytorch import LSHAttention
+                self.tree_reformer = LSHAttention(
+                    dropout=config.attention_dropout,
+                    bucket_size=self.tree_k,
+                    n_hashes=8,
+                    causal=True,
+                )
+            except ImportError:
+                logger.error("Please install reformer-pytorch to use Reformer attention.")
+                raise
+
+        elif self.attention_method == 'performer':
+            try:
+                from performer_pytorch import FastAttention
+                if not os.environ.get('IGNORE_PERFORMER', '1') == '1':
+                    dim_heads = config.hidden_size // config.num_attention_heads
+                    default_dtype = torch.get_default_dtype()
+                    torch.set_default_dtype(torch.float32)
+                    self.tree_performer = FastAttention(
+                        dim_heads=dim_heads,
+                        nb_features=int(dim_heads * (dim_heads ** 0.5)),  # NOTE: this may lead OOM
+                        # nb_features=dim_heads,
+                        causal=True,
+                    )
+                    torch.set_default_dtype(default_dtype)
+            except ImportError:
+                logger.error("Please install performer-pytorch to use Performer attention.")
+                raise
+
+    # Adapted from LlamaAttention.forward
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional["TimberCache"] = None,
+            output_attentions: bool = False,
+            output_attn_sparsity_loss: bool = False,
+            use_cache: bool = False,
+            cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        attn_sparsity_loss = None
+
+        bsz, q_len, _ = hidden_states.size()
+        # assert hidden_states.dtype == torch.bfloat16
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        past_key_value = getattr(self, "past_key_value", past_key_value)
+        cos, sin = self.rotary_emb(value_states, position_ids)
+
+        if self.tree_rope_method == 'none':
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        causal_mask = attention_mask
+        # if attention_mask is not None and cache_position is not None:
+        if attention_mask is not None:
+            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+
+        if self.attention_method == 'none' or (self.layer_idx in self.tree_dense_layers):
+            # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+            # Reference: https://github.com/pytorch/pytorch/issues/112577.
+            if query_states.device.type == "cuda" and attention_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
+
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=causal_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+            )
+
+            if os.environ.get('CHECKOUT_STATES', '0') == '1':
+                os.makedirs('./cache/llama/', exist_ok=True)
+                torch.save({
+                    'q': query_states,
+                    'k': key_states,
+                    'v': value_states,
+                    'out': attn_output,
+                }, './cache/llama/qkvout.pth')
+                input('stored. press enter to continue >>> ')
+
+        elif self.attention_method == 'reformer':
+            q = query_states  # / (query_states.shape[-1] ** 0.5)
+            k = key_states
+            v = value_states
+
+            N, H, TDST, HID = q.shape
+            _, _, TSRC, _ = k.shape
+            assert k.shape == v.shape
+
+            q = q.reshape(N * H, TDST, HID)  # .contiguous()
+            # k = k.reshape(N*H, TSRC, HID) #.contiguous()
+            v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+
+            self.tree_reformer.bucket_size = self.tree_k
+
+            attn_output, attn, buckets = self.tree_reformer(q, v)  # (10, 1024, 128)
+            attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
+        elif self.attention_method == 'performer':
+            q = query_states  # / (query_states.shape[-1] ** 0.5)
+            k = key_states
+            v = value_states
+
+            with torch.autocast('cuda', enabled=False):
+                attn_output = self.tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
+            attn_output = attn_output.to(q.dtype)
+
+        elif self.attention_method == 'timber':
+            mask_k = self.tree_k
+            if self.layer_idx in self.tree_high_k_layers:
+                mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
+
+            q = query_states / (query_states.shape[-1] ** 0.5)
+            k = key_states
+            v = value_states
+
+            N, H, TDST, HID = q.shape
+            _, _, TSRC, _ = k.shape
+            assert k.shape == v.shape
+
+            # For L1 loss of attention map
+            if output_attn_sparsity_loss:
+                # select random `select_n` queries for speedup
+                select_n = 1024
+                selection = torch.randperm(TDST, device=q.device)[:select_n]
+                attn_sparsity_loss = compute_attn_lp_loss_triton(
+                    q[..., selection, :], k,
+                    p=self.tree_lp_norm_coeff,
+                    attend_lengths=selection.expand(N, select_n)
+                ).mean(-1)
+
+            q = q.reshape(N * H, TDST, HID)  # .contiguous()
+            k = k.reshape(N * H, TSRC, HID)  # .contiguous()
+            v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+
+            TARGET_DENSE_QUERIES = 0
+            current_query_index = TSRC - TDST
+            DENSE_QUERIES = TARGET_DENSE_QUERIES - current_query_index
+            LAST_DENSE_QUERIES = self.tree_last_dense_queries
+
+            if LAST_DENSE_QUERIES == 0:
+                LAST_DENSE_QUERIES = None
+            if isinstance(LAST_DENSE_QUERIES, int):
+                assert LAST_DENSE_QUERIES < 0
+            else:
+                assert LAST_DENSE_QUERIES == None
+
+            attn_outputs = []
+
+            if DENSE_QUERIES > 0:
+                if min(DENSE_QUERIES, TDST) != min(TSRC, DENSE_QUERIES):
+                    flash_attention_mask = torch.ones((N * H, min(DENSE_QUERIES, TDST), min(TSRC, DENSE_QUERIES)),
+                                                      device=q.device, dtype=q.dtype)
+                    flash_attention_mask = torch.tril(flash_attention_mask, diagonal=current_query_index)
+                    flash_attention_mask = (1 - flash_attention_mask) * (-32000.0)
+                else:
+                    flash_attention_mask = None
+                attn_output_flash, _ = flash_attention(
+                    q[:, :min(DENSE_QUERIES, TDST), :],
+                    k[:, :min(TSRC, DENSE_QUERIES), :],
+                    v[:, :min(TSRC, DENSE_QUERIES), :],
+                    flash_attention_mask,
+                )
+                attn_outputs.append(attn_output_flash)
+            else:
+                DENSE_QUERIES = 0
+
+            if q.shape[1] > DENSE_QUERIES:
+                q_timber = q[:, min(DENSE_QUERIES, TDST):LAST_DENSE_QUERIES, :]
+                try:
+                    attn_output_timber, _ = timber_attention(
+                        q_timber,
+                        k[:, :LAST_DENSE_QUERIES, :],
+                        v[:, :LAST_DENSE_QUERIES, :],
+                        mask_k=mask_k,
+                        block_size_q=self.tree_block_size_q,
+                        block_size_k=self.tree_block_size_k,
+                        dense_queries_exp=self.tree_dense_queries,
+                        rope_method=self.tree_rope_method,
+                        rope_cos=cos,
+                        rope_sin=sin,
+                        position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+                        enable_sparq=self.tree_enable_sparq,
+                        is_flash=self.tree_enable_flash,
+                        using_sliding_window=self.tree_use_sliding_window,
+                    )
+                except RuntimeError as ex:
+                    os.makedirs('cache/timber', exist_ok=True)
+                    torch.save({
+                        'q': q_timber,
+                        'k': k[:, :LAST_DENSE_QUERIES, :],
+                        'v': v[:, :LAST_DENSE_QUERIES, :],
+                        'mask_k': mask_k,
+                        'block_size_q': self.tree_block_size_q,
+                        'block_size_k': self.tree_block_size_k,
+                    }, 'cache/timber/qkv.pth')
+                    raise Exception('oops timber is dead, check cache/timber/qkv.pth') from ex
+
+                # NOTE: accumulation should be done with fp32
+                if self.tree_using_context_avg:
+                    last_cumsum = None
+                    if past_key_value is not None:
+                        assert hasattr(past_key_value, "cumsum")
+                        last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+                        if last_cumsum is not None:
+                            last_cumsum = last_cumsum.flatten(0, 1)
+
+                    if last_cumsum is None:
+                        # print('cache miss')
+                        last_cumsum = v.cumsum(-2, dtype=torch.float32)
+                        last_cumsum = last_cumsum[:, TSRC - TDST + DENSE_QUERIES:LAST_DENSE_QUERIES, :]
+                    else:
+                        # print('cache hit')
+                        curr_v = v[:, -q_timber.shape[-2]:LAST_DENSE_QUERIES, :]
+                        curr_v = curr_v.cumsum(-2, dtype=torch.float32)
+                        last_cumsum = curr_v + last_cumsum[:, -1:, :]
+
+                    if past_key_value is not None:
+                        past_key_value.update_cumsum(
+                            last_cumsum.unflatten(0, (N, H)),
+                            self.layer_idx
+                        )
+
+                    context_avg = last_cumsum / torch.arange(
+                        current_query_index + DENSE_QUERIES + 1,
+                        current_query_index + DENSE_QUERIES + 1 + q_timber.shape[1],
+                        device=v.device
+                    )[None, :, None]
+                    context_avg = context_avg.to(v.dtype)
+
+                    # N, H, TDST
+                    scale_avg = torch.sigmoid(
+                        self.tree_avgpool_scaler(hidden_states[:, DENSE_QUERIES:LAST_DENSE_QUERIES, :]).transpose(-1,
+                                                                                                                  -2).reshape(
+                            N * H, -1, 1)
+                    ) * 0.25 * torch.clamp(1.0 - (mask_k / torch.arange(TSRC - TDST + DENSE_QUERIES,
+                                                                        TSRC - TDST + DENSE_QUERIES + q_timber.shape[1],
+                                                                        device=v.device)), 0.0, 1.0)[None, :, None].to(
+                        v.dtype)
+                    # NOTE: 0.25 is just heuristic
+                    # NOTE: 256 is top-k value
+                    attn_output_timber = (attn_output_timber * (1 - scale_avg) + context_avg * scale_avg).to(v.dtype)
+                attn_outputs.append(attn_output_timber)
+
+            if LAST_DENSE_QUERIES is not None:
+                flash_attention_mask = torch.zeros((N * H, abs(LAST_DENSE_QUERIES), TSRC), dtype=q.dtype,
+                                                   device=q.device)
+                attn_output_last_flash, _ = flash_attention(
+                    q[:, LAST_DENSE_QUERIES:, :],
+                    k[:, :, :],
+                    v[:, :, :],
+                    flash_attention_mask,
+                )
+                attn_outputs.append(attn_output_last_flash)
+
+            if len(attn_outputs) > 1:
+                attn_output = torch.cat(attn_outputs, dim=-2)
+            else:
+                attn_output = attn_outputs[0]
+
+            attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+        else:
+            raise Exception(self.attention_method)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        if output_attn_sparsity_loss:
+            return attn_output, None, past_key_value, attn_sparsity_loss
 
         return attn_output, None, past_key_value
 
@@ -1428,22 +1409,24 @@ class LlamaModel(LlamaPreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
-                    attention_mask,
+                    causal_mask,
                     position_ids,
                     past_key_values,
                     output_attentions,
                     output_attn_sparsity_loss,
                     use_cache,
+                    cache_position,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     output_attn_sparsity_loss=output_attn_sparsity_loss,
                     use_cache=use_cache,
+                    cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]

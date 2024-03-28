@@ -1,14 +1,12 @@
 import pathlib
 from dataclasses import dataclass
 
-import pathlib
-from dataclasses import dataclass
-
 import torch
 import torch.autograd
 import torch.onnx
 import torch.utils.checkpoint
 import transformers
+from transformers import LlamaForCausalLM
 from peft import LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
@@ -19,6 +17,7 @@ from timber.models.qwen.configuration_qwen import QWenConfig
 class TrainConfig:
     disable_kd: bool = False
     using_fsdp: bool = False
+    using_deepspeed: bool = False
     model_parallel: bool = False
     lr: float = 5e-5
     batch_size: int = 1
@@ -56,6 +55,7 @@ def parse_args():
     parser.add_argument('--method', default='timber', type=str)
     parser.add_argument('--dense_queries', default=None, type=int)
     parser.add_argument('--using_fsdp', action='store_true')
+    parser.add_argument('--using_deepspeed', action='store_true')
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--disable_global_context', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -82,6 +82,7 @@ def parse_args():
     train_config = TrainConfig(
         model_parallel=args.model_parallel,
         using_fsdp=args.using_fsdp,
+        using_deepspeed=args.using_deepspeed,
         disable_kd=args.disable_kd,
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
@@ -135,7 +136,7 @@ MODELS = {
 def load_model(
         train_config: TrainConfig = None,
         method='timber',
-        device='cuda:0',
+        device=torch.cuda.current_device(),
         is_teacher=False,
 ):
     if train_config.using_fsdp:
