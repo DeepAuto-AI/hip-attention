@@ -42,8 +42,8 @@ def job_ppl(args, model, tokenizer, device, visualize):
                 
             else:
                 os.environ['CHECKOUT_ENSEMBLE'] = '0'
-                print("QUIT!!!!!!!!!!!!!!")
-                return
+                # print("QUIT!!!!!!!!!!!!!!")
+                # return
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
             input_ids = encodings[:, begin_loc:end_loc].to(device)

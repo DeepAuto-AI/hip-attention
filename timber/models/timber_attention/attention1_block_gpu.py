@@ -1740,7 +1740,7 @@ def timber_attention(
 
 ):
     assert sampling_method in ['random', 'first']
-    print('sampling_method : ', sampling_method)
+    # print('sampling_method : ', sampling_method)
 
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
