@@ -1842,13 +1842,7 @@ def timber_attention(
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
 
-    layer_id : int = 0,
-
-):
-    assert sampling_method in ['random', 'first']
-    # print('sampling_method : ', sampling_method)
-
-    
+    layer_id : int = 0,    
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
     
@@ -2104,7 +2098,7 @@ def timber_attention(
                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                 )
                 if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
-                    os.makedirs(f'./cache/ensemble/llama13b_chat/models/default', exist_ok=True)
+                    os.makedirs(f'./cache/ensemble/llama13b_32k/models/default', exist_ok=True)
                     torch.save({
                         'indices': indices,
                         'ks' : ks,
@@ -2118,7 +2112,7 @@ def timber_attention(
                         'probs_or_context' : probs_or_context,
                         'scores': scores,
                         'layer_id' : layer_id,
-                    }, f'./cache/ensemble/llama13b_chat/models/default/l_{layer_id}_{sampling_method}.pth')
+                    }, f'./cache/ensemble/llama13b_32k/models/default/l_{layer_id}_{sampling_method}.pth')
                     print(">>> STORED.")
                     # input('stored. press enter to continue >>> ')
             else:
@@ -2138,8 +2132,9 @@ def timber_attention(
                 assert ensemble_method in ['final_attn', ] # TODO 'per_attn_iteration'
                 if ensemble_model_setting == "random_pruning":
                     if ensemble_method == 'final_attn':
-                        assert ensemble_method_final in ['all_agree', 'more_sparse', 'same_sparse', 'less_sparse', 
-                                                         'avg', 'max', 'min', 'med',]
+                        assert ensemble_method_final in ['all_agree', 'union', 'union_bounded_mask_k',
+                                                        'more_sparse', 'same_sparse', 'less_sparse', 
+                                                        'avg', 'max', 'min', 'med',]
                         if ((layer_id) == ensemble_particular_layer) or (ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
                             real_ensemble = True
                             ensemble_attn_mask_per_layer = [] # TODO not efficient?
@@ -2190,7 +2185,7 @@ def timber_attention(
                                 ensemble_attn_mask_per_layer.append(indices)
                                 
                                 if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
-                                    os.makedirs(f'./cache/ensemble/llama13b_chat/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
+                                    os.makedirs(f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
                                     torch.save({
                                         'indices': indices,
                                         'ks' : ks,
@@ -2210,7 +2205,7 @@ def timber_attention(
                                         'ensemble_particular_layer' : ensemble_particular_layer,
                                         'layer_id' : layer_id,
                                         'model_i': i,
-                                    }, f'./cache/ensemble/llama13b_chat/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+                                    }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
                                     print(">>> STORED.")
                                     # input('stored. press enter to continue >>> ')
 

@@ -117,7 +117,7 @@ def _masking_iteration_topk(
     stride_keys_vllm_block_size, 
     stride_keys_vllm_x, 
 
-    MODEL_I
+    MODEL_I,
     
     # rope support
     ROPE_METHOD,
@@ -226,7 +226,7 @@ def _masking_iteration_topk(
     if SAMPLING_METHOD == 'random':
         # if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
         if (idx_iteration > 0) and (idx_iteration == (N_ITERATION // 2)):
-            idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+            idx_tsrc_block += tl.random.rand(idx_bdst+MODEL_I, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
     idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
     idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
     idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
@@ -1040,7 +1040,7 @@ def _masking_iteration_compute(
                     stride_keys_vllm_x, 
 
                     # ensemble
-                    MODEL_I
+                    MODEL_I,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
@@ -1130,7 +1130,7 @@ def _masking_iteration_compute(
                     stride_keys_vllm_x, 
 
                     # ensemble
-                    MODEL_I
+                    MODEL_I,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,

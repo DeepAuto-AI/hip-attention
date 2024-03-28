@@ -27,7 +27,8 @@ def ensemble_random_pruning(
     _, TSRC, _ = k.shape
     # indices : [40, 128, 256] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K]
     assert ensemble_method in ['final_attn']
-    assert ensemble_method_final in ['all_agree', 'more_sparse', 'same_sparse', 'less_sparse', 
+    assert ensemble_method_final in ['all_agree', 'union', 'union_bounded_mask_k',
+                                     'more_sparse', 'same_sparse', 'less_sparse', 
                                     'avg', 'max', 'min', 'med',]
 
     origin_sparsity = (torch.sum((torch.stack(ensemble_attn_mask_per_layer, dim=0) < TSRC))//ensemble_model_n).item()
@@ -45,7 +46,10 @@ def ensemble_random_pruning(
             per_query_token_cnt_diclist = []
             for r in ensemble_attn_mask_per_layer:
                 unique_ensemble, counts = torch.unique(r, return_counts=True)
-                per_query_token_cnt_diclist.append(dict(zip(unique_ensemble.tolist(), counts.tolist())))
+                d = dict(zip(unique_ensemble.tolist(), counts.tolist()))
+                d.pop(32000, None)
+                per_query_token_cnt_diclist.append(d)
+                
                     
             ensembled_indices = torch.full((N_H, TDST//block_size_q, mask_k//block_size_k), 32000)
             for idx, token_dict in enumerate(per_query_token_cnt_diclist): # N_H * (TDST//block_size_q)
@@ -54,9 +58,85 @@ def ensemble_random_pruning(
                 
                 selected_indices = [key for key, value in token_dict.items() if value == ensemble_model_n and key < TSRC]
                 
+                assert len(selected_indices) <= (mask_k // block_size_k)
                 for key_idx, key in enumerate(selected_indices):
-                    if key_idx < (mask_k // block_size_k):
+                    ensembled_indices[n_h_idx, tdst_idx, key_idx] = key
+                    # if key_idx < (mask_k // block_size_k):
+                    #     ensembled_indices[n_h_idx, tdst_idx, key_idx] = key
+            # breakpoint()
+
+        elif ensemble_method_final == "union":
+            '''
+            [40, 128, 256] * 5
+            package in one batch; 
+            in batch; output of attentions
+            '''
+            ensemble_attn_mask_per_layer = torch.cat(ensemble_attn_mask_per_layer, dim=-1)
+            # ensemble_attn_mask_per_layer : [40, 128, 1280] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(-1, ensemble_attn_mask_per_layer.shape[-1])
+            # ensemble_attn_mask_per_layer : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            per_query_token_cnt_diclist = []
+            for r in ensemble_attn_mask_per_layer:
+                unique_ensemble, counts = torch.unique(r, return_counts=True)
+                d = dict(zip(unique_ensemble.tolist(), counts.tolist()))
+                d.pop(32000, None)
+                per_query_token_cnt_diclist.append(d)
+                    
+            max_dict_size = max(len(dic) for dic in per_query_token_cnt_diclist)
+            ensembled_indices = torch.full((N_H, TDST//block_size_q, max_dict_size), 32000)
+            for idx, token_dict in enumerate(per_query_token_cnt_diclist): # N_H * (TDST//block_size_q)
+                n_h_idx = idx // (TDST // block_size_q)
+                tdst_idx = idx % (TDST // block_size_q)
+                
+                selected_indices = [key for key, value in token_dict.items() if value >= 1 and key < TSRC]
+                
+                assert len(selected_indices) <= max_dict_size
+                for key_idx, key in enumerate(selected_indices):
+                    ensembled_indices[n_h_idx, tdst_idx, key_idx] = key
+            # breakpoint()
+
+        elif ensemble_method_final == "union_bounded_mask_k":
+            '''
+            [40, 128, 256] * 5
+            package in one batch; 
+            in batch; output of attentions
+            '''
+            ensemble_attn_mask_per_layer = torch.cat(ensemble_attn_mask_per_layer, dim=-1)
+            # ensemble_attn_mask_per_layer : [40, 128, 1280] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(-1, ensemble_attn_mask_per_layer.shape[-1])
+            # ensemble_attn_mask_per_layer : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            per_query_token_cnt_diclist = []
+            for r in ensemble_attn_mask_per_layer:
+                unique_ensemble, counts = torch.unique(r, return_counts=True)
+                d = dict(zip(unique_ensemble.tolist(), counts.tolist()))
+                d.pop(32000, None)
+                per_query_token_cnt_diclist.append(d)
+
+            # Assuming per_query_token_cnt_diclist is your list of dictionaries
+            sorted_per_query_token_cnt_diclist = []
+
+            for dic in per_query_token_cnt_diclist:
+                # Sorting each dictionary by its values in descending order
+                sorted_dic = dict(sorted(dic.items(), key=lambda item: item[1], reverse=True))
+                sorted_per_query_token_cnt_diclist.append(sorted_dic)
+
+            # Now, sorted_per_query_token_cnt_diclist contains the sorted dictionaries
+
+            ensembled_indices = torch.full((N_H, TDST//block_size_q, mask_k//block_size_k), 32000)
+            for idx, token_dict in enumerate(sorted_per_query_token_cnt_diclist): # N_H * (TDST//block_size_q)
+                n_h_idx = idx // (TDST // block_size_q)
+                tdst_idx = idx % (TDST // block_size_q)
+                
+                selected_indices = [key for key, value in token_dict.items() if value >= 1 and key < TSRC]
+                
+                assert len(selected_indices) <= mask_k//block_size_k
+                for key_idx, key in enumerate(selected_indices):
+                    if key_idx < mask_k//block_size_k:
                         ensembled_indices[n_h_idx, tdst_idx, key_idx] = key
+                    # if key_idx < (mask_k // block_size_k):
+                    #     ensembled_indices[n_h_idx, tdst_idx, key_idx] = key
+            # breakpoint()
+            
 
         elif ensemble_method_final == "more_sparse":
             pass
@@ -86,7 +166,7 @@ def ensemble_random_pruning(
 
     print("PATH: hardcoded to llama 13b chat")
     if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
-        os.makedirs(f'./cache/ensemble/llama13b_chat/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
+        os.makedirs(f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
         torch.save({
             'ks' : ks,
             'q_timber': q_timber,
@@ -112,7 +192,7 @@ def ensemble_random_pruning(
             'sparsity_per_layer' : sparsity_per_layer,
             'sparse_ratio' : sparsity_ratio,
 
-        }, f'./cache/ensemble/llama13b_chat/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+        }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
         print(">>> STORED.")
         # input('stored. press enter to continue >>> ')
     return ensembled_indices, sparsity_ratio
