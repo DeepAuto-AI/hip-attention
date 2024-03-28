@@ -7,35 +7,38 @@ sns.set_style('whitegrid')
 
 dups = range(1, 17)
 
-def samples():
-    block_size = 16
+def samples(query_size = 1, step_size = 1):
+    block_size = 32
     block_size_ks = [1, 2, 4]
-    query_size = 1
-    k = 512
+    k = 1024
     batch_sizes = {
-        1: 512,
-        3: 384,
-        4: 256,
-        5: 192,
-        6: 160,
-        7: 160,
-        8: 128,
-        9: 128,
-        10: 128,
-        11: 128,
-        12: 96,
-        13: 96,
-        14: 80,
-        16: 72,
+        1: 256,
+        3: 192,
+        4: 128,
+        5: 96,
+        6: 80,
+        7: 80,
+        8: 64,
+        9: 64,
+        10: 64,
+        11: 64,
+        12: 48,
+        13: 48,
+        14: 40,
+        16: 32,
+        24: 16,
+        32: 8,
+        48: 4,
     }
     num_samples = 200
     cache_path = './cache/attention1_block_gpu/result.json'
     
-    batch_size = max(list(batch_sizes.values()))
+    batch_size = max(1, max(list(batch_sizes.values())) // query_size)
     results = {}
     for dup in dups:
+        dup *= step_size
         if dup in batch_sizes:
-            batch_size = batch_sizes[dup]
+            batch_size = max(1, batch_sizes[dup] // query_size)
         
         latency_timbers = []
         for block_size_k in block_size_ks:
@@ -103,13 +106,13 @@ def samples():
         }
     
     os.makedirs('./saves/seqlen_speed_report', exist_ok=True)
-    path = './saves/seqlen_speed_report/result.json'
+    path = f'./saves/seqlen_speed_report/result_q{query_size}.json'
     with open(path, 'w') as f:
         json.dump(results, f, indent=2)
     print('dumped', path)
 
-def plot():
-    path = './saves/seqlen_speed_report/result.json'
+def plot(query_size=1, step_size=1):
+    path = f'./saves/seqlen_speed_report/result_q{query_size}.json'
     with open(path, 'r') as f:
         data = json.load(f)
     
@@ -127,8 +130,9 @@ def plot():
         ys_speedup = []
         ys_speedup_flash = []
         for dup in dups:
+            dup = dup * step_size
             entry = data[f's{dup * 1024}']
-            xs.append(entry['seq_len'])
+            xs.append(entry['seq_len'] / 1024)
             ys_base.append(entry['latency_base'] / entry['batch_size'] * 1000)
             ys_flash.append(entry['latency_flash'] / entry['batch_size'] * 1000)
             ys_timber.append(entry['latency_timbers'][iks] / entry['batch_size'] * 1000)
@@ -143,37 +147,46 @@ def plot():
     sns.lineplot(x=xs, y=ys_base, label='Torch')
     sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2')
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'TimberAttention (bk={block_size_k})')
+        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP-Attention (bk={block_size_k})')
     plt.legend()
-    plt.title('Single Query Latency (k=512, bq=16)')
-    plt.xlabel('Seq. Length')
+    if query_size == 1:
+        plt.title('Decoding Latency (k=1024, bq=32)')
+    else:
+        plt.title('Prompt Latency (k=1024, bq=32)')
+    plt.xlabel('Seq. Length (k)')
     plt.ylabel('Latency (us)')
-    plt.xlim(0, 17*1024)
+    plt.xlim(0, 17*step_size)
     
-    fig_path = './saves/seqlen_speed_report/plot_seqlen_latency'
+    fig_path = f'./saves/seqlen_speed_report/plot_seqlen_latency_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
     plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
     print(f'saved {fig_path}.png')
     
     plt.figure(figsize=(5,4))
     
-    plt.title('Single Query Speedup (k=512, bq=16)')
+    if query_size == 1:
+        plt.title('Decoding Speedup (k=1024, bq=32)')
+    else:
+        plt.title('Prompt Speedup (k=1024, bq=32)')
     sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch')
     sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2')
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'TimberAttention (bk={block_size_k})')
-    plt.xlabel('Seq. Length')
-    plt.ylabel('Decoding Speedup')
-    plt.xlim(0, 17*1024)
+        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
+    plt.xlabel('Seq. Length (k)')
+    plt.ylabel('Speedup')
+    plt.xlim(0, 17*step_size)
     
-    fig_path = './saves/seqlen_speed_report/plot_seqlen_speedup'
+    fig_path = f'./saves/seqlen_speed_report/plot_seqlen_speedup_q{query_size}'
     plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
     plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
     print(f'saved {fig_path}.png')
 
 def main():
-    samples()
-    plot()
+    samples(query_size=1, step_size=4)
+    plot(query_size=1, step_size=4)
+    
+    samples(query_size=1024, step_size=4)
+    plot(query_size=1024, step_size=4)
 
 if __name__ == '__main__':
     main()

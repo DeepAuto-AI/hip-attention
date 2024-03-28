@@ -15,7 +15,9 @@ class ArgsType:
     block_size_k: int = 2
     batch_size: int = 1
     k: int = 512
-    dense_queries: int = 2048
+    dense_queries: int = 0
+    dense_layers: int = 3
+
     ensemble: bool = False
     ensemble_model_setting : str = "random_pruning"
     ensemble_method : str = "final_attn"
@@ -41,6 +43,7 @@ def eval_args(
     parser.add_argument('--block_size_k', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
+    parser.add_argument('--dense_layers', type=int, default=3)
     parser.add_argument('--dense_queries', type=int, default=2048)
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--max_tokens', type=int, default=512)
@@ -58,6 +61,7 @@ def eval_args(
 
     parser.add_argument('--visualize', action='store_true')
 
+    parser.add_argument('--rope_method', type=str, default='none')
     args = parser.parse_args()
     print(args)
     return args

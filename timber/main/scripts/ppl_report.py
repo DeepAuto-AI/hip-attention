@@ -27,6 +27,7 @@ def samples():
             '--stride', '4096',
             '--block_size_q', str(block_size_q),
             '--block_size_k', str(block_size_k),
+            '--dense_layers', str(4),
             '--k', str(k),
         ])
         with open(cache_path, 'r') as f:
@@ -97,7 +98,7 @@ def plots():
     plt.title('Perplexity / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('PPL. (w/o train)')
-    plt.yscale('log', base=2)
+    # plt.yscale('log', base=2)
     
     plt.savefig('./saves/ppl_report/plot_ppl_report.png', dpi=200, bbox_inches='tight')
     plt.savefig('./saves/ppl_report/plot_ppl_report.pdf', dpi=200, bbox_inches='tight')

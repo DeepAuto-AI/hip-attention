@@ -18,6 +18,7 @@ w_start = 512 (32 block)
 import json
 import random
 import gc
+import warnings
 from matplotlib import pyplot as plt
 import numpy as np
 import skimage.measure
@@ -750,6 +751,26 @@ def debug_print(
     print('saved', path, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K, x.shape)
     plt.savefig(path, dpi=96, bbox_inches='tight')
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    q_embed = (q * cos) + (rotate_half(q) * sin) 
+    
+    if k is not None:
+        sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+        sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+    else:
+        k_embed = None
+    return q_embed, k_embed
+
 def attention_matrix(
     queries: Tensor, 
     keys: Tensor,
@@ -783,6 +804,17 @@ def attention_matrix(
     SAMPLING_METHOD: str = 'first',
     ENSEMBLE_PER_ATTN_ITER_N : int = 5,
     MODEL_I : int = 0,
+    
+    USING_SLIDING_WINDOW=True,
+    SLIDING_WINDOW_SIZE=256,
+    
+    ROPE_METHOD='none',
+    ROPE_COS=None,
+    ROPE_SIN=None,
+    POSITION_IDS=None,
+    
+    SELF_EXTEND_SCALE=None,
+    SELF_EXTEND_WINDOW=None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -792,7 +824,7 @@ def attention_matrix(
     
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
-    assert T_DST <= T_SRC
+    assert T_DST <= T_SRC, f"{queries.shape}, {keys.shape}"
     
     if triton.cdiv(mask_k, BLOCK_SIZE_K) <= ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS:
         ESTIMATOR_LOWER_RESOLUTION = 1
@@ -806,14 +838,17 @@ def attention_matrix(
         SPARQ = False
     if SPARQ and (T_SRC < SPARQ_START_TSRC):
         SPARQ = False
+    if ROPE_METHOD in ['self_extend']:
+        # assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
+        # SPARQ_HID = 16
+        SPARQ = False
     
-    # SPARQ = False
-    # SPARQ_HID = 16
-    # SPARQ = True
+    if SPARQ:
+        warnings.warn('sparq is enabled')
     
     dtype = queries.dtype
     device = queries.device
-    assert queries.device == keys.device
+    # assert queries.device == keys.device
     
     assert isinstance(BLOCK_SIZE_Q, int)
     assert isinstance(BLOCK_SIZE_K, int)
@@ -868,8 +903,19 @@ def attention_matrix(
         sparq_indices_strides = (1, 1, 1)
         if SPARQ:
             with timer('matrix.setup.sparq'):
-                queries_scores = queries.abs()
-                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST: # shen T_DST not divisible to BLOCK_SIZE_Q
+                q_scale = 1 / math.sqrt(HID)
+                queries_scores = queries
+                if ROPE_METHOD in ['self_extend']:
+                    queries_scores, _ = apply_rotary_pos_emb(
+                        queries / q_scale, 
+                        None, 
+                        ROPE_COS, 
+                        ROPE_SIN, 
+                        POSITION_IDS
+                    )
+                    queries_scores *= q_scale
+                queries_scores = queries_scores.abs()
+                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST:
                     queries_scores = F.pad(
                         queries_scores.unsqueeze(0), 
                         (0, 0, 0, B_DST * BLOCK_SIZE_Q - T_DST), 
@@ -888,7 +934,7 @@ def attention_matrix(
                     queries_scores, 
                     k=SPARQ_HID, 
                     dim=-1, 
-                    sorted=False
+                    sorted=True
                 )
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
@@ -911,14 +957,27 @@ def attention_matrix(
         masking_iteration(
             # input matrices
             queries, keys, attention_mask,
+            
             # input metrices (blocked) 
             mask, tmask, sparq_indices, sparq_indices_strides,
+            
             # temp vectors (blocked)
             ws, ks, tsrcs, 
+            
             # operator variables
             scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
+            
             # iteration controls
             i_iteration, n_iteration,
+            
+            # rope config
+            ROPE_METHOD,
+            ROPE_COS,
+            ROPE_SIN,
+            POSITION_IDS,
+            SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW,
+            
             # input constant
             kv_repeat_interleave,
             N,
@@ -930,11 +989,13 @@ def attention_matrix(
             SPARQ, 
             SPARQ_HID, 
             max(0, triton.cdiv(n_completed, BLOCK_SIZE_Q) - (triton.cdiv(T_SRC, BLOCK_SIZE_Q) - triton.cdiv(T_DST, BLOCK_SIZE_Q))),
+            
             # kernel constant
             BLOCK_SIZE_Q,
             BLOCK_SIZE_K,
             REDUCE_METHOD,
             REDUCE_STRIDE,
+            
             SAMPLING_METHOD,
             ENSEMBLE_PER_ATTN_ITER_N,
             MODEL_I,
@@ -953,6 +1014,7 @@ def attention_matrix(
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score" if not IS_FLASH else "flash_atten"):
         if not IS_FLASH:
+            assert ROPE_METHOD in ['none']
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
@@ -963,13 +1025,23 @@ def attention_matrix(
             )
             assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
         else:
+            assert ROPE_METHOD in ['self_extend', 'none']
             context = calc_prob_return_context(
-                queries=queries, keys=keys, values=values, attention_mask=attention_mask,
+                queries=queries, keys=keys, values=values, 
+                attention_mask=attention_mask,
                 indices=indices, ks=ks,
                 KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 IS_CAUSAL=is_causal,
+                USING_SLIDING_WINDOW=USING_SLIDING_WINDOW,
+                SLIDING_WINDOW_SIZE=SLIDING_WINDOW_SIZE,
+                ROPE_METHOD=ROPE_METHOD,
+                ROPE_COS=ROPE_COS,
+                ROPE_SIN=ROPE_SIN,
+                POSITION_IDS=POSITION_IDS,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
             )
 
             return indices, ks, context, None
@@ -1654,6 +1726,14 @@ def paged_timber_attention(
     block_size_k: int = 1,
     reduce_method: str = 'max',
     reduce_stride: int = 2,
+    
+    rope_method: str = 'none',
+    rope_cos: Tensor = None,
+    rope_sin: Tensor = None,
+    position_ids: Tensor = None,
+    
+    self_extend_scale: int = 8,
+    self_extend_window: int = 1024,
 ):
     """
     vLLM compatible paged attention
@@ -1670,6 +1750,8 @@ def paged_timber_attention(
         q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
     
     with timer('compat'):
+        if max_context_len < 0:
+            max_context_len = block_tables.shape[1] * k.shape[3]
         paged_k = PagedKeyCacheVllmCompat(
             key_cache=k,
             block_table=block_tables,
@@ -1684,20 +1766,44 @@ def paged_timber_attention(
     
     # print('paged qkv cache shape', q.shape, paged_k.shape, paged_v.shape)
     
-    return timber_attention(
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_start'):
+    #     k.readonly_start()
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(v, 'readonly_start'):
+    #     v.readonly_start()
+    
+    out = timber_attention(
         q=q,
         k=paged_k,
         v=paged_v,
         attention_mask=attention_mask,
+        
         w_start=w_start,
         n_patches=n_patches,
         mask_k=mask_k,
         scale_up=scale_up,
         block_size_q=block_size_q,
         block_size_k=block_size_k,
+        
         reduce_method=reduce_method,
         reduce_stride=reduce_stride,
+        
+        dense_queries_exp=0,
+        
+        rope_method=rope_method,
+        rope_cos=rope_cos,
+        rope_sin=rope_sin,
+        position_ids=position_ids,
+        
+        self_extend_scale=self_extend_scale,
+        self_extend_window=self_extend_window,
     )
+    
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_end'):
+    #     k.readonly_end()
+    # if (not torch.cuda.is_current_stream_capturing()) and hasattr(v, 'readonly_end'):
+    #     v.readonly_end()
+    
+    return out
 
 def timber_attention(
     q: Tensor, 
@@ -1714,8 +1820,8 @@ def timber_attention(
     scale_up: float = 2,
     is_causal: bool = True,
     
-    block_size_q: int = 8,
-    block_size_k: int = 1,
+    block_size_q: int = 32,
+    block_size_k: int = 2,
     reduce_method: str = 'max',
     reduce_stride: int = 2,
     
@@ -1742,6 +1848,116 @@ def timber_attention(
     assert sampling_method in ['random', 'first']
     # print('sampling_method : ', sampling_method)
 
+    
+    using_sliding_window: bool = True,
+    sliding_window_size: int = 128,
+    
+    dense_queries_exp: Optional[int] = None,
+    
+    rope_method: Literal['none', 'self_extend'] = 'none',
+    rope_cos: Optional[Tensor] = None,
+    rope_sin: Optional[Tensor] = None,
+    position_ids: Optional[Tensor] = None,
+    
+    self_extend_scale: int = 8,
+    self_extend_window: int = 1024,
+):
+    assert sampling_method in ['random', 'first']
+    
+    if q.requires_grad:
+        is_flash = False
+    
+    assert rope_method in ['none', 'self_extend']
+    if rope_method == 'self_extend':
+        assert dense_queries_exp == 0
+        assert rope_sin is not None
+        assert rope_cos is not None
+        # assert position_ids is not None
+        assert is_flash
+    
+    is_prompt = isinstance(k, Tensor) and isinstance(v, Tensor) and (q.shape[1] > 32)
+    if is_prompt:
+        if dense_queries_exp is None:
+            dense_queries_exp = int(((math.log2(k.shape[1] / mask_k / 2)) * mask_k + mask_k) * 3)
+        dense_queries = int(max(0, dense_queries_exp - k.shape[1] + q.shape[1]))
+        # print('dense queries', dense_queries_exp, dense_queries, q.shape[1], k.shape[1], block_size_q, block_size_k)
+        if is_causal and (dense_queries > 0) and (dense_queries_exp > 0):
+            contexts = []
+            
+            dense_q = q[:, :dense_queries, :]
+            dense_k = k[:, :dense_queries + k.shape[1] - q.shape[1], :]
+            dense_v = v[:, :dense_queries + k.shape[1] - q.shape[1], :]
+            
+            dense_q = dense_q.unsqueeze(-2)
+            dense_k = dense_k.unsqueeze(-2)
+            dense_v = dense_v.unsqueeze(-2)
+            
+            if dense_q.shape[0] != dense_k.shape[0]:
+                kv_repeat = dense_q.shape[0] // dense_k.shape[0]
+                dense_k = torch.repeat_interleave(dense_k, kv_repeat, 0)
+                dense_v = torch.repeat_interleave(dense_v, kv_repeat, 0)
+
+            dense_context, _ = flash_attention(
+                dense_q,
+                dense_k,
+                dense_v,
+                is_causal=True
+            )
+            dense_context = dense_context.squeeze(-2)
+            contexts.append(dense_context)
+            
+            if dense_queries < q.shape[1]:
+                sparse_q = q[:, dense_queries:, :]
+                sparse_k = k[:, :, :]
+                sparse_v = v[:, :, :]
+                sparse_context, _ = timber_attention(
+                    sparse_q,
+                    sparse_k,
+                    sparse_v,
+                    
+                    attention_mask=attention_mask,
+                    
+                    w_start=w_start,
+                    n_patches=n_patches,
+                    mask_k=mask_k,
+                    scale_up=scale_up,
+                    
+                    is_causal=is_causal,
+                    
+                    block_size_q=block_size_q,
+                    block_size_k=block_size_k,
+                    
+                    reduce_method=reduce_method,
+                    reduce_stride=reduce_stride,
+                    
+                    chunking=chunking,
+                    chunk_size=chunk_size,
+                    
+                    is_flash=is_flash,
+                    
+                    enable_sparq=enable_sparq,
+                    sampling_method=sampling_method,
+                    
+                    using_sliding_window=using_sliding_window,
+                    sliding_window_size=sliding_window_size,
+                    
+                    dense_queries_exp=dense_queries_exp,
+                    
+                    rope_method=rope_method,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    position_ids=position_ids,
+                    
+                    self_extend_scale=self_extend_scale,
+                    self_extend_window=self_extend_window,
+                )
+                contexts.append(sparse_context)
+            
+            if len(contexts) > 1:
+                return torch.cat(contexts, dim=1), None
+            else:
+                return contexts[0], None
+        
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
     
@@ -1761,27 +1977,48 @@ def timber_attention(
                 attention_mask_chunk = None
             
             context, _ = timber_attention(
-                q_chunk, k_chunk, v_chunk, 
+                q_chunk, 
+                k_chunk, 
+                v_chunk, 
                 attention_mask=attention_mask_chunk,
+                
                 w_start=w_start,
                 n_patches=n_patches,
                 mask_k=mask_k,
                 scale_up=scale_up,
+                
                 is_causal=is_causal,
+                
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
+                
                 reduce_method=reduce_method,
                 reduce_stride=reduce_stride,
+                
                 is_flash=is_flash,
                 enable_sparq=enable_sparq,
+                
                 sampling_method=sampling_method,
                 ensemble_per_attn_iter_n=ensemble_per_attn_iter_n,
+                
+                using_sliding_window=using_sliding_window,
+                sliding_window_size=sliding_window_size,
+                
+                dense_queries_exp=dense_queries_exp,
+                
+                rope_method=rope_method,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                position_ids=position_ids,
+                
+                self_extend_scale=self_extend_scale,
+                self_extend_window=self_extend_window,
             )
             contexts.append(context)
             
         contexts = torch.cat(contexts, dim=1)    
         
-        return contexts, None    
+        return contexts, None
     
     global DEBUG
     DENSE_SPARSE_ATTENTION = False
@@ -1853,6 +2090,17 @@ def timber_attention(
                     SPARQ=enable_sparq,
                     SAMPLING_METHOD=sampling_method,
 
+                    USING_SLIDING_WINDOW=using_sliding_window,
+                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                    
+                    ROPE_METHOD=rope_method,
+                    ROPE_COS=rope_cos,
+                    ROPE_SIN=rope_sin,
+                    POSITION_IDS=position_ids,
+                    
+                    SELF_EXTEND_SCALE=self_extend_scale,
+                    SELF_EXTEND_WINDOW=self_extend_window,
+                    
                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                 )
                 if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
@@ -1918,6 +2166,16 @@ def timber_attention(
                                     SPARQ=enable_sparq,
                                     SAMPLING_METHOD=sampling_method,
                                     
+                                    USING_SLIDING_WINDOW=using_sliding_window,
+                                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                                    
+                                    ROPE_METHOD=rope_method,
+                                    ROPE_COS=rope_cos,
+                                    ROPE_SIN=rope_sin,
+                                    POSITION_IDS=position_ids,
+                                    
+                                    SELF_EXTEND_SCALE=self_extend_scale,
+                                    SELF_EXTEND_WINDOW=self_extend_window,
 
                                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                                     MODEL_I = i,
@@ -2004,6 +2262,17 @@ def timber_attention(
                             SPARQ=enable_sparq,
                             SAMPLING_METHOD=sampling_method,
 
+                            USING_SLIDING_WINDOW=using_sliding_window,
+                            SLIDING_WINDOW_SIZE=sliding_window_size,
+                            
+                            ROPE_METHOD=rope_method,
+                            ROPE_COS=rope_cos,
+                            ROPE_SIN=rope_sin,
+                            POSITION_IDS=position_ids,
+                            
+                            SELF_EXTEND_SCALE=self_extend_scale,
+                            SELF_EXTEND_WINDOW=self_extend_window,
+
                             ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                         )
                 print('real_ensemble : ', real_ensemble)
@@ -2013,6 +2282,7 @@ def timber_attention(
                 return probs_or_context, (indices, ks, None, sparsity_per_layer if real_ensemble else None)
             else:
                 probs = probs_or_context
+                assert rope_method in ['none'] # self_extend is not supported
             
             # assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
         
@@ -2047,10 +2317,23 @@ def timber_attention(
                     BLOCK_SIZE_Q=block_size_q,
                     BLOCK_SIZE_K=block_size_k,
                 )
+                
+                # v_cumsum = v.cumsum(dim=1)
+                # v_avg = v_cumsum / torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None]
+                
+                # exp_norm = torch.exp(scores - torch.max(scores, dim=-1, keepdim=True)[0])
+                # min_exp_norm = torch.where(scores > -100, exp_norm, 1000.0).min(dim=-1, keepdim=True)[0]
+                # sum_exp_norm = exp_norm.sum(dim=-1, keepdim=True)
+                # ctx_exp_norm = min_exp_norm * torch.clamp_min(torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None] - mask_k, 0)
+                # sum_exp_norm = sum_exp_norm + ctx_exp_norm
+                # ctx_ratio = (ctx_exp_norm / sum_exp_norm) * 0.1
+                
+                # context = context * (1 - ctx_ratio) + v_avg * ctx_ratio
     
     return context, (indices, ks, probs, sparsity_per_layer if real_ensemble else None)
 
 import torch.nn.functional as F
+
 
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
@@ -2064,8 +2347,11 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     # )
     # return context, None
     from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
-
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal), None
+    
+    assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
+    assert k.shape[0] == v.shape[0]
+    
+    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
