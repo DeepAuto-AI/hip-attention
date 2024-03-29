@@ -811,9 +811,9 @@ def attention_matrix(
     ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',
-    
-    USING_SLIDING_WINDOW=False,
-    SLIDING_WINDOW_SIZE=256,
+
+    USING_SLIDING_WINDOW=True,
+    SLIDING_WINDOW_SIZE=128,
     
     ROPE_METHOD='none',
     ROPE_COS=None,
@@ -874,7 +874,6 @@ def attention_matrix(
     assert w_curr <= mask_k, f'{w_curr} <= {mask_k}'
     
     with timer('matrix.setup'):
-        
         # vectors
         tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
         tsrcs = torch.arange(
@@ -974,7 +973,7 @@ def attention_matrix(
         n_iteration += 1
     # w_curr = _w_curr
     
-    n_completed = _w_curr
+    n_completed = 0 #_w_curr
     with timer("iterations"):
         i_iteration = 0
         mask, ws, ks = masking_iteration(
@@ -1028,6 +1027,9 @@ def attention_matrix(
             GRID_SRC_STRIDE,
             GRID_K_STRIDE,
             
+            USING_SLIDING_WINDOW,
+            SLIDING_WINDOW_SIZE,
+            
             DEBUG,
         )
         if DEBUG:
@@ -1046,6 +1048,7 @@ def attention_matrix(
             assert ROPE_METHOD in ['none']
             assert not USING_SLIDING_WINDOW
             assert not SPARQ
+            warnings.warn('you are not using flash attention')
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
@@ -2092,7 +2095,10 @@ def timber_attention(
     with timer('timber_attention'):
         with timer('attention_matrix'):
             estimated_ksrc_stride = min(32, max(1, round(mask_k / block_size_k / 32)))
-            # estimated_ksrc_stride = 1
+            # estimated_ksrc_stride = 1 
+            if q.shape[1] > 32:
+                # if prompt
+                estimated_ksrc_stride = 1
             
             indices, ks, probs_or_context, scores = attention_matrix(
                 queries=q,

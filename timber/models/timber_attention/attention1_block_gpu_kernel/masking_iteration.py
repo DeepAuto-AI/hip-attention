@@ -96,6 +96,9 @@ def _masking_iteration_topk(
     GRID_SRC_STRIDE,
     GRID_K_STRIDE,
     
+    USING_SLIDING_WINDOW,
+    SLIDING_WINDOW_SIZE,
+    
     HID, 
     SPARQ, 
     SPARQ_HID,
@@ -544,10 +547,16 @@ def _masking_iteration_topk(
         )
         
         if IS_CAUSAL:
-            scores_partial_ignore_mask |= (
-                ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
-                False
-            )
+            if not USING_SLIDING_WINDOW:
+                scores_partial_ignore_mask |= (
+                    ((idx_tdst[:, None] + T_SRC - T_DST) < idx_tsrc[None, :]) |
+                    False
+                )
+            else:
+                scores_partial_ignore_mask |= (
+                    ((idx_tdst[:, None] + T_SRC - T_DST) < (idx_tsrc[None, :] + tl.maximum(0, SLIDING_WINDOW_SIZE - BLOCK_SIZE_Q - BLOCK_SIZE_K))) |
+                    False
+                )
         
         if ATTEN_MASK is not None:
             scores_partial_ignore_mask |= (
@@ -764,6 +773,8 @@ def _masking_iteration_compute(
     SAMPLING_METHOD: tl.constexpr,
     GRID_SRC_STRIDE: tl.constexpr,
     GRID_K_STRIDE: tl.constexpr,
+    USING_SLIDING_WINDOW: tl.constexpr,
+    SLIDING_WINDOW_SIZE: tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -1010,6 +1021,9 @@ def _masking_iteration_compute(
                     GRID_SRC_STRIDE,
                     GRID_K_STRIDE,
                     
+                    USING_SLIDING_WINDOW,
+                    SLIDING_WINDOW_SIZE,
+                    
                     HID, 
                     SPARQ, 
                     SPARQ_HID_HALF, # NOTE: this hurt accuracy little
@@ -1098,6 +1112,9 @@ def _masking_iteration_compute(
                     
                     GRID_SRC_STRIDE,
                     GRID_K_STRIDE,
+                    
+                    USING_SLIDING_WINDOW,
+                    SLIDING_WINDOW_SIZE,
                     
                     HID, 
                     SPARQ, 
@@ -1243,6 +1260,8 @@ def masking_iteration(
     SAMPLING_METHOD: str,
     GRID_SRC_STRIDE: int,
     GRID_K_STRIDE: int,
+    USING_SLIDING_WINDOW: bool,
+    SLIDING_WINDOW_SIZE: int,
     DEBUG: bool = False,
 ):
     if DEBUG:
@@ -1381,8 +1400,8 @@ def masking_iteration(
         scores = None
     
     # prepare for output
-    ws_out = ws.clone()
-    ks_out = torch.zeros(
+    ws_out = torch.empty_like(ws)
+    ks_out = torch.empty(
         (N, B_DST, GRID_SRC_STRIDE),
         dtype=torch.int64,
         device=queries.device,
@@ -1509,6 +1528,8 @@ def masking_iteration(
         SAMPLING_METHOD,
         GRID_SRC_STRIDE,
         GRID_K_STRIDE,
+        USING_SLIDING_WINDOW,
+        SLIDING_WINDOW_SIZE,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
@@ -1519,7 +1540,7 @@ def masking_iteration(
     torch.cuda.set_device(orig_device)
     
     ks_out = ks_out.sum(-1)
-    # print('ksout', ks_out, ws_out)
+    # print('ksout', ks_out, ws_out, N_COMPLETED, BLOCK_SIZE_Q, mask_k)
     
     # print('t_mask', t_mask[0, -1])
     
