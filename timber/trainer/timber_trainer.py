@@ -220,7 +220,7 @@ class LabModule(pl.LightningModule):
         from torchmetrics.text.perplexity import Perplexity
         with torch.no_grad():
             device = 'cpu'
-            if self.config.using_fsdp:
+            if self.config.using_deepspeed:
                 device = 'cuda'
             calculator = Perplexity(ignore_index=-100).to(device)
             for preds, target in zip(self.validation_preds, self.validation_targets):
@@ -236,12 +236,10 @@ class LabModule(pl.LightningModule):
     def configure_optimizers(self):
         params = []
         for name, p in self.model.named_parameters():
-            # print(name, p.requires_grad, p.shape, p.dtype)
             if p.requires_grad:
                 params.append(p)
-        if self.config.using_fsdp:
+        if self.config.using_deepspeed:
             return DeepSpeedCPUAdam(params, lr=self.config.lr)
-        # return DeepSpeedCPUAdam(params, lr=self.config.lr)
         return torch.optim.AdamW(params, lr=self.config.lr)
 
 
@@ -273,6 +271,7 @@ def main(config: TrainConfig):
             },
         }
         strategy = DeepSpeedStrategy(config=deepspeed_config)
+        devices = torch.cuda.device_count()
     else:
         devices = torch.cuda.device_count()
         strategy = "auto"

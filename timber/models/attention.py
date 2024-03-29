@@ -12,7 +12,8 @@ def custom_attention(
         attention_mask, causal_mask, position_ids,
         attention_dropout,
         attention_method,  # 'none', 'reformer', 'performer', 'timber'
-        tree_avgpool_scaler, tree_reformer, tree_performer,
+        tree_avgpool_scaler,
+        tree_reformer=None, tree_performer=None,
         tree_k=512, tree_block_size_q=32, tree_block_size_k=2,
         tree_use_sliding_window=False, tree_enable_sparq=False, tree_enable_flash=False,
         tree_using_context_avg=False, past_key_value=None, layer_idx=None,
