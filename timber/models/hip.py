@@ -20,6 +20,8 @@ def custom_attention(
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
         tree_last_dense_queries=0,
 ):
+    attn_sparsity_loss = None
+
     if attention_method == 'none':
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -222,4 +224,4 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output
+    return attn_output, attn_sparsity_loss

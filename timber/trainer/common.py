@@ -149,6 +149,7 @@ def load_model(
             device = torch.cuda.current_device()
     if train_config.using_fsdp:
         device = 'cpu'
+    print("Device:", device)
 
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]

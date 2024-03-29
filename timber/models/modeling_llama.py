@@ -742,6 +742,8 @@ class LlamaCustomAttention(LlamaAttention):
             nn.Linear(config.hidden_size // 4, config.num_attention_heads)
         )
 
+        self.tree_reformer = self.tree_performer = None
+
         if self.attention_method == 'reformer':
             try:
                 from reformer_pytorch import LSHAttention
@@ -785,7 +787,6 @@ class LlamaCustomAttention(LlamaAttention):
             use_cache: bool = False,
             cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        attn_sparsity_loss = None
 
         bsz, q_len, _ = hidden_states.size()
         # assert hidden_states.dtype == torch.bfloat16
@@ -821,7 +822,7 @@ class LlamaCustomAttention(LlamaAttention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-        attn_output = custom_attention(
+        attn_output, attn_sparsity_loss = custom_attention(
             query_states=query_states,
             key_states=key_states,
             value_states=value_states,
