@@ -835,7 +835,7 @@ def calc_prob_return_context(
     assert len(sliding_window_mask_strides) == 3
     
     assert ROPE_METHOD in ['none', 'self_extend']
-    if ROPE_COS is not None:
+    if ROPE_METHOD in ['self_extend']:
         assert ROPE_SIN is not None
         assert POSITION_IDS is not None
         assert ROPE_COS.ndim == 2

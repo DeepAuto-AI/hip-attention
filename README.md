@@ -64,15 +64,10 @@ python3 -m vllm.entrypoints.openai.api_server \
 --gpu-memory-utilization 0.8
 ```
 
-
 ## vllm + Qwen's Dynamic-NTK
 
 add the following content in Qwen's `config.json`. 
 
-<<<<<<< HEAD
-# for vllm dev
-HIP_DENSE_LAYERS=3 HIP_K=256 CUDA_VISIBLE_DEVICES=0 python timber/main/llama_eval.py --model vllm_llama1b --job stream --batch_size 4 --input sample4k.md --stride 4096
-=======
 - `seq_length` is the threshold for activating NTK, default 8192 (the same as Qwen).
 - `factor` does not affect the logic of dynamic-ntk. It is used by vllm to calculate the maximum input length for model. If it is set to 1, warnings will occur if input is longer than 8192. Setting to 4 may be enough.
 
@@ -82,5 +77,15 @@ HIP_DENSE_LAYERS=3 HIP_K=256 CUDA_VISIBLE_DEVICES=0 python timber/main/llama_eva
     "seq_length": 8192,
     "factor": 4.0
 }
->>>>>>> geon-dev
+```
+
+# 4090 vllm dev
+```
+BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_DENSE_LAYERS=4 HIP_K=1024 CUDA_VISIBLE_DEVICES=0 python timber/main/llama_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
+
+sudo /usr/local/cuda-12.2/bin/ncu --target-processes all -f -o profile ./scripts/bench_stream_1.sh
+
+sudo /usr/local/cuda-12.2/bin/nsys profile -t cuda ./scripts/bench_stream_1.sh
+
+sudo /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 50000 --output report_hip_sys_%i -t cuda ./scripts/bench_stream_1.sh
 ```
