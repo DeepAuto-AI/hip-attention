@@ -403,6 +403,7 @@ def _calc_prob_return_context_compute(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_HID: tl.constexpr,
     BLOCK_BK: tl.constexpr,
+    NUM_SINK: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -432,11 +433,12 @@ def _calc_prob_return_context_compute(
             CONTEXT_LENGTH +\
                 ((idx_n // KV_REPEAT_INTERLEAVE) // VLLM_NUM_KV_HEADS) * stride_context_length_num_seqs,
         )
+        tsrc = context_length
     else:
         context_length = None
+        # TODO replace to read from global memory
+        tsrc = (idx_bdst * BLOCK_SIZE_Q + BLOCK_SIZE_Q) + TSRC - TDST
     
-    # TODO replace to read from global memory
-    tsrc = TSRC - (idx_bdst * BLOCK_SIZE_Q + BLOCK_SIZE_Q - 1)
     idx_sliding_tsrc_start = tl.maximum(0, tsrc - SLIDING_WINDOW_SIZE)
     idx_sliding_tsrc_end = tl.minimum(tsrc, idx_sliding_tsrc_start + SLIDING_WINDOW_SIZE)
     
@@ -471,6 +473,93 @@ def _calc_prob_return_context_compute(
     else:
         queries_grouped = None
     
+    # attention sink
+    SLIDING_SINK_SIZE = NUM_SINK * BLOCK_SIZE_K
+    if USING_SLIDING_WINDOW:
+        for idx_slide_block in range(tl.cdiv(SLIDING_SINK_SIZE, 32)):
+            idx_sliding = tl.arange(0, 32) + idx_slide_block * 32
+            mask_sliding = idx_sliding < SLIDING_SINK_SIZE
+
+            idx_tsrc = idx_sliding
+            mask_tsrc = idx_tsrc < TSRC
+            if CONTEXT_LENGTH is not None:
+                mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
+            
+            offset_to_submit = idx_tsrc - idx_sliding_tsrc_start
+            mask_to_submit = (idx_tsrc >= idx_sliding_tsrc_start) & (idx_tsrc < idx_sliding_tsrc_end)
+            tl.store(
+                SLIDING_WINDOW_MASK +\
+                    idx_n * stride_sliding_window_mask_n +\
+                    idx_bdst * stride_sliding_window_mask_bdst +\
+                    offset_to_submit * stride_sliding_window_mask_tsrc,
+                mask = mask_to_submit,
+                value = 1,
+            )
+            
+            acc, l_i, m_i = _calc_prob_return_context_acc_compute(
+                K, stride_k_n, stride_k_tsrc, stride_k_hid,
+                V, stride_v_n, stride_v_tsrc, stride_v_hid, 
+                CONTEXT_LENGTH, 
+                
+                queries,
+                queries_grouped,
+                idx_n,
+                idx_tsrc,
+                mask_tsrc,
+                idx_hid,
+                mask_hid,
+                idx_tdst,
+                mask_tdst,
+                context_length,
+                acc,
+                l_i,
+                m_i,
+                
+                KV_REPEAT_INTERLEAVE,
+                IS_CAUSAL,
+                TDST,
+                TSRC,
+                HID,
+                
+                CACHE_METHOD,
+                
+                VLLM_NUM_KV_HEADS,
+                VLLM_BLOCK_SIZE,
+                VLLM_X,
+                
+                stride_k_vllm_num_blocks,
+                stride_k_vllm_num_kv_heads,
+                stride_k_vllm_head_size_x,
+                stride_k_vllm_block_size,
+                stride_k_vllm_x,
+                
+                stride_v_vllm_num_blocks,
+                stride_v_vllm_num_kv_heads,
+                stride_v_vllm_head_size,
+                stride_v_vllm_block_size,
+                
+                BLOCK_TABLES,
+                stride_block_tables_num_seqs,
+                stride_block_tables_max_num_blocks_per_seq,
+                
+                ROPE_METHOD,
+    
+                ROPE_COS,
+                stride_rope_cos_idx, 
+                stride_rope_cos_hid,
+                
+                ROPE_SIN,
+                stride_rope_sin_idx, 
+                stride_rope_sin_hid,
+                
+                POSITION_IDS,
+                stride_position_ids_n,
+                stride_position_ids_tdst,
+                
+                SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW,
+            )
+    
     # perform main flash attention
     for idx_bbk in range(tl.cdiv(ks, BLOCK_BK)):
         idx_bk = (tl.arange(0, BLOCK_BK) + idx_bbk * BLOCK_BK).to(tl.int64)
@@ -489,6 +578,8 @@ def _calc_prob_return_context_compute(
         # [BLOCK_BK, BLOCK_SIZE_K]
         idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
         mask_tsrc = (idx_tsrc < TSRC) & mask_bk[:, None]
+        if USING_SLIDING_WINDOW:
+            mask_tsrc = mask_tsrc & (idx_tsrc >= SLIDING_SINK_SIZE)
         if CONTEXT_LENGTH is not None:
             mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
         
@@ -499,7 +590,7 @@ def _calc_prob_return_context_compute(
         if USING_SLIDING_WINDOW:
             # submit mask
             offset_to_submit = idx_tsrc - idx_sliding_tsrc_start
-            mask_to_submit = (idx_tsrc >= idx_sliding_tsrc_start) & (idx_tsrc < idx_sliding_tsrc_end)
+            mask_to_submit = (idx_tsrc >= idx_sliding_tsrc_start) & (idx_tsrc < idx_sliding_tsrc_end) & mask_tsrc
             tl.store(
                 SLIDING_WINDOW_MASK +\
                     idx_n * stride_sliding_window_mask_n +\
@@ -655,7 +746,7 @@ def _calc_prob_return_context_compute(
     
     # epilogue
     m_i += tl.math.log2(l_i)
-    acc = acc / l_i
+    acc = (acc / l_i)
     tl.store(
         CONTEXT +\
             idx_n * stride_context_n +\
@@ -825,7 +916,7 @@ def calc_prob_return_context(
     if USING_SLIDING_WINDOW:
         sliding_window_mask = torch.zeros(
             (N, BDST, SLIDING_WINDOW_SIZE), 
-            dtype=torch.int16, 
+            dtype=torch.bool, 
             device=queries.device
         )
         sliding_window_mask_strides = sliding_window_mask.stride()
@@ -849,6 +940,9 @@ def calc_prob_return_context(
         rope_cos_stride = (0, 0)
         rope_sin_stride = (0, 0)
         position_ids_stride = (0, 0)
+    
+    # NOTE: to match 32x32 tensor-core
+    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K)
     
     # grid = (N, BDST, )
     grid = (N * BDST, )
@@ -928,6 +1022,7 @@ def calc_prob_return_context(
         BLOCK_SIZE_K,
         BLOCK_HID,
         BLOCK_BK,
+        NUM_SINK,
         IS_CAUSAL,
         
         # num_warps=8,

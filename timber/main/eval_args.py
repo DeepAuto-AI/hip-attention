@@ -35,7 +35,7 @@ def eval_args(
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--dense_layers', type=int, default=3)
-    parser.add_argument('--dense_queries', type=int, default=2048)
+    parser.add_argument('--dense_queries', type=int, default=0)
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--max_tokens', type=int, default=512)
     parser.add_argument('--rope_method', type=str, default='none')
