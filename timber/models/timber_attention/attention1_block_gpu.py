@@ -19,10 +19,7 @@ import json
 import random
 import gc
 import warnings
-from matplotlib import pyplot as plt
 import numpy as np
-import skimage.measure
-import skimage
 import torch
 from torch import Tensor
 import tqdm
@@ -32,6 +29,7 @@ from typing import Literal, Optional, Tuple, List, Union
 import os
 import math
 from torch.autograd import Function
+from transformers.utils import logging
 
 assert (triton.__version__ in ['2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
@@ -45,6 +43,7 @@ from timber.models.timber_attention.attention1_block_gpu_kernel.masking_iteratio
 from timber.models.timber_attention.attention1_block_gpu_kernel.safe_indices import safe_indices
 from timber.models.timber_attention.attention1_block_gpu_kernel.calc_prob_return_context import calc_prob_return_context
 
+logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)
 
 DEBUG = os.environ.get('TIMBER_DEBUG', '0') == '1'
@@ -252,7 +251,7 @@ def _calc_score_compute_bwd_queries(
     GRAD_QUERIES, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
     
     # input variables
-    N, TDST, TSRC, HID, BK, K,
+    N, TDST, TSRC, HID, BLOCK_K, K,
     
     # block constant
     BLOCK_SIZE_Q: tl.constexpr,
@@ -260,6 +259,7 @@ def _calc_score_compute_bwd_queries(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
 ):
     """
     ks: int[N, TDST]
@@ -282,71 +282,72 @@ def _calc_score_compute_bwd_queries(
     """
     
     idx_n = tl.program_id(0)
-    idx_bdst = tl.program_id(1)
-    
-    scalar_ks = tl.load(
-        KS +\
-            idx_n * stride_ks_n +\
-            idx_bdst * stride_ks_bdst
-    )
-    
+    idx_query_block = tl.program_id(1)
+
     idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED)
-    mask_block_q = idx_block_q < BLOCK_SIZE_Q
     idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
-    mask_block_k = idx_block_k < BLOCK_SIZE_K
-    
-    idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q)
-    mask_tdst = (idx_tdst < TDST) & mask_block_q
-    
     idx_hid = tl.arange(0, BLOCK_HID)
-    mask_hid = idx_hid < HID
-    
+
+    scalar_ks = tl.load(
+        KS +
+        idx_n.to(tl.int64) * stride_ks_n +
+        idx_query_block.to(tl.int64) * stride_ks_bdst
+    )
+
     accumulator = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID,), dtype=tl.float32)
-    for idx_bk in range(BK):
-        idx_tsrc = tl.load(
-            INDICES + \
-                idx_n * stride_indices_n + \
-                idx_bdst * stride_indices_bdst + \
-                idx_bk * stride_indices_bk,
+    for idx_key_block in range(scalar_ks):
+        idx_key_start = tl.load(
+            INDICES +
+            idx_n.to(tl.int64) * stride_indices_n +
+            idx_query_block.to(tl.int64) * stride_indices_bdst +
+            idx_key_block.to(tl.int64) * stride_indices_bk,
         )
-        
-        idx_tsrc = idx_tsrc + idx_block_k
-        mask_tsrc = (idx_tsrc < TSRC) & mask_block_k & (idx_tsrc < scalar_ks)
-        
-        idx_k = idx_bk * BLOCK_SIZE_K + idx_block_k
-        mask_k = (idx_k < K) & mask_block_k
-        
+
+        if IS_CAUSAL:
+            causal_mask = ((idx_key_start + idx_block_k)[None, :] <= (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None])
+        else:
+            causal_mask = True
+
         # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: score]
         grad_score = tl.load(
-            GRAD_SCORES +\
-                idx_n * stride_grad_scores_n +\
-                idx_tdst[:, None] * stride_grad_scores_tdst + \
-                idx_k[None, :] * stride_grad_scores_k,
-            mask = mask_tdst[:, None] & (mask_tsrc & mask_k)[None, :],
-            other = 0,
+            GRAD_SCORES +
+            idx_n.to(tl.int64) * stride_grad_scores_n +
+            (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_scores_tdst +
+            (idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :].to(tl.int64) * stride_grad_scores_k,
+            mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
+                 (idx_block_q[:, None] < BLOCK_SIZE_Q) &
+                 ((idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :] < K) &
+                 (idx_block_k[None, :] < BLOCK_SIZE_K) &
+                 causal_mask,
+            other=0,
         )
-        
+
         # [BLOCK_SIZE_K_PADDED: score, BLOCK_HID: hid]
         key = tl.load(
-            KEYS +\
-                idx_n * stride_keys_n +\
-                idx_tsrc[:, None] * stride_keys_tsrc +\
-                idx_hid[None, :] * stride_keys_hid,
-            mask = mask_hid[None, :] & (mask_tsrc & mask_k)[:, None],
-            other = 0
+            KEYS +
+            idx_n.to(tl.int64) * stride_keys_n +
+            (idx_key_start + idx_block_k)[:, None].to(tl.int64) * stride_keys_tsrc +
+            idx_hid[None, :].to(tl.int64) * stride_keys_hid,
+            mask=((idx_key_start + idx_block_k)[:, None] < TSRC) &
+                 (idx_block_k[:, None] < BLOCK_SIZE_K) &
+                 (idx_hid[None, :] < HID),
+            other=0,
         )
         
         # tl.device_print("", idx_tsrc)
         accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
     
     tl.store(
-        GRAD_QUERIES +\
-            idx_n * stride_grad_queries_n +\
-            idx_tdst[:, None] * stride_grad_queries_tdst +\
-            idx_hid[None, :] * stride_grad_queries_hid,
-        mask = mask_hid[None, :] & mask_tdst[:, None],
-        value = accumulator
+        GRAD_QUERIES +
+        idx_n.to(tl.int64) * stride_grad_queries_n +
+        (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_queries_tdst +
+        idx_hid[None, :].to(tl.int64) * stride_grad_queries_hid,
+        mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
+             (idx_block_q[:, None] < BLOCK_SIZE_Q) &
+             (idx_hid[None, :] < HID),
+        value=accumulator
     )
+
 
 @triton.jit
 def _calc_score_compute_bwd_keys(
@@ -452,7 +453,7 @@ def _calc_score_compute_bwd_keys(
 class CalcScoreAutoGradFn(Function):
     @staticmethod
     # ctx is the first argument to forward
-    def forward(
+    def forward(  # noqa
         ctx, 
         # matrices
         queries: Tensor, keys: Union[Tensor, "PagedKeyCacheVllmCompat"], attention_mask: Tensor,
@@ -467,6 +468,7 @@ class CalcScoreAutoGradFn(Function):
         ctx.save_for_backward(queries, keys, indices, ks)
         ctx.BLOCK_SIZE_Q = BLOCK_SIZE_Q
         ctx.BLOCK_SIZE_K = BLOCK_SIZE_K
+        ctx.IS_CAUSAL = IS_CAUSAL
         
         N, TDST, HID = queries.shape
         _N, TSRC, _ = keys.shape
@@ -553,6 +555,8 @@ class CalcScoreAutoGradFn(Function):
         assert ks.ndim == 2
         assert scores.ndim == 3
         with timer("_calc_score_compute"):
+            orig_device = torch.cuda.current_device()
+            torch.cuda.set_device(queries.device)
             _calc_score_compute[grid](
                 # input matrix
                 queries, *queries.stride(),
@@ -602,12 +606,13 @@ class CalcScoreAutoGradFn(Function):
                 num_stages=2,
                 enable_warp_specialization=False,
             )
+            torch.cuda.set_device(orig_device)
             
         # print(scores[0, 300, :])
         return scores
 
     @staticmethod
-    def backward(ctx, grad_scores):
+    def backward(ctx, grad_scores):  # noqa
         ENABLED = True
         
         queries, keys, indices, ks = ctx.saved_tensors
@@ -651,6 +656,7 @@ class CalcScoreAutoGradFn(Function):
                     BLOCK_SIZE_K,
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
+                    ctx.IS_CAUSAL,
                 )
         
         # for keys
@@ -729,8 +735,11 @@ def debug_print(
     w_curr,
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
+    from matplotlib import pyplot as plt
+    import skimage.measure
+    import skimage
     plt.clf()
-    indices = safe_indices(mask, ws, BLOCK_SIZE_K)
+    indices = safe_indices(mask, ws, BLOCK_SIZE_K, allow_collision=True)
     # indices = torch.clamp(indices, 0, triton.cdiv(T_SRC, BLOCK_SIZE) - 1)
     x = to_dense(
         indices.cpu().numpy(),
@@ -802,9 +811,9 @@ def attention_matrix(
     ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',
-    
+
     USING_SLIDING_WINDOW=True,
-    SLIDING_WINDOW_SIZE=256,
+    SLIDING_WINDOW_SIZE=128,
     
     ROPE_METHOD='none',
     ROPE_COS=None,
@@ -813,6 +822,9 @@ def attention_matrix(
     
     SELF_EXTEND_SCALE=None,
     SELF_EXTEND_WINDOW=None,
+    
+    GRID_SRC_STRIDE=1,
+    GRID_K_STRIDE=1,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -862,8 +874,6 @@ def attention_matrix(
     assert w_curr <= mask_k, f'{w_curr} <= {mask_k}'
     
     with timer('matrix.setup'):
-        mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
-        
         # vectors
         tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
         tsrcs = torch.arange(
@@ -880,16 +890,31 @@ def attention_matrix(
         # NOTE: store non blocked width
         ws = torch.clamp(tsrcs, 0, w_curr)
         # NOTE: store num blocks
-        ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
         # assert tsrcs.dtype == torch.int64
         # assert ws.dtype == torch.int64
         # assert ks.dtype == torch.int64
         
         # matrices
         # NOTE: float16 -> int64 seems not possible
-        mask = torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
+        bws = torch.ceil(ws / BLOCK_SIZE_K)
+        ks = torch.ceil(bws / GRID_SRC_STRIDE).to(torch.int64)
+        mask_k_block = triton.cdiv(triton.cdiv(mask_k, BLOCK_SIZE_K), GRID_K_STRIDE)
+        mask = torch.arange(
+            mask_k_block, device=device, dtype=torch.float32
+        )\
+            .view(1, 1, 1, mask_k_block)\
+            .expand(1, 1, GRID_SRC_STRIDE, mask_k_block) \
+                / ks.unsqueeze(-1).unsqueeze(-1)
+        mask = mask + (
+            torch.arange(GRID_SRC_STRIDE, device=device, dtype=torch.float32).view(1, 1, GRID_SRC_STRIDE, 1)
+        ) * (1 / bws.unsqueeze(-1).unsqueeze(-1))
         tmask = torch.zeros(
-            (mask.shape[0], mask.shape[1], mask_k_block * math.ceil(scale_up)), 
+            (
+                mask.shape[0], 
+                mask.shape[1], 
+                GRID_SRC_STRIDE,
+                mask_k_block * math.ceil(scale_up)
+            ), 
             dtype=torch.float32, 
             device=device
         )
@@ -937,9 +962,8 @@ def attention_matrix(
                 sparq_indices = sparq_indices.to(torch.int16)
                 # sparq_indices = torch.arange(0, SPARQ_HID, device=queries.device)[None, None, :].repeat(N, B_DST, 1)
                 sparq_indices_strides = sparq_indices.stride()
-    
-    if DEBUG:
-        debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+    # if DEBUG:
+    #     debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
         
     # NOTE: Calc. Mask
     n_iteration = 0
@@ -949,21 +973,25 @@ def attention_matrix(
         n_iteration += 1
     # w_curr = _w_curr
     
-    n_completed = _w_curr
+    n_completed = 0 #_w_curr
     with timer("iterations"):
         i_iteration = 0
-        masking_iteration(
+        mask, ws, ks = masking_iteration(
             # input matrices
             queries, keys, attention_mask,
             
             # input metrices (blocked) 
-            mask, tmask, sparq_indices, sparq_indices_strides,
+            mask, tmask, 
+            sparq_indices, sparq_indices_strides,
             
             # temp vectors (blocked)
             ws, ks, tsrcs, 
             
             # operator variables
-            scale_up, triton.cdiv(n_patches, BLOCK_SIZE_K), triton.cdiv(mask_k, BLOCK_SIZE_K), is_causal,
+            scale_up, 
+            triton.cdiv(n_patches, BLOCK_SIZE_K), 
+            triton.cdiv(mask_k, BLOCK_SIZE_K), 
+            is_causal,
             
             # iteration controls
             i_iteration, n_iteration,
@@ -996,6 +1024,12 @@ def attention_matrix(
             
             SAMPLING_METHOD,
             
+            GRID_SRC_STRIDE,
+            GRID_K_STRIDE,
+            
+            USING_SLIDING_WINDOW,
+            SLIDING_WINDOW_SIZE,
+            
             DEBUG,
         )
         if DEBUG:
@@ -1012,6 +1046,9 @@ def attention_matrix(
     with timer("score" if not IS_FLASH else "flash_atten"):
         if not IS_FLASH:
             assert ROPE_METHOD in ['none']
+            assert not USING_SLIDING_WINDOW
+            assert not SPARQ
+            warnings.warn('you are not using flash attention')
             scores, probs = calc_score_return_prob(
                 queries=queries, keys=keys, attention_mask=attention_mask,
                 indices=indices, ks=ks,
@@ -1044,6 +1081,9 @@ def attention_matrix(
             return indices, ks, context, None
     
     if DEBUG:
+        from matplotlib import pyplot as plt
+        import skimage.measure
+        import skimage
         x = to_dense(
             indices.cpu().numpy(),
             ks.cpu().numpy(),
@@ -1522,6 +1562,9 @@ class SparseAttentionAutoGradFn(Function):
         assert context.ndim == 3
         # assert values.dtype == probs.dtype, f"{values.dtype} == {probs.dtype}"
         # assert values.dtype == context.dtype
+
+        orig_device = torch.cuda.current_device()
+        torch.cuda.set_device(indices.device)
         _sdbmm_compute[grid](
             # inputs
             indices, *indices.stride(),
@@ -1555,6 +1598,7 @@ class SparseAttentionAutoGradFn(Function):
             
             num_warps=BLOCK_HID//32,
         )
+        torch.cuda.set_device(orig_device)
         
         return context
     
@@ -1587,6 +1631,8 @@ class SparseAttentionAutoGradFn(Function):
             )
             
             if ENABLED_VALUES:
+                orig_device = torch.cuda.current_device()
+                torch.cuda.set_device(indices.device)
                 _sdbmm_compute_bwd_values[grid](
                     probs, probs.stride(0), probs.stride(1), probs.stride(2),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2),
@@ -1603,6 +1649,7 @@ class SparseAttentionAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                 )
+                torch.cuda.set_device(orig_device)
             
             # print(grad_values.abs().sum())
         
@@ -1824,9 +1871,9 @@ def timber_attention(
     
     chunking: bool = False,
     chunk_size: int = 2048,
-    
-    is_flash: bool = True,
-    enable_sparq: bool = True,
+
+    is_flash: bool = False,
+    enable_sparq: bool = False,
     
     sampling_method: str = 'random',
     
@@ -1846,6 +1893,7 @@ def timber_attention(
     assert sampling_method in ['random', 'first']
     
     if q.requires_grad:
+        logger.warning_once('q requires grad, turning off flash')
         is_flash = False
     
     assert rope_method in ['none', 'self_extend']
@@ -2046,6 +2094,12 @@ def timber_attention(
     
     with timer('timber_attention'):
         with timer('attention_matrix'):
+            estimated_ksrc_stride = min(32, max(1, round(mask_k / block_size_k / 32)))
+            # estimated_ksrc_stride = 1 
+            if q.shape[1] > 32:
+                # if prompt
+                estimated_ksrc_stride = 1
+            
             indices, ks, probs_or_context, scores = attention_matrix(
                 queries=q,
                 keys=k,
@@ -2078,6 +2132,9 @@ def timber_attention(
                 
                 SELF_EXTEND_SCALE=self_extend_scale,
                 SELF_EXTEND_WINDOW=self_extend_window,
+                
+                GRID_SRC_STRIDE=estimated_ksrc_stride,
+                GRID_K_STRIDE=estimated_ksrc_stride,
             )
             
             if is_flash:
@@ -2153,7 +2210,7 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
     assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
     assert k.shape[0] == v.shape[0]
     
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+    return flash_attn_with_kvcache(q.half(), k.half(), v.half(), causal=is_causal, softmax_scale=1.0), None
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
@@ -2331,7 +2388,8 @@ def main_debug():
         v,
         mask_k=256,
         block_size_q=16,
-        block_size_k=2,
+        block_size_k=4,
+        dense_queries_exp=0,
         is_flash=False,
     )
     

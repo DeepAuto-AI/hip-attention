@@ -25,7 +25,7 @@ class BatchedStreamer(TextStreamer):
     
     def put(self, value):
         if self.idx == 1:
-            print('prompt trace', get_bench().format_tracetree())
+            # print('prompt trace', get_bench().format_tracetree())
             get_bench().reset_trace()
             get_bench().reset_measures()
         self.idx += 1
@@ -52,6 +52,7 @@ def job_stream(args, model, tokenizer, device):
         
         inputs = tokenizer([input_text, ] * args.batch_size, return_tensors='pt').to(device)
         print('input_ids', len(input_text), inputs.input_ids.shape)
+        print(inputs)
 
         t = time.time()
         elapsed = 0
@@ -85,7 +86,7 @@ def job_stream(args, model, tokenizer, device):
                         print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
             else:
-                streamer = BatchedStreamer(tokenizer, skip_prompt=True)
+                streamer = BatchedStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
                 
                 with torch.no_grad():
                     model.generate(
