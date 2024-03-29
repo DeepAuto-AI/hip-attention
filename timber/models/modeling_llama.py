@@ -51,7 +51,7 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
-from timber.models.hip import custom_attention
+from timber.models.attention import custom_attention
 
 
 if is_flash_attn_2_available():
