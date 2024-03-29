@@ -251,7 +251,7 @@ def _calc_score_compute_bwd_queries(
     GRAD_QUERIES, stride_grad_queries_n, stride_grad_queries_tdst, stride_grad_queries_hid,
     
     # input variables
-    N, N_QUERIES, N_KEYS, HID, BLOCK_K, K,
+    N, TDST, TSRC, HID, BLOCK_K, K,
     
     # block constant
     BLOCK_SIZE_Q: tl.constexpr,
@@ -314,7 +314,7 @@ def _calc_score_compute_bwd_queries(
             idx_n.to(tl.int64) * stride_grad_scores_n +
             (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_scores_tdst +
             (idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :].to(tl.int64) * stride_grad_scores_k,
-            mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < N_QUERIES) &
+            mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
                  (idx_block_q[:, None] < BLOCK_SIZE_Q) &
                  ((idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :] < K) &
                  (idx_block_k[None, :] < BLOCK_SIZE_K) &
@@ -328,7 +328,7 @@ def _calc_score_compute_bwd_queries(
             idx_n.to(tl.int64) * stride_keys_n +
             (idx_key_start + idx_block_k)[:, None].to(tl.int64) * stride_keys_tsrc +
             idx_hid[None, :].to(tl.int64) * stride_keys_hid,
-            mask=((idx_key_start + idx_block_k)[:, None] < N_KEYS) &
+            mask=((idx_key_start + idx_block_k)[:, None] < TSRC) &
                  (idx_block_k[:, None] < BLOCK_SIZE_K) &
                  (idx_hid[None, :] < HID),
             other=0,
@@ -342,7 +342,7 @@ def _calc_score_compute_bwd_queries(
         idx_n.to(tl.int64) * stride_grad_queries_n +
         (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_queries_tdst +
         idx_hid[None, :].to(tl.int64) * stride_grad_queries_hid,
-        mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < N_QUERIES) &
+        mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
              (idx_block_q[:, None] < BLOCK_SIZE_Q) &
              (idx_hid[None, :] < HID),
         value=accumulator
@@ -807,7 +807,7 @@ def attention_matrix(
     IS_FLASH: bool = False,
     
     # NOTE: this improve latency quite well, but hurt accuracy
-    ESTIMATOR_LOWER_RESOLUTION: int = 1,
+    ESTIMATOR_LOWER_RESOLUTION: int = 2,
     ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
     
     SAMPLING_METHOD: str = 'first',

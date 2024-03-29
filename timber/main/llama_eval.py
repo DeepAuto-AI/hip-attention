@@ -27,7 +27,7 @@ def load_vllm_model(args: ArgsType):
     
     device = 'cuda:0'
     MODELS = {
-        'vllm_llama32k': './LLaMA-2-7B-32K',
+        'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
@@ -138,9 +138,9 @@ def load_model(args):
             m.tree_dense_queries = args.dense_queries
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method
-            m.tree_enable_sparq = args.enable_sparq
-            m.tree_enable_flash = args.enable_flash
-            m.tree_use_sliding_window = args.use_sliding_window
+            m.tree_enable_sparq = not args.disable_sparq
+            m.tree_enable_flash = not args.disable_flash
+            m.tree_use_sliding_window = not args.disable_sliding_window
             m.tree_sampling_method = args.sampling_method
 
     if args.method != 'none' and args.checkpoint is not None:
