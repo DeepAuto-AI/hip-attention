@@ -1556,7 +1556,7 @@ def masking_iteration(
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
-        num_warps=1,
+        num_warps=2,
         num_stages=2,
         # enable_warp_specialization=False,
     )
