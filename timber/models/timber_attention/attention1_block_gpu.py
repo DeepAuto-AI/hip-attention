@@ -2073,11 +2073,12 @@ def timber_attention(
     
     with timer('timber_attention'):
         with timer('attention_matrix'):
-            estimated_ksrc_stride = min(32, max(1, round(mask_k / block_size_k / 32)))
-            # estimated_ksrc_stride = 1 
+            estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
             if q.shape[1] > 32:
                 # if prompt
                 estimated_ksrc_stride = 1
+            # estimated_ksrc_stride = 8
+            # print(estimated_ksrc_stride)
             
             indices, ks, probs_or_context, scores = attention_matrix(
                 queries=q,
@@ -2369,7 +2370,7 @@ def main_debug():
         block_size_q=16,
         block_size_k=4,
         dense_queries_exp=0,
-        is_flash=False,
+        is_flash=True,
     )
     
     stderr = (out - context).abs().mean().item()
