@@ -734,6 +734,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_enable_sparq = False
         self.tree_enable_flash = False
         self.tree_use_sliding_window = False
+        self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
         self.tree_avgpool_scaler = nn.Sequential(
@@ -851,6 +852,7 @@ class LlamaCustomAttention(LlamaAttention):
             output_attn_sparsity_loss=output_attn_sparsity_loss,
             tree_lp_norm_coeff=self.tree_lp_norm_coeff,
             tree_last_dense_queries=self.tree_last_dense_queries,
+            tree_sampling_method=self.tree_sampling_method,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()

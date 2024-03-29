@@ -48,6 +48,7 @@ def eval_args(
     parser.add_argument('--enable_sparq', default=False, action='store_true')
     parser.add_argument('--enable_flash', default=False, action='store_true')
     parser.add_argument('--use_sliding_window', default=False, action='store_true')
+    parser.add_argument('--sampling_method', default='random', type=str)
     args = parser.parse_args()
     print(args)
     return args

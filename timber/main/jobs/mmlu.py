@@ -150,7 +150,7 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
     return probs, seq_len
 
 def evaluate_mmlu(args, model, tokenizer, subject_name):
-    dataset = load_dataset('lukaemon/mmlu', subject_name)
+    dataset = load_dataset('lukaemon/mmlu', subject_name, trust_remote_code=True)
     
     few_shots = []
     for question in dataset['train']:

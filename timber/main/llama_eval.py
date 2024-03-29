@@ -141,6 +141,7 @@ def load_model(args):
             m.tree_enable_sparq = args.enable_sparq
             m.tree_enable_flash = args.enable_flash
             m.tree_use_sliding_window = args.use_sliding_window
+            m.tree_sampling_method = args.sampling_method
 
     if args.method != 'none' and args.checkpoint is not None:
         if pathlib.Path(args.checkpoint).is_dir():

@@ -18,7 +18,7 @@ def custom_attention(
         tree_using_context_avg=False, past_key_value=None, layer_idx=None,
         tree_dense_queries=0, tree_rope_method='none',
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
-        tree_last_dense_queries=0,
+        tree_last_dense_queries=0, tree_sampling_method='first',
 ):
     attn_sparsity_loss = None
 
@@ -149,6 +149,7 @@ def custom_attention(
                     enable_sparq=tree_enable_sparq,
                     is_flash=tree_enable_flash,
                     using_sliding_window=tree_use_sliding_window,
+                    sampling_method=tree_sampling_method,
                 )
             except RuntimeError as ex:
                 os.makedirs('cache/timber', exist_ok=True)
