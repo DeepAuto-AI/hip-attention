@@ -11,7 +11,7 @@ from transformers import LlamaForCausalLM
 from peft import LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from timber.models.qwen.configuration_qwen import QWenConfig
+from timber.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 
 
 @dataclass
@@ -19,7 +19,6 @@ class TrainConfig:
     disable_kd: bool = False
     using_fsdp: bool = False
     using_deepspeed: bool = False
-    deepspeed_config: str = None
     model_parallel: bool = False
     lr: float = 5e-5
     batch_size: int = 1
@@ -59,7 +58,6 @@ def parse_args():
     parser.add_argument('--dense_queries', default=None, type=int)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--using_deepspeed', action='store_true')
-    parser.add_argument('--deepspeed_config', default=None, type=str)
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--disable_global_context', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -88,7 +86,6 @@ def parse_args():
         model_parallel=args.model_parallel,
         using_fsdp=args.using_fsdp,
         using_deepspeed=args.using_deepspeed,
-        deepspeed_config=args.deepspeed_config,
         disable_kd=args.disable_kd,
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
@@ -174,7 +171,7 @@ def load_model(
 
     ConfigClass = LlamaConfig
     if 'qwen' in train_config.model:
-        ConfigClass = QWenConfig
+        ConfigClass = Qwen2Config
 
     config = ConfigClass.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'eager' if 'qwen' in train_config.model else 'sdpa'
@@ -189,7 +186,11 @@ def load_model(
     if train_config.using_fsdp:
         quant_config = None
 
-    model = LlamaForCausalLM.from_pretrained(
+    ModelClass = LlamaForCausalLM
+    if 'qwen' in train_config.model:
+        ModelClass = Qwen2ForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config,
         device_map=device_map,
