@@ -825,7 +825,7 @@ def attention_matrix(
     
     GRID_SRC_STRIDE=1,
     GRID_K_STRIDE=1,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
     if DEBUG:

@@ -8,19 +8,61 @@ from timber.models.attn_l1_loss import compute_attn_lp_loss_triton
 
 def custom_attention(
         query_states, key_states, value_states,
-        hidden_states, rope_cos, rope_sin,
-        attention_mask, causal_mask, position_ids,
+        attention_mask, causal_mask,
         attention_dropout,
-        attention_method,  # 'none', 'reformer', 'performer', 'timber'
-        tree_avgpool_scaler,
+
+        # Attention method
+        attention_method='timber',  # 'none', 'reformer', 'performer', 'timber'
         tree_reformer=None, tree_performer=None,
+
+        # Timber parameters
         tree_k=512, tree_block_size_q=32, tree_block_size_k=2,
-        tree_use_sliding_window=False, tree_enable_sparq=False, tree_enable_flash=False,
-        tree_using_context_avg=False, past_key_value=None, layer_idx=None,
-        tree_dense_queries=0, tree_rope_method='none',
+        tree_dense_queries=0, tree_last_dense_queries=0,
+        tree_sampling_method='first',
+
+        # Latency optimization tweaks
+        tree_enable_flash=False, tree_enable_sparq=False, tree_use_sliding_window=False,
+
+        # Context averaging parameters
+        tree_using_context_avg=False, tree_avgpool_scaler=None, last_cumsum=None, hidden_states=None,
+
+        # RoPE parameters
+        tree_rope_method='none', rope_cos=None, rope_sin=None, position_ids=None,
+
+        # Attention sparsity loss
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
-        tree_last_dense_queries=0, tree_sampling_method='first',
 ):
+    """
+    @param query_states: (N, H, TDST, HID)
+    @param key_states: (N, H, TSRC, HID)
+    @param value_states: (N, H, TSRC, HID)
+    @param attention_mask: (N, 1, TDST, TSRC)
+    @param causal_mask: (1, 1, TDST, TSRC)
+    @param attention_dropout: Dropout probability
+    @param attention_method: Attention method: ['none', 'reformer', 'performer', 'timber']
+    @param tree_reformer: Optional. Reformer object
+    @param tree_performer: Optional. Performer object
+    @param tree_k: Number of tokens to attend to for each query token in Timber attention
+    @param tree_block_size_q: Query block size for Timber attention
+    @param tree_block_size_k: Key block size for Timber attention
+    @param tree_dense_queries: Number of dense queries
+    @param tree_last_dense_queries: Number of last dense queries
+    @param tree_sampling_method: Sampling method for Timber attention: ['first', 'random']
+    @param tree_enable_flash: Enable flash attention
+    @param tree_enable_sparq: Enable SparQ attention
+    @param tree_use_sliding_window: Use sliding window for Timber attention
+    @param tree_using_context_avg: Use context averaging for Timber attention
+    @param tree_avgpool_scaler: Average pooling scaler
+    @param last_cumsum: Last cumsum for context averaging
+    @param hidden_states: Hidden states for context averaging
+    @param tree_rope_method: RoPE method: ['none', 'self_extend']
+    @param rope_cos: Used in self-extend RoPE method
+    @param rope_sin: Used in self-extend RoPE method
+    @param position_ids: Position IDs for self-extend RoPE method
+    @param output_attn_sparsity_loss: Whether to compute attention sparsity regularization
+    @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
+    @return: Attention output, last cumsum, attention sparsity loss
+    """
     attn_sparsity_loss = None
 
     if attention_method == 'none':
@@ -123,8 +165,8 @@ def custom_attention(
                 block_size_k=tree_block_size_k,
                 dense_queries_exp=tree_dense_queries,
                 rope_method=tree_rope_method,
-                rope_cos=rope_cos.squeeze(0),
-                rope_sin=rope_sin.squeeze(0),
+                rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                 position_ids=position_ids,
                 enable_sparq=tree_enable_sparq,
                 is_flash=tree_enable_flash,
@@ -145,28 +187,15 @@ def custom_attention(
 
         # NOTE: accumulation should be done with fp32
         if tree_using_context_avg:
-            last_cumsum = None
-            if past_key_value is not None:
-                assert hasattr(past_key_value, "cumsum")
-                last_cumsum = past_key_value.get_cumsum(layer_idx)
-                if last_cumsum is not None:
-                    last_cumsum = last_cumsum.flatten(0, 1)
 
             if last_cumsum is None:
-                # print('cache miss')
                 last_cumsum = v.cumsum(-2, dtype=torch.float32)
                 last_cumsum = last_cumsum[:, TSRC - TDST:LAST_DENSE_QUERIES, :]
             else:
-                # print('cache hit')
+                last_cumsum = last_cumsum.flatten(0, 1)
                 curr_v = v[:, -q_timber.shape[-2]:LAST_DENSE_QUERIES, :]
                 curr_v = curr_v.cumsum(-2, dtype=torch.float32)
                 last_cumsum = curr_v + last_cumsum[:, -1:, :]
-
-            if past_key_value is not None:
-                past_key_value.update_cumsum(
-                    last_cumsum.unflatten(0, (N, H)),
-                    layer_idx
-                )
 
             context_avg = last_cumsum / torch.arange(
                 current_query_index + 1,
@@ -174,6 +203,8 @@ def custom_attention(
                 device=v.device
             )[None, :, None]
             context_avg = context_avg.to(v.dtype)
+
+            last_cumsum = last_cumsum.unflatten(0, (N, H))
 
             # N, H, TDST
             scale_avg = torch.sigmoid(
@@ -205,4 +236,4 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output, attn_sparsity_loss
+    return attn_output, last_cumsum, attn_sparsity_loss

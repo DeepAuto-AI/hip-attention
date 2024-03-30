@@ -7,6 +7,7 @@ import copy
 import importlib
 import math
 import pathlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Tuple, Union, Callable, List, Any, Generator
 
 import torch
@@ -14,6 +15,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 import warnings
 
+from timber import custom_attention
 from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedTokenizer, GenerationConfig, StoppingCriteriaList
 from transformers.generation.logits_process import LogitsProcessorList
@@ -119,6 +121,26 @@ def _import_flash_attn():
             "Warning: import flash_attn fail, please install FlashAttention to get higher efficiency "
             "https://github.com/Dao-AILab/flash-attention"
         )
+
+
+@dataclass
+class BaseModelOutputWithPastAndL1(BaseModelOutputWithPast):
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    attn_sparsity_loss: Optional[Tuple[torch.FloatTensor]] = None
+
+
+@dataclass
+class CausalLMOutputWithPastAndL1(CausalLMOutputWithPast):
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    attn_sparsity_loss: Optional[Tuple[torch.FloatTensor]] = None
+
 
 def quantize_cache_v(fdata, bits, qmax, qmin):
     # b, s, head, h-dim->b, head, s, h-dim
@@ -320,6 +342,32 @@ class QWenAttention(nn.Module):
                     warnings.warn("Failed to import KV cache kernels.")
                     self.cache_kernels = None
 
+        ###### Tree Attention ######
+        self.attention_method = 'none'
+        self.tree_k = 512
+        self.tree_block_size_q = 8
+        self.tree_block_size_k = 1
+        self.tree_using_context_avg = True
+        self.tree_dense_queries = 2048
+        self.tree_last_dense_queries = None
+        self.tree_dense_layers = []
+        self.tree_high_k_layers = {
+            # 0:4, 1:4, 2:4,
+        }
+        self.tree_rope_method = 'none'
+        self.tree_enable_sparq = False
+        self.tree_enable_flash = False
+        self.tree_use_sliding_window = False
+        self.tree_sampling_method = 'random'
+        self.tree_lp_norm_coeff = 0.5
+
+        self.tree_avgpool_scaler = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size // 4),
+            nn.ReLU(),
+            nn.Linear(config.hidden_size // 4, config.num_attention_heads)
+        )
+        #############################
+
     def _attn(self, query, key, value, causal_mask=None, attention_mask=None, head_mask=None):
         device = query.device
         if self.use_cache_quantization:
@@ -411,6 +459,7 @@ class QWenAttention(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = False,
+        output_attn_sparsity_loss: Optional[bool] = False,
         use_cache: Optional[bool] = False,
     ):
         mixed_x_layer = self.c_attn(hidden_states)
@@ -525,9 +574,58 @@ class QWenAttention(nn.Module):
                         attention_mask = attention_mask.masked_fill(~causal_mask, torch.finfo(query.dtype).min)
                 else:
                     attention_mask = causal_mask
-                attn_output = F.scaled_dot_product_attention(
-                    query, key, value, attn_mask=attention_mask
-                ).transpose(1, 2)
+
+                use_original_attention = False
+                if use_original_attention:
+                    attn_output = F.scaled_dot_product_attention(
+                        query, key, value, attn_mask=attention_mask
+                    )
+
+                else:
+                    mask_k = self.tree_k
+                    if self.layer_idx in self.tree_high_k_layers:
+                        mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
+
+                    attn_output, _, attn_sparsity_loss = custom_attention(
+                        query_states=query, key_states=key, value_states=value,
+                        attention_mask=attention_mask, causal_mask=causal_mask,
+                        attention_dropout=self.config.attn_dropout_prob if self.training else 0.0,
+
+                        # Attention method
+                        attention_method='none' if self.layer_idx in self.tree_dense_layers else self.attention_method,
+                        tree_reformer=self.tree_reformer,
+                        tree_performer=self.tree_performer,
+
+                        # Timber parameters
+                        tree_k=mask_k,
+                        tree_block_size_q=self.tree_block_size_q, tree_block_size_k=self.tree_block_size_k,
+                        tree_dense_queries=self.tree_dense_queries,
+                        tree_last_dense_queries=self.tree_last_dense_queries,
+                        tree_sampling_method=self.tree_sampling_method,
+
+                        # Latency optimization tweaks
+                        tree_enable_flash=self.tree_enable_flash,
+                        tree_enable_sparq=self.tree_enable_sparq,
+                        tree_use_sliding_window=self.tree_use_sliding_window,
+
+                        # Context averaging parameters
+                        tree_using_context_avg=self.tree_using_context_avg,
+                        tree_avgpool_scaler=self.tree_avgpool_scaler,
+                        hidden_states=hidden_states,
+                        last_cumsum=None,  # TODO: implement cumsum caching for generation speedup
+
+                        # RoPE parameters
+                        tree_rope_method=self.tree_rope_method,
+                        rope_cos=None,  # TODO: implement RoPE self-extend
+                        rope_sin=None,
+                        position_ids=None,
+
+                        # Attention sparsity loss
+                        output_attn_sparsity_loss=output_attn_sparsity_loss,
+                        tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                    )
+
+                attn_output = attn_output.transpose(1, 2)
                 attn_weight = None
             else:
                 attn_output, attn_weight = self._attn(
@@ -551,6 +649,9 @@ class QWenAttention(nn.Module):
                 raise ValueError("Cannot output attentions while using scaled_dot_product_attention")
             else:
                 outputs += (attn_weight,)
+
+        if output_attn_sparsity_loss:
+            outputs += (attn_sparsity_loss,)
 
         return outputs
 
@@ -604,6 +705,7 @@ class QWenBlock(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        output_attn_sparsity_loss: Optional[bool] = False,
     ):
         layernorm_output = self.ln_1(hidden_states)
 
@@ -615,6 +717,7 @@ class QWenBlock(nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_attn_sparsity_loss=output_attn_sparsity_loss,
         )
         attn_output = attn_outputs[0]
 
@@ -752,6 +855,7 @@ class QWenModel(QWenPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
         output_attentions = (
@@ -863,6 +967,7 @@ class QWenModel(QWenPreTrainedModel):
         presents = () if use_cache else None
         all_self_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
+        attn_sparsity_losses = () if output_attn_sparsity_loss else None
         for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
 
             if output_hidden_states:
@@ -873,7 +978,7 @@ class QWenModel(QWenPreTrainedModel):
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, use_cache, output_attentions)
+                        return module(*inputs, use_cache, output_attentions, output_attn_sparsity_loss)
 
                     return custom_forward
 
@@ -898,6 +1003,7 @@ class QWenModel(QWenPreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    output_attn_sparsity_loss=output_attn_sparsity_loss,
                 )
 
             hidden_states = outputs[0]
@@ -906,6 +1012,9 @@ class QWenModel(QWenPreTrainedModel):
 
             if output_attentions:
                 all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+
+            if output_attn_sparsity_loss:
+                attn_sparsity_losses = attn_sparsity_losses + (outputs[-1],)
 
         hidden_states = self.ln_f(hidden_states)
         hidden_states = hidden_states.view(output_shape)
@@ -918,11 +1027,12 @@ class QWenModel(QWenPreTrainedModel):
                 v for v in [hidden_states, presents, all_hidden_states] if v is not None
             )
 
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastAndL1(
             last_hidden_state=hidden_states,
             past_key_values=presents,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
+            attn_sparsity_loss=attn_sparsity_losses,
         )
 
 
@@ -1033,8 +1143,9 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPastAndL1]:
 
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
@@ -1053,6 +1164,7 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_attn_sparsity_loss=output_attn_sparsity_loss,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
@@ -1073,12 +1185,13 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastAndL1(
             loss=loss,
             logits=lm_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            attn_sparsity_loss=transformer_outputs.attn_sparsity_loss,
         )
 
     @staticmethod
