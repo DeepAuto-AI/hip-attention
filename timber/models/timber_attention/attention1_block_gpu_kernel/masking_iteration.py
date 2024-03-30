@@ -1460,12 +1460,12 @@ def masking_iteration(
     assert ks.ndim == 2
     assert ks_out.ndim == 3
     assert t_srcs.ndim == 2
-    
+
     # print('mask', mask[0, -1])
     # print('ks', ks, mask_k, BLOCK_SIZE_K, mask.shape, t_mask.shape, BLOCK_MASK_K)
-    
-    # print()
-    
+
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(queries.device)
     _masking_iteration_compute[grid](
         # input matrices
         queries, *queries.stride(),
@@ -1560,6 +1560,7 @@ def masking_iteration(
         num_stages=2,
         # enable_warp_specialization=False,
     )
+    torch.cuda.set_device(orig_device)
     
     ks_out = ks_out.sum(-1)
     # print('ksout', ks_out, ws_out, N_COMPLETED, BLOCK_SIZE_Q, mask_k)

@@ -963,7 +963,9 @@ def calc_prob_return_context(
     # print(f'{block_tables.data_ptr():X} {block_tables_strides}')
     # print(f'{context_length.data_ptr():X} {sliding_window_mask_strides}')
     # print(f'{sliding_window_mask.data_ptr():X} {sliding_window_mask_strides}')
-    
+
+    orig_device = torch.cuda.current_device()
+    torch.cuda.set_device(queries.device)
     _calc_prob_return_context_compute[grid](
         queries, *queries.stride(),
         queries_grouped,
@@ -1028,5 +1030,6 @@ def calc_prob_return_context(
         # num_warps=8,
         # num_stages=2,
     )
+    torch.cuda.set_device(orig_device)
     
     return context

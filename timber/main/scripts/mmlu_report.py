@@ -1,24 +1,27 @@
 import os
 import json
+import argparse
 from timber.main.jobs.mmlu import MMLU_SUBJECTS
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--configs', type=str, nargs='+', required=True)
+    args = parser.parse_args()
     os.makedirs('./saves/mmlu_report', exist_ok=True)
-    
-    configs = [
-        'none', 
-        'llama32k_timber_bq32_bk2_k512',
-        'llama13b_timber_bq32_bk2_k512'
-    ]
+
     header = ['config',] + MMLU_SUBJECTS + ['avg',]
     lines = [','.join(header)]
     seq_len = {}
     data_len = {}
-    for config in configs:
-        row = [config]
+    for config in args.configs:
+        row = [repr(config)]
         acc_len = acc_sum = 0
         for subject in MMLU_SUBJECTS:
-            json_path = f'./saves/llama_eval/mmlu/{subject}_{config}.json'
+            json_path = f'./saves/llama_eval/mmlu/{config}/{subject}.json'
+            if not os.path.exists(json_path):
+                row.append('N/A')
+                print(f'not found: {json_path}. skipping')
+                continue
             with open(json_path, 'r') as f:
                 data = json.load(f)
                 row.append(str(data['accuracy']))
