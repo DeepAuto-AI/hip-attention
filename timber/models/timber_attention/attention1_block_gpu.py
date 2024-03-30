@@ -2067,8 +2067,8 @@ def timber_attention(
             indices = precomputed_indices
             ks = precomputed_ks
             
-            assert indices.shape[:-1] == (N, T_DST), f'{indices.shape}'
-            assert ks.shape == (N, T_DST), f'{ks.shape}'
+            assert indices.shape[:-1] == (N, T_DST), f'{indices.shape}, {(N, T_DST)}'
+            assert ks.shape == (N, T_DST), f'{ks.shape}, {(N, T_DST)}'
         
         with timer('sparse_attention'):
             if not is_flash:
