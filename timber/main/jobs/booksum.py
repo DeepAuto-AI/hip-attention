@@ -12,10 +12,10 @@ from transformers import LogitsProcessor, LogitsProcessorList
 from timber.dataset.booksum import BookSumDataset
 from timber.utils import seed, get_bench
 from torch.utils.data import Subset
+from vllm import LLM
 
 import subprocess
 import logging
-
 
 def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
@@ -23,9 +23,9 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
 
     inputs, completion = item
 
-    if (out_dir / f"out_{idx}.txt").exists():
-        with open(out_dir / f"out_{idx}.txt", 'r') as f:
-            return f.read()
+    # if (out_dir / f"out_{idx}.txt").exists():
+    #     with open(out_dir / f"out_{idx}.txt", 'r') as f:
+    #         return f.read()
 
     tokenizer.truncation_side = 'left'
 
@@ -42,7 +42,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     inputs = tokenizer(
         prompt,
         return_tensors='pt',
-        max_length=model.config.max_position_embeddings - args.gen_tokens,
+        max_length=model.config.max_position_embeddings - args.max_tokens,
         truncation=True,
     )['input_ids'][0]
 
@@ -70,7 +70,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     output = model.generate(
         inputs=inputs.unsqueeze(0).cuda(),
         attention_mask=torch.ones((1, inputs.shape[-1]), dtype=torch.long, device='cuda'),
-        max_new_tokens=args.gen_tokens,
+        max_new_tokens=args.max_tokens,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
         logits_processor=LogitsProcessorList([
@@ -85,13 +85,8 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     if output.endswith('</s>'):
         output = output[:-4]
     output = output.strip()
-    tqdm.write(f"{idx} Summary:\t{(output[:200],)}[...]\n\n")
-
-    with open(out_dir / f"out_{idx}.txt", 'w') as f:
-        f.write(output)
-
+    
     return output
-
 
 def install_rogue():
     logger = logging.getLogger()
@@ -117,14 +112,19 @@ def install_rogue():
 
     return ROUGE_HOME
 
-
 @torch.no_grad()
 def job_booksum(args, model, tokenizer, device):
     seed()
 
+    is_vllm = isinstance(model, LLM)
+    if is_vllm:
+        # we do not access to tokenizer.
+        tokenizer = None
+    
     dataset = BookSumDataset(
         tokenizer=tokenizer,
         for_eval=True,
+        need_tokenization=not is_vllm,
     )
     train_idx, test_idx = train_test_split(list(range(len(dataset))), test_size=0.05)
     test_dataset = Subset(dataset, test_idx)
@@ -132,17 +132,49 @@ def job_booksum(args, model, tokenizer, device):
     outputs = []
 
     out_dir = pathlib.Path(f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
-                           f"_bk{args.block_size_k}_k{args.k}_gl{args.gen_tokens}_s{args.do_sample}")
+                           f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_s{args.do_sample}")
     out_dir.mkdir(parents=True, exist_ok=True)
     pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
 
     for idx, item in enumerate(tqdm(test_dataset, dynamic_ncols=True, leave=True, desc="booksum")):
-        output = gen_summary(args, model, tokenizer, device, idx, item, out_dir)
+        inputs, completion = item
+        
+        if is_vllm:
+            from vllm import SamplingParams
+            
+            sampling_params = SamplingParams(
+                temperature=0.7,
+                top_p=0.9,
+                top_k=1000,
+                max_tokens=args.max_tokens,
+                frequency_penalty=0.0,
+                repetition_penalty=1.0,
+                ignore_eos=False,
+                skip_special_tokens=True,
+            )
+            
+            prompt = \
+                f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
+                f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
+                f'<|im_start|>assistant\n'
+            output = model.generate(
+                prompt, 
+                sampling_params,
+                use_tqdm=False,
+            )[0].outputs[0].text
+        else:
+            output = gen_summary(args, model, tokenizer, device, idx, item, out_dir)
+        
+        tqdm.write(f"[{idx:<7}] Summary: {output[:200]}[...]")
+        with open(out_dir / f"out_{idx}.txt", 'w') as f:
+            f.write(output)
         outputs.append(output)
 
         with open(f"saves/llama_eval/booksum/reference/ref_{idx}.txt", 'w') as f:
-            inputs, completion = item
-            f.write(tokenizer.decode(completion, skip_special_tokens=True))
+            if isinstance(completion, str):
+                f.write(completion)
+            else:
+                f.write(tokenizer.decode(completion, skip_special_tokens=True))
 
     rouge_dir = install_rogue()
 
@@ -161,9 +193,7 @@ def job_booksum(args, model, tokenizer, device):
     with open(out_dir / "rouge_scores.json", 'w') as f:
         json.dump(output_dict, f, indent=2)
 
-
 class StopAfterStringIsGenerated(LogitsProcessor):
-
     def __init__(self, base_len: int, tokenizer):
         super().__init__()
 
