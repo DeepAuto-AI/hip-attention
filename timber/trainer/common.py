@@ -19,6 +19,7 @@ class TrainConfig:
     disable_kd: bool = False
     using_fsdp: bool = False
     using_deepspeed: bool = False
+    deepspeed_config: str = None
     model_parallel: bool = False
     lr: float = 5e-5
     batch_size: int = 1
@@ -58,6 +59,7 @@ def parse_args():
     parser.add_argument('--dense_queries', default=None, type=int)
     parser.add_argument('--using_fsdp', action='store_true')
     parser.add_argument('--using_deepspeed', action='store_true')
+    parser.add_argument('--deepspeed_config', default=None, type=str)
     parser.add_argument('--disable_kd', action='store_true')
     parser.add_argument('--disable_global_context', action='store_true')
     parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
@@ -86,6 +88,7 @@ def parse_args():
         model_parallel=args.model_parallel,
         using_fsdp=args.using_fsdp,
         using_deepspeed=args.using_deepspeed,
+        deepspeed_config=args.deepspeed_config,
         disable_kd=args.disable_kd,
         dataset=args.dataset,
         load_from_checkpoint=args.checkpoint,
@@ -214,8 +217,10 @@ def load_model(
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
-                # m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
+            elif train_config.using_deepspeed:
+                import deepspeed
+                m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
 

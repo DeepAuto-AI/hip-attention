@@ -11,6 +11,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.strategies import DeepSpeedStrategy, FSDPStrategy
 from pytorch_lightning.loggers.wandb import WandbLogger
 from sklearn.model_selection import train_test_split
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data import Subset
 
@@ -238,9 +239,32 @@ class LabModule(pl.LightningModule):
         for name, p in self.model.named_parameters():
             if p.requires_grad:
                 params.append(p)
+
         if self.config.using_deepspeed:
-            return DeepSpeedCPUAdam(params, lr=self.config.lr)
-        return torch.optim.AdamW(params, lr=self.config.lr)
+            optimizer = DeepSpeedCPUAdam(params, lr=self.config.lr)
+        else:
+            optimizer = torch.optim.AdamW(params, lr=self.config.lr)
+
+        scheduler = InverseSqrtScheduler(optimizer, self.config.warmup_steps)
+
+        return [optimizer], [scheduler]
+
+
+class InverseSqrtScheduler(LambdaLR):
+    """ Linear warmup and then follows an inverse square root decay schedule
+        Linearly increases learning rate schedule from 0 to 1 over `warmup_steps` training steps.
+        Afterward, learning rate follows an inverse square root decay schedule.
+    """
+
+    def __init__(self, optimizer, warmup_steps, last_epoch=-1):
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1.0, warmup_steps))
+
+            decay_factor = warmup_steps ** 0.5
+            return decay_factor * step ** -0.5
+
+        super(InverseSqrtScheduler, self).__init__(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
 def main(config: TrainConfig):

@@ -301,6 +301,32 @@ def main(config: TrainConfig):
     datamodule = LabDataModule(config=config)
     datamodule.setup("fit")
 
+    ds_config = {
+        "zero_optimization": {
+            "stage": 3,
+            "offload_optimizer": {
+                "device": "cpu",
+                "pin_memory": True
+            },
+            "offload_param": {
+                "device": "cpu",
+                "pin_memory": True
+            },
+            "overlap_comm": True,
+            "contiguous_gradients": True,
+            "sub_group_size": 1e9,
+            "reduce_bucket_size": "auto",
+            "stage3_prefetch_bucket_size": "auto",
+            "stage3_param_persistence_threshold": "auto",
+            "stage3_max_live_parameters": 1e9,
+            "stage3_max_reuse_distance": 1e9,
+            "stage3_gather_16bit_weights_on_model_save": True,
+        },
+        "train_micro_batch_size_per_gpu": config.batch_size,
+        "gradient_accumulation_steps": config.accumulation_steps,
+        "gradient_clipping": 1.0,
+    }
+
     trainer_config = Seq2SeqTrainingArguments(
         logging_steps=1,
         fp16=True,
@@ -317,6 +343,7 @@ def main(config: TrainConfig):
         ignore_data_skip=True,
         warmup_steps=config.warmup_steps,
         local_rank=config.local_rank,
+        deepspeed=ds_config if config.using_deepspeed else None,
     )
 
     trainer = Trainer(
