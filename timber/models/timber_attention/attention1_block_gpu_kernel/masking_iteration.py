@@ -108,7 +108,9 @@ def _masking_iteration_topk(
     BLOCK_SIZE_Q_PADDED,
     BLOCK_SIZE_K,
     BLOCK_MASK_K,
+    BLOCK_MASK_K_PADDED,
     BLOCK_TMASK_K,
+    BLOCK_TMASK_K_PADDED,
     BLOCK_HID, 
     
     # vllm compat
@@ -185,7 +187,7 @@ def _masking_iteration_topk(
     tl.debug_barrier()
     
     assert REDUCE_METHOD == 'max'
-    scores = tl.full((BLOCK_TMASK_K,), float("inf"), dtype=tl.float32)
+    scores = tl.full((BLOCK_TMASK_K_PADDED,), float("inf"), dtype=tl.float32)
     
     idx_tdst = (idx_bdst * BLOCK_SIZE_Q + idx_block_q).to(tl.int64)
     mask_tdst = mask_w & mask_block_q & (idx_tdst < T_DST)
@@ -199,8 +201,13 @@ def _masking_iteration_topk(
             other = False
         ).to(tl.int1)
     
-    num_pixels_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
-    num_pixels_mask = mask_w & (num_pixels_range < num_pixels_scalar)
+    num_pixels_range = tl.arange(0, BLOCK_TMASK_K_PADDED).to(tl.int64)
+    num_pixels_mask = (
+        mask_w & 
+        (num_pixels_range < num_pixels_scalar) & 
+        (num_pixels_range < BLOCK_TMASK_K) &
+        True
+    )
     idx_tsrc_block = tl.load(
         TMASK +\
             idx_n * stride_tmask_n +\
@@ -296,16 +303,16 @@ def _masking_iteration_topk(
             )
     
     for _idx_block_k in range(0, BLOCK_SIZE_K):
-        scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K), dtype=tl.float32)
+        scores_partial = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_TMASK_K_PADDED), dtype=tl.float32)
         
-        # [BLOCK_TMASK_K, ]
+        # [BLOCK_TMASK_K_PADDED, ]
         idx_tsrc = (idx_tsrc_block + _idx_block_k).to(tl.int64)
         mask_tsrc = (idx_tsrc < T_SRC) & (_idx_block_k < BLOCK_SIZE_K) & mask_tsrc_block
         
         # if CONTEXT_LENGTH is not None:
         #     mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
         
-        # [BLOCK_TMASK_K, ]
+        # [BLOCK_TMASK_K_PADDED, ]
         if ATTEN_MASK is not None:
             key_mask = tl.load(
                 ATTEN_MASK +\
@@ -367,7 +374,7 @@ def _masking_iteration_topk(
                         other = 0,
                     )
             
-            # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+            # [BLOCK_HID: hid, BLOCK_TMASK_K_PADDED: tsrc]
             vec_k_mask = (
                 num_pixels_mask &
                 # mask_hid[:, None] &
@@ -381,10 +388,10 @@ def _masking_iteration_topk(
                 )
             
             if ROPE_METHOD == 'self_extend':
-                mask_tsrc_neighbor = tl.zeros((BLOCK_TMASK_K, ), dtype=tl.int1)
+                mask_tsrc_neighbor = tl.zeros((BLOCK_TMASK_K_PADDED, ), dtype=tl.int1)
             
             if KEY_CACHE_METHOD == 'cont':
-                # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                # [BLOCK_HID: hid, BLOCK_TMASK_K_PADDED: tsrc]
                 vec_k = tl.load(
                     KEYS +\
                         (idx_n // KV_REPEAT_INTERLEAVE) * stride_keys_n +\
@@ -452,7 +459,7 @@ def _masking_iteration_topk(
                 ).to(tl.int64)
                 offset_block = (idx_tsrc - ((idx_tsrc // VLLM_BLOCK_SIZE) * VLLM_BLOCK_SIZE)).to(tl.int64)
                 
-                # [BLOCK_HID: hid, BLOCK_TMASK_K: tsrc]
+                # [BLOCK_HID: hid, BLOCK_TMASK_K_PADDED: tsrc]
                 vec_k = tl.load(
                     KEYS +\
                         idx_block[None, :] * stride_keys_vllm_num_blocks +\
@@ -518,7 +525,7 @@ def _masking_iteration_topk(
             else:
                 raise Exception()
             
-            # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+            # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K_PADDED: tsrc]
             if ROPE_METHOD == 'self_extend':
                 scores_micro = -tl.where(
                     mask_tsrc_neighbor[None, :],
@@ -535,7 +542,7 @@ def _masking_iteration_topk(
                 raise Exception()
             scores_partial += scores_micro.to(scores_partial.dtype)
         
-        # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K: tsrc]
+        # [BLOCK_SIZE_PADDED: tdst, BLOCK_TMASK_K_PADDED: tsrc]
         scores_partial_ignore_mask = (
             (~num_pixels_mask[None, :]) |
             (~mask_tdst[:, None]) |
@@ -623,7 +630,7 @@ def _masking_iteration_topk(
     masked_scores = scores
     
     kth = k_new
-    scores_kth_large = _triton_kth_ascending(masked_scores, kth, BLOCK_TMASK_K)
+    scores_kth_large = _triton_kth_ascending(masked_scores, kth, BLOCK_TMASK_K_PADDED)
     # scores_avg = tl.sum(masked_scores * (masked_scores < 1.0)) / num_pixels_scalar
     # scores_min = tl.min(masked_scores)
     # scores_kth_large = scores_avg # - (scores_min * 0.1)
@@ -632,8 +639,8 @@ def _masking_iteration_topk(
     topk_mask_cumsum = tl.cumsum(topk_mask.to(tl.int64))
     topk_range = tl.maximum(tl.minimum((topk_mask_cumsum - 1) * topk_mask, kth - 1), 0).to(tl.int64)
     
-    temp_range = tl.arange(0, BLOCK_TMASK_K).to(tl.int64)
-    temp_mask = mask_w & (temp_range < num_pixels_scalar)
+    temp_range = tl.arange(0, BLOCK_TMASK_K_PADDED).to(tl.int64)
+    temp_mask = mask_w & (temp_range < num_pixels_scalar) & (temp_range < BLOCK_TMASK_K)
     temp = tl.load(
         TMASK +\
             idx_n * stride_tmask_n +\
@@ -658,7 +665,7 @@ def _masking_iteration_topk(
             SCORES +\
                 idx_n * stride_scores_n +\
                 idx_bdst * stride_scores_bdst +\
-                tl.arange(0, BLOCK_MASK_K) * stride_scores_k,
+                tl.arange(0, BLOCK_MASK_K_PADDED) * stride_scores_k,
             mask=mask_w ,
             value=32000.0,
         )
@@ -675,9 +682,9 @@ def _masking_iteration_topk(
 
 # @triton.autotune(
 #     configs=[
-#         # triton.Config(kwargs={}, num_warps=16),
-#         # triton.Config(kwargs={}, num_warps=8, num_stages=1),
-#         # triton.Config(kwargs={}, num_warps=4, num_stages=1),
+#         triton.Config(kwargs={}, num_warps=16),
+#         triton.Config(kwargs={}, num_warps=8, num_stages=1),
+#         triton.Config(kwargs={}, num_warps=4, num_stages=1),
 #         triton.Config(kwargs={}, num_warps=2, num_stages=1),
 #     ],
 #     key=['BLOCK_MASK_K'],
@@ -760,9 +767,13 @@ def _masking_iteration_compute(
     SPARQ: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
     BLOCK_MASK_K: tl.constexpr, 
+    BLOCK_MASK_K_PADDED: tl.constexpr,
     BLOCK_TMASK_K: tl.constexpr, 
+    BLOCK_TMASK_K_PADDED: tl.constexpr,
     BLOCK_MASK_K_HALF: tl.constexpr, 
+    BLOCK_MASK_K_HALF_PADDED: tl.constexpr,
     BLOCK_TMASK_K_HALF: tl.constexpr, 
+    BLOCK_TMASK_K_HALF_PADDED: tl.constexpr,
     BLOCK_MAX_DUP: tl.constexpr,
     BLOCK_HID: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
@@ -881,8 +892,12 @@ def _masking_iteration_compute(
             num_pixels += dup_pixels
         """
         
-        k_old_range = tl.arange(0, BLOCK_MASK_K).to(tl.int64)
-        k_old_mask = True #k_old_range < k_old
+        k_old_range = tl.arange(0, BLOCK_MASK_K_PADDED).to(tl.int64)
+        k_old_mask = (
+            (k_old_range < k_old) &
+            (k_old_range < BLOCK_MASK_K) & 
+            True
+        )
         # tl.debug_barrier()
         loc_vec = tl.load(
             MASK +\
@@ -1033,7 +1048,9 @@ def _masking_iteration_compute(
                     BLOCK_SIZE_Q_PADDED,
                     BLOCK_SIZE_K,
                     BLOCK_MASK_K,
+                    BLOCK_MASK_K_PADDED,
                     BLOCK_TMASK_K,
+                    BLOCK_TMASK_K_PADDED,
                     BLOCK_HID, 
                     
                     VLLM_NUM_KV_HEADS, 
@@ -1125,7 +1142,9 @@ def _masking_iteration_compute(
                     BLOCK_SIZE_Q_PADDED,
                     BLOCK_SIZE_K,
                     BLOCK_MASK_K,
+                    BLOCK_MASK_K_PADDED,
                     BLOCK_TMASK_K_HALF,
+                    BLOCK_TMASK_K_HALF_PADDED,
                     BLOCK_HID, 
                     
                     VLLM_NUM_KV_HEADS, 
@@ -1515,9 +1534,13 @@ def masking_iteration(
         SPARQ,
         REDUCE_METHOD,
         BLOCK_MASK_K,
+        next_multiple_of(BLOCK_MASK_K),
         BLOCK_TMASK_K,
+        next_multiple_of(BLOCK_TMASK_K),
         BLOCK_MASK_K // 2,
+        next_multiple_of(BLOCK_MASK_K // 2),
         BLOCK_TMASK_K // 2,
+        next_multiple_of(BLOCK_TMASK_K // 2),
         triton.next_power_of_2(math.ceil(scale_up)),
         int(BLOCK_HID),
         int(BLOCK_SIZE_Q),
