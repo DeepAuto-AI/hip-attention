@@ -1693,6 +1693,10 @@ def paged_timber_attention(
     
     self_extend_scale: int = 8,
     self_extend_window: int = 1024,
+    
+    using_precomputed_mask: bool = False,
+    precomputed_indices: Tensor = None,
+    precomputed_ks: Tensor = None,
 ):
     """
     vLLM compatible paged attention
@@ -1755,6 +1759,10 @@ def paged_timber_attention(
         
         self_extend_scale=self_extend_scale,
         self_extend_window=self_extend_window,
+        
+        using_precomputed_mask=using_precomputed_mask,
+        precomputed_ks=precomputed_ks,
+        precomputed_indices=precomputed_indices,
     )
     
     # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_end'):
@@ -1804,6 +1812,10 @@ def timber_attention(
     
     self_extend_scale: int = 8,
     self_extend_window: int = 1024,
+    
+    using_precomputed_mask: bool = False,
+    precomputed_indices: Tensor = None,
+    precomputed_ks: Tensor = None,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1893,6 +1905,10 @@ def timber_attention(
                     
                     self_extend_scale=self_extend_scale,
                     self_extend_window=self_extend_window,
+                    
+                    using_precomputed_mask=using_precomputed_mask,
+                    precomputed_ks=precomputed_ks,
+                    precomputed_indices=precomputed_indices,
                 )
                 contexts.append(sparse_context)
             
@@ -1955,6 +1971,10 @@ def timber_attention(
                 
                 self_extend_scale=self_extend_scale,
                 self_extend_window=self_extend_window,
+                
+                using_precomputed_mask=using_precomputed_mask,
+                precomputed_ks=precomputed_ks,
+                precomputed_indices=precomputed_indices,
             )
             contexts.append(context)
             
@@ -1963,7 +1983,6 @@ def timber_attention(
         return contexts, None
     
     global DEBUG
-    DENSE_SPARSE_ATTENTION = False
     
     if w_start is None:
         w_start = math.ceil(mask_k * scale_up)
@@ -1984,16 +2003,6 @@ def timber_attention(
     assert HID == _HID
     KV_REPEAT_INTERLEAVE = N // _N
     
-    # assert q.dtype == k.dtype, f'{q.dtype} == {k.dtype}'
-    # assert q.dtype == v.dtype
-    
-    # if attention_mask is None:
-    #     attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
-    # if attention_mask.dtype != torch.bool:
-    #     # mask should mark alive token as True
-    #     attention_mask = attention_mask > 0.5
-    # assert attention_mask.dtype == torch.bool
-    
     assert isinstance(block_size_q, int)
     assert isinstance(block_size_k, int)
     
@@ -2007,50 +2016,59 @@ def timber_attention(
         torch.cuda.synchronize()
     
     with timer('timber_attention'):
-        with timer('attention_matrix'):
-            estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
-            if q.shape[1] > 32:
-                # if prompt
-                estimated_ksrc_stride = 1
-            # estimated_ksrc_stride = 8
-            # print(estimated_ksrc_stride)
+        if not using_precomputed_mask:
+            with timer('attention_matrix'):
+                # if prompt (exceed single tensor-core block), 
+                # do not use topk strding. this will cause more resource
+                estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
+                if q.shape[1] > 32:
+                    estimated_ksrc_stride = 1
+                
+                indices, ks = hip_attention_mask(
+                    queries=q,
+                    keys=k,
+                    values=v,
+                    attention_mask=attention_mask,
+                    kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                    
+                    w_start=w_start,
+                    n_patches=n_patches,
+                    mask_k=mask_k,
+                    scale_up=scale_up,
+                    is_causal=is_causal,
+                    
+                    BLOCK_SIZE_Q=block_size_q,
+                    BLOCK_SIZE_K=block_size_k,
+                    REDUCE_METHOD=reduce_method,
+                    REDUCE_STRIDE=reduce_stride,
+                    
+                    IS_FLASH=is_flash,
+                    SPARQ=enable_sparq,
+                    SAMPLING_METHOD=sampling_method,
+                    
+                    USING_SLIDING_WINDOW=using_sliding_window,
+                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                    
+                    ROPE_METHOD=rope_method,
+                    ROPE_COS=rope_cos,
+                    ROPE_SIN=rope_sin,
+                    POSITION_IDS=position_ids,
+                    
+                    SELF_EXTEND_SCALE=self_extend_scale,
+                    SELF_EXTEND_WINDOW=self_extend_window,
+                    
+                    GRID_SRC_STRIDE=estimated_ksrc_stride,
+                    GRID_K_STRIDE=estimated_ksrc_stride,
+                )
+        else:
+            assert precomputed_ks is not None
+            assert precomputed_indices is not None
             
-            indices, ks = hip_attention_mask(
-                queries=q,
-                keys=k,
-                values=v,
-                attention_mask=attention_mask,
-                kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
-                
-                w_start=w_start,
-                n_patches=n_patches,
-                mask_k=mask_k,
-                scale_up=scale_up,
-                is_causal=is_causal,
-                
-                BLOCK_SIZE_Q=block_size_q,
-                BLOCK_SIZE_K=block_size_k,
-                REDUCE_METHOD=reduce_method,
-                REDUCE_STRIDE=reduce_stride,
-                
-                IS_FLASH=is_flash,
-                SPARQ=enable_sparq,
-                SAMPLING_METHOD=sampling_method,
-                
-                USING_SLIDING_WINDOW=using_sliding_window,
-                SLIDING_WINDOW_SIZE=sliding_window_size,
-                
-                ROPE_METHOD=rope_method,
-                ROPE_COS=rope_cos,
-                ROPE_SIN=rope_sin,
-                POSITION_IDS=position_ids,
-                
-                SELF_EXTEND_SCALE=self_extend_scale,
-                SELF_EXTEND_WINDOW=self_extend_window,
-                
-                GRID_SRC_STRIDE=estimated_ksrc_stride,
-                GRID_K_STRIDE=estimated_ksrc_stride,
-            )
+            indices = precomputed_indices
+            ks = precomputed_ks
+            
+            assert indices.shape[:-1] == (N, T_DST), f'{indices.shape}'
+            assert ks.shape == (N, T_DST), f'{ks.shape}'
         
         with timer('sparse_attention'):
             if not is_flash:
@@ -2132,24 +2150,27 @@ def timber_attention(
 
 import torch.nn.functional as F
 
-
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
     probs = torch.softmax(scores, dim=-1)
     context = torch.bmm(probs, v)
     return context, probs
 
-def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
-    # context = F.scaled_dot_product_attention(
-    #     q, k, v, is_causal=False, scale=None,
-    # )
-    # return context, None
-    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
-    
-    assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
-    assert k.shape[0] == v.shape[0]
-    
-    return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True, backend='flash_attn'):
+    if backend == 'sdpa':
+        context = F.scaled_dot_product_attention(
+            q, k, v, is_causal=False, scale=None,
+        )
+        return context, None
+    elif backend == 'flash_attn':
+        from flash_attn import flash_attn_with_kvcache
+        
+        assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
+        assert k.shape[0] == v.shape[0]
+        
+        return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+    else:
+        raise Exception()
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
