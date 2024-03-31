@@ -65,12 +65,70 @@ def test_CalcScoreAutoGradFn():
         compare("dK", ref_dk, tri_dk)
 
 
+def test_CalcScoreAutoGradFn_perf(warmup=25, rep=100):
+    BSZ = 2
+    QUERY_LEN = 32768
+    KEY_LEN = 32768
+    QUERY_DIM = 64
+    BLOCK_SIZE_Q = 32
+    BLOCK_SIZE_K = 2
+    K = 512
+    IS_CAUSAL = True
+    KV_REPEAT_INTERLEAVE = 1
+    compute_backward = True
+
+    BLOCK_K = K // BLOCK_SIZE_K
+
+    queries = torch.randn(BSZ, QUERY_LEN, QUERY_DIM).cuda().requires_grad_(True)
+    keys = torch.randn(BSZ, KEY_LEN, QUERY_DIM).cuda().requires_grad_(True)
+    attention_mask = None
+    dout = torch.randn(BSZ, QUERY_LEN, K).cuda()
+
+    # indices to key for each query block
+    indices = torch.randint(0, KEY_LEN, (BSZ, triton.cdiv(QUERY_LEN, BLOCK_SIZE_Q), BLOCK_K))
+    indices.copy_(torch.load("exmaple_indices.pth", map_location="cpu")[:indices.shape[0], :indices.shape[1], :indices.shape[2]])
+    indices = indices.clone().cuda()
+
+    # number of key blocks to attend to for each query block
+    ks = torch.randint(0, BLOCK_K, (BSZ, triton.cdiv(QUERY_LEN, BLOCK_SIZE_Q)))
+    ks.copy_(torch.load("example_ks.pth", map_location="cpu")[:ks.shape[0], :ks.shape[1]])
+    ks = ks.clone().cuda()
+
+    scores = CalcScoreAutoGradFn.apply(
+        queries, keys, attention_mask,
+        indices, ks,
+        KV_REPEAT_INTERLEAVE,
+        BLOCK_SIZE_Q, BLOCK_SIZE_K,
+        IS_CAUSAL,
+    )
+    # scores: [BSZ, QUERY_LEN, K]
+    if compute_backward:
+        fn = lambda: torch.softmax(scores, dim=-1).backward(dout, retain_graph=True)
+        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        print("CalcScoreAutoGradFn backward: ", ms)
+        tri_dq, queries.grad = queries.grad.clone(), None
+        tri_dk, keys.grad = keys.grad.clone(), None
+
+    ref_scores = reference_impl(
+        queries, keys, attention_mask,
+        indices, ks,
+        KV_REPEAT_INTERLEAVE,
+        BLOCK_SIZE_Q, BLOCK_SIZE_K,
+        IS_CAUSAL,
+    )
+    if compute_backward:
+        fn = lambda: torch.softmax(ref_scores, dim=-1).backward(dout, retain_graph=True)
+        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        print("reference_impl backward: ", ms)
+        ref_dq, queries.grad = queries.grad.clone(), None
+        ref_dk, keys.grad = keys.grad.clone(), None
+
+
 def reference_dQ_impl(
-        queries, keys, d_scores, attention_mask,
+        queries, keys, d_scores,
         indices, ks,
         KV_REPEAT_INTERLEAVE, BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL
 ):
-    assert attention_mask is None
     assert KV_REPEAT_INTERLEAVE == 1
 
     BSZ, QUERY_LEN, QUERY_DIM = queries.shape
@@ -169,3 +227,4 @@ def compare(name, ref, tri):
 
 if __name__ == "__main__":
     test_CalcScoreAutoGradFn()
+    test_CalcScoreAutoGradFn_perf()

@@ -197,7 +197,7 @@ def load_model(
         max_memory=max_memory,
         load_in_4bit=None if quant_config is not None else True,
         quantization_config=quant_config,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
@@ -276,6 +276,8 @@ def load_model(
         else:
             model = get_peft_model(model, peft_config)
             model.print_trainable_parameters()
+
+        #model.to(torch.float16)
 
     return model
 

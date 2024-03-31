@@ -155,12 +155,6 @@ class Trainer(Seq2SeqTrainer):
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
         result = super().training_step(model, inputs)
-
-        total_max_mem = sum(
-            torch.cuda.max_memory_allocated(device)
-            for device in range(torch.cuda.device_count())
-        )
-
         return result
 
     def compute_loss(self, model, inputs, return_outputs=False):
@@ -179,7 +173,7 @@ class Trainer(Seq2SeqTrainer):
         output = self.model(
             inputs,
             attention_mask=(inputs.ne(self.pad_token_id)).to(inputs.dtype),
-            labels=target,
+            #labels=target,
             output_hidden_states=not self.config.disable_kd,
             output_attn_sparsity_loss=self.config.sparsity_reg != 0,
         )
@@ -302,6 +296,18 @@ def main(config: TrainConfig):
     datamodule.setup("fit")
 
     ds_config = {
+        "bf16": {
+            "enabled": False,
+        },
+        "fp16": {
+            "loss_scale": 0,
+            "auto_cast": True,
+            "loss_scale_window": 1000,
+            "initial_scale_power": 32,
+            "hysteresis": 2,
+            "min_loss_scale": 0.5,
+            "enabled": True
+        },
         "zero_optimization": {
             "stage": 3,
             "offload_optimizer": {
@@ -314,13 +320,22 @@ def main(config: TrainConfig):
             },
             "overlap_comm": True,
             "contiguous_gradients": True,
-            "sub_group_size": 1e9,
+            "sub_group_size": 1e8,
             "reduce_bucket_size": "auto",
             "stage3_prefetch_bucket_size": "auto",
             "stage3_param_persistence_threshold": "auto",
-            "stage3_max_live_parameters": 1e9,
-            "stage3_max_reuse_distance": 1e9,
+            "stage3_max_live_parameters": 1e8,
+            "stage3_max_reuse_distance": 1e8,
             "stage3_gather_16bit_weights_on_model_save": True,
+            "zero_hpz_partition_size": torch.cuda.device_count(),
+        },
+        "activation_checkpointing": {
+            "partition_activations": True,
+            "cpu_checkpointing": True,
+            "contiguous_memory_optimization": False,
+            "number_checkpoints": None,
+            "synchronize_checkpoint_boundary": False,
+            "profile": False
         },
         "train_micro_batch_size_per_gpu": config.batch_size,
         "gradient_accumulation_steps": config.accumulation_steps,
