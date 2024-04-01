@@ -1,3 +1,4 @@
+import os
 import pathlib
 from dataclasses import dataclass
 
@@ -10,7 +11,7 @@ from transformers import LlamaForCausalLM
 from peft import LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from timber.models.qwen.configuration_qwen import QWenConfig
+from timber.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 
 
 @dataclass
@@ -76,7 +77,7 @@ def parse_args():
     parser.add_argument('--sparsity_reg', default=None, type=float)
     parser.add_argument('--dense_layers', type=int, default=None)
     parser.add_argument('--name', type=str, default='default')
-    parser.add_argument('--model_parallel', default=False, action='store_true')
+    parser.add_argument('--model_parallel', default=None, type=int)
     parser.add_argument('--local-rank', default=None, type=int)
 
     args = parser.parse_args()
@@ -133,6 +134,7 @@ MODELS = {
     'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
     'yi6b': '01-ai/Yi-6B-200K',
     'yi34b': '01-ai/Yi-34B-200K',
+    'giraffe13b': 'abacusai/Giraffe-13b-32k-v3',
 }
 
 
@@ -142,21 +144,34 @@ def load_model(
         device=None,
         is_teacher=False,
 ):
+    device_map = "auto"
+    max_memory = None
+
+    if os.environ.get('LOCAL_RANK', None) is not None:
+        train_config.local_rank = int(os.environ['LOCAL_RANK'])
+
     if device is None:
         if train_config.local_rank is not None:
-            device = f'cuda:{train_config.local_rank}'
+            if train_config.model_parallel is not None:
+                device_map = "auto"
+                max_memory = {
+                    train_config.local_rank * train_config.model_parallel + i: "70GiB"
+                    for i in range(train_config.model_parallel)
+                }
+            else:
+                device_map = {"": f'cuda:{train_config.local_rank}'}
         else:
-            device = torch.cuda.current_device()
+            device_map = {"": torch.cuda.current_device()}
     if train_config.using_fsdp:
-        device = 'cpu'
-    print("Device:", device)
+        device_map = 'cpu'
+    print("Device map:", device_map, "max_memory:", max_memory)
 
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
 
     ConfigClass = LlamaConfig
     if 'qwen' in train_config.model:
-        ConfigClass = QWenConfig
+        ConfigClass = Qwen2Config
 
     config = ConfigClass.from_pretrained(model_id)
     config._attn_implementation = config.attn_implementation = 'eager' if 'qwen' in train_config.model else 'sdpa'
@@ -171,11 +186,15 @@ def load_model(
     if train_config.using_fsdp:
         quant_config = None
 
-    model = LlamaForCausalLM.from_pretrained(
+    ModelClass = LlamaForCausalLM
+    if 'qwen' in train_config.model:
+        ModelClass = Qwen2ForCausalLM
+
+    model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map="auto" if train_config.model_parallel else
-                   {"": device} if device != 'cpu' else 'cpu',
+        device_map=device_map,
+        max_memory=max_memory,
         load_in_4bit=None if quant_config is not None else True,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
@@ -199,8 +218,10 @@ def load_model(
         if hasattr(m, 'gradient_checkpointing'):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
-                # m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
+            elif train_config.using_deepspeed:
+                import deepspeed
+                m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
 
