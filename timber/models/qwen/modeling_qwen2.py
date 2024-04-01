@@ -839,11 +839,6 @@ class Qwen2CustomAttention(Qwen2Attention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        causal_mask = attention_mask
-        # if attention_mask is not None and cache_position is not None:
-        if attention_mask is not None:
-            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
@@ -855,7 +850,7 @@ class Qwen2CustomAttention(Qwen2Attention):
 
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,
-            attention_mask=attention_mask, causal_mask=causal_mask,
+            attention_mask=attention_mask, causal_mask=None,
             attention_dropout=self.attention_dropout if self.training else 0.0,
 
             # Attention method
