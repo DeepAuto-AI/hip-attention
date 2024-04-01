@@ -761,7 +761,7 @@ class LlamaCustomAttention(LlamaAttention):
         elif self.attention_method == 'performer':
             try:
                 from performer_pytorch import FastAttention
-                if not os.environ.get('IGNORE_PERFORMER', '1') == '1':
+                if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
                     dim_heads = config.hidden_size // config.num_attention_heads
                     default_dtype = torch.get_default_dtype()
                     torch.set_default_dtype(torch.float32)

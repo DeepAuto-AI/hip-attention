@@ -60,6 +60,7 @@ def load_vllm_model(args: ArgsType):
     assert args.checkpoint is None
     
     seq_len = args.stride
+    assert seq_len > 0
     # seq_len = 10600
     model = LLM(
         model_id,
@@ -76,6 +77,14 @@ def load_vllm_model(args: ArgsType):
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    
+    if tokenizer.bos_token_id is None:
+        tokenizer.bos_token = tokenizer.eos_token
+        tokenizer.bos_token_id = tokenizer.eos_token_id
+    
+    if tokenizer.eos_token_id is None:
+        tokenizer.eos_token = tokenizer.bos_token
+        tokenizer.eos_token_id = tokenizer.bos_token_id
 
     return model, tokenizer, device
 
