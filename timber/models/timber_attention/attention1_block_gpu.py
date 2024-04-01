@@ -15,19 +15,19 @@ w_start = 512 (32 block)
 4096: 256 block
 """
 
-import json
-import random
 import gc
+import json
+import math
+import os
 import warnings
+from typing import Literal, Optional, Tuple, Union
+
 import numpy as np
 import torch
-from torch import Tensor
 import tqdm
 import triton
 import triton.language as tl
-from typing import Literal, Optional, Tuple, List, Union
-import os
-import math
+from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
 
@@ -333,10 +333,10 @@ def _calc_score_compute_bwd_queries(
                  (idx_hid[None, :] < HID),
             other=0,
         )
-        
+
         # tl.device_print("", idx_tsrc)
         accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
-    
+
     tl.store(
         GRAD_QUERIES +
         idx_n.to(tl.int64) * stride_grad_queries_n +
@@ -630,16 +630,16 @@ class CalcScoreAutoGradFn(Function):
         if ctx.needs_input_grad[0]:
             grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_Q))
             BLOCK_HID = triton.next_power_of_2(HID)
-            
+
             grad_queries = torch.zeros_like(queries)
-            
+
             if ENABLED:
                 assert ks.ndim == 2
                 assert indices.ndim == 3
                 assert keys.ndim == 3
                 assert grad_scores.ndim == 3
                 assert  grad_queries.ndim == 3
-                
+
                 _calc_score_compute_bwd_queries[grid](
                     ks, ks.stride(0), ks.stride(1),
                     indices, indices.stride(0), indices.stride(1), indices.stride(2), 
@@ -664,7 +664,7 @@ class CalcScoreAutoGradFn(Function):
             grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_Q), BK)
             BLOCK_HID = triton.next_power_of_2(HID)
             
-            grad_keys = torch.zeros_like(keys)
+            grad_keys = torch.zeros_like(keys, dtype=torch.float32)
             
             if ENABLED:
                 _calc_score_compute_bwd_keys[grid](
@@ -684,6 +684,8 @@ class CalcScoreAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                 )
+
+            grad_keys = grad_keys.to(keys.dtype)
         
         return (
             grad_queries, 
@@ -736,7 +738,6 @@ def debug_print(
     mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
 ):
     from matplotlib import pyplot as plt
-    import skimage.measure
     import skimage
     plt.clf()
     indices = safe_indices(mask, ws, BLOCK_SIZE_K, allow_collision=True)
@@ -825,7 +826,7 @@ def hip_attention_mask(
     
     GRID_SRC_STRIDE=1,
     GRID_K_STRIDE=1,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
     if DEBUG:
@@ -1559,7 +1560,7 @@ class SparseAttentionAutoGradFn(Function):
             grad_values = torch.zeros(
                 (N, T_SRC, HID), 
                 device=values.device, 
-                dtype=values.dtype,
+                dtype=torch.float32,
             )
             
             if ENABLED_VALUES:
@@ -1582,7 +1583,8 @@ class SparseAttentionAutoGradFn(Function):
                     BLOCK_HID,
                 )
                 torch.cuda.set_device(orig_device)
-            
+
+            grad_values = grad_values.to(values.dtype)
             # print(grad_values.abs().sum())
         
         # for probs

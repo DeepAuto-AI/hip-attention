@@ -19,6 +19,7 @@ from timber.main.jobs.mmlu import job_mmlu
 from timber.main.jobs.ppl import job_ppl
 from timber.main.jobs.stream import job_stream
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from timber.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from timber.utils import seed
 
 
@@ -87,6 +88,7 @@ def load_vllm_model(args: ArgsType):
 
     return model, tokenizer, device
 
+
 def load_model(args):
     if args.model.startswith('vllm'):
         return load_vllm_model(args)
@@ -99,9 +101,6 @@ def load_model(args):
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-        'qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
-        'qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
-        'qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
@@ -111,20 +110,24 @@ def load_model(args):
         model_id = args.model
     print(f'Loading model {model_id}')
 
-    config = LlamaConfig.from_pretrained(model_id)
-    config._attn_implementation = config.attn_implementation = 'sdpa'
+    if args.model.startswith('qwen'):
+        config = Qwen2Config.from_pretrained(model_id)
+        config._attn_implementation = config.attn_implementation = 'sdpa'
+
+    else:
+        config = LlamaConfig.from_pretrained(model_id)
+        config._attn_implementation = config.attn_implementation = 'sdpa'
     
     infer_dtype = torch.bfloat16
     # infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
-    #if args.method == 'none':
-    #    ModelClass = transformers.LlamaForCausalLM
+    if args.model.startswith('qwen'):
+        ModelClass = Qwen2ForCausalLM
 
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        #load_in_4bit=True,
         device_map="auto",
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
@@ -206,6 +209,7 @@ def load_model(args):
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     
     return model, tokenizer, device
+
 
 def main():
     seed()

@@ -183,7 +183,7 @@ def compute_attn_lp_loss_kernel_backward(
                 (d_idx < HDIM)[:, None]
         ),
         other=0
-    )  # [hd, q_blk]
+    ).to(tl.float32)  # [hd, q_blk]
     output_chunk = tl.load(
         output +
         n_idx * output_stride_n +
@@ -193,7 +193,7 @@ def compute_attn_lp_loss_kernel_backward(
             (q_begin + q_idx < TDST)[None, :]
         ),
         other=0
-    )  # [1, q_blk]
+    ).to(tl.float32)  # [1, q_blk]
     grad_output_chunk = tl.load(
         grad_output +
         n_idx * grad_output_stride_n +
@@ -203,7 +203,7 @@ def compute_attn_lp_loss_kernel_backward(
             (q_begin + q_idx < TDST)[None, :]
         ),
         other=0
-    )  # [1, q_blk]
+    ).to(tl.float32)  # [1, q_blk]
     l_chunk = tl.load(
         l +
         n_idx * l_stride_n +
@@ -213,7 +213,7 @@ def compute_attn_lp_loss_kernel_backward(
             (q_begin + q_idx < TDST)[None, :]
         ),
         other=0
-    )  # [1, q_blk]
+    ).to(tl.float32)  # [1, q_blk]
     m_chunk = tl.load(
         m +
         n_idx * m_stride_n +
@@ -223,7 +223,7 @@ def compute_attn_lp_loss_kernel_backward(
             (q_begin + q_idx < TDST)[None, :]
         ),
         other=-1e9
-    )  # [1, q_blk]
+    ).to(tl.float32)  # [1, q_blk]
 
     attend_lengths_chunk = None
     if attend_lengths is not None:
@@ -247,7 +247,7 @@ def compute_attn_lp_loss_kernel_backward(
                 (d_idx < HDIM)[None, :]
             ),
             other=0
-        )  # [kv_blk, hd]
+        ).to(tl.float32)  # [kv_blk, hd]
 
         attn_scores = tl.dot(k_chunk, q_chunk).to(tl.float32)  # [kv_blk, q_blk]
         logP = attn_scores - m_chunk - tl.log(l_chunk)  # [kv_blk, q_blk]
