@@ -43,7 +43,11 @@ def test_CalcScoreAutoGradFn():
     )
     # scores: [BSZ, QUERY_LEN, K]
     if compute_backward:
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         torch.softmax(scores, dim=-1).backward(dout)
+        torch.cuda.synchronize()
+        print("Triton Backward pass Peak memory allocated: ", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
         tri_dq, queries.grad = queries.grad.clone(), None
         tri_dk, keys.grad = keys.grad.clone(), None
 
@@ -55,13 +59,24 @@ def test_CalcScoreAutoGradFn():
         IS_CAUSAL,
     )
     if compute_backward:
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         torch.softmax(ref_scores, dim=-1).backward(dout)
+        torch.cuda.synchronize()
+        print("Ref Backward pass Peak memory allocated: ", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
         ref_dq, queries.grad = queries.grad.clone(), None
         ref_dk, keys.grad = keys.grad.clone(), None
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    ref2_dq = reference_dQ_impl(queries, keys, scores, indices, ks, KV_REPEAT_INTERLEAVE, BLOCK_SIZE_Q, BLOCK_SIZE_K, IS_CAUSAL)
+    torch.cuda.synchronize()
+    print("Ref2 Backward pass Peak memory allocated: ", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
 
     compare("scores", ref_scores[ref_scores > -1e10], scores[ref_scores > -1e10])
     if compute_backward:
         compare("dQ", ref_dq, tri_dq)
+        compare("dQ2", ref2_dq, tri_dq)
         compare("dK", ref_dk, tri_dk)
 
 

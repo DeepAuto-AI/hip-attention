@@ -297,15 +297,6 @@ def main(config: TrainConfig):
 
     ds_config = {
         "bf16": {
-            "enabled": False,
-        },
-        "fp16": {
-            "loss_scale": 0,
-            "auto_cast": True,
-            "loss_scale_window": 1000,
-            "initial_scale_power": 32,
-            "hysteresis": 2,
-            "min_loss_scale": 0.5,
             "enabled": True
         },
         "zero_optimization": {
@@ -344,7 +335,7 @@ def main(config: TrainConfig):
 
     trainer_config = Seq2SeqTrainingArguments(
         logging_steps=1,
-        fp16=True,
+        bf16=True,
         output_dir=config.model_checkpoint_dir,
         gradient_accumulation_steps=config.accumulation_steps,
         max_steps=config.max_steps,

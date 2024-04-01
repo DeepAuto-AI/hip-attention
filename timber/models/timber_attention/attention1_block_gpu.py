@@ -260,8 +260,6 @@ def _calc_score_compute_bwd_queries(
     BLOCK_SIZE_K_PADDED: tl.constexpr,
     BLOCK_HID: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
-
-    SUM_BLOCK_SIZE: tl.constexpr,
 ):
     """
     ks: int[N, TDST]
@@ -283,9 +281,8 @@ def _calc_score_compute_bwd_queries(
     grad_queries[n, tdst, :] = acc
     """
     
-    idx_n = tl.program_id(1)
-    idx_query_block = tl.program_id(2)
-    idx_key_block_start = tl.program_id(0) * SUM_BLOCK_SIZE
+    idx_n = tl.program_id(0)
+    idx_query_block = tl.program_id(1)
 
     idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED)
     idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
@@ -298,50 +295,49 @@ def _calc_score_compute_bwd_queries(
     )
 
     accumulator = tl.zeros((BLOCK_SIZE_Q_PADDED, BLOCK_HID,), dtype=tl.float32)
-    for idx_key_block in range(idx_key_block_start, idx_key_block_start + SUM_BLOCK_SIZE):
-        if idx_key_block < scalar_ks:
-            idx_key_start = tl.load(
-                INDICES +
-                idx_n.to(tl.int64) * stride_indices_n +
-                idx_query_block.to(tl.int64) * stride_indices_bdst +
-                idx_key_block.to(tl.int64) * stride_indices_bk,
-            )
+    for idx_key_block in range(scalar_ks):
+        idx_key_start = tl.load(
+            INDICES +
+            idx_n.to(tl.int64) * stride_indices_n +
+            idx_query_block.to(tl.int64) * stride_indices_bdst +
+            idx_key_block.to(tl.int64) * stride_indices_bk,
+        )
 
-            if IS_CAUSAL:
-                causal_mask = ((idx_key_start + idx_block_k)[None, :] <= (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None])
-            else:
-                causal_mask = True
+        if IS_CAUSAL:
+            causal_mask = ((idx_key_start + idx_block_k)[None, :] <= (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None])
+        else:
+            causal_mask = True
 
-            # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: score]
-            grad_score = tl.load(
-                GRAD_SCORES +
-                idx_n.to(tl.int64) * stride_grad_scores_n +
-                (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_scores_tdst +
-                (idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :].to(tl.int64) * stride_grad_scores_k,
-                mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
-                     (idx_block_q[:, None] < BLOCK_SIZE_Q) &
-                     ((idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :] < K) &
-                     (idx_block_k[None, :] < BLOCK_SIZE_K) &
-                     causal_mask,
-                other=0,
-            )
+        # [BLOCK_SIZE_Q_PADDED: tdst, BLOCK_SIZE_K_PADDED: score]
+        grad_score = tl.load(
+            GRAD_SCORES +
+            idx_n.to(tl.int64) * stride_grad_scores_n +
+            (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_scores_tdst +
+            (idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :].to(tl.int64) * stride_grad_scores_k,
+            mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
+                 (idx_block_q[:, None] < BLOCK_SIZE_Q) &
+                 ((idx_key_block * BLOCK_SIZE_K + idx_block_k)[None, :] < K) &
+                 (idx_block_k[None, :] < BLOCK_SIZE_K) &
+                 causal_mask,
+            other=0,
+        )
 
-            # [BLOCK_SIZE_K_PADDED: score, BLOCK_HID: hid]
-            key = tl.load(
-                KEYS +
-                idx_n.to(tl.int64) * stride_keys_n +
-                (idx_key_start + idx_block_k)[:, None].to(tl.int64) * stride_keys_tsrc +
-                idx_hid[None, :].to(tl.int64) * stride_keys_hid,
-                mask=((idx_key_start + idx_block_k)[:, None] < TSRC) &
-                     (idx_block_k[:, None] < BLOCK_SIZE_K) &
-                     (idx_hid[None, :] < HID),
-                other=0,
-            )
+        # [BLOCK_SIZE_K_PADDED: score, BLOCK_HID: hid]
+        key = tl.load(
+            KEYS +
+            idx_n.to(tl.int64) * stride_keys_n +
+            (idx_key_start + idx_block_k)[:, None].to(tl.int64) * stride_keys_tsrc +
+            idx_hid[None, :].to(tl.int64) * stride_keys_hid,
+            mask=((idx_key_start + idx_block_k)[:, None] < TSRC) &
+                 (idx_block_k[:, None] < BLOCK_SIZE_K) &
+                 (idx_hid[None, :] < HID),
+            other=0,
+        )
 
-            # tl.device_print("", idx_tsrc)
-            accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
+        # tl.device_print("", idx_tsrc)
+        accumulator += tl.dot(grad_score, key).to(accumulator.dtype)
 
-    tl.atomic_add(
+    tl.store(
         GRAD_QUERIES +
         idx_n.to(tl.int64) * stride_grad_queries_n +
         (idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None].to(tl.int64) * stride_grad_queries_tdst +
@@ -349,7 +345,7 @@ def _calc_score_compute_bwd_queries(
         mask=((idx_query_block * BLOCK_SIZE_Q + idx_block_q)[:, None] < TDST) &
              (idx_block_q[:, None] < BLOCK_SIZE_Q) &
              (idx_hid[None, :] < HID),
-        val=accumulator
+        value=accumulator
     )
 
 
@@ -632,8 +628,7 @@ class CalcScoreAutoGradFn(Function):
 
         # for queries
         if ctx.needs_input_grad[0]:
-            SUM_BLOCK_SIZE = 32
-            grid = (triton.cdiv(BK, SUM_BLOCK_SIZE), N, triton.cdiv(T_DST, BLOCK_SIZE_Q))
+            grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_Q))
             BLOCK_HID = triton.next_power_of_2(HID)
 
             grad_queries = torch.zeros_like(queries)
@@ -643,7 +638,7 @@ class CalcScoreAutoGradFn(Function):
                 assert indices.ndim == 3
                 assert keys.ndim == 3
                 assert grad_scores.ndim == 3
-                assert grad_queries.ndim == 3
+                assert  grad_queries.ndim == 3
 
                 _calc_score_compute_bwd_queries[grid](
                     ks, ks.stride(0), ks.stride(1),
@@ -662,8 +657,6 @@ class CalcScoreAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                     ctx.IS_CAUSAL,
-
-                    SUM_BLOCK_SIZE,
                 )
         
         # for keys
@@ -671,7 +664,7 @@ class CalcScoreAutoGradFn(Function):
             grid = (N, triton.cdiv(T_DST, BLOCK_SIZE_Q), BK)
             BLOCK_HID = triton.next_power_of_2(HID)
             
-            grad_keys = torch.zeros_like(keys)
+            grad_keys = torch.zeros_like(keys, dtype=torch.float32)
             
             if ENABLED:
                 _calc_score_compute_bwd_keys[grid](
@@ -691,6 +684,8 @@ class CalcScoreAutoGradFn(Function):
                     next_multiple_of(BLOCK_SIZE_K, 16),
                     BLOCK_HID,
                 )
+
+            grad_keys = grad_keys.to(keys.dtype)
         
         return (
             grad_queries, 
@@ -1633,7 +1628,7 @@ class SparseAttentionAutoGradFn(Function):
             grad_values = torch.zeros(
                 (N, T_SRC, HID), 
                 device=values.device, 
-                dtype=values.dtype,
+                dtype=torch.float32,
             )
             
             if ENABLED_VALUES:
@@ -1656,7 +1651,8 @@ class SparseAttentionAutoGradFn(Function):
                     BLOCK_HID,
                 )
                 torch.cuda.set_device(orig_device)
-            
+
+            grad_values = grad_values.to(values.dtype)
             # print(grad_values.abs().sum())
         
         # for probs
