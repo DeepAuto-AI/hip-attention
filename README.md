@@ -23,15 +23,15 @@ After building the container, run commands below (change `--gpus` and `--tensor-
 
 ```bash
 docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
-       -v ~/.cache/huggingface/:/root/.cache/huggingface \
-       -e 'PAGED_ATTENTION_BACKEND=timber' \
-       -e 'PROMPT_ATTENTION_BACKEND=timber' \
-       vllm/vllm-openai \
-            --model togethercomputer/LLaMA-2-7B-32K \
-            --tensor-parallel-size 4 \
-            --kv-cache-dtype fp8_e5m2 \
-            --dtype half \
-            --gpu-memory-utilization 0.8
+    -v ~/.cache/huggingface/:/root/.cache/huggingface \
+    -e 'PAGED_ATTENTION_BACKEND=hip' \
+    -e 'PROMPT_ATTENTION_BACKEND=hip' \
+    vllm/vllm-openai \
+        --model togethercomputer/LLaMA-2-7B-32K \
+        --tensor-parallel-size 4 \
+        --kv-cache-dtype fp8_e5m2 \
+        --dtype half \
+        --gpu-memory-utilization 0.8
 ```
 ----
 
@@ -52,8 +52,8 @@ pip install -e . --no-build-isolation --verbose
 
 ## Running without docker
 ```bash
-PAGED_ATTENTION_BACKEND=timber \  
-PROMPT_ATTENTION_BACKEND=timber \
+PAGED_ATTENTION_BACKEND=hip \  
+PROMPT_ATTENTION_BACKEND=hip \
 CUDA_VISIBLE_DEVICES=0,1 \
 python3 -m vllm.entrypoints.openai.api_server \
 --model togethercomputer/LLaMA-2-7B-32K \
@@ -87,7 +87,7 @@ sudo /usr/local/cuda-12.2/bin/ncu --target-processes all -f -o profile ./scripts
 
 sudo /usr/local/cuda-12.2/bin/nsys profile -t cuda ./scripts/bench_stream_1.sh
 
-sudo /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 50000 --output report_hip_sys_%i -t cuda ./scripts/bench_stream_1.sh
+sudo /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 50000 --output report_hip_sys_17 -t cuda -n true --env-var FILENAME=16k,PYBIN=`which python`,BACKEND=hip ./scripts/bench_stream_1.sh
 ```
 
 # Example training command

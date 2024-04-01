@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import Tensor
 import matplotlib.pyplot as plt
-from timber.models.timber_attention.attention1_block_gpu import timber_attention, attention_matrix, sparse_attention, load_checkouts
+from timber.models.timber_attention.attention1_block_gpu import timber_attention, hip_attention_mask, sparse_attention, load_checkouts
 
 def to_dense(
     indices: np.ndarray, 
@@ -59,7 +59,7 @@ def main():
     w_start = mask_k * scale_up
     n_patches = mask_k / scale_up
     
-    indices, ks, probs, scores = attention_matrix(
+    indices, ks, probs, scores = hip_attention_mask(
         q, k, torch.ones((N, TSRC), dtype=torch.bool, device=q.device),
         w_start,
         n_patches,

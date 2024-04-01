@@ -5,7 +5,7 @@ from torch import nn
 from timber.models.timber_attention.attention1_block_gpu import (
     load_checkouts,
     sparse_attention,
-    attention_matrix,
+    hip_attention_mask,
 )
 
 def test_sparse_attention():
@@ -27,7 +27,7 @@ def test_sparse_attention():
     mask = torch.ones((q.shape[0], k.shape[1]), dtype=torch.bool, device=q.device)
     
     with torch.autocast('cuda', torch.float32):
-        indices, ks, probs, scores = attention_matrix(
+        indices, ks, probs, scores = hip_attention_mask(
             q,
             k,
             v,
@@ -97,7 +97,7 @@ def test_attention_mask():
     
     # exam GD
     for i in range(1000):
-        indices, ks, probs, scores = attention_matrix(
+        indices, ks, probs, scores = hip_attention_mask(
             q,
             k,
             v,

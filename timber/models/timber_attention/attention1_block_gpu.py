@@ -781,7 +781,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
         k_embed = None
     return q_embed, k_embed
 
-def attention_matrix(
+def hip_attention_mask(
     queries: Tensor, 
     keys: Tensor,
     values: Tensor,
@@ -830,7 +830,7 @@ def attention_matrix(
     global DEBUG
     
     if DEBUG:
-        print('attention_matrix', queries.shape, keys.shape, w_start, n_patches, mask_k, scale_up, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+        print('hip_attention_mask', queries.shape, keys.shape, w_start, n_patches, mask_k, scale_up, BLOCK_SIZE_Q, BLOCK_SIZE_K)
         os.makedirs('saves/models/timber_attention/', exist_ok=True)
     
     N, T_DST, HID = queries.shape
@@ -1050,78 +1050,10 @@ def attention_matrix(
             assert not USING_SLIDING_WINDOW
             assert not SPARQ
             warnings.warn('you are not using flash attention')
-            scores, probs = calc_score_return_prob(
-                queries=queries, keys=keys, attention_mask=attention_mask,
-                indices=indices, ks=ks,
-                KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
-                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                BLOCK_SIZE_K=BLOCK_SIZE_K,
-                IS_CAUSAL=is_causal,
-            )
-            assert probs.dtype == queries.dtype, f"{probs.dtype} == {queries.dtype}"
         else:
             assert ROPE_METHOD in ['self_extend', 'none']
-            context = calc_prob_return_context(
-                queries=queries, keys=keys, values=values, 
-                attention_mask=attention_mask,
-                indices=indices, ks=ks,
-                KV_REPEAT_INTERLEAVE=kv_repeat_interleave,
-                BLOCK_SIZE_Q=BLOCK_SIZE_Q, 
-                BLOCK_SIZE_K=BLOCK_SIZE_K,
-                IS_CAUSAL=is_causal,
-                USING_SLIDING_WINDOW=USING_SLIDING_WINDOW,
-                SLIDING_WINDOW_SIZE=SLIDING_WINDOW_SIZE,
-                ROPE_METHOD=ROPE_METHOD,
-                ROPE_COS=ROPE_COS,
-                ROPE_SIN=ROPE_SIN,
-                POSITION_IDS=POSITION_IDS,
-                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
-            )
-
-            return indices, ks, context, None
     
-    if DEBUG:
-        from matplotlib import pyplot as plt
-        import skimage.measure
-        import skimage
-        x = to_dense(
-            indices.cpu().numpy(),
-            ks.cpu().numpy(),
-            probs.detach().cpu().to(torch.float32).numpy(),
-            N, 
-            T_DST, 
-            T_SRC, 
-            BLOCK_SIZE_Q, 
-            BLOCK_SIZE_K,
-        )[0]
-        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-        if x.shape[0] == 1:
-            x = x.repeat(32, 0)
-        plt.imshow(x)
-        path = 'saves/models/timber_attention/block_est.png'
-        print('saved', path)
-        plt.savefig(path, dpi=200, bbox_inches='tight')
-        
-        # x = np.matmul(
-        #     queries[0].cpu().numpy(), 
-        #     keys[0].cpu().numpy().transpose((-1, -2))
-        # )
-        if isinstance(keys, Tensor):
-            x = (queries[0] @ keys[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
-            if is_causal:
-                x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
-            x = np.exp(x - x.max(-1, keepdims=True))
-            x = x / x.sum(-1, keepdims=True)
-            x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-            plt.imshow(x)
-            path = 'saves/models/timber_attention/block_truth.png'
-            print('saved', path)
-            plt.savefig(path, dpi=200, bbox_inches='tight')
-            # print(ks)
-            # input('>>>')
-    
-    return indices, ks, probs, scores
+    return indices, ks
 
 
 @triton.jit
@@ -1780,6 +1712,10 @@ def paged_timber_attention(
     
     self_extend_scale: int = 8,
     self_extend_window: int = 1024,
+    
+    using_precomputed_mask: bool = False,
+    precomputed_indices: Tensor = None,
+    precomputed_ks: Tensor = None,
 ):
     """
     vLLM compatible paged attention
@@ -1842,6 +1778,10 @@ def paged_timber_attention(
         
         self_extend_scale=self_extend_scale,
         self_extend_window=self_extend_window,
+        
+        using_precomputed_mask=using_precomputed_mask,
+        precomputed_ks=precomputed_ks,
+        precomputed_indices=precomputed_indices,
     )
     
     # if (not torch.cuda.is_current_stream_capturing()) and hasattr(k, 'readonly_end'):
@@ -1891,6 +1831,10 @@ def timber_attention(
     
     self_extend_scale: int = 8,
     self_extend_window: int = 1024,
+    
+    using_precomputed_mask: bool = False,
+    precomputed_indices: Tensor = None,
+    precomputed_ks: Tensor = None,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1981,6 +1925,10 @@ def timber_attention(
                     
                     self_extend_scale=self_extend_scale,
                     self_extend_window=self_extend_window,
+                    
+                    using_precomputed_mask=using_precomputed_mask,
+                    precomputed_ks=precomputed_ks,
+                    precomputed_indices=precomputed_indices,
                 )
                 contexts.append(sparse_context)
             
@@ -2043,6 +1991,10 @@ def timber_attention(
                 
                 self_extend_scale=self_extend_scale,
                 self_extend_window=self_extend_window,
+                
+                using_precomputed_mask=using_precomputed_mask,
+                precomputed_ks=precomputed_ks,
+                precomputed_indices=precomputed_indices,
             )
             contexts.append(context)
             
@@ -2051,7 +2003,6 @@ def timber_attention(
         return contexts, None
     
     global DEBUG
-    DENSE_SPARSE_ATTENTION = False
     
     if w_start is None:
         w_start = math.ceil(mask_k * scale_up)
@@ -2072,16 +2023,6 @@ def timber_attention(
     assert HID == _HID
     KV_REPEAT_INTERLEAVE = N // _N
     
-    # assert q.dtype == k.dtype, f'{q.dtype} == {k.dtype}'
-    # assert q.dtype == v.dtype
-    
-    # if attention_mask is None:
-    #     attention_mask = torch.full((N, T_SRC), True, dtype=torch.bool, device=q.device)
-    # if attention_mask.dtype != torch.bool:
-    #     # mask should mark alive token as True
-    #     attention_mask = attention_mask > 0.5
-    # assert attention_mask.dtype == torch.bool
-    
     assert isinstance(block_size_q, int)
     assert isinstance(block_size_k, int)
     
@@ -2095,80 +2036,107 @@ def timber_attention(
         torch.cuda.synchronize()
     
     with timer('timber_attention'):
-        with timer('attention_matrix'):
-            estimated_ksrc_stride = min(32, max(1, round(mask_k / block_size_k / 32)))
-            # estimated_ksrc_stride = 1 
-            if q.shape[1] > 32:
-                # if prompt
-                estimated_ksrc_stride = 1
+        if not using_precomputed_mask:
+            with timer('attention_matrix'):
+                # if prompt (exceed single tensor-core block), 
+                # do not use topk strding. this will cause more resource
+                estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
+                if q.shape[1] > 32:
+                    estimated_ksrc_stride = 1
+                
+                indices, ks = hip_attention_mask(
+                    queries=q,
+                    keys=k,
+                    values=v,
+                    attention_mask=attention_mask,
+                    kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                    
+                    w_start=w_start,
+                    n_patches=n_patches,
+                    mask_k=mask_k,
+                    scale_up=scale_up,
+                    is_causal=is_causal,
+                    
+                    BLOCK_SIZE_Q=block_size_q,
+                    BLOCK_SIZE_K=block_size_k,
+                    REDUCE_METHOD=reduce_method,
+                    REDUCE_STRIDE=reduce_stride,
+                    
+                    IS_FLASH=is_flash,
+                    SPARQ=enable_sparq,
+                    SAMPLING_METHOD=sampling_method,
+                    
+                    USING_SLIDING_WINDOW=using_sliding_window,
+                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                    
+                    ROPE_METHOD=rope_method,
+                    ROPE_COS=rope_cos,
+                    ROPE_SIN=rope_sin,
+                    POSITION_IDS=position_ids,
+                    
+                    SELF_EXTEND_SCALE=self_extend_scale,
+                    SELF_EXTEND_WINDOW=self_extend_window,
+                    
+                    GRID_SRC_STRIDE=estimated_ksrc_stride,
+                    GRID_K_STRIDE=estimated_ksrc_stride,
+                )
+        else:
+            assert precomputed_ks is not None
+            assert precomputed_indices is not None
             
-            indices, ks, probs_or_context, scores = attention_matrix(
-                queries=q,
-                keys=k,
-                values=v,
-                attention_mask=attention_mask,
-                kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
-                
-                w_start=w_start,
-                n_patches=n_patches,
-                mask_k=mask_k,
-                scale_up=scale_up,
-                is_causal=is_causal,
-                
-                BLOCK_SIZE_Q=block_size_q,
-                BLOCK_SIZE_K=block_size_k,
-                REDUCE_METHOD=reduce_method,
-                REDUCE_STRIDE=reduce_stride,
-                
-                IS_FLASH=is_flash,
-                SPARQ=enable_sparq,
-                SAMPLING_METHOD=sampling_method,
-                
-                USING_SLIDING_WINDOW=using_sliding_window,
-                SLIDING_WINDOW_SIZE=sliding_window_size,
-                
-                ROPE_METHOD=rope_method,
-                ROPE_COS=rope_cos,
-                ROPE_SIN=rope_sin,
-                POSITION_IDS=position_ids,
-                
-                SELF_EXTEND_SCALE=self_extend_scale,
-                SELF_EXTEND_WINDOW=self_extend_window,
-                
-                GRID_SRC_STRIDE=estimated_ksrc_stride,
-                GRID_K_STRIDE=estimated_ksrc_stride,
-            )
+            indices = precomputed_indices
+            ks = precomputed_ks
             
-            if is_flash:
-                return probs_or_context, (indices, ks, None)
-            else:
-                probs = probs_or_context
-                assert rope_method in ['none'] # self_extend is not supported
-            
-            # assert probs.dtype == v.dtype, f"{probs.dtype} == {v.dtype}"
+            assert indices.shape[:-1] == (N, T_DST), f'{indices.shape}, {(N, T_DST)}'
+            assert ks.shape == (N, T_DST), f'{ks.shape}, {(N, T_DST)}'
         
         with timer('sparse_attention'):
-            if DENSE_SPARSE_ATTENTION:
-                probs_dense = torch.tensor(to_dense(
-                    indices.to(torch.float32).cpu().numpy(), 
-                    ks.to(torch.float32).cpu().numpy(), 
-                    probs.to(torch.float32).cpu().numpy(), 
-                    N, T_DST, T_SRC, block_size_q, block_size_k,
-                )).to(v.dtype).to(indices.device)
+            if not is_flash:
+                assert rope_method in ['none'] # self_extend is not supported
                 
-                # scores_dense = to_dense(
-                #     indices.cpu(), ks.cpu(), scores.cpu(),
-                #     N, T_DST, T_SRC, block_size_q, block_size_k,
-                # ).to(indices.device)
+                scores, probs = calc_score_return_prob(
+                    queries=q, keys=k, attention_mask=attention_mask,
+                    indices=indices, ks=ks,
+                    KV_REPEAT_INTERLEAVE=KV_REPEAT_INTERLEAVE,
+                    BLOCK_SIZE_Q=block_size_q,
+                    BLOCK_SIZE_K=block_size_k,
+                    IS_CAUSAL=is_causal,
+                )
+                assert probs.dtype == q.dtype, f"{probs.dtype} == {q.dtype}"
                 
-                mask_dense = probs_dense <= 1e-7
-                mask_dense = mask_dense.to(probs.dtype) * torch.finfo(probs.dtype).min
+                if DEBUG:
+                    x = to_dense(
+                        indices.cpu().numpy(),
+                        ks.cpu().numpy(),
+                        probs.detach().cpu().to(torch.float32).numpy(),
+                        N, 
+                        T_DST, 
+                        T_SRC, 
+                        block_size_q, 
+                        block_size_k,
+                    )[0]
+                    x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+                    if x.shape[0] == 1:
+                        x = x.repeat(32, 0)
+                    plt.imshow(x)
+                    path = 'saves/models/timber_attention/block_est.png'
+                    print('saved', path)
+                    plt.savefig(path, dpi=200, bbox_inches='tight')
+                    
+                    if isinstance(k, Tensor):
+                        x = (q[0] @ k[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
+                        if is_causal:
+                            x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+                        x = np.exp(x - x.max(-1, keepdims=True))
+                        x = x / x.sum(-1, keepdims=True)
+                        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+                        plt.imshow(x)
+                        path = 'saves/models/timber_attention/block_truth.png'
+                        print('saved', path)
+                        plt.savefig(path, dpi=200, bbox_inches='tight')
+                        # print(ks)
+                        # input('>>>')
                 
-                scores_truth = torch.bmm(q, k.transpose(-1, -2))
-                probs_truth = (scores_truth + mask_dense).softmax(dim=-1)
-                
-                context = torch.bmm(probs_truth, v)
-            else:
                 context = sparse_attention(
                     v,
                     indices,
@@ -2178,23 +2146,29 @@ def timber_attention(
                     BLOCK_SIZE_Q=block_size_q,
                     BLOCK_SIZE_K=block_size_k,
                 )
-                
-                # v_cumsum = v.cumsum(dim=1)
-                # v_avg = v_cumsum / torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None]
-                
-                # exp_norm = torch.exp(scores - torch.max(scores, dim=-1, keepdim=True)[0])
-                # min_exp_norm = torch.where(scores > -100, exp_norm, 1000.0).min(dim=-1, keepdim=True)[0]
-                # sum_exp_norm = exp_norm.sum(dim=-1, keepdim=True)
-                # ctx_exp_norm = min_exp_norm * torch.clamp_min(torch.arange(1, v.shape[1]+1, device=v.device)[None, :, None] - mask_k, 0)
-                # sum_exp_norm = sum_exp_norm + ctx_exp_norm
-                # ctx_ratio = (ctx_exp_norm / sum_exp_norm) * 0.1
-                
-                # context = context * (1 - ctx_ratio) + v_avg * ctx_ratio
+            else:
+                scores = probs = None
+                context = calc_prob_return_context(
+                    queries=q, keys=k, values=v, 
+                    attention_mask=attention_mask,
+                    indices=indices, ks=ks,
+                    KV_REPEAT_INTERLEAVE=KV_REPEAT_INTERLEAVE,
+                    BLOCK_SIZE_Q=block_size_q, 
+                    BLOCK_SIZE_K=block_size_k,
+                    IS_CAUSAL=is_causal,
+                    USING_SLIDING_WINDOW=using_sliding_window,
+                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                    ROPE_METHOD=rope_method,
+                    ROPE_COS=rope_cos,
+                    ROPE_SIN=rope_sin,
+                    POSITION_IDS=position_ids,
+                    SELF_EXTEND_SCALE=self_extend_scale,
+                    SELF_EXTEND_WINDOW=self_extend_window,
+                )
     
     return context, (indices, ks, probs)
 
 import torch.nn.functional as F
-
 
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     scores = torch.bmm(q, k.transpose(-1, -2))
@@ -2202,17 +2176,21 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
     context = torch.bmm(probs, v)
     return context, probs
 
-def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True):
-    # context = F.scaled_dot_product_attention(
-    #     q, k, v, is_causal=False, scale=None,
-    # )
-    # return context, None
-    from flash_attn import flash_attn_with_kvcache
-    
-    assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
-    assert k.shape[0] == v.shape[0]
-    
-    return flash_attn_with_kvcache(q.half(), k.half(), v.half(), causal=is_causal, softmax_scale=1.0), None
+def flash_attention(q: Tensor, k: Tensor, v: Tensor, is_causal=True, backend='flash_attn'):
+    if backend == 'sdpa':
+        context = F.scaled_dot_product_attention(
+            q, k, v, is_causal=False, scale=None,
+        )
+        return context, None
+    elif backend == 'flash_attn':
+        from flash_attn import flash_attn_with_kvcache
+        
+        assert q.shape[0] == k.shape[0], f"{q.shape}, {k.shape}"
+        assert k.shape[0] == v.shape[0]
+        
+        return flash_attn_with_kvcache(q, k, v, causal=is_causal, softmax_scale=1.0), None
+    else:
+        raise Exception()
 
 def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     """
@@ -2392,7 +2370,7 @@ def main_debug():
         block_size_q=16,
         block_size_k=4,
         dense_queries_exp=0,
-        is_flash=False,
+        is_flash=True,
     )
     
     stderr = (out - context).abs().mean().item()
