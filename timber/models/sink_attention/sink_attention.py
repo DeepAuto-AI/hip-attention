@@ -314,24 +314,35 @@ class AttentionScoreFunc(Function):
         
         _device = torch.cuda.current_device()
         torch.cuda.set_device(q.device)
-        _attention_scores_compute[grid](
-            q, *q.stride(),
-            k, *k.stride(),
-            cos, *cos.stride(),
-            sin, *sin.stride(),
-            
-            indices, *indices.stride(),
-            values, *values.stride(),
-            
-            N, TDST, TSRC, HID,
-            num_sink,
-            window_size,
-            
-            BLOCK_HID,
-            
-            num_warps=1,
-            num_stages=1,
-        )
+        try:
+            _attention_scores_compute[grid](
+                q, *q.stride(),
+                k, *k.stride(),
+                cos, *cos.stride(),
+                sin, *sin.stride(),
+                
+                indices, *indices.stride(),
+                values, *values.stride(),
+                
+                N, TDST, TSRC, HID,
+                num_sink,
+                window_size,
+                
+                BLOCK_HID,
+                
+                num_warps=1,
+                num_stages=1,
+            )
+        except RuntimeError as ex:
+            print(
+                q.shape, q.dtype, 
+                k.shape, k.dtype, 
+                cos.shape, cos.dtype, 
+                sin.shape, sin.dtype, 
+                indices.shape, indices.dtype, 
+                values.shape, values.dtype
+            )
+            raise Exception() from ex
         torch.cuda.set_device(_device)
         
         ctx.save_for_backward(
@@ -488,14 +499,15 @@ def sink_attention(
     return context
 
 if __name__ == '__main__':
-    N = 1
-    T = 8
+    N = 40
+    T = 16000
     HID = 128
-    NSINK = 2
-    WIND = 4
+    NSINK = 4
+    WIND = 512
+    QSIZE = 1
     
     std = 0.5
-    q = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
+    q = torch.nn.Parameter((torch.randn((N, T, HID), device=0) * std)[:, :QSIZE, :].contiguous())
     k = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
     v = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
     cos = torch.randn((T, HID), device=q.device)
@@ -509,7 +521,7 @@ if __name__ == '__main__':
         )
         
         # look up diagonal
-        loss = (x - v[:, :, :]).square().mean() * 1000
+        loss = (x - v[:, :q.shape[1], :]).square().mean() * 1000
         loss.backward()
         
         lr = 1e-3
