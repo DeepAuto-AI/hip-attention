@@ -335,6 +335,7 @@ class AttentionScoreFunc(Function):
             )
         except RuntimeError as ex:
             print(
+                num_sink, window_size,
                 q.shape, q.dtype, q.is_contiguous(),
                 k.shape, k.dtype, k.is_contiguous(),
                 cos.shape, cos.dtype, cos.is_contiguous(),
