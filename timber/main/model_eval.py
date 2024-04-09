@@ -118,8 +118,10 @@ def load_model(args):
         config = LlamaConfig.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
     
-    infer_dtype = torch.bfloat16
-    # infer_dtype = torch.float16
+    if torch.cuda.is_bf16_supported():
+        infer_dtype = torch.bfloat16
+    else:
+        infer_dtype = torch.float16
     # infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM

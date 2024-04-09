@@ -236,11 +236,11 @@ def _attention_score_backward_compute(
     grad_query = grad_score * key
     
     grad_key_origin, idx_key_origin_hid, grad_key_rot, idx_key_rot_hid = grad_rotary_embedded_vector(
-        grad_query, query_origin, query_rot, cos_q, sin_q,
+        grad_key, key_origin, key_rot, cos_k, sin_k,
         HID, BLOCK_HID
     )
     grad_query_origin, idx_query_origin_hid, grad_query_rot, idx_query_rot_hid = grad_rotary_embedded_vector(
-        grad_key, key_origin, key_rot, cos_k, sin_k,
+        grad_query, query_origin, query_rot, cos_q, sin_q,
         HID, BLOCK_HID
     )
     
@@ -249,7 +249,7 @@ def _attention_score_backward_compute(
     tl.atomic_add(
         GRAD_K +\
             idx_n * stride_grad_k_n +\
-            idx_tdst * stride_grad_k_tsrc +\
+            idx_tsrc * stride_grad_k_tsrc +\
             idx_key_origin_hid * stride_grad_k_hid,
         mask = mask_hid,
         val = grad_key_origin
@@ -257,7 +257,7 @@ def _attention_score_backward_compute(
     tl.atomic_add(
         GRAD_K +\
             idx_n * stride_grad_k_n +\
-            idx_tdst * stride_grad_k_tsrc +\
+            idx_tsrc * stride_grad_k_tsrc +\
             idx_key_rot_hid * stride_grad_k_hid,
         mask = mask_hid,
         val = grad_key_rot
@@ -480,7 +480,7 @@ def sink_attention(
         window_size=window_size,
     )
     
-    if v.dtype == torch.bfloat16:
+    if v.dtype in [torch.bfloat16, torch.float16]:
         v = v.to(torch.float32)
     context = torch.bmm(probs, v)
     context = context.to(_dtype)
