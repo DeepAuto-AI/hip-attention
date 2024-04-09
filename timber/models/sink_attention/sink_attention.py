@@ -166,7 +166,6 @@ class AttentionScoreFunc(Function):
         N, TDST, HID = q.shape
         _, TSRC, _ = k.shape
         assert k.shape == (N, TSRC, HID)
-        assert v.shape == (N, TSRC, HID)
         assert cos.shape[-1] == HID
         assert sin.shape[-1] == HID
         
