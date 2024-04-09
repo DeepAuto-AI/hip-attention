@@ -30,18 +30,18 @@ def load_rotary_embedded_vector(
     
     vec = tl.load(
         QK +\
-            idx_n * stride_qk_n +\
-            idx_t_qk * stride_qk_t +\
-            idx_hid * stride_qk_hid,
+            idx_n.to(tl.int64) * stride_qk_n +\
+            idx_t_qk.to(tl.int64) * stride_qk_t +\
+            idx_hid.to(tl.int64) * stride_qk_hid,
         mask = mask_hid,
         other = 0,
     )
     
     vec_rot = tl.load(
         QK +\
-            idx_n * stride_qk_n +\
-            idx_t_qk * stride_qk_t +\
-            idx_hid_rot * stride_qk_hid,
+            idx_n.to(tl.int64) * stride_qk_n +\
+            idx_t_qk.to(tl.int64) * stride_qk_t +\
+            idx_hid_rot.to(tl.int64) * stride_qk_hid,
         mask = mask_hid_rot,
         other = 0,
     )
@@ -49,15 +49,15 @@ def load_rotary_embedded_vector(
     
     cos = tl.load(
         COS +\
-            idx_t_rope * stride_cos_t +\
-            idx_hid * stride_cos_hid,
+            idx_t_rope.to(tl.int64) * stride_cos_t +\
+            idx_hid.to(tl.int64) * stride_cos_hid,
         mask=mask_hid,
         other=0,
     )
     sin = tl.load(
         SIN +\
-            idx_t_rope * stride_sin_t +\
-            idx_hid * stride_sin_hid,
+            idx_t_rope.to(tl.int64) * stride_sin_t +\
+            idx_hid.to(tl.int64) * stride_sin_hid,
         mask=mask_hid,
         other=0,
     )
