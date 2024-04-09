@@ -260,7 +260,11 @@ def custom_attention(
         v = v.reshape(N * H, TSRC, HID)  # .contiguous()
 
         attn_output = sink_attention(
-            q, k, v, rope_cos, rope_sin, num_sink=4, window_size=tree_k,
+            q, k, v, 
+            rope_cos.squeeze(0), 
+            rope_sin.squeeze(0), 
+            num_sink=4, 
+            window_size=tree_k,
         )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
