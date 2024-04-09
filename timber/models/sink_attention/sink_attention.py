@@ -170,7 +170,7 @@ class AttentionScoreFunc(Function):
         assert sin.shape[-1] == HID
         
         device = q.device
-        dtype = q.dtype
+        dtype = torch.float32 #q.dtype
         
         ctx.save_for_backward(
             q, k, cos, sin
