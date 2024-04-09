@@ -131,7 +131,7 @@ def load_model(args):
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map="auto",
+        device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],

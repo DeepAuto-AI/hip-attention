@@ -31,7 +31,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
         return
 
     os.makedirs('./cache', exist_ok=True)
-    cache_path = './cache/llama_eval.pth'
+    cache_path = f'./cache/llama_eval_{args.model}.pth'
     if not os.path.exists(cache_path):
         test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt").input_ids
