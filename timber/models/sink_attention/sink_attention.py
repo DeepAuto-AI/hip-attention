@@ -24,9 +24,9 @@ def _attention_scores_compute(
     # kernel constants
     BLOCK_HID: tl.constexpr,
 ):
-    idx_n = tl.program_id(0).to(tl.int64)
-    idx_tdst = tl.program_id(1).to(tl.int64)
-    idx_k = tl.program_id(2).to(tl.int64)
+    idx_n = tl.program_id(0)
+    idx_tdst = tl.program_id(1)
+    idx_k = tl.program_id(2)
     
     tdst = idx_tdst + TSRC - TDST
     
@@ -42,7 +42,7 @@ def _attention_scores_compute(
     mask_hid = idx_hid < HID
     
     idx_hid_rot = (idx_hid + HID // 2) % HID
-    mask_hid_rot = mask_hid & (idx_hid_rot < HID)
+    mask_hid_rot = mask_hid
     
     # load key
     key = tl.load(
@@ -50,7 +50,7 @@ def _attention_scores_compute(
             idx_n * stride_k_n +\
             idx_tsrc * stride_k_tsrc +\
             idx_hid * stride_k_hid,
-        mask = mask_tsrc & mask_hid,
+        mask = mask_hid,
         other = 0,
     )
     
@@ -59,7 +59,7 @@ def _attention_scores_compute(
             idx_n * stride_k_n +\
             idx_tsrc * stride_k_tsrc +\
             idx_hid_rot * stride_k_hid,
-        mask = mask_tsrc & mask_hid_rot,
+        mask = mask_hid_rot,
         other = 0,
     )
     key_rot = tl.where(idx_hid < HID // 2, -key_rot, key_rot)
@@ -68,14 +68,14 @@ def _attention_scores_compute(
         COS +\
             idx_k * stride_cos_t +\
             idx_hid * stride_cos_hid,
-        mask=mask_tsrc & mask_hid,
+        mask=mask_hid,
         other=0,
     )
     sin_k = tl.load(
         SIN +\
             idx_k * stride_sin_t +\
             idx_hid * stride_sin_hid,
-        mask=mask_tsrc & mask_hid,
+        mask=mask_hid,
         other=0,
     )
     
@@ -85,7 +85,7 @@ def _attention_scores_compute(
     query = tl.load(
         Q +\
             idx_n * stride_q_n +\
-            tdst * stride_q_tdst +\
+            idx_tdst * stride_q_tdst +\
             idx_hid * stride_q_hid,
         mask = mask_hid,
         other = 0,
@@ -94,7 +94,7 @@ def _attention_scores_compute(
     query_rot = tl.load(
         Q +\
             idx_n * stride_q_n +\
-            tdst * stride_q_tdst +\
+            idx_tdst * stride_q_tdst +\
             idx_hid_rot * stride_q_hid,
         mask = mask_hid_rot,
         other = 0,
@@ -120,30 +120,34 @@ def _attention_scores_compute(
     
     query = ((query.to(tl.float32) * cos_q) + (query_rot.to(tl.float32) * sin_q)).to(query.dtype)
     
-    # calc dot product. NOTE: you need to scale query before pass into kernel
-    score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
+    # calc dot product.
+    score = tl.sum(query.to(tl.float32) * key.to(tl.float32) * mask_hid)
     score = score / tl.sqrt(HID.to(tl.float32))
     score = tl.where(idx_tsrc <= tdst, score, float('-inf'))
     
     # output
     idx_z = idx_n * TDST * (WINDOW_SIZE + NUM_SINK) + idx_tdst * (WINDOW_SIZE + NUM_SINK) + idx_k
+    tl.debug_barrier()
     tl.store(
         VALUES +\
             idx_z * stride_values_z,
         value = score
     )
+    tl.debug_barrier()
     tl.store(
         INDICES +\
             0 * stride_indices_d +\
             idx_z * stride_indices_z,
         value = idx_n
     )
+    tl.debug_barrier()
     tl.store(
         INDICES +\
             1 * stride_indices_d +\
             idx_z * stride_indices_z,
         value = idx_tdst
     )
+    tl.debug_barrier()
     tl.store(
         INDICES +\
             2 * stride_indices_d +\
@@ -204,7 +208,10 @@ class AttentionScoreFunc(Function):
             num_sink,
             window_size,
             
-            BLOCK_HID
+            BLOCK_HID,
+            
+            num_warps=1,
+            num_stages=1,
         )
         torch.cuda.set_device(_device)
         
@@ -255,6 +262,7 @@ def attention_scores(
         requires_grad=q.requires_grad,
         dtype=values.dtype,
         device=values.device,
+        check_invariants=True,
     )
     
     return probs
@@ -305,10 +313,6 @@ def sink_attention(
         num_sink=num_sink,
         window_size=window_size,
     )
-    
-    # print(probs.to_dense()[0])
-    # q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin, None)
-    # print((q_embed @ k_embed.transpose(-1, -2))[0] / (128 ** 0.5))
     
     if v not in [torch.float32]:
         v = v.to(torch.float32)

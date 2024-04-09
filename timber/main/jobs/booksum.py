@@ -12,7 +12,6 @@ from transformers import LogitsProcessor, LogitsProcessorList
 from timber.dataset.booksum import BookSumDataset
 from timber.utils import seed, get_bench
 from torch.utils.data import Subset
-from vllm import LLM, SamplingParams
 
 import subprocess
 import logging
@@ -131,6 +130,7 @@ def install_rogue():
     return ROUGE_HOME
 
 def generate_samples(args, model, tokenizer, device, out_dir):
+    from vllm import LLM, SamplingParams
     is_vllm = isinstance(model, LLM)
     if is_vllm:
         # we do not access to tokenizer.

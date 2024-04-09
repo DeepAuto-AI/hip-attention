@@ -803,8 +803,14 @@ class LlamaCustomAttention(LlamaAttention):
         past_key_value = getattr(self, "past_key_value", past_key_value)
         cos, sin = self.rotary_emb(value_states, position_ids)
 
-        if (self.tree_rope_method == 'none') and (self.attention_method not in ['streaming_llm']):
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        if (self.tree_rope_method == 'none'):
+            if self.layer_idx in self.tree_dense_layers:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            else:
+                if self.attention_method == 'streaming_llm':
+                    pass
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -827,6 +833,16 @@ class LlamaCustomAttention(LlamaAttention):
         if past_key_value is not None:
             assert hasattr(past_key_value, "cumsum")
             last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+        
+        # import matplotlib.pyplot as plt
+        # q, k = apply_rotary_pos_emb(query_states[0].float(), key_states[0].float(), cos, sin, None)
+        # probs_truth = (q @ k.transpose(-1, -2)) / (128 ** 0.5)
+        # probs = probs_truth.softmax(-1).float()[0]
+        # plt.clf()
+        # plt.imshow(probs[0].cpu().numpy() ** 0.2)
+        # plt.colorbar()
+        # plt.savefig('dump.png')
+        # input('b')
 
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,

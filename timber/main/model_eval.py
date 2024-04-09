@@ -119,6 +119,7 @@ def load_model(args):
         config._attn_implementation = config.attn_implementation = 'sdpa'
     
     infer_dtype = torch.bfloat16
+    # infer_dtype = torch.float16
     # infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
