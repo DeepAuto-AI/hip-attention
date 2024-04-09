@@ -555,3 +555,32 @@ def get_all_allocated_tensors() -> List[Tuple[torch.Tensor, list]]:
         except OSError:
             pass
     return tensors
+
+def setup_seaborn(
+    label_fontsize = 8,
+    legend_fontsize = 7,
+    axes_label_fontsize = 6
+):
+    import seaborn as sns
+    
+    sns.set_theme(
+        context='paper',
+        style='whitegrid',
+        palette='Set2',
+        font='Noto Sans, Sans Serif',
+        font_scale=1.0,
+        color_codes=True,
+        rc={
+            'axes.titlesize': str(label_fontsize),
+            'font.weight': 'medium',
+            'axes.labelweight': '600',
+            'axes.titleweight': '600',
+            'legend.fontsize': str(legend_fontsize),
+            'axes.grid.which': 'both',
+            'ytick.labelsize': str(axes_label_fontsize),
+            'xtick.labelsize': str(axes_label_fontsize),
+            'axes.labelsize': str(label_fontsize),
+            'ytick.major.pad': '1.0',
+            'xtick.major.pad': '1.0',
+        }
+    )

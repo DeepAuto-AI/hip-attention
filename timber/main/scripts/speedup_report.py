@@ -2,9 +2,11 @@ import json
 import math
 import sys, subprocess, os, itertools, tqdm
 import seaborn as sns
-sns.set_style('whitegrid')
 import pypareto
 import matplotlib.pyplot as plt
+
+from timber.utils import setup_seaborn
+setup_seaborn()
 
 os.environ['PYTHONPATH'] = './'
 
@@ -137,28 +139,48 @@ def plot_ppl(query_size=1):
         })
         xs.append(latency_base / latency_timber)
     
+    data = list(sorted(zip(xs, ys, entries), key=lambda x: x[0]))
+    xs = [d[0] for d in data]
+    ys = [d[1] for d in data]
+    entries = [d[2] for d in data]
+    
     pts = list(zip(xs, ys, map(lambda x: (x,), range(len(data_ppl)))))
-    chain = pypareto.Comparison(by_value, pypareto.MaxMinList(pypareto.MaxMin.MAX, pypareto.MaxMin.MIN, pypareto.MaxMin.MIN)).as_chain()
+    chain = pypareto.Comparison(
+        by_value, 
+        pypareto.MaxMinList(
+            pypareto.MaxMin.MAX, 
+            pypareto.MaxMin.MIN, 
+            pypareto.MaxMin.MIN,
+        )
+    ).as_chain()
     pts = chain.split_by_pareto(pts)[0]
     xs_front = [pt[0] for pt in pts]
     ys_front = [pt[1] for pt in pts]
     idxs_front = [pt[2][0] for pt in pts]
     
-    plt.figure(figsize=(5, 4))
+    plt.figure(figsize=(2.5, 2.0))
     
-    plt.title(f'Perplexity / Decoding Speedup (#Query: {query_size})')
-    plt.ylabel('PPL. (w/o train)')
-    plt.xlabel('Decoding Speedup')
+    if query_size == 1:
+        plt.title(f'PPL. / Decoding Speedup')
+    else:
+        plt.title(f'PPL. / Decoding Speedup (#Q:{query_size})')
+    plt.ylabel('PPL. (w/o train) ↓')
+    plt.xlabel('Decoding Speedup ↑')
     sns.scatterplot(x=xs, y=ys)
     sns.lineplot(x=xs_front, y=ys_front)
+    last_x = 0
     for idx in range(len(idxs_front)):
-        plt.annotate(
-            f'k:{entries[idxs_front[idx]]["k"]}, bq:{entries[idxs_front[idx]]["block_size_q"]}, bk:{entries[idxs_front[idx]]["block_size_k"]}', 
-            (xs_front[idx], ys_front[idx] + 0.01),
-            horizontalalignment='center',
-            verticalalignment='bottom',
-            fontsize=9,
-        )
+        if abs(xs_front[idx] - last_x) > 0.8:
+            x = plt.annotate(
+                f'$k$:{entries[idxs_front[idx]]["k"]}\n$b_q$:{entries[idxs_front[idx]]["block_size_q"]}, $b_k$:{entries[idxs_front[idx]]["block_size_k"]}', 
+                (xs_front[idx] - 0.5, ys_front[idx] + 0.00),
+                horizontalalignment='center',
+                verticalalignment='bottom',
+                fontsize=6.0,
+                color='0.1'
+            )
+            x.set_alpha(0.4)
+            last_x = xs_front[idx]
     
     # baseline_ppl = 5.59
     baseline_ppl = 4.682
