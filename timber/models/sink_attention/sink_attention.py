@@ -242,11 +242,11 @@ def attention_scores(
         q, k, cos, sin, num_sink, window_size,
     )
     
-    # values = values\
-    #     .view(-1, num_sink + window_size)\
-    #     .softmax(-1)\
-    #     .view(-1)\
-    #     .contiguous()
+    values = values\
+        .view(-1, num_sink + window_size)\
+        .softmax(-1)\
+        .view(-1)\
+        .contiguous()
     
     probs = torch.sparse_coo_tensor(
         indices=indices,
@@ -306,9 +306,9 @@ def sink_attention(
         window_size=window_size,
     )
     
-    print(probs.to_dense()[0])
-    q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin, None)
-    print((q_embed @ k_embed.transpose(-1, -2))[0] / (128 ** 0.5))
+    # print(probs.to_dense()[0])
+    # q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin, None)
+    # print((q_embed @ k_embed.transpose(-1, -2))[0] / (128 ** 0.5))
     
     if v not in [torch.float32]:
         v = v.to(torch.float32)
