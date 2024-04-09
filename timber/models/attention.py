@@ -259,7 +259,6 @@ def custom_attention(
         k = k.reshape(N * H, TSRC, HID)  # .contiguous()
         v = v.reshape(N * H, TSRC, HID)  # .contiguous()
 
-        
         attn_output = sink_attention(
             q, k, v, rope_cos, rope_sin, num_sink=4, window_size=tree_k,
         )

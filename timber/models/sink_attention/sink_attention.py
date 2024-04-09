@@ -161,7 +161,6 @@ class AttentionScoreFunc(Function):
     ):
         assert q.ndim == 3
         assert k.ndim == 3
-        assert v.ndim == 3
         assert cos.ndim == 2
         assert sin.ndim == 2
         N, TDST, HID = q.shape
