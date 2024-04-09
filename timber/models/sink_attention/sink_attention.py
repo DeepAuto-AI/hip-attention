@@ -100,9 +100,9 @@ def _attention_scores_compute(
     # kernel constants
     BLOCK_HID: tl.constexpr,
 ):
-    idx_n = tl.program_id(0)
-    idx_tdst = tl.program_id(1)
-    idx_k = tl.program_id(2)
+    idx_n = tl.program_id(0).to(tl.int64)
+    idx_tdst = tl.program_id(1).to(tl.int64)
+    idx_k = tl.program_id(2).to(tl.int64)
     
     tdst = idx_tdst + TSRC - TDST
     
@@ -305,7 +305,7 @@ class AttentionScoreFunc(Function):
         dtype = torch.float32 #q.dtype
         
         nnz = N * TDST * (num_sink + window_size)
-        indices = torch.zeros((3, nnz), dtype=torch.int32, device=device)
+        indices = torch.zeros((3, nnz), dtype=torch.int64, device=device)
         values = torch.zeros((nnz,), dtype=dtype, device=device)
         
         BLOCK_HID = triton.next_power_of_2(HID)
