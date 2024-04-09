@@ -335,12 +335,12 @@ class AttentionScoreFunc(Function):
             )
         except RuntimeError as ex:
             print(
-                q.shape, q.dtype, 
-                k.shape, k.dtype, 
-                cos.shape, cos.dtype, 
-                sin.shape, sin.dtype, 
-                indices.shape, indices.dtype, 
-                values.shape, values.dtype
+                q.shape, q.dtype, q.is_contiguous(),
+                k.shape, k.dtype, k.is_contiguous(),
+                cos.shape, cos.dtype, cos.is_contiguous(),
+                sin.shape, sin.dtype, sin.is_contiguous(),
+                indices.shape, indices.dtype, indices.is_contiguous(),
+                values.shape, values.dtype, values.is_contiguous(),
             )
             raise Exception() from ex
         torch.cuda.set_device(_device)
@@ -499,8 +499,8 @@ def sink_attention(
     return context
 
 if __name__ == '__main__':
-    N = 40
-    T = 16000
+    N = 32
+    T = 7536
     HID = 128
     NSINK = 4
     WIND = 512
