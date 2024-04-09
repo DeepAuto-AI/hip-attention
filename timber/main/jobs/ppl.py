@@ -15,6 +15,7 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
 
+@torch.inference_mode
 def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
     try:
         from vllm import LLM, SamplingParams
