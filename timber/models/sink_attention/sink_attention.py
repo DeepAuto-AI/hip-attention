@@ -127,7 +127,7 @@ def _attention_scores_compute(
         Q, stride_q_n, stride_q_tdst, stride_q_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
-        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK),
+        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK - 1),
         HID, BLOCK_HID,
     )
     
@@ -219,7 +219,7 @@ def _attention_score_backward_compute(
         Q, stride_q_n, stride_q_tdst, stride_q_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
-        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK),
+        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK - 1),
         HID, BLOCK_HID,
     )
     
@@ -501,17 +501,18 @@ def sink_attention(
 
 if __name__ == '__main__':
     N = 32
-    T = 7536
+    T = 128
     HID = 128
     NSINK = 4
     WIND = 512
     QSIZE = 1
     
+    dtype = torch.float16
     std = 0.5
-    q = torch.nn.Parameter((torch.randn((N, T, HID), device=0) * std)[:, :QSIZE, :].contiguous())
-    k = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
-    v = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
-    cos = torch.randn((T, HID), device=q.device)
+    q = torch.nn.Parameter((torch.randn((N, T, HID), device=0, dtype=dtype) * std)[:, :QSIZE, :].contiguous())
+    k = torch.nn.Parameter(torch.randn((N, T, HID), device=0, dtype=dtype) * std)
+    v = torch.nn.Parameter(torch.randn((N, T, HID), device=0, dtype=dtype) * std)
+    cos = torch.randn((T, HID), device=q.device, dtype=dtype)
     sin = cos.clone()
     
     for istep in range(10000):
