@@ -22,7 +22,7 @@ def load_rotary_embedded_vector(
     HID,
     BLOCK_HID,
 ):
-    idx_hid = tl.arange(0, BLOCK_HID)
+    idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64)
     mask_hid = idx_hid < HID
     
     idx_hid_rot = (idx_hid + HID // 2) % HID
@@ -119,7 +119,7 @@ def _attention_scores_compute(
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
         idx_n, idx_tsrc, idx_k,
-        HID, BLOCK_HID
+        HID, BLOCK_HID,
     )
     
     # load query
@@ -140,25 +140,25 @@ def _attention_scores_compute(
     idx_z = idx_n * TDST * (WINDOW_SIZE + NUM_SINK) + idx_tdst * (WINDOW_SIZE + NUM_SINK) + idx_k
     tl.store(
         VALUES +\
-            idx_z * stride_values_z,
+            idx_z.to(tl.int64) * stride_values_z,
         value = score
     )
     tl.store(
         INDICES +\
             0 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_n
     )
     tl.store(
         INDICES +\
             1 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_tdst
     )
     tl.store(
         INDICES +\
             2 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_tsrc
     )
 
