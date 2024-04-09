@@ -103,14 +103,16 @@ def _attention_scores_compute(
     
     cos_q = tl.load(
         COS +\
-            tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_cos_t +\
+            tdst * stride_cos_t +\
+            # tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_cos_t +\
             idx_hid * stride_cos_hid,
         mask=mask_hid,
         other=0,
     )
     sin_q = tl.load(
         SIN +\
-            tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_sin_t +\
+            tdst * stride_sin_t +\
+            # tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_sin_t +\
             idx_hid * stride_sin_hid,
         mask=mask_hid,
         other=0,
@@ -119,8 +121,9 @@ def _attention_scores_compute(
     query = ((query.to(tl.float32) * cos_q) + (query_rot.to(tl.float32) * sin_q)).to(query.dtype)
     
     # calc dot product. NOTE: you need to scale query before pass into kernel
-    score = tl.sum(query.to(tl.float32) * key.to(tl.float32)) / tl.sqrt(HID.to(tl.float32))
-    score = tl.where(idx_tsrc <= tdst, score, -32000.0)
+    score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
+    score = score / tl.sqrt(HID.to(tl.float32))
+    score = tl.where(idx_tsrc <= tdst, score, float('-inf'))
     
     # output
     idx_z = idx_n * TDST * (WINDOW_SIZE + NUM_SINK) + idx_tdst * (WINDOW_SIZE + NUM_SINK) + idx_k
@@ -233,15 +236,17 @@ def attention_scores(
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
     
+    window_size = min(window_size, TSRC - num_sink)
+    
     indices, values = AttentionScoreFunc.apply(
         q, k, cos, sin, num_sink, window_size,
     )
     
-    values = values\
-        .view(-1, num_sink + window_size)\
-        .softmax(-1)\
-        .view(-1)\
-        .contiguous()
+    # values = values\
+    #     .view(-1, num_sink + window_size)\
+    #     .softmax(-1)\
+    #     .view(-1)\
+    #     .contiguous()
     
     probs = torch.sparse_coo_tensor(
         indices=indices,
@@ -253,6 +258,35 @@ def attention_scores(
     )
     
     return probs
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+    if position_ids is None:
+        N = q.shape[0]
+        TDST = q.shape[1]
+        position_ids = torch.arange(0, TDST, device=q.device)[None, :].expand(N, TDST)
+    
+    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+    cos = cos  # [seq_len, dim]
+    sin = sin  # [seq_len, dim]
+    assert cos.ndim == 2
+    cos = cos[position_ids]  # [bs, seq_len, dim]
+    sin = sin[position_ids]  # [bs, seq_len, dim]
+    assert position_ids.ndim == 2
+    assert cos.ndim == 3
+    
+    q_embed = (q * cos) + (rotate_half(q) * sin) 
+    
+    if k is not None:
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+    else:
+        k_embed = None
+    return q_embed, k_embed    
 
 def sink_attention(
     q: Tensor,
@@ -271,6 +305,10 @@ def sink_attention(
         num_sink=num_sink,
         window_size=window_size,
     )
+    
+    print(probs.to_dense()[0])
+    q_embed, k_embed = apply_rotary_pos_emb(q, k, cos, sin, None)
+    print((q_embed @ k_embed.transpose(-1, -2))[0] / (128 ** 0.5))
     
     if v not in [torch.float32]:
         v = v.to(torch.float32)
