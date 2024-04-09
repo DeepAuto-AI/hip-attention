@@ -119,7 +119,7 @@ def _attention_scores_compute(
     query = ((query.to(tl.float32) * cos_q) + (query_rot.to(tl.float32) * sin_q)).to(query.dtype)
     
     # calc dot product. NOTE: you need to scale query before pass into kernel
-    score = tl.sum(query * key)
+    score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
     score = tl.where(idx_tsrc <= tdst, score, -32000.0)
     
     # output
@@ -265,6 +265,8 @@ def sink_attention(
     num_sink: int = 4,
     window_size: int = 512,
 ):
+    _dtype = v.dtype
+    
     # COO format
     probs = attention_scores(
         q, k, cos, sin,
@@ -272,7 +274,10 @@ def sink_attention(
         window_size=window_size,
     )
     
+    if v not in [torch.float32]:
+        v = v.to(torch.float32)
     context = torch.bmm(probs, v)
+    context = context.to(_dtype)
     
     return context
 
