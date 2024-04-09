@@ -112,10 +112,9 @@ def _attention_scores_compute(
         window_offset = idx_k - NUM_SINK
         t_tsrc = tdst - WINDOW_SIZE + 1 + window_offset
         idx_tsrc = tl.maximum(idx_k, t_tsrc)
-    mask_tsrc = idx_tsrc <= tdst
     
     # load key
-    key, key_origin, key_rot, cos_k, sin_k = load_rotary_embedded_vector(
+    key, _, _, _, _ = load_rotary_embedded_vector(
         K, stride_k_n, stride_k_tsrc, stride_k_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
@@ -124,7 +123,7 @@ def _attention_scores_compute(
     )
     
     # load query
-    query, query_origin, query_rot, cos_q, sin_q = load_rotary_embedded_vector(
+    query, _, _, _, _ = load_rotary_embedded_vector(
         Q, stride_q_n, stride_q_tdst, stride_q_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
@@ -384,7 +383,10 @@ class AttentionScoreFunc(Function):
             num_sink,
             window_size,
             
-            BLOCK_HID
+            BLOCK_HID,
+            
+            num_warps=1,
+            num_stages=1,
         )
         
         return (
@@ -492,13 +494,14 @@ if __name__ == '__main__':
     NSINK = 2
     WIND = 4
     
-    q = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * 0.02)
-    k = torch.nn.Parameter(q.data.clone())
-    v = torch.nn.Parameter(q.data.clone())
+    std = 0.5
+    q = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
+    k = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
+    v = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * std)
     cos = torch.randn((T, HID), device=q.device)
     sin = cos.clone()
     
-    for istep in range(100):
+    for istep in range(10000):
         x = sink_attention(
             q, k, v, cos, sin, 
             num_sink=NSINK,
@@ -506,7 +509,7 @@ if __name__ == '__main__':
         )
         
         # look up diagonal
-        loss = (x - v[:, :, :]).abs().mean() * 1000
+        loss = (x - v[:, :, :]).square().mean() * 1000
         loss.backward()
         
         lr = 1e-3
@@ -517,8 +520,8 @@ if __name__ == '__main__':
         q.grad = None
         k.data += -k.grad * lr
         k.grad = None
-        v.data += -v.grad * lr
+        v.data += -v.grad * lr * 0.1
         v.grad = None
         
-        if (istep % 10) == 0:
+        if (istep % 500) == 0:
             print('loss', loss.item())
