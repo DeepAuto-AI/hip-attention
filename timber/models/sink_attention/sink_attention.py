@@ -103,16 +103,16 @@ def _attention_scores_compute(
     
     cos_q = tl.load(
         COS +\
-            tdst * stride_cos_t +\
-            # tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_cos_t +\
+            # tdst * stride_cos_t +\
+            tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_cos_t +\
             idx_hid * stride_cos_hid,
         mask=mask_hid,
         other=0,
     )
     sin_q = tl.load(
         SIN +\
-            tdst * stride_sin_t +\
-            # tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_sin_t +\
+            # tdst * stride_sin_t +\
+            tl.minimum(tdst, WINDOW_SIZE + NUM_SINK) * stride_sin_t +\
             idx_hid * stride_sin_hid,
         mask=mask_hid,
         other=0,
