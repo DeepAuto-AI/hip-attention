@@ -314,8 +314,8 @@ def sink_attention(
         window_size=window_size,
     )
     
-    if v not in [torch.float32]:
-        v = v.to(torch.float32)
+    if v.dtype == torch.bfloat16:
+        v = v.to(torch.float16)
     context = torch.bmm(probs, v)
     context = context.to(_dtype)
     
