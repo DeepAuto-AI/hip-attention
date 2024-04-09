@@ -335,7 +335,7 @@ class AttentionScoreFunc(Function):
             )
         except RuntimeError as ex:
             print(
-                num_sink, window_size, _device,
+                N, TDST, TSRC, HID, BLOCK_HID, num_sink, window_size, _device,
                 q.shape, q.dtype, q.is_contiguous(), q.device,
                 k.shape, k.dtype, k.is_contiguous(), k.device,
                 cos.shape, cos.dtype, cos.is_contiguous(), cos.device,
@@ -381,6 +381,9 @@ class AttentionScoreFunc(Function):
         BLOCK_HID = triton.next_power_of_2(HID)
         
         grid = (NNZ,)
+        
+        _device = torch.cuda.current_device()
+        torch.cuda.set_device(q.device)
         _attention_score_backward_compute[grid](
             grad_values, *grad_values.stride(),
             q, *q.stride(),
@@ -400,6 +403,7 @@ class AttentionScoreFunc(Function):
             num_warps=1,
             num_stages=1,
         )
+        torch.cuda.set_device(_device)
         
         return (
             grad_q, #q: Tensor
