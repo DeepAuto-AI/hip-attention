@@ -244,6 +244,28 @@ def custom_attention(
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
 
+    elif attention_method == 'streaming_llm':
+        from timber.models.sink_attention.sink_attention import sink_attention
+        
+        q = query_states / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+
+        N, H, TDST, HID = q.shape
+        _, _, TSRC, _ = k.shape
+        assert k.shape == v.shape
+
+        q = q.reshape(N * H, TDST, HID)  # .contiguous()
+        k = k.reshape(N * H, TSRC, HID)  # .contiguous()
+        v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+
+        
+        attn_output = sink_attention(
+            q, k, v, rope_cos, rope_sin, num_sink=4, window_size=tree_k,
+        )
+
+        attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
     else:
         raise Exception(attention_method)
 

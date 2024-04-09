@@ -803,7 +803,7 @@ class LlamaCustomAttention(LlamaAttention):
         past_key_value = getattr(self, "past_key_value", past_key_value)
         cos, sin = self.rotary_emb(value_states, position_ids)
 
-        if self.tree_rope_method == 'none':
+        if (self.tree_rope_method == 'none') and (self.attention_method not in ['streaming_llm']):
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
