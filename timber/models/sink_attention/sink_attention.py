@@ -119,7 +119,7 @@ def _attention_scores_compute(
     query = ((query.to(tl.float32) * cos_q) + (query_rot.to(tl.float32) * sin_q)).to(query.dtype)
     
     # calc dot product. NOTE: you need to scale query before pass into kernel
-    score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
+    score = tl.sum(query.to(tl.float32) * key.to(tl.float32)) / tl.sqrt(HID)
     score = tl.where(idx_tsrc <= tdst, score, -32000.0)
     
     # output

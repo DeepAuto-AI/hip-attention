@@ -247,7 +247,7 @@ def custom_attention(
     elif attention_method == 'streaming_llm':
         from timber.models.sink_attention.sink_attention import sink_attention
         
-        q = query_states / (query_states.shape[-1] ** 0.5)
+        q = query_states # / (query_states.shape[-1] ** 0.5)
         k = key_states
         v = value_states
 
