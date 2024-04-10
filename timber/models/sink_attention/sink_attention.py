@@ -498,7 +498,11 @@ def sink_attention(
     
     if v.dtype in [torch.bfloat16, torch.float16]:
         v = v.to(torch.float32)
-    context = torch.bmm(probs, v)
+    try:
+        context = torch.bmm(probs, v)
+    except torch.cuda.OutOfMemoryError as ex:
+        print(probs.shape, v.shape)
+        raise Exception() from ex
     context = context.to(_dtype)
     
     return context
