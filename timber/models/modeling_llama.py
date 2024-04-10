@@ -721,19 +721,19 @@ class LlamaCustomAttention(LlamaAttention):
 
         self.attention_method = 'none'
         self.tree_k = 512
-        self.tree_block_size_q = 8
-        self.tree_block_size_k = 1
-        self.tree_using_context_avg = True
-        self.tree_dense_queries = 2048
+        self.tree_block_size_q = 32
+        self.tree_block_size_k = 2
+        self.tree_using_context_avg = False
+        self.tree_dense_queries = 0
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
         self.tree_high_k_layers = {
             # 0:4, 1:4, 2:4,
         }
         self.tree_rope_method = 'none'
-        self.tree_enable_sparq = False
-        self.tree_enable_flash = False
-        self.tree_use_sliding_window = False
+        self.tree_enable_sparq = True
+        self.tree_enable_flash = True
+        self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
