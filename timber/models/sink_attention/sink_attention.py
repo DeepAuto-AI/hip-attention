@@ -444,7 +444,6 @@ def attention_scores(
         requires_grad=q.requires_grad,
         dtype=values.dtype,
         device=values.device,
-        check_invariants=True,
     )
     
     return probs
