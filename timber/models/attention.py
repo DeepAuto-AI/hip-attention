@@ -129,7 +129,7 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
-    elif attention_method == 'timber':
+    elif attention_method == 'timber' or attention_method == 'hip' or attention_method == 'tree':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
         v = value_states
