@@ -1045,11 +1045,13 @@ def hip_attention_mask(
     
     # # NOTE: are you sure this function is the only thing can differentiate?
     with timer("score" if not IS_FLASH else "flash_atten"):
+        if not USING_SLIDING_WINDOW:
+            warnings.warn('you are not using sliding window, WARN: this may degrade performance')
         if not IS_FLASH:
             assert ROPE_METHOD in ['none']
             assert not USING_SLIDING_WINDOW
             assert not SPARQ
-            warnings.warn('you are not using flash attention')
+            warnings.warn('you are not using flash attention, WARN: this may degrade performance & latency')
         else:
             assert ROPE_METHOD in ['self_extend', 'none']
     
