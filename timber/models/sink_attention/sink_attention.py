@@ -561,8 +561,8 @@ def sparse_attention(
     
     window_size = min(window_size, TSRC - num_sink)
     
-    values = probs.coalesce().values()
-    indices = probs.coalesce().indices()
+    values = probs._values()
+    indices = probs._indices()
     
     context = torch.zeros((N, TDST, HID), dtype=v.dtype, device=v.device)
     
