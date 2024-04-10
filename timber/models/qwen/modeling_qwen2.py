@@ -829,8 +829,17 @@ class Qwen2CustomAttention(Qwen2Attention):
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
+        
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        if (self.tree_rope_method == 'none'):
+            if self.layer_idx in self.tree_dense_layers:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            else:
+                if self.attention_method == 'streaming_llm':
+                    pass
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)

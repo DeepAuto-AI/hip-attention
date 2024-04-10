@@ -22,7 +22,7 @@ def load_rotary_embedded_vector(
     HID,
     BLOCK_HID,
 ):
-    idx_hid = tl.arange(0, BLOCK_HID)
+    idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64)
     mask_hid = idx_hid < HID
     
     idx_hid_rot = (idx_hid + HID // 2) % HID
@@ -30,18 +30,18 @@ def load_rotary_embedded_vector(
     
     vec = tl.load(
         QK +\
-            idx_n * stride_qk_n +\
-            idx_t_qk * stride_qk_t +\
-            idx_hid * stride_qk_hid,
+            idx_n.to(tl.int64) * stride_qk_n +\
+            idx_t_qk.to(tl.int64) * stride_qk_t +\
+            idx_hid.to(tl.int64) * stride_qk_hid,
         mask = mask_hid,
         other = 0,
     )
     
     vec_rot = tl.load(
         QK +\
-            idx_n * stride_qk_n +\
-            idx_t_qk * stride_qk_t +\
-            idx_hid_rot * stride_qk_hid,
+            idx_n.to(tl.int64) * stride_qk_n +\
+            idx_t_qk.to(tl.int64) * stride_qk_t +\
+            idx_hid_rot.to(tl.int64) * stride_qk_hid,
         mask = mask_hid_rot,
         other = 0,
     )
@@ -49,15 +49,15 @@ def load_rotary_embedded_vector(
     
     cos = tl.load(
         COS +\
-            idx_t_rope * stride_cos_t +\
-            idx_hid * stride_cos_hid,
+            idx_t_rope.to(tl.int64) * stride_cos_t +\
+            idx_hid.to(tl.int64) * stride_cos_hid,
         mask=mask_hid,
         other=0,
     )
     sin = tl.load(
         SIN +\
-            idx_t_rope * stride_sin_t +\
-            idx_hid * stride_sin_hid,
+            idx_t_rope.to(tl.int64) * stride_sin_t +\
+            idx_hid.to(tl.int64) * stride_sin_hid,
         mask=mask_hid,
         other=0,
     )
@@ -100,9 +100,9 @@ def _attention_scores_compute(
     # kernel constants
     BLOCK_HID: tl.constexpr,
 ):
-    idx_n = tl.program_id(0)
-    idx_tdst = tl.program_id(1)
-    idx_k = tl.program_id(2)
+    idx_n = tl.program_id(0).to(tl.int64)
+    idx_tdst = tl.program_id(1).to(tl.int64)
+    idx_k = tl.program_id(2).to(tl.int64)
     
     tdst = idx_tdst + TSRC - TDST
     
@@ -112,23 +112,22 @@ def _attention_scores_compute(
         window_offset = idx_k - NUM_SINK
         t_tsrc = tdst - WINDOW_SIZE + 1 + window_offset
         idx_tsrc = tl.maximum(idx_k, t_tsrc)
-    mask_tsrc = idx_tsrc <= tdst
     
     # load key
-    key, key_origin, key_rot, cos_k, sin_k = load_rotary_embedded_vector(
+    key, _, _, _, _ = load_rotary_embedded_vector(
         K, stride_k_n, stride_k_tsrc, stride_k_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
         idx_n, idx_tsrc, idx_k,
-        HID, BLOCK_HID
+        HID, BLOCK_HID,
     )
     
     # load query
-    query, query_origin, query_rot, cos_q, sin_q = load_rotary_embedded_vector(
+    query, _, _, _, _ = load_rotary_embedded_vector(
         Q, stride_q_n, stride_q_tdst, stride_q_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
-        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK),
+        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK - 1),
         HID, BLOCK_HID,
     )
     
@@ -141,25 +140,25 @@ def _attention_scores_compute(
     idx_z = idx_n * TDST * (WINDOW_SIZE + NUM_SINK) + idx_tdst * (WINDOW_SIZE + NUM_SINK) + idx_k
     tl.store(
         VALUES +\
-            idx_z * stride_values_z,
+            idx_z.to(tl.int64) * stride_values_z,
         value = score
     )
     tl.store(
         INDICES +\
             0 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_n
     )
     tl.store(
         INDICES +\
             1 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_tdst
     )
     tl.store(
         INDICES +\
             2 * stride_indices_d +\
-            idx_z * stride_indices_z,
+            idx_z.to(tl.int64) * stride_indices_z,
         value = idx_tsrc
     )
 
@@ -220,7 +219,7 @@ def _attention_score_backward_compute(
         Q, stride_q_n, stride_q_tdst, stride_q_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
-        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK),
+        idx_n, idx_tdst, tl.minimum(tdst, WINDOW_SIZE + NUM_SINK - 1),
         HID, BLOCK_HID,
     )
     
@@ -237,11 +236,11 @@ def _attention_score_backward_compute(
     grad_query = grad_score * key
     
     grad_key_origin, idx_key_origin_hid, grad_key_rot, idx_key_rot_hid = grad_rotary_embedded_vector(
-        grad_query, query_origin, query_rot, cos_q, sin_q,
+        grad_key, key_origin, key_rot, cos_k, sin_k,
         HID, BLOCK_HID
     )
     grad_query_origin, idx_query_origin_hid, grad_query_rot, idx_query_rot_hid = grad_rotary_embedded_vector(
-        grad_key, key_origin, key_rot, cos_k, sin_k,
+        grad_query, query_origin, query_rot, cos_q, sin_q,
         HID, BLOCK_HID
     )
     
@@ -250,7 +249,7 @@ def _attention_score_backward_compute(
     tl.atomic_add(
         GRAD_K +\
             idx_n * stride_grad_k_n +\
-            idx_tdst * stride_grad_k_tsrc +\
+            idx_tsrc * stride_grad_k_tsrc +\
             idx_key_origin_hid * stride_grad_k_hid,
         mask = mask_hid,
         val = grad_key_origin
@@ -258,7 +257,7 @@ def _attention_score_backward_compute(
     tl.atomic_add(
         GRAD_K +\
             idx_n * stride_grad_k_n +\
-            idx_tdst * stride_grad_k_tsrc +\
+            idx_tsrc * stride_grad_k_tsrc +\
             idx_key_rot_hid * stride_grad_k_hid,
         mask = mask_hid,
         val = grad_key_rot
@@ -306,7 +305,7 @@ class AttentionScoreFunc(Function):
         dtype = torch.float32 #q.dtype
         
         nnz = N * TDST * (num_sink + window_size)
-        indices = torch.zeros((3, nnz), dtype=torch.int32, device=device)
+        indices = torch.zeros((3, nnz), dtype=torch.int64, device=device)
         values = torch.zeros((nnz,), dtype=dtype, device=device)
         
         BLOCK_HID = triton.next_power_of_2(HID)
@@ -315,24 +314,36 @@ class AttentionScoreFunc(Function):
         
         _device = torch.cuda.current_device()
         torch.cuda.set_device(q.device)
-        _attention_scores_compute[grid](
-            q, *q.stride(),
-            k, *k.stride(),
-            cos, *cos.stride(),
-            sin, *sin.stride(),
-            
-            indices, *indices.stride(),
-            values, *values.stride(),
-            
-            N, TDST, TSRC, HID,
-            num_sink,
-            window_size,
-            
-            BLOCK_HID,
-            
-            num_warps=1,
-            num_stages=1,
-        )
+        try:
+            _attention_scores_compute[grid](
+                q, *q.stride(),
+                k, *k.stride(),
+                cos, *cos.stride(),
+                sin, *sin.stride(),
+                
+                indices, *indices.stride(),
+                values, *values.stride(),
+                
+                N, TDST, TSRC, HID,
+                num_sink,
+                window_size,
+                
+                BLOCK_HID,
+                
+                num_warps=1,
+                num_stages=1,
+            )
+        except RuntimeError as ex:
+            print(
+                N, TDST, TSRC, HID, BLOCK_HID, num_sink, window_size, _device,
+                q.shape, q.dtype, q.is_contiguous(), q.device,
+                k.shape, k.dtype, k.is_contiguous(), k.device,
+                cos.shape, cos.dtype, cos.is_contiguous(), cos.device,
+                sin.shape, sin.dtype, sin.is_contiguous(), sin.device,
+                indices.shape, indices.dtype, indices.is_contiguous(), indices.device,
+                values.shape, values.dtype, values.is_contiguous(), values.device,
+            )
+            raise Exception() from ex
         torch.cuda.set_device(_device)
         
         ctx.save_for_backward(
@@ -370,6 +381,9 @@ class AttentionScoreFunc(Function):
         BLOCK_HID = triton.next_power_of_2(HID)
         
         grid = (NNZ,)
+        
+        _device = torch.cuda.current_device()
+        torch.cuda.set_device(q.device)
         _attention_score_backward_compute[grid](
             grad_values, *grad_values.stride(),
             q, *q.stride(),
@@ -384,8 +398,12 @@ class AttentionScoreFunc(Function):
             num_sink,
             window_size,
             
-            BLOCK_HID
+            BLOCK_HID,
+            
+            num_warps=1,
+            num_stages=1,
         )
+        torch.cuda.set_device(_device)
         
         return (
             grad_q, #q: Tensor
@@ -478,7 +496,7 @@ def sink_attention(
         window_size=window_size,
     )
     
-    if v.dtype == torch.bfloat16:
+    if v.dtype in [torch.bfloat16, torch.float16]:
         v = v.to(torch.float32)
     context = torch.bmm(probs, v)
     context = context.to(_dtype)
@@ -486,19 +504,22 @@ def sink_attention(
     return context
 
 if __name__ == '__main__':
-    N = 1
-    T = 8
+    N = 32
+    T = 128
     HID = 128
-    NSINK = 2
-    WIND = 4
+    NSINK = 4
+    WIND = 512
+    QSIZE = 1
     
-    q = torch.nn.Parameter(torch.randn((N, T, HID), device=0) * 0.02)
-    k = torch.nn.Parameter(q.data.clone())
-    v = torch.nn.Parameter(q.data.clone())
-    cos = torch.randn((T, HID), device=q.device)
+    dtype = torch.float16
+    std = 0.5
+    q = torch.nn.Parameter((torch.randn((N, T, HID), device=0, dtype=dtype) * std)[:, :QSIZE, :].contiguous())
+    k = torch.nn.Parameter(torch.randn((N, T, HID), device=0, dtype=dtype) * std)
+    v = torch.nn.Parameter(torch.randn((N, T, HID), device=0, dtype=dtype) * std)
+    cos = torch.randn((T, HID), device=q.device, dtype=dtype)
     sin = cos.clone()
     
-    for istep in range(100):
+    for istep in range(10000):
         x = sink_attention(
             q, k, v, cos, sin, 
             num_sink=NSINK,
@@ -506,7 +527,7 @@ if __name__ == '__main__':
         )
         
         # look up diagonal
-        loss = (x - v[:, :, :]).abs().mean() * 1000
+        loss = (x - v[:, :q.shape[1], :]).square().mean() * 1000
         loss.backward()
         
         lr = 1e-3
@@ -517,8 +538,8 @@ if __name__ == '__main__':
         q.grad = None
         k.data += -k.grad * lr
         k.grad = None
-        v.data += -v.grad * lr
+        v.data += -v.grad * lr * 0.1
         v.grad = None
         
-        if (istep % 10) == 0:
+        if (istep % 500) == 0:
             print('loss', loss.item())

@@ -808,7 +808,7 @@ class LlamaCustomAttention(LlamaAttention):
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
             else:
                 if self.attention_method == 'streaming_llm':
-                    pass
+                    cos = sin = None
                 else:
                     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -816,6 +816,11 @@ class LlamaCustomAttention(LlamaAttention):
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if cos is None:
+                cos, sin = self.rotary_emb(
+                    value_states,
+                    torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

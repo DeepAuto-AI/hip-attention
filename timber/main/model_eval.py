@@ -118,9 +118,13 @@ def load_model(args):
         config = LlamaConfig.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
     
-    infer_dtype = torch.bfloat16
-    # infer_dtype = torch.float16
-    # infer_dtype = torch.float32
+    if torch.cuda.is_bf16_supported():
+        infer_dtype = torch.bfloat16
+    else:
+        infer_dtype = torch.float16
+    
+    if os.getenv('FORCE_FP32', '0') == '1':
+        infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
@@ -129,7 +133,7 @@ def load_model(args):
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map="auto",
+        device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],
