@@ -192,7 +192,16 @@ def generate_samples(args, model, tokenizer, device, out_dir):
             else:
                 f.write(tokenizer.decode(completion, skip_special_tokens=True))
 
-def evaluate_rouge(args, model, tokenizer, device, out_dir):
+MAX_NEW_TOKENS = 256
+
+def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
+    for node in out_dir.glob('*'):
+        if node.is_file():
+            content = node.read_text()
+            ids = tokenizer(content, truncation=True, max_length=256).input_ids
+            content = tokenizer.decode(ids, skip_special_tokens=True)
+            node.write_text(content)
+    
     rouge_dir = install_rogue()
 
     from pyrouge import Rouge155
