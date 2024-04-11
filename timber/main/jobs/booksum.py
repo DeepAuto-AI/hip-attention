@@ -34,7 +34,7 @@ class StopAfterStringIsGenerated(LogitsProcessor):
             scores[ends_with_answer] = forced_eos
         return scores
 
-PROMPT_FIRST_ONLY = os.getenv('PROMPT_FIRST_ONLY', '0') == '1'
+PROMPT_FIRST_ONLY = os.getenv('PROMPT_FIRST_ONLY', '1') == '1'
 
 def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'

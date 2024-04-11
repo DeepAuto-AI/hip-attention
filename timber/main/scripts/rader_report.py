@@ -10,7 +10,7 @@ DATA_LONGBENCH = {
         [19.1, 22.0, 27.3, 29.7, 26.3, 25.6, 25.0],
     ],
     'theta_offset': 1.0,
-    'ymin': 80.0,
+    'ymin': 50.0,
 }
 
 DATA_LMEVAL = {
