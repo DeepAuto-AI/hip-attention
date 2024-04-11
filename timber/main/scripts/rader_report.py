@@ -10,20 +10,24 @@ DATA_LONGBENCH = {
         [19.1, 22.0, 27.3, 29.7, 26.3, 25.6, 25.0],
     ],
     'theta_offset': 1.0,
+    'ymin': 80.0,
 }
 
 DATA_LMEVAL = {
-    'row_headers': ['LLaMA2 7B', 'StreamingLLM k128', 'StreamingLLM k256', 'StreamingLLM k512', 'HiP k128 PP', 'HiP k256 PP', 'HiP k512 PP'],
-    'col_headers': ['ARC', 'Hellaswag', 'MMLU', 'TruthfulQA', 'Winogrande', 'GSM8k'],
+    # 'row_headers': ['LLaMA2 7B', 'StreamingLLM k128', 'StreamingLLM k256', 'StreamingLLM k512', 'HiP k128 PP', 'HiP k256 PP', 'HiP k512 PP'],
+    'row_headers': ['LLaMA2 7B', 'StreamingLLM k256', 'StreamingLLM k512', 'HiP k256 PP', 'HiP k512 PP'],
+    'col_headers': ['ARC', 'Hellaswag', 'MMLU', 'TruthfulQA', 'Winogrande', 'GSM8k', 'Average'],
     'data': [
         [43.60, 75.37, 42.80, 32.41, 71.43, 5.38, 45.17],
-        [],
+        # [],
         [43.69, 74.70, 41.11, 32.41, 71.43, 2.65, 44.33],
-        [],
-        [],
+        [43.60, 75.12, 41.76, 32.41, 71.43, 4.47, 44.80],
+        # [],
         [43.60, 75.13, 42.21, 32.41, 71.35, 4.85, 44.93],
         [43.60, 75.37, 42.56, 32.41, 71.35, 5.69, 45.16],
-    ]
+    ],
+    'theta_offset': 1.0,
+    'ymin': 80.0,
 }
 
 DATA_LMMSEVAL = {
@@ -67,11 +71,12 @@ def render_rader(chart, name, title, root='saves/raders/'):
         else:
             ax.plot(label_loc, grade, label=label, linewidth=2.0)
     ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.3), ncols=2)
-    ax.set_ylim([50, np.max(data) * 1.0])
+    ax.set_ylim([chart['ymin'], np.max(data) * 1.0])
     
     plt.savefig(os.path.join(root, name + '.png'), dpi=200, bbox_inches="tight", pad_inches=0)
     plt.savefig(os.path.join(root, name + '.pdf'), dpi=200, bbox_inches="tight", pad_inches=0)
     print('saved', os.path.join(root, name + '.png'))
 
 if __name__ == '__main__':
-    render_rader(DATA_LONGBENCH, 'plot_rader_longbench', 'LM-Eval')
+    render_rader(DATA_LONGBENCH, 'plot_rader_longbench', 'LongBench')
+    render_rader(DATA_LMEVAL, 'plot_rader_lmeval', 'LM-Eval')

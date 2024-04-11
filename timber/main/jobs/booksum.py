@@ -34,6 +34,8 @@ class StopAfterStringIsGenerated(LogitsProcessor):
             scores[ends_with_answer] = forced_eos
         return scores
 
+PROMPT_FIRST_ONLY = os.getenv('PROMPT_FIRST_ONLY', '0') == '1'
+
 def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
     LAST_DENSE = os.environ.get('LAST_DENSE', '0') == '1'
@@ -50,7 +52,10 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model.config, 'max_position_embeddings')
 
     if not args.disable_prompt:
-        prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
+        if PROMPT_FIRST_ONLY:
+            prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+        else:
+            prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following." 
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
     if prompt.endswith('</s>'):
@@ -171,8 +176,10 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                     f'<|im_start|>assistant\n'
             elif ('llama32k' in args.model.lower() or 'llama13b_32k' in args.model.lower()) and 'instruct' not in args.model.lower():
                 # llama2
-                prompt = \
-                    f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
+                if PROMPT_FIRST_ONLY:
+                    prompt = f"Summarize the following text in about 300 words:\n\n{inputs}"
+                else:
+                    prompt = f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
             else:
                 raise Exception(args.model)
             vllm_outputs = model.generate(
