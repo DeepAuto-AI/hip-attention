@@ -163,12 +163,16 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                 skip_special_tokens=True,
             )
             
-            # Qwen
             if 'qwen' in args.model.lower():
+                # Qwen 1.5
                 prompt = \
                     f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
                     f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
                     f'<|im_start|>assistant\n'
+            elif 'llama32k' in args.model.lower() and 'instruct' not in args.model.lower():
+                # llama2
+                prompt = \
+                    f'Summarize the following text in about 300 words:\n\n{inputs}\n\nSummary: '
             else:
                 raise Exception(args.model)
             vllm_outputs = model.generate(
