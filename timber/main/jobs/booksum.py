@@ -169,7 +169,7 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                     f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
                     f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
                     f'<|im_start|>assistant\n'
-            elif 'llama32k' in args.model.lower() and 'instruct' not in args.model.lower():
+            elif ('llama32k' in args.model.lower() or 'llama13b_32k' in args.model.lower()) and 'instruct' not in args.model.lower():
                 # llama2
                 prompt = \
                     f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
