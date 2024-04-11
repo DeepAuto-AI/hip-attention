@@ -50,7 +50,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model.config, 'max_position_embeddings')
 
     if not args.disable_prompt:
-        prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}\n\nSummary: "
+        prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
     if prompt.endswith('</s>'):
@@ -155,7 +155,7 @@ def generate_samples(args, model, tokenizer, device, out_dir):
             sampling_params = SamplingParams(
                 temperature=0.7,
                 top_p=0.9,
-                top_k=1000,
+                top_k=50,
                 max_tokens=args.max_tokens,
                 frequency_penalty=0.0,
                 repetition_penalty=1.0,
@@ -172,7 +172,7 @@ def generate_samples(args, model, tokenizer, device, out_dir):
             elif 'llama32k' in args.model.lower() and 'instruct' not in args.model.lower():
                 # llama2
                 prompt = \
-                    f'Summarize the following text in about 300 words:\n\n{inputs}\n\nSummary: '
+                    f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
             else:
                 raise Exception(args.model)
             vllm_outputs = model.generate(
