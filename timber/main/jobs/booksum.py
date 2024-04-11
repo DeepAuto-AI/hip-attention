@@ -243,3 +243,4 @@ def job_booksum(args, model, tokenizer, device):
     
     generate_samples(args, model, tokenizer, device, out_dir)
     evaluate_rouge(args, model, tokenizer, device, out_dir)
+    print(args)
