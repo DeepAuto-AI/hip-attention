@@ -49,7 +49,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model, 'config')
     assert hasattr(model.config, 'max_position_embeddings')
 
-    if args.give_prompt:
+    if not args.disable_prompt:
         prompt = "Summarize the following text in about 300 words:\n\n" + tokenizer.decode(inputs, skip_special_tokens=True)
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
@@ -76,7 +76,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
                 m.tree_last_dense_queries = -1
 
     additional_args = {}
-    if args.do_sample:
+    if not args.no_sample:
         additional_args = dict(
             do_sample=True,
             temperature=0.7,
@@ -229,7 +229,7 @@ def job_booksum(args, model, tokenizer, device):
 
     out_dir = pathlib.Path(
         f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
-        f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_s{args.do_sample}"
+        f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_ns{args.no_sample}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
