@@ -50,7 +50,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model.config, 'max_position_embeddings')
 
     if not args.disable_prompt:
-        prompt = "Summarize the following text in about 300 words:\n\n" + tokenizer.decode(inputs, skip_special_tokens=True)
+        prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}\n\nSummary: "
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
     if prompt.endswith('</s>'):
