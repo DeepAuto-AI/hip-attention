@@ -40,7 +40,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
 
     inputs, completion = item
 
-    if (out_dir / f"out_{idx}.txt").exists():
+    if (out_dir / f"out_{idx}.txt").exists() and not args.overwrite:
         with open(out_dir / f"out_{idx}.txt", 'r') as f:
             return f.read()
 
