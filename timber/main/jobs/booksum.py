@@ -52,10 +52,13 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model.config, 'max_position_embeddings')
 
     if not args.disable_prompt:
-        if PROMPT_FIRST_ONLY:
-            prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+        if 'llama13b_32k' in args.model.lower():
+            prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
         else:
-            prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following." 
+            if PROMPT_FIRST_ONLY:
+                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+            else:
+                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
     if prompt.endswith('</s>'):
@@ -174,12 +177,15 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                     f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
                     f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
                     f'<|im_start|>assistant\n'
-            elif ('llama32k' in args.model.lower() or 'llama13b_32k' in args.model.lower()) and 'instruct' not in args.model.lower():
+            elif ('llama32k' in args.model.lower()) and 'instruct' not in args.model.lower():
                 # llama2
                 if PROMPT_FIRST_ONLY:
                     prompt = f"Summarize the following text in about 300 words:\n\n{inputs}"
                 else:
                     prompt = f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
+            elif 'llama13b_32k' in args.model.lower():
+                # llama2
+                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
             else:
                 raise Exception(args.model)
             vllm_outputs = model.generate(
