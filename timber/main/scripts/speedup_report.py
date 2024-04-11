@@ -98,8 +98,8 @@ def plot():
     # plt.yscale('log', base=2)
     # plt.xscale('log', base=2)
     
-    plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight')
-    plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print('saved', './saves/speedup_report/plot_speedup_report.png')
 
 def by_value(a, b):
@@ -112,6 +112,8 @@ def by_value(a, b):
         return pypareto.Domination.LESS
     else:
         return pypareto.Domination.EQUAL
+
+LINEWIDTH = 1.5
 
 def plot_ppl(query_size=1):
     path = './saves/speedup_report/result.json'
@@ -167,7 +169,7 @@ def plot_ppl(query_size=1):
     plt.ylabel('PPL. (w/o train) ↓')
     plt.xlabel('Decoding Speedup ↑')
     sns.scatterplot(x=xs, y=ys)
-    sns.lineplot(x=xs_front, y=ys_front)
+    sns.lineplot(x=xs_front, y=ys_front, linewidth=LINEWIDTH)
     last_x = 0
     for idx in range(len(idxs_front)):
         if abs(xs_front[idx] - last_x) > 0.8:
@@ -184,13 +186,13 @@ def plot_ppl(query_size=1):
     
     # baseline_ppl = 5.59
     baseline_ppl = 4.682
-    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=1)
-    plt.axvline(1.0, color='#555', linestyle='--', linewidth=1)
+    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=LINEWIDTH, zorder=1000)
+    plt.axvline(1.0, color='#555', linestyle='--', linewidth=LINEWIDTH, zorder=1000)
     # plt.yscale('log', base=2)
     # plt.xscale('log', base=2)
     
-    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight')
-    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print('saved', f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png')
 
 def main():

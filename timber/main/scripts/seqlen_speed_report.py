@@ -112,6 +112,8 @@ def samples(query_size = 1, step_size = 1):
         json.dump(results, f, indent=2)
     print('dumped', path)
 
+LINEWIDTH = 1.5
+
 def plot(query_size=1, step_size=1):
     path = f'./saves/seqlen_speed_report/result_q{query_size}.json'
     with open(path, 'r') as f:
@@ -147,10 +149,10 @@ def plot(query_size=1, step_size=1):
     
     plt.figure(figsize=figsize)
     
-    sns.lineplot(x=xs, y=ys_base, label='Torch')
-    sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2')
+    sns.lineplot(x=xs, y=ys_base, label='Torch', linewidth=LINEWIDTH)
+    sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2', linewidth=LINEWIDTH)
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP ($b_k$={block_size_k})')
+        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP ($b_k$={block_size_k})', linewidth=LINEWIDTH)
     plt.legend()
     if query_size == 1:
         plt.title('Decoding Latency ($k$=1024, $b_q$=32)')
@@ -161,8 +163,8 @@ def plot(query_size=1, step_size=1):
     plt.xlim(0, 17*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_latency_q{query_size}'
-    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
-    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print(f'saved {fig_path}.png')
     
     plt.figure(figsize=figsize)
@@ -171,18 +173,18 @@ def plot(query_size=1, step_size=1):
         plt.title('Decoding Speedup ($k$=1024, $b_q$=32)')
     else:
         plt.title('Prompt Speedup ($k$=1024, $b_q$=32)')
-    sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch')
-    sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2')
+    sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch', linewidth=LINEWIDTH)
+    sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2', linewidth=LINEWIDTH)
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP ($b_k$={block_size_k})')
+        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP ($b_k$={block_size_k})', linewidth=LINEWIDTH)
     plt.xlabel('Seq. Length (k) ↑')
     plt.ylabel('Speedup ↑')
     plt.xlim(0, 17*step_size)
     plt.legend()
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_speedup_q{query_size}'
-    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
-    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print(f'saved {fig_path}.png')
 
 def main():
