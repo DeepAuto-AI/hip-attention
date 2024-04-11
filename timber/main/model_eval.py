@@ -1,5 +1,6 @@
 import os
 import pathlib
+import warnings
 
 import torch
 import transformers
@@ -25,6 +26,9 @@ from timber.utils import seed
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
+    
+    if int(os.getenv('HIP_K', '512')) != args.k:
+        warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
     
     device = 'cuda:0'
     MODELS = {
