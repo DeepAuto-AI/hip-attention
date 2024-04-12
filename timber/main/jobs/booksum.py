@@ -53,7 +53,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
 
     if not args.disable_prompt:
         if 'llama13b_32k' in args.model.lower():
-            prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
+            prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {tokenizer.decode(inputs, skip_special_tokens=True)} [/INST]"
         else:
             if PROMPT_FIRST_ONLY:
                 prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
