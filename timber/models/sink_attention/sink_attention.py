@@ -292,6 +292,9 @@ class AttentionScoreFunc(Function):
         num_sink: int,
         window_size: int,
     ):
+        q = q.contiguous()
+        k = k.contiguous()
+        
         assert q.ndim == 3
         assert k.ndim == 3
         assert cos.ndim == 2, cos.shape
