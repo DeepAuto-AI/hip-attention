@@ -26,7 +26,7 @@ def load_rotary_embedded_vector(
     idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64)
     mask_hid = idx_hid < HID
     
-    idx_hid_rot = (idx_hid + HID // 2) % HID
+    idx_hid_rot = ((idx_hid + HID // 2) % HID).to(tl.int64)
     mask_hid_rot = mask_hid
     
     vec = tl.load(
@@ -138,7 +138,7 @@ def _attention_scores_compute(
     score = tl.where(idx_tsrc <= tdst, score, float('-inf'))
     
     # output
-    idx_z = idx_n * TDST * (WINDOW_SIZE + NUM_SINK) + idx_tdst * (WINDOW_SIZE + NUM_SINK) + idx_k
+    idx_z = idx_n.to(tl.int64) * TDST.to(tl.int64) * (WINDOW_SIZE.to(tl.int64) + NUM_SINK.to(tl.int64)) + idx_tdst.to(tl.int64) * (WINDOW_SIZE.to(tl.int64) + NUM_SINK.to(tl.int64)) + idx_k.to(tl.int64)
     tl.store(
         VALUES +\
             idx_z.to(tl.int64) * stride_values_z,
