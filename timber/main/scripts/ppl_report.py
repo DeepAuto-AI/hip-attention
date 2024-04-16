@@ -14,14 +14,14 @@ ks = [256, 512, 1024]
 
 def samples():
     results = {}
-    cache_path = './cache/llama_eval/ppl.json'
     for block_size_q, block_size_k, k in tqdm.tqdm(
         list(itertools.product(block_size_qs, block_size_ks, ks)), 
         desc='exam', dynamic_ncols=True
     ):
         print(f'ppl measure bq{block_size_q}, bk{block_size_k}, k{k}')
+        cache_path = f'./cache/llama_eval/dev/ppl_timber_llama13b_s4096_dl4_k{k}_ckptFalse.json'
         subprocess.call([
-            'python', 'timber/main/llama_eval.py', 
+            'python', 'timber/main/model_eval.py', 
             '--model', 'llama13b',
             '--method', 'timber',
             '--stride', '4096',

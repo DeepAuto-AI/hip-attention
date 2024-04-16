@@ -10,7 +10,7 @@ dups = range(1, 17)
 
 def samples(query_size = 1, step_size = 1):
     block_size = 32
-    block_size_ks = [1, 2, 4]
+    block_size_ks = [2, 4]
     k = 1024
     batch_sizes = {
         1: 256,
@@ -188,10 +188,10 @@ def plot(query_size=1, step_size=1):
     print(f'saved {fig_path}.png')
 
 def main():
-    # samples(query_size=1, step_size=4)
+    samples(query_size=1, step_size=4)
     plot(query_size=1, step_size=4)
     
-    # samples(query_size=1024, step_size=4)
+    samples(query_size=1024, step_size=4)
     plot(query_size=1024, step_size=4)
 
 if __name__ == '__main__':

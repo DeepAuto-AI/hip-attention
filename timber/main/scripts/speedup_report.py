@@ -91,7 +91,7 @@ def plot():
             ys.append(speedup)
         sns.scatterplot(x=xs, y=ys, label=f'Query Length: {query_size}')
     
-    plt.title('Decode Speedup / Num. Blocks')
+    plt.title('Decode Speedup (4k) / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('Speedup')
     plt.axhline(1.0, color='#555', linestyle='--', linewidth=1)
@@ -163,9 +163,9 @@ def plot_ppl(query_size=1):
     plt.figure(figsize=(2.5, 2.0))
     
     if query_size == 1:
-        plt.title(f'PPL. / Decoding Speedup')
+        plt.title(f'PPL. / Decoding Speedup (4k)')
     else:
-        plt.title(f'PPL. / Decoding Speedup (#Q:{query_size})')
+        plt.title(f'PPL. / Decoding Speedup (4k, #Q:{query_size})')
     plt.ylabel('PPL. (w/o train) ↓')
     plt.xlabel('Decoding Speedup ↑')
     sns.scatterplot(x=xs, y=ys)

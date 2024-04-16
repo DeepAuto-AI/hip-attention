@@ -41,7 +41,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
-        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+        # 'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
         'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
