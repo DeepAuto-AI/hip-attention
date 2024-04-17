@@ -63,6 +63,16 @@ def load_pretrained_model(model_path, model_base, model_name, use_timber_attn=Tr
             # ywlee
             # Load our LlavaLlamaForCausalLM
             model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    m.attention_method = os.getenv('ATTENTION_METHOD', 'timber')
+                    m.tree_k = os.getenv('TREE_K', 512)
+                    m.tree_block_size_q = os.getenv('TREE_BLOCK_SIZE_Q', 32)
+                    m.tree_block_size_k = os.getenv('TREE_BLOCK_SIZE_K', 2)
+                    m.tree_dense_layers = []
+                    if m.attention_method == 'timber':
+                        m.tree_dense_layers = [0, 1, 2]
+
             token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
             if model.lm_head.weight.shape[0] != token_num:
                 model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
