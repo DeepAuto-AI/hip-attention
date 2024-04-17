@@ -102,7 +102,7 @@ def get_logit_prob(probs: torch.Tensor, tokenizer: transformers.PreTrainedTokeni
     # print(token_id)
     return letter, max(gathered)
 
-def evaluate_subject(args: ArgsType, model, tokenizer, subject, image_processor=None):
+def evaluate_subject(args: ArgsType, model, tokenizer, subject):
     # print(subject)
     ds = datasets.load_dataset(f'./cache/MMMU/', subject)
     # ds = datasets.load_dataset('./cache/MMLU/', subject)
@@ -206,11 +206,11 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject, image_processor=
     
     return accuracy
 
-def job_mmmu(args: ArgsType, model, tokenizer, image_processor=None):
+def job_mmmu(args: ArgsType, model, tokenizer, device):
     accs = []
     results = {}
     for subject in MMMU_SUBJECT:
-        acc = evaluate_subject(args, model, tokenizer, subject, image_processor)
+        acc = evaluate_subject(args, model, tokenizer, subject)
         results[subject] = acc
         accs.append(acc)
     
