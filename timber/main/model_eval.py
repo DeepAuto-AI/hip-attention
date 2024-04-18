@@ -55,6 +55,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
         'vllm_gemma2b': 'google/gemma-2b-it',
         'vllm_gemma7b': 'google/gemma-7b-it',
+        'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]

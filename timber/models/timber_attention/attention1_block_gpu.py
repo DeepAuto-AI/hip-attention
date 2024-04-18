@@ -2206,6 +2206,11 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     is_mem = torch.arange(0, seqlen_k, device=q.device) % block_size == (block_size - 1)
     return fused_landmark_attention(q, k, v, is_mem, block_size=block_size)
 
+def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tensor, window_size: int):
+    from timber.models.sink_attention.sink_attention import sink_attention
+    
+    return sink_attention(q, k, v, cos, sin, window_size=window_size)
+
 def main_latency_benchmark():
     global DEBUG
     
@@ -2222,6 +2227,9 @@ def main_latency_benchmark():
     parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--scale_up', type=int, default=2)
+    parser.add_argument('--hidden_size', type=int, default=-1)
+    parser.add_argument('--head_size', type=int, default=-1)
+    parser.add_argument('--refresh_interval', type=int, default=8)
     parser.add_argument('--not_causal', action='store_true')
     args = parser.parse_args()
     
@@ -2248,10 +2256,25 @@ def main_latency_benchmark():
     k = k.cpu()
     v = v.cpu()
     
+    if args.head_size > 0 and args.head_size != q.shape[0]:
+        head_reps = int(math.ceil(args.head_size / HID))
+        q = q.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
+        k = k.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
+        v = v.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
+    
     q = q.repeat(BSIZE, max(1, triton.cdiv(QUERY_SIZE, 1024)), 1)[:, :QUERY_SIZE, :].contiguous()
     k = k.repeat(BSIZE, DUPS, 1)
     v = v.repeat(BSIZE, DUPS, 1)
     started = False
+    
+    if args.hidden_size > 0 and args.hidden_size != HID:
+        hid_reps = int(math.ceil(args.hidden_size / HID))
+        q = q.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
+        k = k.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
+        v = v.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
+        HID = args.hidden_size
+    
+    cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
     
     if METHOD in 'flash':
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
@@ -2265,10 +2288,12 @@ def main_latency_benchmark():
     q = q.cuda()
     k = k.cuda()
     v = v.cuda()
+    cos = cos.cuda()
+    sin = sin.cuda()
     
     timber_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
-    def sample():
+    def sample(state = None):
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
@@ -2276,23 +2301,46 @@ def main_latency_benchmark():
                 flash_attention(q, k, v, is_causal=is_causal)
             elif METHOD == 'landmark':
                 landmark_attention(q, k, v)
+            elif METHOD == 'streaming':
+                streaming_attention(q, k, v, cos, sin, window_size=args.k)
             elif METHOD == 'timber':
-                timber_attention(
-                    q,
-                    k,
-                    v,
-                    # attention_mask=timber_attention_mask,
-                    mask_k=args.k,
-                    block_size_q=args.block_size_q,
-                    block_size_k=args.block_size_k,
-                    scale_up=args.scale_up,
-                    is_causal=is_causal,
-                )
+                if state is None:
+                    _, mask = timber_attention(
+                        q,
+                        k,
+                        v,
+                        # attention_mask=timber_attention_mask,
+                        mask_k=args.k,
+                        block_size_q=args.block_size_q,
+                        block_size_k=args.block_size_k,
+                        scale_up=args.scale_up,
+                        is_causal=is_causal,
+                    )
+                else:
+                    indices, ks = state
+                    
+                    _, mask = timber_attention(
+                        q,
+                        k,
+                        v,
+                        # attention_mask=timber_attention_mask,
+                        mask_k=args.k,
+                        block_size_q=args.block_size_q,
+                        block_size_k=args.block_size_k,
+                        scale_up=args.scale_up,
+                        is_causal=is_causal,
+                        
+                        using_precomputed_mask=True,
+                        precomputed_indices=indices,
+                        precomputed_ks=ks,
+                    )
+                return mask[0], mask[1]
             else:
                 raise Exception()
     
     s = torch.cuda.Stream()
     graph = None
+    graph_stateful = None
     samples = []
     for i in tqdm.tqdm(range(n_samples)):
         start = torch.cuda.Event(enable_timing=True)
@@ -2301,16 +2349,26 @@ def main_latency_benchmark():
         
         if i < 3:
             s.wait_stream(torch.cuda.current_stream())
-            sample()
+            state = sample()
+            sample(state)
             torch.cuda.current_stream().wait_stream(s)
         elif args.trace:
             sample()
         elif graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                sample()
+                state = sample()
+            graph_stateful = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph_stateful):
+                sample(state)
         else:
-            graph.replay()
+            if args.refresh_interval > 0:
+                if (i % args.refresh_interval) == 0:
+                    graph.replay()
+                else:
+                    graph_stateful.replay()
+            else:
+                graph.replay()
         
         end.record()
         torch.cuda.synchronize()
