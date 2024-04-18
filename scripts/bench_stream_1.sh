@@ -6,8 +6,8 @@ export CACHE_ENGINE='vllm'
 export ATTENTION_BACKEND=$BACKEND
 export PROMPT_ATTENTION_BACKEND=$BACKEND
 export PAGED_ATTENTION_BACKEND=$BACKEND
-export HIP_DENSE_LAYERS=4 
-export HIP_K=512
+export HIP_DENSE_LAYERS=4
+# export HIP_K=512
 # export CUDA_VISIBLE_DEVICES=0,1
 # export HF_HOME=/d1/heejun/cache/hf_home
 
