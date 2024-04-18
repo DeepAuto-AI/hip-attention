@@ -562,6 +562,7 @@ def setup_seaborn(
     axes_label_fontsize = 6,
     font_weight = 500,
     axes_label_weight = 600,
+    axis_below = False,
 ):
     import seaborn as sns
     
@@ -584,6 +585,6 @@ def setup_seaborn(
             'axes.labelsize': str(label_fontsize),
             'ytick.major.pad': '1.0',
             'xtick.major.pad': '1.0',
-            'axes.axisbelow': False,
+            'axes.axisbelow': axis_below,
         }
     )
