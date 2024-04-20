@@ -2233,6 +2233,9 @@ def main_latency_benchmark():
     parser.add_argument('--not_causal', action='store_true')
     args = parser.parse_args()
     
+    if args.query_size > 32:
+        args.refresh_interval = -1
+    
     DEBUG = args.debug
     TRACE = args.trace
     BSIZE = args.batch_size
