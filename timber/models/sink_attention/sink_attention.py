@@ -144,24 +144,26 @@ def _attention_scores_compute(
             idx_z.to(tl.int64) * stride_values_z,
         value = score
     )
-    # tl.store(
-    #     INDICES +\
-    #         0 * stride_indices_d +\
-    #         idx_z.to(tl.int64) * stride_indices_z,
-    #     value = idx_n
-    # )
-    # tl.store(
-    #     INDICES +\
-    #         1 * stride_indices_d +\
-    #         idx_z.to(tl.int64) * stride_indices_z,
-    #     value = idx_tdst
-    # )
-    # tl.store(
-    #     INDICES +\
-    #         2 * stride_indices_d +\
-    #         idx_z.to(tl.int64) * stride_indices_z,
-    #     value = idx_tsrc
-    # )
+    zero = tl.zeros((1,), dtype=tl.int64)
+    one = zero + 1
+    tl.store(
+        INDICES +\
+            zero * stride_indices_d +\
+            idx_z.to(tl.int64) * stride_indices_z,
+        value = idx_n
+    )
+    tl.store(
+        INDICES +\
+            one * stride_indices_d +\
+            idx_z.to(tl.int64) * stride_indices_z,
+        value = idx_tdst
+    )
+    tl.store(
+        INDICES +\
+            (one * 2) * stride_indices_d +\
+            idx_z.to(tl.int64) * stride_indices_z,
+        value = idx_tsrc
+    )
 
 @triton.jit
 def _attention_score_backward_compute(
