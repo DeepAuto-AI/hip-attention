@@ -506,18 +506,22 @@ def _sparse_attention_compute(
     BLOCK_HID: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
+    zero = tl.zeros((1, ), dtype=tl.int64)
+    one = zero + 1
+    two = zero + 2
+    
     idx_n = tl.program_id(0).to(tl.int64)
     idx_tdst = tl.program_id(1).to(tl.int64)
     # idx_bk = tl.program_id(2).to(tl.int64)
     
-    idx_hid = tl.arange(0, BLOCK_HID)
+    idx_hid = tl.arange(0, BLOCK_HID).to(tl.int64)
     mask_hid = idx_hid < HID
     
     acc = tl.zeros((BLOCK_HID, ), dtype=tl.float32)
     
     for idx_bk in range(BK):
         CACHE_SIZE = NUM_SINK + WINDOW_SIZE
-        idx_k = idx_bk * BLOCK_K + tl.arange(0, BLOCK_K)
+        idx_k = idx_bk.to(tl.int64) * BLOCK_K + tl.arange(0, BLOCK_K).to(tl.int64)
         mask_k = idx_k < CACHE_SIZE
         
         idx_z = idx_n * TDST * CACHE_SIZE + idx_tdst * CACHE_SIZE + idx_k
@@ -525,7 +529,7 @@ def _sparse_attention_compute(
         
         idx_tsrc = tl.load(
             INDICES +\
-                2 * stride_indices_d +\
+                two * stride_indices_d +\
                 idx_z * stride_indices_z,
             mask = mask_z,
             other = 0
