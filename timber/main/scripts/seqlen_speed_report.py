@@ -33,6 +33,7 @@ def samples(query_size = 1, step_size = 1):
     }
     num_samples = 200
     cache_path = './cache/attention1_block_gpu/result.json'
+    refresh_interval = 8
     
     batch_size = max(1, max(list(batch_sizes.values())) // query_size)
     results = {}
@@ -53,6 +54,7 @@ def samples(query_size = 1, step_size = 1):
                 '--dups', str(dup),
                 '--batch_size', str(batch_size),
                 '--samples', str(num_samples),
+                '--refresh_interval', str(refresh_interval),
             ]
             print(' '.join(cmd))
             subprocess.call(cmd)

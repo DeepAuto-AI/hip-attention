@@ -20,6 +20,7 @@ def samples():
     batch_size = 256
     results = {}
     cache_path = './cache/attention1_block_gpu/result.json'
+    refresh_interval = 8
     
     for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
         subprocess.call([
@@ -53,6 +54,7 @@ def samples():
             '--dups', '4',
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
+            '--refresh_interval', str(refresh_interval),
         ])
         with open(cache_path, 'r') as f:
             latency = json.load(f)['mean']
@@ -196,7 +198,7 @@ def plot_ppl(query_size=1):
     print('saved', f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png')
 
 def main():
-    # samples()
+    samples()
     plot()
     for q in query_sizes: plot_ppl(q)
 
