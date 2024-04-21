@@ -2233,7 +2233,7 @@ def main_latency_benchmark():
     parser.add_argument('--not_causal', action='store_true')
     args = parser.parse_args()
     
-    if args.query_size > 32:
+    if args.query_size > 1:
         args.refresh_interval = -1
     
     DEBUG = args.debug
@@ -2337,6 +2337,8 @@ def main_latency_benchmark():
                         precomputed_indices=indices,
                         precomputed_ks=ks,
                     )
+                if mask is None:
+                    return None, None
                 return mask[0], mask[1]
             else:
                 raise Exception()
@@ -2353,7 +2355,8 @@ def main_latency_benchmark():
         if i < 3:
             s.wait_stream(torch.cuda.current_stream())
             state = sample()
-            sample(state)
+            if args.refresh_interval > 0:
+                sample(state)
             torch.cuda.current_stream().wait_stream(s)
         elif args.trace:
             sample()
@@ -2361,9 +2364,10 @@ def main_latency_benchmark():
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 state = sample()
-            graph_stateful = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph_stateful):
-                sample(state)
+            if args.refresh_interval > 0:
+                graph_stateful = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph_stateful):
+                    sample(state)
         else:
             if args.refresh_interval > 0:
                 if (i % args.refresh_interval) == 0:

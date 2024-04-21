@@ -10,7 +10,8 @@ setup_seaborn()
 
 os.environ['PYTHONPATH'] = './'
 
-query_sizes = [1, 2, 4, 8, 16]
+# query_sizes = [1, 2, 4, 8, 16]
+query_sizes = [1,]
 block_size_qs = [8, 16, 32]
 block_size_ks = [1, 2, 4]
 ks = [256, 512, 1024]

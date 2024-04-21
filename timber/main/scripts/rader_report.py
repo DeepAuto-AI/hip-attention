@@ -89,7 +89,7 @@ from timber.utils import setup_seaborn
 
 setup_seaborn(
     legend_fontsize=6,
-    axis_below=True
+    axis_below=False
 )
 
 def loop_list(lst):
@@ -113,7 +113,7 @@ def render_rader(chart, name, title, root='saves/raders/'):
     ax = plt.subplot(polar=True)
     ax.set_title(title)
     ax.set_theta_offset(chart['theta_offset'])
-    ax.tick_params(axis='x', which='major', pad=-20)
+    ax.tick_params(axis='x', which='major', pad=-25)
     plt.xticks(label_loc, labels=categories)
     for idx, (grade, label) in enumerate(zip(grades, chart['row_headers'])):
         if idx == 0:
