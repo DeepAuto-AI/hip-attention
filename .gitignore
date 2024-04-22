@@ -48,3 +48,5 @@ timber/timber.egg-info/
 profile.*
 *.nsys-rep
 *.ncu-rep
+jeff.py
+dummy.jpg
