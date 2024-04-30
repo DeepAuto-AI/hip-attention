@@ -1736,8 +1736,14 @@ def main_debug():
         window=1
     )
     
-    q = q[:, block * 2:, :]
-    out = out[:, block * 2:, :]
+    reps = 4
+    q = q.repeat(1, reps, 1)
+    k = k.repeat(1, reps, 1)
+    v = v.repeat(1, reps, 1)
+    out = out.repeat(1, reps, 1)
+    
+    q = q[:, k.shape[1]//2:, :]
+    out = out[:, k.shape[1]//2:, :]
     
     print('q', q.shape)
     print('k', k.shape)
@@ -1759,6 +1765,8 @@ def main_debug():
         is_flash=True,
         using_sliding_window=False,
     )
+    
+    print(atten_ks, atten_ks.min(), atten_ks.max())
     
     stderr = (out - context).abs().mean().item()
     stdcontext = torch.std_mean(out)[0].item()
