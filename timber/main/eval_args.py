@@ -29,7 +29,7 @@ def eval_args(
     parser.add_argument('--stride', type=int, default=-1)
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--count', type=int, default=100)
+    parser.add_argument('--count', type=int, default=-1)
     parser.add_argument('--block_size_q', type=int, default=32)
     parser.add_argument('--block_size_k', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=1)
