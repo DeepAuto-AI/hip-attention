@@ -23,7 +23,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
         LLM = torch.Tensor
         warnings.warn('oops')
     
-    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     print("Will write to", outfile)
     if os.path.exists(outfile) and not args.overwrite:

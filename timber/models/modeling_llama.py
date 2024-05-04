@@ -775,6 +775,16 @@ class LlamaCustomAttention(LlamaAttention):
             except ImportError:
                 logger.error("Please install performer-pytorch to use Performer attention.")
                 raise
+        
+        from timber.models.hyper_attention.hyper_attn import HyperAttention
+        self.hyper_attention = HyperAttention(
+            input_dim=self.hidden_size // config.num_attention_heads,
+            lsh_num_projs=7, # not very meaningful after 7
+            block_size=64, # smaller better
+            sample_size=1024, # larger better
+            min_seq_len=32, # this factor is kind of random. usually smaller better
+            cuda=True, 
+        )
 
     # Adapted from LlamaAttention.forward
     def forward(
@@ -886,6 +896,9 @@ class LlamaCustomAttention(LlamaAttention):
             # Attention sparsity loss
             output_attn_sparsity_loss=output_attn_sparsity_loss,
             tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+            
+            # Hyper attention states
+            hyper_attention=self.hyper_attention,
         )
 
         if last_cumsum is not None:

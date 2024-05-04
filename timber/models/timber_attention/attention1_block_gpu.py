@@ -1711,7 +1711,7 @@ def main_latency_benchmark():
         print(get_bench().format_tracetree())
     
     samples = np.array(samples)
-    print(f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
+    print(f'({METHOD}) {np.mean(samples):.4f} ms +- {np.std(samples):.4f} ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
     
     os.makedirs('./cache/attention1_block_gpu/', exist_ok=True)
     with open('./cache/attention1_block_gpu/result.json', 'w') as f:

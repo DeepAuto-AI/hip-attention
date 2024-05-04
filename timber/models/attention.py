@@ -31,6 +31,9 @@ def custom_attention(
 
         # Attention sparsity loss
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
+        
+        # Hyper attention state
+        hyper_attention=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -268,6 +271,23 @@ def custom_attention(
         )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
+    elif attention_method == 'hyper_attention':
+        q = query_states / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+
+        N, H, TDST, HID = q.shape
+        _, _, TSRC, _ = k.shape
+        assert k.shape == v.shape
+        
+        # q = q.view(N*H, TDST, HID)
+        # k = k.view(N*H, TSRC, HID)
+        # v = v.view(N*H, TSRC, HID)
+        
+        attn_output = hyper_attention(
+            q, k, v, causal=True, scale=1.0
+        )
 
     else:
         raise Exception(attention_method)
