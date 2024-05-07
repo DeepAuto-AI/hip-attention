@@ -43,15 +43,15 @@ class HyperAttention(torch.nn.Module):
             
                 # If n_query is odd we pad inputs by adding all-zero rows
                 if n_query % 2:
-                    print(key.shape)
                     query = torch.nn.functional.pad(query, (0,0,0,1), mode='constant',value=0.)
                     key = torch.nn.functional.pad(key, (0,0,0,1), mode='constant',value=0.)
                     value = torch.nn.functional.pad(value, (0,0,0,1), mode='constant',value=0.)
-
+                
                 q_bd = query.view(batch_size, 2*n_heads, query.shape[2]//2, query.shape[-1])
                 k_bd = key.view(batch_size, 2*n_heads, key.shape[2]//2, key.shape[-1])
                 v_bd = value.view(batch_size, 2*n_heads, key.shape[2]//2, value.shape[-1])
-        
+
+                # print(q_bd.shape)
                 attn_bd, lse_bd = self.forward(q_bd, k_bd, v_bd, scale, True, True)
                 
                 if attn_bd.shape[2] not in attn_bd.stride():

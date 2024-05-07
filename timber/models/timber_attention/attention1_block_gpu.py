@@ -31,7 +31,7 @@ from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
 
-assert (triton.__version__ in ['2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
+assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
 
 from timber.utils import get_bench, seed
@@ -1579,7 +1579,7 @@ def main_latency_benchmark():
     v = v.cpu()
     
     if args.head_size > 0 and args.head_size != q.shape[0]:
-        head_reps = int(math.ceil(args.head_size / HID))
+        head_reps = int(math.ceil(args.head_size / q.shape[0]))
         q = q.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
         k = k.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
         v = v.repeat(head_reps, 1, 1)[:args.head_size, :, :].contiguous()
@@ -1596,6 +1596,7 @@ def main_latency_benchmark():
         v = v.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
         HID = args.hidden_size
     
+    head_size = q.shape[0]
     cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
     
     if METHOD in 'flash':
@@ -1615,6 +1616,16 @@ def main_latency_benchmark():
     
     timber_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
+    from timber.models.hyper_attention.hyper_attn import HyperAttention
+    hyper_attention = HyperAttention(
+        input_dim=q.shape[-1],
+        lsh_num_projs=7, # not very meaningful after 7
+        block_size=64, # smaller better
+        sample_size=1024, # larger better
+        min_seq_len=32, # this factor is kind of random. usually smaller better
+        cuda=True, 
+    ).to('cuda').to(q.dtype)
+    
     def sample(state = None):
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
@@ -1625,6 +1636,16 @@ def main_latency_benchmark():
                 landmark_attention(q, k, v)
             elif METHOD == 'streaming':
                 streaming_attention(q, k, v, cos, sin, window_size=args.k)
+            elif METHOD == 'hyper':
+                _q = q.view(-1, head_size, q.shape[1], q.shape[-1])
+                _k = k.view(-1, head_size, k.shape[1], k.shape[-1])
+                _v = v.view(-1, head_size, v.shape[1], v.shape[-1])
+                # print(_q.shape, _k.shape, _v.shape)
+                hyper_attention(
+                    _q, _k, _v,
+                    causal=True, 
+                    scale=1
+                )
             elif METHOD == 'timber':
                 if state is None:
                     _, mask = timber_attention(
