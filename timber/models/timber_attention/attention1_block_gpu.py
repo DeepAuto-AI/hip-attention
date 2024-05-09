@@ -805,7 +805,7 @@ def hip_attention_mask(
     SPARQ_HID: int = 32,
     SPARQ_REDUCE_METHOD: Literal['sum', 'max'] = 'sum',
     
-    IS_FLASH: bool = False,
+    IS_FLASH: bool = True,
     
     # NOTE: this improve latency quite well, but hurt accuracy
     ESTIMATOR_LOWER_RESOLUTION: int = 2,
@@ -1814,7 +1814,7 @@ def timber_attention(
     chunking: bool = False,
     chunk_size: int = 2048,
 
-    is_flash: bool = False,
+    is_flash: bool = True,
     enable_sparq: bool = False,
     
     sampling_method: str = 'random',
