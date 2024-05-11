@@ -19,6 +19,7 @@ from timber.main.jobs.merge_lora import job_merge_lora
 from timber.main.jobs.mmlu import job_mmlu
 from timber.main.jobs.ppl import job_ppl
 from timber.main.jobs.stream import job_stream
+from timber.main.jobs.stream_demo import job_stream_demo
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from timber.utils import seed
@@ -46,6 +47,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
         'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
+        'vllm_qwen7b_pt': 'Qwen/Qwen1.5-7B',
         'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -230,7 +232,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo']
     
     model, tokenizer, device = load_model(args)
 
@@ -246,6 +248,8 @@ def main():
         job_booksum(args, model, tokenizer, device)
     elif args.job == 'merge_lora':
         job_merge_lora(args, model, tokenizer, device)
+    elif args.job == 'stream_demo':
+        job_stream_demo(args, model, tokenizer, device)
     else:
         raise Exception()
 
