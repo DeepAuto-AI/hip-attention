@@ -73,18 +73,19 @@ def generate_stream(
         
         if istep >= args.batch_size:
             if istep == args.batch_size:
+                os.system('clear')
                 print('\n----- Decoding Starts -----\n')
             stream = step_outputs[0]
             token_ids = stream.outputs[-1].token_ids
             
-            text = tokenizer.convert_ids_to_tokens(token_ids[-1]).replace('Ġ', ' ').replace('Ċ', '\n').replace('âĢĿ', '').replace('âĢľ', '')
+            text = tokenizer.convert_ids_to_tokens(token_ids[-1]).replace('Ġ', ' ').replace('Ċ', '\n').replace('âĢĿ', '').replace('âĢľ', '').replace('âĢĻ', '').replace('âĢĶ', '')
             print(text, end='', flush=True)
             
             t_decode += time.time() - t
             n_decode += 1
             
             if stream.finished:
-                print(f'\n\n[ATTENTION_BACKEND={os.getenv("ATTENTION_BACKEND", "oops")}] End-to-End vLLM Decoding Latency: {t_decode / n_decode*1000:.2f} ms (model={args.model}, prompt_len={len(stream.prompt_token_ids)}, response_len={len(token_ids)})')
+                print(f'\n\n{"="*60}\n[ATTENTION_BACKEND={os.getenv("ATTENTION_BACKEND", "oops")}] (model={args.model}, prompt_len={len(stream.prompt_token_ids)}, response_len={len(token_ids)})\nEnd-to-End vLLM Decoding Latency: {t_decode / n_decode*1000:.2f} ms\n{"="*60}')
         else:
             if istep == 0:
                 print()
