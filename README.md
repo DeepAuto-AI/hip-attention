@@ -1,12 +1,16 @@
-# TimberAttention
+# HiP Attention
+
+[**Link to Demo Video**](docs/demo.mp4)
+
+# How To Install
 
 ## How to clone the repository
 
 ```bash
-git clone <this-repo-url> lightweight-lm
-cd lightweight-lm
+git clone <this-repo-url> hip-attention
+cd hip-attention
 git submodule update --init --remote --recursive  # pull submodules
-````
+```
 
 ## How to build Docker
 
@@ -33,14 +37,13 @@ docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
         --dtype half \
         --gpu-memory-utilization 0.8
 ```
-----
 
 ## Setup without docker
 ```bash
 conda create --name llm python=3.11
 conda activate llm
-conda install nvidia/label/cuda-12.1.0::cuda-toolkit
-conda install -c conda-forge cupy cuda-version=11.8
+conda install nvidia/label/cuda-12.2.0::cuda-toolkit
+conda install -c conda-forge cupy cuda-version=12.2
 cd lightweight-lm
 pip install -e .
 pip install numba packaging
@@ -64,6 +67,8 @@ python3 -m vllm.entrypoints.openai.api_server \
 --gpu-memory-utilization 0.8
 ```
 
+# vLLM Executions
+
 ## vllm + Qwen's Dynamic-NTK
 
 add the following content in Qwen's `config.json`. 
@@ -79,7 +84,9 @@ add the following content in Qwen's `config.json`.
 }
 ```
 
-# 4090 vllm dev
+# Development Notes
+
+## 4090 vllm dev
 ```
 BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=1024 CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
 
@@ -98,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0,1 HIP_K=512 HIP_DENSE_LAYER=4 HIP_REFRESH_INTERVAL=8 ATTE
 CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
 ```
 
-# Example training command
+## Example training command
 ```
 OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 timber/trainer/timber_trainer_hf.py --method timber --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
 ```
