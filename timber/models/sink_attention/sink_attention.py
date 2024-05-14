@@ -1,6 +1,5 @@
 """
 Streaming-LLM: Triton Implementation
-gmlwns2000, jeffwillette @ github
 """
 
 import math
