@@ -83,6 +83,65 @@ DATA_LMMSEVAL = {
     'ymin': 20.0,
 }
 
+DATA_LONGBENCH_LLAMA2_7B = {
+    'row_headers': [
+        'LLaMA2 7B', 
+        'S.LLM k512', 
+        'S.LLM k1024', 
+        'HiP k512', 
+        'HiP k1024'
+    ],
+    'col_headers': ['NarrativeQA', 'Qasper', 'HotpotQA', '2WikiMQA', 'GovReport', 'MultiNews', 'Average'],
+    'data': [
+        [4.35, 12.37, 14.70, 12.33, 30.75, 27.21, 16.95],
+        [4.49, 5.66, 7.90, 8.87, 20.24, 20.61, 11.30],
+        [4.54, 6.65, 7.54, 8.24, 22.21, 23.49, 12.11],
+        [4.15, 9.19, 11.94, 11.59, 23.56, 25.86, 14.38],
+        [3.38, 11.05, 11.79, 12.15, 26.88, 26.05, 15.22],
+    ],
+    'theta_offset': 0.5,
+    'ymin': 30.0,
+}
+DATA_LONGBENCH_QWEN_7B = DATA_LONGBENCH
+DATA_LONGBENCH_LLAMA2_13B = {
+    'row_headers': [
+        'LLaMA2 13B', 
+        'S.LLM k512', 
+        'S.LLM k1024', 
+        'HiP k512', 
+        'HiP k1024'
+    ],
+    'col_headers': ['NarrativeQA', 'Qasper', 'HotpotQA', '2WikiMQA', 'GovReport', 'MultiNews', 'Average'],
+    'data': [
+        [13.45, 11.39, 18.13, 21.21, 28.84, 26.38, 19.90],
+        [7.16, 10.58, 8.18, 12.76, 17.00, 18.16, 12.31],
+        [8.00, 10.46, 10.74, 17.54, 18.92, 20.68, 14.39],
+        [10.72, 10.21, 13.64, 18.56, 23.99, 25.33, 17.08],
+        [11.51, 11.98, 16.37, 20.76, 25.85, 25.85, 18.72],
+    ],
+    'theta_offset': 0.5,
+    'ymin': 30.0,
+}
+DATA_LONGBENCH_QWEN_14B = {
+    'row_headers': [
+        'Qwen1.5 14B', 
+        'S.LLM k512', 
+        'S.LLM k1024', 
+        'HiP k512', 
+        'HiP k1024'
+    ],
+    'col_headers': ['NarrativeQA', 'Qasper', 'HotpotQA', '2WikiMQA', 'GovReport', 'MultiNews', 'Average'],
+    'data': [
+        [22.85, 39.83, 53.82, 41.35, 29.84, 24.41, 35.35],
+        [12.56, 20.85, 32.92, 22.22, 20.94, 19.99, 21.58],
+        [14.63, 24.36, 34.02, 27.21, 23.25, 22.36, 24.31],
+        [17.50, 38.35, 40.64, 35.64, 28.10, 23.97, 30.70],
+        [20.12, 38.19, 48.17, 41.35, 28.61, 24.29, 33.46],
+    ],
+    'theta_offset': 0.5,
+    'ymin': 30.0,
+}
+
 import numpy as np
 import matplotlib.pyplot as plt
 from timber.utils import setup_seaborn
@@ -153,3 +212,8 @@ if __name__ == '__main__':
     render_rader(DATA_LONGBENCH, 'plot_rader_longbench', 'LongBench')
     render_rader(DATA_LMEVAL, 'plot_rader_lmeval', 'LM-Eval')
     render_rader(DATA_LMMSEVAL, 'plot_rader_lmmseval', 'LMMs-Eval')
+    
+    render_rader(DATA_LONGBENCH_LLAMA2_7B, 'plot_rader_longbench_llama7b', 'LLaMA2 7B (LongBench)')
+    render_rader(DATA_LONGBENCH_LLAMA2_13B, 'plot_rader_longbench_llama13b', 'LLaMA2 13B (LongBench)')
+    render_rader(DATA_LONGBENCH_QWEN_7B, 'plot_rader_longbench_qwen7b', 'Qwen1.5 7B (LongBench)')
+    render_rader(DATA_LONGBENCH_QWEN_14B, 'plot_rader_longbench_qwen14b', 'Qwen1.5 14B (LongBench)')
