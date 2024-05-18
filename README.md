@@ -1,6 +1,90 @@
 # HiP Attention
+![demo gif](docs/demo.gif)
+> [**Link to Demo Video**](docs/demo.mp4)
 
-[**Link to Demo Video**](docs/demo.mp4)
+# Usage
+
+After installation, you can access to `timber` package from any project. `timber` is code name of HiP attention.
+
+## TL;DR
+
+**We provide OpenAI Compatible API server built with vLLM and HiP attention!**
+
+![TLDR](docs/tldr.png)
+
+## API
+
+```py
+from torch import Tensor
+from typing import Tuple
+from timber import timber_attention
+
+# NOTE: you have to scale the Q before pass to our kernel
+scale = 1 / (HID ** 0.5)
+# NOTE: we support fused RoPE with SelfExtend (https://github.com/datamllab/LongLM)
+rope_method: Literal["none", "self_extend"] = "none"
+# NOTE: you need to repeat or extend the tensor to match head size.
+position_ids: Optional[Tensor] = \
+    position_ids.repeat_interleave(self.num_heads, 0) if rope_method != 'none' else None
+
+"""
+- q: Tensor[N*H, TDST, HID]
+- k: Tensor[N*H, TSRC, HID]
+- v: Tensor[N*H, TSRC, HID]
+    query, key, value of attention mechanism.
+- mask_k: int, 
+    same as $k$ in the paper
+- block_size_q: int, 
+    same as $b_q$ in the paper. 
+- block_size_k: int, 
+    same as $b_k$ in the paper.
+- dense_queries: int, 
+    if the $T$ for the given query is shorter than this value, we 
+    will use flash attention instead of ours.
+- rope_method: Literal['none', 'self_extend'], 
+    experimental setting to adopt Self-Extend LM paper. seems not 
+    working well, so we did not report this.
+- rope_cos, rope_sin, position_ids: Optional[Tensor], 
+    please leave them as None unless you want to use Self-Extend LM
+- self_extend_scale: int, 
+    G1 in Self-Extend
+- self_extend_window: int, 
+    G2 in Self-Extend
+"""
+
+output, _ = timber_attention(
+    q=q * scale,
+    k=k,
+    v=v,
+    
+    mask_k=512,
+    block_size_q=32,
+    block_size_k=2,
+    
+    dense_queries_exp=None if rope_method == 'none' else 0,
+    
+    rope_method=rope_method,
+    rope_cos=rope_cos,
+    rope_sin=rope_sin,
+    position_ids=position_ids,
+    
+    self_extend_scale=self.self_extend_scale,
+    self_extend_window=self.self_extend_window,
+) # type: Tuple[Tensor[N*H, TDST, HID], ...]
+
+from timber import timber_attention, paged_timber_attention
+
+"""
+Paged Attention Supported HiP Attention
+
+This function is already integrated with in provided vLLM patches.
+Please look following sections, to utilize the paged attention and 
+OpenAI compatible API server with HiP.
+"""
+output, _ = paged_timber_attention(
+    ...
+) # type: Tuple[Tensor[N*H, TDST, HID], ...]
+```
 
 # How To Install
 
@@ -28,23 +112,25 @@ After building the container, run commands below (change `--gpus` and `--tensor-
 ```bash
 docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
     -v ~/.cache/huggingface/:/root/.cache/huggingface \
-    -e 'PAGED_ATTENTION_BACKEND=hip' \
-    -e 'PROMPT_ATTENTION_BACKEND=hip' \
+    -e 'ATTENTION_BACKEND=hip' \
+    -e 'HIP_K=512' \
+    -e 'HIP_REFRESH_INTERVAL=8' \
+    -e 'HIP_DENSE_LAYERS=4' \
     vllm/vllm-openai \
         --model togethercomputer/LLaMA-2-7B-32K \
         --tensor-parallel-size 4 \
         --kv-cache-dtype fp8_e5m2 \
         --dtype half \
-        --gpu-memory-utilization 0.8
+        --gpu-memory-utilization 0.85
 ```
 
 ## Setup without docker
 ```bash
 conda create --name llm python=3.11
 conda activate llm
-conda install nvidia/label/cuda-12.2.0::cuda-toolkit
-conda install -c conda-forge cupy cuda-version=12.2
-cd lightweight-lm
+conda install nvidia/label/cuda-12.4.0::cuda-toolkit
+conda install -c conda-forge cupy cuda-version=12.4
+cd hip-attention
 pip install -e .
 pip install numba packaging
 cd third_party/vllm-timber
@@ -55,8 +141,10 @@ pip install -e . --no-build-isolation --verbose
 
 ## Running without docker
 ```bash
-PAGED_ATTENTION_BACKEND=hip \  
-PROMPT_ATTENTION_BACKEND=hip \
+ATTENTION_BACKEND=hip \
+HIP_K=512 \
+HIP_REFRESH_INTERVAL=8 \
+HIP_DENSE_LAYERS=4 \
 CUDA_VISIBLE_DEVICES=0,1 \
 python3 -m vllm.entrypoints.openai.api_server \
 --model togethercomputer/LLaMA-2-7B-32K \
@@ -64,10 +152,8 @@ python3 -m vllm.entrypoints.openai.api_server \
 --tensor-parallel-size 2 \
 --kv-cache-dtype fp8_e5m2 \
 --dtype half \
---gpu-memory-utilization 0.8
+--gpu-memory-utilization 0.85
 ```
-
-# vLLM Executions
 
 ## vllm + Qwen's Dynamic-NTK
 
@@ -83,6 +169,82 @@ add the following content in Qwen's `config.json`.
     "factor": 4.0
 }
 ```
+
+# Experiments Reproduce
+
+## Streaming Demo
+```bash
+#HiP
+CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+
+#vLLM
+CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+```
+## Generation Demo
+```bash
+ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 BENCHMARK_RUNNER=1 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --model vllm_qwen7b --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2 --input samples/32k.md --max_tokens 128 --stride 32000 --batch_size 4
+```
+
+## Interative Generation Demo
+```bash
+# NOTE: this demo use eager mode. this must be much slower than ideal speed due to single batch and JIT compilation.
+python timber/main/model_eval.py --model llama32k --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2
+```
+
+## Attention Latency Microbenchmarks
+```bash
+python timber/models/timber_attention/attention1_block_gpu.py --method timber --k 512 --block_size_q 32 --block_size_k 2 --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+
+python timber/models/timber_attention/attention1_block_gpu.py --method none --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+
+python timber/models/timber_attention/attention1_block_gpu.py --method flash --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+```
+
+## Wikitext2 Perplexity
+```bash
+# HiP
+python timber/main/model_eval.py --job ppl --method timber --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
+
+# StreamingLLM
+python timber/main/model_eval.py --job ppl --method streaming_llm --k 512 --overwrite --model llama32k --stride 8192
+
+# HyperAttention
+python timber/main/model_eval.py --job ppl --method hyper_attention --overwrite --model llama32k --stride 8192 --dense_layers 6
+
+# vanilla
+python timber/main/model_eval.py --job ppl --method none --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
+```
+
+## LongBench
+```bash
+# HiP
+HIP_K=512 HIP_DENSE_LAYERS=3 HIP_REFRESH_INTERVAL=8 ATTENTION_BACKEND=hip CUDA_VISIBLE_DEVICES=0 ATTENTION_METHOD=hip python pred.py --method hip --k 512 --model qwen2-7b-chat-32k
+python eval.py --method hip --k 512 --modl qwen2-7b-chat-32k
+
+# vLLM
+ATTENTION_BACKEND=vllm HIP_K=512 ATTENTION_METHOD=none CUDA_VISIBLE_DEVICES=0 python pred.py --model qwen2-7b-chat-32k --method none --k 512
+python eval.py --method none --k 512 --modl qwen2-7b-chat-32k
+
+# StreamingLLM
+HIP_K=512 ATTENTION_METHOD=streaming_llm CUDA_VISIBLE_DEVICES=0 python pred.py --model qwen2-7b-chat-32k --method streaming_llm --k 512
+python eval.py --method streaming_llm --k 512 --modl qwen2-7b-chat-32k
+```
+
+## BookSum
+```bash
+CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method streaming_llm --k 512 --name exp_name --overwrite
+
+CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method timber --k 512 --name exp_name --overwrite
+
+CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=none python timber/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method none --name exp_name --overwrite
+```
+
+## UVM Benchmark
+```bash
+BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=512 CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
+```
+
+... And More ...
 
 # Development Notes
 

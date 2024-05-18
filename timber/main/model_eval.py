@@ -34,11 +34,12 @@ def load_vllm_model(args: ArgsType):
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
-        'vllm_llama13b_32k': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+        'vllm_llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+        'vllm_llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
-        'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',

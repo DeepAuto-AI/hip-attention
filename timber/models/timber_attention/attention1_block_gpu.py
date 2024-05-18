@@ -1119,9 +1119,10 @@ def timber_attention(
     # optional mask
     attention_mask: Tensor = None,
     
-    # heuristics: w_start == mask_k * scale_up
+    # NOTE: do not touch w_start, n_patches, scale_up unless you really understand what are they.
+    # NOTE: heuristics: w_start == mask_k * scale_up
     w_start: int = None,
-    # heuristics: n_patches == mask_k // scale_up
+    # NOTE: heuristics: n_patches == mask_k // scale_up
     n_patches: int = None,
     mask_k: int = 512,
     scale_up: float = 2,
