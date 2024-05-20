@@ -16,8 +16,10 @@ echo TARGET=samples/$FILENAME.md
 echo BATCH_SIZE=$BATCH_SIZE
 echo HIP_K=$HIP_K
 echo HIP_REFRESH_INTERVAL=$HIP_REFRESH_INTERVAL
+echo MODEL=$MODEL, suggested vllm_qwen14b_gptq
+
 $PYBIN -b timber/main/model_eval.py \
-    --model vllm_qwen14b_gptq \
+    --model $MODEL \
     --job stream \
     --batch_size $BATCH_SIZE \
     --input samples/$FILENAME.md \
