@@ -16,14 +16,33 @@ from torch.utils.data import Subset
 import subprocess
 import logging
 
+class StopAfterStringIsGenerated(LogitsProcessor):
+    def __init__(self, base_len: int, tokenizer):
+        super().__init__()
 
-def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
+        self.base_len = base_len
+        self.tokenizer = tokenizer
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if input_ids.size(1) > self.base_len:
+            decoded = self.tokenizer.batch_decode(input_ids[:, self.base_len:])
+            ends_with_answer = torch.tensor([s.endswith("</s>") for s in decoded], device=scores.device)
+            forced_eos = torch.full((scores.size(1),), -float("inf"), device=scores.device)
+            forced_eos[self.tokenizer.eos_token_id] = 0
+
+            # Force generation of EOS after a space
+            scores[ends_with_answer] = forced_eos
+        return scores
+
+PROMPT_FIRST_ONLY = os.getenv('PROMPT_FIRST_ONLY', '1') == '1'
+
+def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
     LAST_DENSE = os.environ.get('LAST_DENSE', '0') == '1'
 
     inputs, completion = item
 
-    if (out_dir / f"out_{idx}.txt").exists():
+    if (out_dir / f"out_{idx}.txt").exists() and not args.overwrite:
         with open(out_dir / f"out_{idx}.txt", 'r') as f:
             return f.read()
 
@@ -32,8 +51,14 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model, 'config')
     assert hasattr(model.config, 'max_position_embeddings')
 
-    if args.give_prompt:
-        prompt = "Summarize the following text in about 300 words:\n\n" + tokenizer.decode(inputs, skip_special_tokens=True)
+    if not args.disable_prompt:
+        if 'llama13b_32k' in args.model.lower():
+            prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {tokenizer.decode(inputs, skip_special_tokens=True)} [/INST]"
+        else:
+            if PROMPT_FIRST_ONLY:
+                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+            else:
+                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
     else:
         prompt = tokenizer.decode(inputs, skip_special_tokens=True)
     if prompt.endswith('</s>'):
@@ -42,7 +67,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     inputs = tokenizer(
         prompt,
         return_tensors='pt',
-        max_length=model.config.max_position_embeddings - args.gen_tokens,
+        max_length=model.config.max_position_embeddings - args.max_tokens,
         truncation=True,
     )['input_ids'][0]
 
@@ -59,7 +84,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
                 m.tree_last_dense_queries = -1
 
     additional_args = {}
-    if args.do_sample:
+    if not args.no_sample:
         additional_args = dict(
             do_sample=True,
             temperature=0.7,
@@ -70,7 +95,7 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     output = model.generate(
         inputs=inputs.unsqueeze(0).cuda(),
         attention_mask=torch.ones((1, inputs.shape[-1]), dtype=torch.long, device='cuda'),
-        max_new_tokens=args.gen_tokens,
+        max_new_tokens=args.max_tokens,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
         logits_processor=LogitsProcessorList([
@@ -85,13 +110,8 @@ def gen_summary(args, model, tokenizer, device, idx, item, out_dir):
     if output.endswith('</s>'):
         output = output[:-4]
     output = output.strip()
-    tqdm.write(f"{idx} Summary:\t{(output[:200],)}[...]\n\n")
-
-    with open(out_dir / f"out_{idx}.txt", 'w') as f:
-        f.write(output)
-
+    
     return output
-
 
 def install_rogue():
     logger = logging.getLogger()
@@ -117,33 +137,91 @@ def install_rogue():
 
     return ROUGE_HOME
 
-
-@torch.no_grad()
-def job_booksum(args, model, tokenizer, device):
-    seed()
-
+def generate_samples(args, model, tokenizer, device, out_dir):
+    from vllm import LLM, SamplingParams
+    is_vllm = isinstance(model, LLM)
+    if is_vllm:
+        # we do not access to tokenizer.
+        tokenizer = None
+    
     dataset = BookSumDataset(
         tokenizer=tokenizer,
         for_eval=True,
+        need_tokenization=not is_vllm,
     )
     train_idx, test_idx = train_test_split(list(range(len(dataset))), test_size=0.05)
     test_dataset = Subset(dataset, test_idx)
 
     outputs = []
 
-    out_dir = pathlib.Path(f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
-                           f"_bk{args.block_size_k}_k{args.k}_gl{args.gen_tokens}_s{args.do_sample}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
-
     for idx, item in enumerate(tqdm(test_dataset, dynamic_ncols=True, leave=True, desc="booksum")):
-        output = gen_summary(args, model, tokenizer, device, idx, item, out_dir)
+        inputs, completion = item
+        
+        if is_vllm:
+            assert isinstance(inputs, str)
+            
+            sampling_params = SamplingParams(
+                temperature=0.7,
+                top_p=0.9,
+                top_k=50,
+                max_tokens=args.max_tokens,
+                frequency_penalty=0.0,
+                repetition_penalty=1.0,
+                ignore_eos=False,
+                skip_special_tokens=True,
+            )
+            
+            if 'qwen' in args.model.lower():
+                # Qwen 1.5
+                prompt = \
+                    f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
+                    f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
+                    f'<|im_start|>assistant\n'
+            elif ('llama32k' in args.model.lower()) and 'instruct' not in args.model.lower():
+                # llama2 7b
+                if PROMPT_FIRST_ONLY:
+                    prompt = f"Summarize the following text in about 300 words:\n\n{inputs}"
+                else:
+                    prompt = f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
+            elif ('llama32k' in args.model.lower) and ('instruct' in args.model.lower()):
+                # llama2 7b chat
+                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
+            elif 'llama13b_32k' in args.model.lower():
+                # llama2 13b chat
+                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
+            else:
+                raise Exception(args.model)
+            vllm_outputs = model.generate(
+                prompt, 
+                sampling_params,
+                use_tqdm=False,
+            )
+            output = vllm_outputs[0].outputs[0].text
+        else:
+            output = generate_summary(args, model, tokenizer, device, idx, item, out_dir)
+        
+        output_summary = output.replace('\n', '\\n')[:200]
+        tqdm.write(f"[{idx:<7}] Summary: {output_summary}[...]")
+        with open(out_dir / f"out_{idx}.txt", 'w') as f:
+            f.write(output)
         outputs.append(output)
 
         with open(f"saves/llama_eval/booksum/reference/ref_{idx}.txt", 'w') as f:
-            inputs, completion = item
-            f.write(tokenizer.decode(completion, skip_special_tokens=True))
+            if isinstance(completion, str):
+                f.write(completion)
+            else:
+                f.write(tokenizer.decode(completion, skip_special_tokens=True))
 
+MAX_NEW_TOKENS = 256
+
+def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
+    for node in out_dir.glob('*'):
+        if node.is_file():
+            content = node.read_text()
+            ids = tokenizer(content, truncation=True, max_length=256).input_ids
+            content = tokenizer.decode(ids, skip_special_tokens=True)
+            node.write_text(content)
+    
     rouge_dir = install_rogue()
 
     from pyrouge import Rouge155
@@ -161,22 +239,17 @@ def job_booksum(args, model, tokenizer, device):
     with open(out_dir / "rouge_scores.json", 'w') as f:
         json.dump(output_dict, f, indent=2)
 
+@torch.no_grad()
+def job_booksum(args, model, tokenizer, device):
+    seed()
 
-class StopAfterStringIsGenerated(LogitsProcessor):
-
-    def __init__(self, base_len: int, tokenizer):
-        super().__init__()
-
-        self.base_len = base_len
-        self.tokenizer = tokenizer
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if input_ids.size(1) > self.base_len:
-            decoded = self.tokenizer.batch_decode(input_ids[:, self.base_len:])
-            ends_with_answer = torch.tensor([s.endswith("</s>") for s in decoded], device=scores.device)
-            forced_eos = torch.full((scores.size(1),), -float("inf"), device=scores.device)
-            forced_eos[self.tokenizer.eos_token_id] = 0
-
-            # Force generation of EOS after a space
-            scores[ends_with_answer] = forced_eos
-        return scores
+    out_dir = pathlib.Path(
+        f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
+        f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_ns{args.no_sample}"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
+    
+    generate_samples(args, model, tokenizer, device, out_dir)
+    evaluate_rouge(args, model, tokenizer, device, out_dir)
+    print(args)

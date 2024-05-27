@@ -8,15 +8,11 @@ from tqdm import tqdm
 import argparse
 from transformers import TextStreamer
 
-from vllm import LLM, SamplingParams
 from peft import LoraConfig, TaskType
 from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers.models.auto import AutoTokenizer
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.utils import seed, get_bench
-
-from vllm.transformers_utils import config as vllm_transformers_config
-vllm_transformers_config.FORCE_SIGNLE_LAYER = int(os.environ.get('FORCE_SINGLE_LAYER', '0'))
 
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):
@@ -32,6 +28,10 @@ class BatchedStreamer(TextStreamer):
         return super().put(value[:1])
 
 def job_stream(args, model, tokenizer, device):
+    from vllm import LLM, SamplingParams
+    from vllm.transformers_utils import config as vllm_transformers_config
+    vllm_transformers_config.FORCE_SIGNLE_LAYER = int(os.environ.get('FORCE_SINGLE_LAYER', '0'))
+    
     while True:
         get_bench().reset_trace()
         get_bench().reset_measures()

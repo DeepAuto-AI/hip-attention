@@ -1,5 +1,6 @@
 import os
 import pathlib
+import warnings
 
 import torch
 import transformers
@@ -18,6 +19,7 @@ from timber.main.jobs.merge_lora import job_merge_lora
 from timber.main.jobs.mmlu import job_mmlu
 from timber.main.jobs.ppl import job_ppl
 from timber.main.jobs.stream import job_stream
+from timber.main.jobs.stream_demo import job_stream_demo
 from timber.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from timber.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from timber.utils import seed
@@ -26,21 +28,27 @@ from timber.utils import seed
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
     
+    if int(os.getenv('HIP_K', '512')) != args.k:
+        warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
+    
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
+        'vllm_llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+        'vllm_llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
-        'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
-        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+        # 'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
         'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
         'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
+        'vllm_qwen7b_pt': 'Qwen/Qwen1.5-7B',
         'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -50,6 +58,9 @@ def load_vllm_model(args: ArgsType):
         'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
         'vllm_gemma2b': 'google/gemma-2b-it',
         'vllm_gemma7b': 'google/gemma-7b-it',
+        'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
+        "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
+        'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
@@ -60,6 +71,7 @@ def load_vllm_model(args: ArgsType):
     assert args.checkpoint is None
     
     seq_len = args.stride
+    assert seq_len > 0
     # seq_len = 10600
     model = LLM(
         model_id,
@@ -76,6 +88,14 @@ def load_vllm_model(args: ArgsType):
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    
+    if tokenizer.bos_token_id is None:
+        tokenizer.bos_token = tokenizer.eos_token
+        tokenizer.bos_token_id = tokenizer.eos_token_id
+    
+    if tokenizer.eos_token_id is None:
+        tokenizer.eos_token = tokenizer.bos_token
+        tokenizer.eos_token_id = tokenizer.bos_token_id
 
     return model, tokenizer, device
 
@@ -89,8 +109,10 @@ def load_model(args):
         'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+        'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -109,8 +131,13 @@ def load_model(args):
         config = LlamaConfig.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
     
-    infer_dtype = torch.bfloat16
-    # infer_dtype = torch.float32
+    if torch.cuda.is_bf16_supported():
+        infer_dtype = torch.bfloat16
+    else:
+        infer_dtype = torch.float16
+    
+    if os.getenv('FORCE_FP32', '0') == '1':
+        infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
@@ -119,7 +146,7 @@ def load_model(args):
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map="auto",
+        device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],
@@ -207,7 +234,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo']
     
     model, tokenizer, device = load_model(args)
 
@@ -223,6 +250,8 @@ def main():
         job_booksum(args, model, tokenizer, device)
     elif args.job == 'merge_lora':
         job_merge_lora(args, model, tokenizer, device)
+    elif args.job == 'stream_demo':
+        job_stream_demo(args, model, tokenizer, device)
     else:
         raise Exception()
 

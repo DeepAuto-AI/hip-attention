@@ -1,3 +1,4 @@
+import os
 import triton
 import triton.language as tl
 import torch
@@ -1504,7 +1505,7 @@ def masking_iteration(
         SPARQ_HID, 
         SPARQ_HID // 2 if SPARQ_HID > 16 else SPARQ_HID,
         N_COMPLETED,
-        n_iteration,
+        min(n_iteration, int(os.getenv('HIP_DEBUG_LIMIT_N_ITER', '99999999'))),
         
         # vLLM compat inputs
         *stride_keys_vllm,

@@ -781,7 +781,7 @@ class Qwen2CustomAttention(Qwen2Attention):
         elif self.attention_method == 'performer':
             try:
                 from performer_pytorch import FastAttention
-                if not os.environ.get('IGNORE_PERFORMER', '1') == '1':
+                if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
                     dim_heads = config.hidden_size // config.num_attention_heads
                     default_dtype = torch.get_default_dtype()
                     torch.set_default_dtype(torch.float32)
@@ -829,8 +829,17 @@ class Qwen2CustomAttention(Qwen2Attention):
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
+        
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        if (self.tree_rope_method == 'none'):
+            if self.layer_idx in self.tree_dense_layers:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            else:
+                if self.attention_method == 'streaming_llm':
+                    pass
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -838,11 +847,6 @@ class Qwen2CustomAttention(Qwen2Attention):
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        causal_mask = attention_mask
-        # if attention_mask is not None and cache_position is not None:
-        if attention_mask is not None:
-            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
@@ -855,7 +859,7 @@ class Qwen2CustomAttention(Qwen2Attention):
 
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,
-            attention_mask=attention_mask, causal_mask=causal_mask,
+            attention_mask=attention_mask, causal_mask=None,
             attention_dropout=self.attention_dropout if self.training else 0.0,
 
             # Attention method

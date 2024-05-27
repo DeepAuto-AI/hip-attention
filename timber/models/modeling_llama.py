@@ -721,19 +721,19 @@ class LlamaCustomAttention(LlamaAttention):
 
         self.attention_method = 'none'
         self.tree_k = 512
-        self.tree_block_size_q = 8
-        self.tree_block_size_k = 1
-        self.tree_using_context_avg = True
-        self.tree_dense_queries = 2048
+        self.tree_block_size_q = 32
+        self.tree_block_size_k = 2
+        self.tree_using_context_avg = False
+        self.tree_dense_queries = 0
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
         self.tree_high_k_layers = {
             # 0:4, 1:4, 2:4,
         }
         self.tree_rope_method = 'none'
-        self.tree_enable_sparq = False
-        self.tree_enable_flash = False
-        self.tree_use_sliding_window = False
+        self.tree_enable_sparq = True
+        self.tree_enable_flash = True
+        self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
@@ -761,7 +761,7 @@ class LlamaCustomAttention(LlamaAttention):
         elif self.attention_method == 'performer':
             try:
                 from performer_pytorch import FastAttention
-                if not os.environ.get('IGNORE_PERFORMER', '1') == '1':
+                if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
                     dim_heads = config.hidden_size // config.num_attention_heads
                     default_dtype = torch.get_default_dtype()
                     torch.set_default_dtype(torch.float32)
@@ -775,6 +775,16 @@ class LlamaCustomAttention(LlamaAttention):
             except ImportError:
                 logger.error("Please install performer-pytorch to use Performer attention.")
                 raise
+        
+        from timber.models.hyper_attention.hyper_attn import HyperAttention
+        self.hyper_attention = HyperAttention(
+            input_dim=self.hidden_size // config.num_attention_heads,
+            lsh_num_projs=7, # not very meaningful after 7
+            block_size=64, # smaller better
+            sample_size=1024, # larger better
+            min_seq_len=32, # this factor is kind of random. usually smaller better
+            cuda=True, 
+        )
 
     # Adapted from LlamaAttention.forward
     def forward(
@@ -803,13 +813,24 @@ class LlamaCustomAttention(LlamaAttention):
         past_key_value = getattr(self, "past_key_value", past_key_value)
         cos, sin = self.rotary_emb(value_states, position_ids)
 
-        if self.tree_rope_method == 'none':
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        if (self.tree_rope_method == 'none'):
+            if self.layer_idx in self.tree_dense_layers:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            else:
+                if self.attention_method == 'streaming_llm':
+                    cos = sin = None
+                else:
+                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if cos is None:
+                cos, sin = self.rotary_emb(
+                    value_states,
+                    torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -827,6 +848,16 @@ class LlamaCustomAttention(LlamaAttention):
         if past_key_value is not None:
             assert hasattr(past_key_value, "cumsum")
             last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+        
+        # import matplotlib.pyplot as plt
+        # q, k = apply_rotary_pos_emb(query_states[0].float(), key_states[0].float(), cos, sin, None)
+        # probs_truth = (q @ k.transpose(-1, -2)) / (128 ** 0.5)
+        # probs = probs_truth.softmax(-1).float()[0]
+        # plt.clf()
+        # plt.imshow(probs[0].cpu().numpy() ** 0.2)
+        # plt.colorbar()
+        # plt.savefig('dump.png')
+        # input('b')
 
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,
@@ -865,6 +896,9 @@ class LlamaCustomAttention(LlamaAttention):
             # Attention sparsity loss
             output_attn_sparsity_loss=output_attn_sparsity_loss,
             tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+            
+            # Hyper attention states
+            hyper_attention=self.hyper_attention,
         )
 
         if last_cumsum is not None:

@@ -6,14 +6,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setuptools.setup(
     name="hip_attention",
     version="0.0.1",
-    author="Heejun Lee",
-    author_email="gmlwns5176@gmail.com",
+    author="AUTHOR",
+    author_email="EMAIL",
     description="HiP Attention",
     long_description=long_description,
-    long_description_content_type="gmlwns2000/hip-attention",
-    url="https://github.com/gmlwns2000",
+    long_description_content_type="GITHUB LINK",
+    url="GITHUB URL",
     project_urls={
-        "Bug Tracker": "https://github.com/gmlwns2000",
+        "Bug Tracker": "GITHUB URL",
     },
     classifiers=[
         "Programming Language :: Python :: 3",

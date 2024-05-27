@@ -2,13 +2,16 @@ import json
 import math
 import sys, subprocess, os, itertools, tqdm
 import seaborn as sns
-sns.set_style('whitegrid')
 import pypareto
 import matplotlib.pyplot as plt
 
+from timber.utils import setup_seaborn
+setup_seaborn()
+
 os.environ['PYTHONPATH'] = './'
 
-query_sizes = [1, 2, 4, 8, 16]
+# query_sizes = [1, 2, 4, 8, 16]
+query_sizes = [1,]
 block_size_qs = [8, 16, 32]
 block_size_ks = [1, 2, 4]
 ks = [256, 512, 1024]
@@ -18,6 +21,7 @@ def samples():
     batch_size = 256
     results = {}
     cache_path = './cache/attention1_block_gpu/result.json'
+    refresh_interval = 8
     
     for query_size in tqdm.tqdm(query_sizes, dynamic_ncols=True, desc='none'):
         subprocess.call([
@@ -51,6 +55,7 @@ def samples():
             '--dups', '4',
             '--batch_size', str(batch_size),
             '--samples', str(num_samples),
+            '--refresh_interval', str(refresh_interval),
         ])
         with open(cache_path, 'r') as f:
             latency = json.load(f)['mean']
@@ -89,15 +94,15 @@ def plot():
             ys.append(speedup)
         sns.scatterplot(x=xs, y=ys, label=f'Query Length: {query_size}')
     
-    plt.title('Decode Speedup / Num. Blocks')
+    plt.title('Decode Speedup (4k) / Num. Blocks')
     plt.xlabel('Num. Blocks')
     plt.ylabel('Speedup')
     plt.axhline(1.0, color='#555', linestyle='--', linewidth=1)
     # plt.yscale('log', base=2)
     # plt.xscale('log', base=2)
     
-    plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight')
-    plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig('./saves/speedup_report/plot_speedup_report.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig('./saves/speedup_report/plot_speedup_report.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print('saved', './saves/speedup_report/plot_speedup_report.png')
 
 def by_value(a, b):
@@ -110,6 +115,8 @@ def by_value(a, b):
         return pypareto.Domination.LESS
     else:
         return pypareto.Domination.EQUAL
+
+LINEWIDTH = 1.5
 
 def plot_ppl(query_size=1):
     path = './saves/speedup_report/result.json'
@@ -137,42 +144,62 @@ def plot_ppl(query_size=1):
         })
         xs.append(latency_base / latency_timber)
     
+    data = list(sorted(zip(xs, ys, entries), key=lambda x: x[0]))
+    xs = [d[0] for d in data]
+    ys = [d[1] for d in data]
+    entries = [d[2] for d in data]
+    
     pts = list(zip(xs, ys, map(lambda x: (x,), range(len(data_ppl)))))
-    chain = pypareto.Comparison(by_value, pypareto.MaxMinList(pypareto.MaxMin.MAX, pypareto.MaxMin.MIN, pypareto.MaxMin.MIN)).as_chain()
+    chain = pypareto.Comparison(
+        by_value, 
+        pypareto.MaxMinList(
+            pypareto.MaxMin.MAX, 
+            pypareto.MaxMin.MIN, 
+            pypareto.MaxMin.MIN,
+        )
+    ).as_chain()
     pts = chain.split_by_pareto(pts)[0]
     xs_front = [pt[0] for pt in pts]
     ys_front = [pt[1] for pt in pts]
     idxs_front = [pt[2][0] for pt in pts]
     
-    plt.figure(figsize=(5, 4))
+    plt.figure(figsize=(2.5, 2.0))
     
-    plt.title(f'Perplexity / Decoding Speedup (#Query: {query_size})')
-    plt.ylabel('PPL. (w/o train)')
-    plt.xlabel('Decoding Speedup')
+    if query_size == 1:
+        plt.title(f'PPL. / Decoding Speedup (4k)')
+    else:
+        plt.title(f'PPL. / Decoding Speedup (4k, #Q:{query_size})')
+    plt.ylabel('PPL. (w/o train) ↓')
+    plt.xlabel('Decoding Speedup ↑')
     sns.scatterplot(x=xs, y=ys)
-    sns.lineplot(x=xs_front, y=ys_front)
+    sns.lineplot(x=xs_front, y=ys_front, linewidth=LINEWIDTH)
+    last_x = 0
     for idx in range(len(idxs_front)):
-        plt.annotate(
-            f'k:{entries[idxs_front[idx]]["k"]}, bq:{entries[idxs_front[idx]]["block_size_q"]}, bk:{entries[idxs_front[idx]]["block_size_k"]}', 
-            (xs_front[idx], ys_front[idx] + 0.01),
-            horizontalalignment='center',
-            verticalalignment='bottom',
-            fontsize=9,
-        )
+        if abs(xs_front[idx] - last_x) > 0.8:
+            x = plt.annotate(
+                f'$k$:{entries[idxs_front[idx]]["k"]}\n$b_q$:{entries[idxs_front[idx]]["block_size_q"]}, $b_k$:{entries[idxs_front[idx]]["block_size_k"]}', 
+                (xs_front[idx] - 0.5, ys_front[idx] + 0.00),
+                horizontalalignment='center',
+                verticalalignment='bottom',
+                fontsize=6.0,
+                color='0.1'
+            )
+            x.set_alpha(0.4)
+            last_x = xs_front[idx]
     
     # baseline_ppl = 5.59
     baseline_ppl = 4.682
-    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=1)
-    plt.axvline(1.0, color='#555', linestyle='--', linewidth=1)
+    plt.axhline(baseline_ppl, color='#555', linestyle='--', linewidth=LINEWIDTH, zorder=1000)
+    plt.axvline(1.0, color='#555', linestyle='--', linewidth=LINEWIDTH, zorder=1000)
     # plt.yscale('log', base=2)
     # plt.xscale('log', base=2)
     
-    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight')
-    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print('saved', f'./saves/speedup_report/plot_speedup_report_ppl_q{query_size}.png')
 
 def main():
-    # samples()
+    samples()
     plot()
     for q in query_sizes: plot_ppl(q)
 

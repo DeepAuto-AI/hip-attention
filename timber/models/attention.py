@@ -31,6 +31,9 @@ def custom_attention(
 
         # Attention sparsity loss
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
+        
+        # Hyper attention state
+        hyper_attention=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -68,18 +71,29 @@ def custom_attention(
     if attention_method == 'none':
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == "cuda":
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=causal_mask,
-            dropout_p=attention_dropout,
-        )
+        if causal_mask is not None:
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=causal_mask,
+                dropout_p=attention_dropout,
+            )
+        else:
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=attention_dropout,
+                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
+                is_causal=attention_mask is None and query_states.shape[-2] > 1,
+            )
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -118,7 +132,7 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
-    elif attention_method == 'timber':
+    elif attention_method == 'timber' or attention_method == 'hip' or attention_method == 'tree':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
         v = value_states
@@ -232,6 +246,48 @@ def custom_attention(
             attn_output = attn_outputs[0]
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
+    elif attention_method == 'streaming_llm':
+        from timber.models.sink_attention.sink_attention import sink_attention
+        
+        q = query_states # / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+
+        N, H, TDST, HID = q.shape
+        _, _, TSRC, _ = k.shape
+        assert k.shape == v.shape
+
+        q = q.reshape(N * H, TDST, HID)  # .contiguous()
+        k = k.reshape(N * H, TSRC, HID)  # .contiguous()
+        v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+
+        attn_output = sink_attention(
+            q, k, v, 
+            rope_cos.squeeze(0), 
+            rope_sin.squeeze(0), 
+            num_sink=4, 
+            window_size=tree_k,
+        )
+
+        attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
+    elif attention_method == 'hyper_attention':
+        q = query_states / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+
+        N, H, TDST, HID = q.shape
+        _, _, TSRC, _ = k.shape
+        assert k.shape == v.shape
+        
+        # q = q.view(N*H, TDST, HID)
+        # k = k.view(N*H, TSRC, HID)
+        # v = v.view(N*H, TSRC, HID)
+        
+        attn_output = hyper_attention(
+            q, k, v, causal=True, scale=1.0
+        )
 
     else:
         raise Exception(attention_method)
