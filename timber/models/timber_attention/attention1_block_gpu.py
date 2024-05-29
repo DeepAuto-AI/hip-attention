@@ -31,8 +31,14 @@ from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
 
-assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
-assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
+# assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
+# assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
+
+if not hasattr(tl, 'sort'):
+    warnings.warn(
+        "Triton Language does not contain `sort` function. "
+        "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
+    )
 
 from timber.utils import get_bench, seed
 from timber.models.timber_attention.common import load_checkouts
