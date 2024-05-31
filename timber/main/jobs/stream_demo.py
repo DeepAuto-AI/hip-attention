@@ -20,7 +20,6 @@ def generate_stream(
     sampling_params,
     prompt_token_ids = None,
     use_tqdm: bool = False,
-    lora_request = None,
 ):
     from vllm import SamplingParams
     if prompts is None and prompt_token_ids is None:
@@ -48,7 +47,6 @@ def generate_stream(
             prompt,
             sampling_params,
             token_ids,
-            lora_request=lora_request
         )
     
     # Initialize tqdm.
