@@ -85,7 +85,7 @@ def generate_stream(
             n_decode += 1
             
             if stream.finished:
-                print(f'\n\n{"="*60}\n[ATTENTION_BACKEND={os.getenv("ATTENTION_BACKEND", "oops")}] (model={args.model}, prompt_len={len(stream.prompt_token_ids)}, response_len={len(token_ids)})\nEnd-to-End vLLM Decoding Latency: {t_decode / n_decode*1000:.2f} ms\n{"="*60}')
+                print(f'\n\n{"="*60}\n[VLLM_ATTENTION_BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "oops")}] (model={args.model}, prompt_len={len(stream.prompt_token_ids)}, response_len={len(token_ids)})\nEnd-to-End vLLM Decoding Latency: {t_decode / n_decode*1000:.2f} ms\n{"="*60}')
         else:
             if istep == 0:
                 print()
