@@ -141,7 +141,7 @@ pip install -e . --no-build-isolation --verbose
 
 ## Running without docker
 ```bash
-ATTENTION_BACKEND=hip \
+VLLM_ATTENTION_BACKEND=HIP_ATTN \
 HIP_K=512 \
 HIP_REFRESH_INTERVAL=8 \
 HIP_DENSE_LAYERS=4 \
