@@ -179,8 +179,8 @@ def hip_attention_mask(
         # SPARQ_HID = 16
         SPARQ = False
     
-    if SPARQ:
-        warnings.warn('sparq is enabled')
+    # if SPARQ:
+    #     warnings.warn('sparq is enabled')
     
     dtype = queries.dtype
     device = queries.device
