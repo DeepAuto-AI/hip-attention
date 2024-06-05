@@ -1043,6 +1043,8 @@ def paged_timber_attention(
     using_precomputed_mask: bool = False,
     precomputed_indices: Tensor = None,
     precomputed_ks: Tensor = None,
+    
+    query_format: Literal['N_H_D', 'NH_TDST_D'] = 'N_H_D',
 ):
     """
     vLLM compatible paged attention
@@ -1056,7 +1058,13 @@ def paged_timber_attention(
     
     with timer('scaling'):
         q = q * q_scale
-        q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
+        
+        if query_format == 'N_H_D':
+            q = q.view(q.shape[0] * q.shape[1], 1, q.shape[2])
+        elif query_format == 'NH_TDST_D':
+            pass
+        else:
+            raise Exception(f'unknown format {query_format}')
     
     with timer('compat'):
         if max_context_len < 0:
