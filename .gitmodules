@@ -1,6 +1,6 @@
-[submodule "third_party/LongBench-timber"]
-	path = third_party/LongBench-timber
-	url = git@github.com:gmlwns2000/LongBench-timber.git
+[submodule "third_party/LongBench-hip"]
+	path = third_party/LongBench-hip
+	url = git@github.com:gmlwns2000/LongBench-hip.git
 [submodule "third_party/lm-evaluation-harness"]
 	path = third_party/lm-evaluation-harness
 	url = git@github.com:gmlwns2000/lm-evaluation-harness.git

@@ -27,7 +27,7 @@ wandb/
 *.csv
 
 src/utils/secrets.*
-timber/utils/secrets.*
+hip/utils/secrets.*
 plots/
 submission/
 submission*.zip
@@ -39,8 +39,8 @@ save/
 *.ttf
 .idea/*
 
-timber.egg-info/
-timber/timber.egg-info/
+hip.egg-info/
+hip/hip.egg-info/
 
 *.qdstrm
 *.nsys-rep

@@ -4,11 +4,11 @@ git checkout-index -a -f --prefix=./submission/
 
 cd third_party
 
-cd vllm-timber
-git checkout-index -a -f --prefix=../../submission/third_party/vllm-timber/
+cd vllm-hip
+git checkout-index -a -f --prefix=../../submission/third_party/vllm-hip/
 
-cd ../LongBench-timber
-git checkout-index -a -f --prefix=../../submission/third_party/LongBench-timber/
+cd ../LongBench-hip
+git checkout-index -a -f --prefix=../../submission/third_party/LongBench-hip/
 
 cd ../lm-evaluation-harness
 git checkout-index -a -f --prefix=../../submission/third_party/lm-evaluation-harness/

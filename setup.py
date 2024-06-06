@@ -18,7 +18,7 @@ setuptools.setup(
     classifiers=[
         "Programming Language :: Python :: 3",
     ],
-    package_dir={"timber": "timber"},
-    packages=["timber"],
+    package_dir={"hip": "hip"},
+    packages=["hip"],
     python_requires=">=3.6",
 )
