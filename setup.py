@@ -20,5 +20,5 @@ setuptools.setup(
     ],
     package_dir={"hip": "hip"},
     packages=["hip"],
-    python_requires=">=3.6",
+    python_requires=">=3.9",
 )
