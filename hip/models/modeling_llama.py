@@ -792,7 +792,7 @@ class LlamaCustomAttention(LlamaAttention):
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional["hipCache"] = None,
+            past_key_value: Optional["HiPCache"] = None,
             output_attentions: bool = False,
             output_attn_sparsity_loss: bool = False,
             use_cache: bool = False,
@@ -922,7 +922,7 @@ LLAMA_ATTENTION_CLASSES = {
 }
 
 
-class hipCache(DynamicCache):
+class HiPCache(DynamicCache):
     def __init__(self):
         super().__init__()
         self.cumsum = [None, ] * 100
@@ -1250,7 +1250,7 @@ class LlamaModel(LlamaPreTrainedModel):
         past_seen_tokens = 0
         if use_cache:  # kept for BC (cache positions)
             if not isinstance(past_key_values, StaticCache):
-                past_key_values = hipCache.from_legacy_cache(past_key_values)
+                past_key_values = HiPCache.from_legacy_cache(past_key_values)
                 past_seen_tokens = past_key_values.get_seq_length()
 
         if cache_position is None:

@@ -917,7 +917,7 @@ QWEN2_ATTENTION_CLASSES = {
 }
 
 
-class hipCache(DynamicCache):
+class HiPCache(DynamicCache):
     def __init__(self):
         super().__init__()
         self.cumsum = [None, ] * 100
@@ -1223,7 +1223,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = hipCache.from_legacy_cache(past_key_values)
+                past_key_values = HiPCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:
