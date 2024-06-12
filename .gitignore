@@ -41,6 +41,7 @@ save/
 
 timber.egg-info/
 timber/timber.egg-info/
+build/
 
 *.qdstrm
 *.nsys-rep
