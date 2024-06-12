@@ -1,6 +1,44 @@
+# ##############################################################################
+# PEP 518 [build-system] table
+#
+# We are using setuptools as the build backend, not poetry, flit, or etc.
+#
+# - https://setuptools.pypa.io/en/latest/index.html
+# - https://peps.python.org/pep-0518/#build-system-table
+# ##############################################################################
 [build-system]
-requires = [
-    "setuptools>=42",
-    "wheel"
-]
+requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
+
+# ##############################################################################
+# PEP 621 [project] table
+# - https://peps.python.org/pep-0621/
+# - https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
+# ##############################################################################
+# Basic package info
+
+[project]
+name = "hip-attention"  # Name of package when installed using pip
+version = "0.1.0"
+description = "HiP Attention"
+requires-python = ">=3.11"
+
+# ##############################################################################
+# PEP 518 [tool] table
+# - https://peps.python.org/pep-0518/#tool-table
+# ##############################################################################
+# We use src-layout
+# - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+[tool.setuptools.packages]
+
+[tool.setuptools.packages.find]
+include = ["timber"]
+namespaces = false
+
+# Add package data
+# - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+[tool.setuptools.package-data]
+"*" = [
+  # required by mypy
+  "py.typed",
+]
