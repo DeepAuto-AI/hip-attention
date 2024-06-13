@@ -18,7 +18,7 @@ echo HIP_K=$HIP_K
 echo HIP_REFRESH_INTERVAL=$HIP_REFRESH_INTERVAL
 echo MODEL=$MODEL, suggested vllm_qwen14b_gptq
 
-$PYBIN -b timber/main/model_eval.py \
+$PYBIN -b hip/main/model_eval.py \
     --model $MODEL \
     --job stream \
     --batch_size $BATCH_SIZE \

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export METHOD=timber
+export METHOD=hip
 export BENCHMARK_RUNNER=1
 export PROMPT_ATTENTION_BACKEND=$METHOD
 export PAGED_ATTENTION_BACKEND=$METHOD
@@ -12,4 +12,4 @@ export FORCE_EAGER=0
 echo HF_HOME=$HF_HOME
 echo PYTHON_BIN=$PYTHON_BIN
 
-$PYTHON_BIN timber/main/llama_eval.py --model vllm_yi6b --method timber --job stream --stride 32000 --input sample32k.md --batch_size 8 --max_tokens 16
+$PYTHON_BIN hip/main/llama_eval.py --model vllm_yi6b --method hip --job stream --stride 32000 --input sample32k.md --batch_size 8 --max_tokens 16

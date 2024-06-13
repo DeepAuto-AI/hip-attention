@@ -4,7 +4,7 @@
 
 # Usage
 
-After installation, you can access to `timber` package from any project. `timber` is code name of HiP attention.
+After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
 
 ## TL;DR
 
@@ -17,7 +17,7 @@ After installation, you can access to `timber` package from any project. `timber
 ```py
 from torch import Tensor
 from typing import Tuple
-from timber import timber_attention
+from hip import hip_attention
 
 # NOTE: you have to scale the Q before pass to our kernel
 scale = 1 / (HID ** 0.5)
@@ -52,7 +52,7 @@ position_ids: Optional[Tensor] = \
     G2 in Self-Extend
 """
 
-output, _ = timber_attention(
+output, _ = hip_attention(
     q=q * scale,
     k=k,
     v=v,
@@ -72,7 +72,7 @@ output, _ = timber_attention(
     self_extend_window=self.self_extend_window,
 ) # type: Tuple[Tensor[N*H, TDST, HID], ...]
 
-from timber import timber_attention, paged_timber_attention
+from hip import hip_attention, paged_hip_attention
 
 """
 Paged Attention Supported HiP Attention
@@ -81,7 +81,7 @@ This function is already integrated with in provided vLLM patches.
 Please look following sections, to utilize the paged attention and 
 OpenAI compatible API server with HiP.
 """
-output, _ = paged_timber_attention(
+output, _ = paged_hip_attention(
     ...
 ) # type: Tuple[Tensor[N*H, TDST, HID], ...]
 ```
@@ -101,8 +101,8 @@ git submodule update --init --remote --recursive  # pull submodules
 Run commands below:
 
 ```bash
-cd third_party/vllm-timber
-docker build . --build-context timber=../.. --target vllm-openai --tag vllm/vllm-openai
+cd third_party/vllm-hip
+docker build . --build-context hip=../.. --target vllm-openai --tag vllm/vllm-openai
 ```
 
 ## Running Docker
@@ -133,7 +133,7 @@ conda install -c conda-forge cupy cuda-version=12.4
 cd hip-attention
 pip install -e .
 pip install numba packaging
-cd third_party/vllm-timber
+cd third_party/vllm-hip
 pip install -r requirements-build.txt
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -e . --no-build-isolation --verbose
@@ -141,7 +141,7 @@ pip install -e . --no-build-isolation --verbose
 
 ## Running without docker
 ```bash
-ATTENTION_BACKEND=hip \
+VLLM_ATTENTION_BACKEND=HIP_ATTN \
 HIP_K=512 \
 HIP_REFRESH_INTERVAL=8 \
 HIP_DENSE_LAYERS=4 \
@@ -177,44 +177,44 @@ With following commands, you can reproduce most of our experiments.
 ## Streaming Demo
 ```bash
 #HiP
-CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
 
 #vLLM
-CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
 ```
 ## Generation Demo
 ```bash
-ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 BENCHMARK_RUNNER=1 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --model vllm_qwen7b --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2 --input samples/32k.md --max_tokens 128 --stride 32000 --batch_size 4
+ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 BENCHMARK_RUNNER=1 HIP_DENSE_LAYERS=4 python hip/main/model_eval.py --model vllm_qwen7b --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2 --input samples/32k.md --max_tokens 128 --stride 32000 --batch_size 4
 ```
 
 ## Interative Generation Demo
 ```bash
 # NOTE: this demo use eager mode. this must be much slower than ideal speed due to single batch and JIT compilation.
-python timber/main/model_eval.py --model llama32k --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2
+python hip/main/model_eval.py --model llama32k --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2
 ```
 
 ## Attention Latency Microbenchmarks
 ```bash
-python timber/models/timber_attention/attention1_block_gpu.py --method timber --k 512 --block_size_q 32 --block_size_k 2 --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+python hip/models/hip_attention/attention1_block_gpu.py --method hip --k 512 --block_size_q 32 --block_size_k 2 --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
 
-python timber/models/timber_attention/attention1_block_gpu.py --method none --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+python hip/models/hip_attention/attention1_block_gpu.py --method none --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
 
-python timber/models/timber_attention/attention1_block_gpu.py --method flash --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
+python hip/models/hip_attention/attention1_block_gpu.py --method flash --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
 ```
 
 ## Wikitext2 Perplexity
 ```bash
 # HiP
-python timber/main/model_eval.py --job ppl --method timber --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
+python hip/main/model_eval.py --job ppl --method hip --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
 
 # StreamingLLM
-python timber/main/model_eval.py --job ppl --method streaming_llm --k 512 --overwrite --model llama32k --stride 8192
+python hip/main/model_eval.py --job ppl --method streaming_llm --k 512 --overwrite --model llama32k --stride 8192
 
 # HyperAttention
-python timber/main/model_eval.py --job ppl --method hyper_attention --overwrite --model llama32k --stride 8192 --dense_layers 6
+python hip/main/model_eval.py --job ppl --method hyper_attention --overwrite --model llama32k --stride 8192 --dense_layers 6
 
 # vanilla
-python timber/main/model_eval.py --job ppl --method none --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
+python hip/main/model_eval.py --job ppl --method none --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
 ```
 
 ## LongBench
@@ -234,16 +234,16 @@ python eval.py --method streaming_llm --k 512 --modl qwen2-7b-chat-32k
 
 ## BookSum
 ```bash
-CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method streaming_llm --k 512 --name exp_name --overwrite
+CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method streaming_llm --k 512 --name exp_name --overwrite
 
-CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python timber/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method timber --k 512 --name exp_name --overwrite
+CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python hip/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method hip --k 512 --name exp_name --overwrite
 
-CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=none python timber/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method none --name exp_name --overwrite
+CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=none python hip/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method none --name exp_name --overwrite
 ```
 
 ## UVM Benchmark
 ```bash
-BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=512 CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
+BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=512 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
 ```
 
 ## Nsight-System
@@ -258,7 +258,7 @@ MODEL=vllm_luxia21.4b BATCH_SIZE=72 BACKEND=vllm HIP_REFRESH_INTERVAL=1 /usr/loc
 
 ## 4090 vllm dev
 ```bash
-BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=1024 CUDA_VISIBLE_DEVICES=0 python timber/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
+BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=1024 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
 
 sudo /usr/local/cuda-12.2/bin/ncu --target-processes all -f -o profile ./scripts/bench_stream_1.sh
 
@@ -270,12 +270,18 @@ lm_eval --model hf --model_args pretrained=togethercomputer/LLaMA-2-7B-32K,load_
 
 sudo /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 50000 --output report_hip_sys_17 -t cuda -n true ./scripts/bench_stream_1.sh
 
-CUDA_VISIBLE_DEVICES=0,1 HIP_K=512 HIP_DENSE_LAYER=4 HIP_REFRESH_INTERVAL=8 ATTENTION_BACKEND=hip python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+CUDA_VISIBLE_DEVICES=0,1 HIP_K=512 HIP_DENSE_LAYER=4 HIP_REFRESH_INTERVAL=8 ATTENTION_BACKEND=hip python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
 
-CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python timber/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
+
+python examples/openai_chat_image_stress.py --image-file="images/cherry_blossom.jpg" --model="microsoft/Phi-3-vision-128k-instruct" --endpoint="http://localhost:8888/v1" --token="token-blw7qUu6tFQeO9Ch5LVrIBWN3PEx2isaf4Xp" --num-workers 4 --num-seqs 32
+
+MEASURE_PEAK_MEMORY=0 DISABLE_SAMPLING=1 BENCHMARK_RUNNER=1 VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 CUDA_VISIBLE_DEVICES=0,2 python3 -m vllm.entrypoints.openai.api_server --model microsoft/Phi-3-vision-128k-instruct --download-dir $HF_HOME --tensor-parallel-size 2 --kv-cache-dtype fp8_e5m2 --dtype half --gpu-memory-utilization 0.7 --max-model-len 32000 --max-num-seq 256 --trust-remote-code --image-input-type pixel_values --image-token-id -1 --image-input-shape "1008, 1344" --fake-image-input-shape "1, 16, 3, 336, 336" --image-feature-size 1921 --disable-log-request --max-seq-len-to-capture 32000 --swap-space 4 --port 8888
+
+python examples/openai_chat_image_client.py --image-file="images/cherry_blossom.jpg" --model="microsoft/Phi-3-vision-128k-instruct" --endpoint="http://localhost:8888/v1" --token="token-blw7qUu6tFQeO9Ch5LVrIBWN3PEx2isaf4Xp" --max-tokens 512
 ```
 
 ## Example training command
 ```bash
-OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 timber/trainer/timber_trainer_hf.py --method timber --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
+OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 hip/trainer/hip_trainer_hf.py --method hip --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
 ```
