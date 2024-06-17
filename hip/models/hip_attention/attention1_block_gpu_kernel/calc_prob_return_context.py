@@ -795,12 +795,12 @@ def calc_prob_return_context(
     IS_CAUSAL: bool,
     USING_SLIDING_WINDOW: bool,
     SLIDING_WINDOW_SIZE: int,
-    ROPE_METHOD: str,
-    ROPE_COS: Optional[Tensor],
-    ROPE_SIN: Optional[Tensor],
-    POSITION_IDS: Optional[Tensor],
-    SELF_EXTEND_SCALE: int,
-    SELF_EXTEND_WINDOW: int,
+    ROPE_METHOD: str = 'none',
+    ROPE_COS: Optional[Tensor] = None,
+    ROPE_SIN: Optional[Tensor] = None,
+    POSITION_IDS: Optional[Tensor] = None,
+    SELF_EXTEND_SCALE: int = 1,
+    SELF_EXTEND_WINDOW: int = 1,
 ):
     """
     implement flash attention 1, not 2.
