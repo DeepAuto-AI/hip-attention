@@ -17,7 +17,7 @@ from torch import Tensor
 from hip.models.hip_attention.attention1_block_gpu \
     import calc_prob_return_context \
         as block_sparse_flash_attention
-from hip.models.hip_attention.attention1_block_gpu import load_checkouts
+from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
 import numpy as np
 from numpy import ndarray as NdArray
 import numba
@@ -40,12 +40,52 @@ def masking_iteration_draft_numba_kernel(
     block_size_q: int,
     block_size_k: int,
 ) -> int:
-    if k.shape[0] <= mask_k:
+    mask_block_k = cdiv(mask_k, block_size_k)
+    TSRC = k.shape[0]
+    BSRC = cdiv(k.shape[0], block_size_k)
+    
+    if TSRC <= mask_k:
         for i in range(len(indices)):
             indices[i] = i * block_size_k
-        return k.shape[0]
+        return BSRC
     else:
-        pass
+        # initialize
+        group_sizes = np.zeros_like(indices)
+        for i in range(len(indices)):
+            indices[i] = int(BSRC / mask_block_k * i)
+            group_sizes[i] = int(BSRC / mask_block_k * (i + 1)) - int(BSRC / mask_block_k * i)
+        group_size = BSRC / mask_block_k
+        # until converge
+        while group_size > 1:
+            # divide
+            dupped_indices = indices.repeat(2)
+            dupped_indices[1::2] = (dupped_indices[1::2] + group_sizes * 0.5).astype(np.int32)
+            dupped_mask = group_sizes > 1
+            
+            scores = np.zeros_like(dupped_indices, dtype=np.float32)
+            for i in range(len(scores)):
+                if ((i % 2) == 1) and not dupped_mask[i // 2]:
+                    continue
+                idx_tsrc = dupped_indices[i] * block_size_k
+                keys = k[idx_tsrc:idx_tsrc+block_size_k, :]
+                queries = q[:, :]
+                # print(idx_tsrc, TSRC, dupped_mask[i // 2], group_sizes[i // 2], keys.shape, queries.shape)
+                t = queries @ keys.T
+                scores[i] = t.max()
+            scores[1::2] += -32000.0 * ~dupped_mask
+            
+            # select
+            topk_indices = np.argsort(-scores)[:mask_block_k]
+            indices[:] = dupped_indices[topk_indices]
+            dupped_group_sizes = group_sizes.repeat(2)
+            dupped_group_sizes[0::2] = dupped_indices[1::2] - dupped_indices[0::2]
+            dupped_group_sizes[1::2] = dupped_indices[0::2] + group_sizes - dupped_indices[1::2]
+            group_sizes[:] = dupped_group_sizes[topk_indices]
+            # print(group_size, indices, topk_indices, group_sizes)
+            
+            group_size = group_size / 2
+        indices[:] = np.sort(indices) * block_size_k
+        return mask_block_k
 
 def masking_iteration_draft_numba(
     # in
@@ -73,14 +113,14 @@ def masking_iteration_draft_numba(
         for idx_tdst in range(cdiv(TDST, block_size_q)):
             final_k = masking_iteration_draft_numba_kernel(
                 q[idx_n, idx_tdst * block_size_q: (idx_tdst + 1) * block_size_q, :],
-                k[idx_n, :(idx_tdst + 1) * block_size_q + TSRC - TDST + 1, :],
-                indices[idx_n, :],
+                k[idx_n, :(idx_tdst + 1) * block_size_q + TSRC - TDST, :],
+                indices[idx_n, idx_tdst, :],
                 mask_k=mask_k,
                 mask_k_init=mask_k_init,
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
             )
-            ks[idx_n] = final_k
+            ks[idx_n, idx_tdst] = final_k
 
 def masking_iteration_draft(
     q: Tensor,
@@ -139,6 +179,21 @@ def hip_attention(
         block_size_k=block_size_k,
     )
     
+    print(*indices[0], sep='\n')
+    print(ks[0])
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    debug_mask = to_dense(
+        indices.cpu().numpy(),
+        ks.cpu().numpy(),
+        None,
+        N, TDST, TSRC, block_size_q, block_size_k,
+    )
+    # print(debug_mask)
+    import matplotlib.pyplot as plt
+    plt.imshow(debug_mask[0])
+    plt.savefig('dummy.png')
+    
     context = block_sparse_flash_attention(
         q, k, v, 
         attention_mask=None,
@@ -161,6 +216,10 @@ def hip_attention(
     return context, None
 
 if __name__ == '__main__':
-    q, k, v, out = load_checkouts(idx=0, window=16)
-    out_est, _ = hip_attention(q, k, v)
-    print(F.mse_loss(out, out_est).item())
+    q, k, v, out = load_checkouts(idx=6, window=1, seq_len=4096)
+    context, _ = hip_attention(q, k, v, mask_k=512, block_size_k=4, block_size_q=32)
+    
+    stderr = (out - context).abs().mean().item()
+    stdcontext = torch.std_mean(out)[0].item()
+    
+    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
