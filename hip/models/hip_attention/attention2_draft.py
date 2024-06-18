@@ -2,17 +2,28 @@
 HiP v1.1
 TODO:
 1. Masking iteration using integer to avoid aliasing and collision
- - Convert tmask into int32
+ - Convert tmask into int32 (good!)
  - Reuse the computed dot products
-2. Using QUEST method for b_k
-2. Maximum token location predictor
- - Test oracle
+2. Using QUEST method for b_k (not very good)
+3. Maximum token location predictor
+ - Test oracle (not very good)
  - Test estimators
+4. sifters? (not very good)
+5. masking -> allocate cells (not very good)
 """
+
+# normal                    PPL: 9.7576
+# bk 1 bkg 4                PPL: 9.3042
+# bk 4 bkg 1                PPL: 9.1336
+# bk 1 bkg 4 oracle_rep 
+# bk 4 bkg 1 oracle_rep     PPL: 9.1336
+# bk 4 bkg 1 2 sifters      PPL: 9.2236
+# bk 4 bkg 1 recurse 2 lv   PPL: 9.1364
+# bk 4 bkg 1 recurse 3 lv   PPL: 9.1930
 
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Union
 from torch import Tensor
 from hip.models.hip_attention.attention1_block_gpu \
     import calc_prob_return_context \
@@ -23,9 +34,11 @@ from numpy import ndarray as NdArray
 import numba
 import math
 
+@numba.njit
 def cdiv(a, b):
     return math.ceil(a / b)
 
+@numba.njit
 def masking_iteration_draft_numba_kernel(
     #in
     q: NdArray, # fp32[block_size_q, HID]
@@ -39,10 +52,17 @@ def masking_iteration_draft_numba_kernel(
     mask_k_init: int,
     block_size_q: int,
     block_size_k: int,
+    block_size_k_group: int, 
+    oracle_rep: bool,
+    sifter_shift: int, 
+    has_initial_indices: bool,
+    has_initial_ks: bool,
+    initial_group_sizes: Optional[NdArray],
+    sliding_window_size: int, 
 ) -> int:
     mask_block_k = cdiv(mask_k, block_size_k)
-    TSRC = k.shape[0]
-    BSRC = cdiv(k.shape[0], block_size_k)
+    TSRC = max(0, k.shape[0] - sliding_window_size)
+    BSRC = cdiv(TSRC, block_size_k)
     
     if TSRC <= mask_k:
         for i in range(len(indices)):
@@ -50,43 +70,71 @@ def masking_iteration_draft_numba_kernel(
         return BSRC
     else:
         # initialize
-        group_sizes = np.zeros_like(indices)
-        for i in range(len(indices)):
-            indices[i] = int(BSRC / mask_block_k * i)
-            group_sizes[i] = int(BSRC / mask_block_k * (i + 1)) - int(BSRC / mask_block_k * i)
-        group_size = BSRC / mask_block_k
+        if has_initial_indices or has_initial_ks:
+            assert has_initial_indices
+            assert has_initial_ks
+            assert initial_group_sizes is not None
+            
+            group_sizes = initial_group_sizes.copy()
+            group_size = np.max(group_sizes)
+        else:
+            group_sizes = np.zeros_like(indices)
+            for i in range(len(indices)):
+                indices[i] = int(BSRC / mask_block_k * i)
+                group_sizes[i] = int(BSRC / mask_block_k * (i + 1)) - int(BSRC / mask_block_k * i)
+            group_size = BSRC / mask_block_k
+        
         # until converge
+        stage = 0
         while group_size > 1:
             # divide
-            dupped_indices = indices.repeat(2)
+            dupped_indices = indices.repeat(2).copy()
             dupped_indices[1::2] = (dupped_indices[1::2] + group_sizes * 0.5).astype(np.int32)
-            dupped_mask = group_sizes > 1
+            dupped_group_sizes = group_sizes.repeat(2).copy()
+            dupped_group_sizes[0::2] = dupped_indices[1::2] - dupped_indices[0::2]
+            dupped_group_sizes[1::2] = dupped_indices[0::2] + group_sizes - dupped_indices[1::2]
+            dupped_mask = dupped_group_sizes >= 1
             
             scores = np.zeros_like(dupped_indices, dtype=np.float32)
             for i in range(len(scores)):
-                if ((i % 2) == 1) and not dupped_mask[i // 2]:
+                if not dupped_mask[i]:
                     continue
                 idx_tsrc = dupped_indices[i] * block_size_k
-                keys = k[idx_tsrc:idx_tsrc+block_size_k, :]
-                queries = q[:, :]
-                # print(idx_tsrc, TSRC, dupped_mask[i // 2], group_sizes[i // 2], keys.shape, queries.shape)
-                t = queries @ keys.T
-                scores[i] = t.max()
-            scores[1::2] += -32000.0 * ~dupped_mask
+                queries = q[1::2, :]
+                if block_size_k_group > 1:
+                    assert not oracle_rep
+                    keys_min = k[idx_tsrc:idx_tsrc+block_size_k, :q.shape[-1]]
+                    keys_max = k[idx_tsrc:idx_tsrc+block_size_k, q.shape[-1]:]
+                    t_1 = queries @ np.ascontiguousarray(keys_min.T)
+                    t_2 = queries @ np.ascontiguousarray(keys_max.T)
+                    scores[i] = max(t_1.max(), t_2.max())
+                else:
+                    if not oracle_rep:
+                        keys = k[idx_tsrc:idx_tsrc+block_size_k, :]
+                        t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
+                        scores[i] = t.max()
+                    else:
+                        for shift in range(dupped_group_sizes[i]):
+                            keys = k[idx_tsrc+shift*block_size_k:idx_tsrc+shift*block_size_k+block_size_k, :]
+                            t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
+                            scores[i] = max(scores[i], t.max())
+            scores[:] += -32000.0 * ~dupped_mask
             
             # select
-            topk_indices = np.argsort(-scores)[:mask_block_k]
+            if stage == 0:
+                topk_indices = np.argsort(-scores)[mask_block_k*sifter_shift:mask_block_k*sifter_shift+mask_block_k]
+            else:
+                topk_indices = np.argsort(-scores)[:mask_block_k]
             indices[:] = dupped_indices[topk_indices]
-            dupped_group_sizes = group_sizes.repeat(2)
-            dupped_group_sizes[0::2] = dupped_indices[1::2] - dupped_indices[0::2]
-            dupped_group_sizes[1::2] = dupped_indices[0::2] + group_sizes - dupped_indices[1::2]
             group_sizes[:] = dupped_group_sizes[topk_indices]
             # print(group_size, indices, topk_indices, group_sizes)
             
             group_size = group_size / 2
+            stage += 1
         indices[:] = np.sort(indices) * block_size_k
         return mask_block_k
 
+@numba.njit(parallel=True)
 def masking_iteration_draft_numba(
     # in
     q: NdArray,
@@ -101,6 +149,13 @@ def masking_iteration_draft_numba(
     mask_k_init: int,
     block_size_q: int,
     block_size_k: int,
+    block_size_k_group: int,
+    oracle_rep: bool,
+    sifter_shift: int,
+    has_initial_indices: bool,
+    has_initial_ks: bool,
+    initial_group_sizes: Optional[NdArray],
+    sliding_window_size: int,
 ):
     """
     grid = (N, TDST)
@@ -109,18 +164,125 @@ def masking_iteration_draft_numba(
     N, TDST, _ = q.shape
     _, TSRC, _ = k.shape
     
-    for idx_n in range(N):
-        for idx_tdst in range(cdiv(TDST, block_size_q)):
+    for idx_n in numba.prange(N):
+        for idx_tdst in numba.prange(cdiv(TDST, block_size_q)):
             final_k = masking_iteration_draft_numba_kernel(
                 q[idx_n, idx_tdst * block_size_q: (idx_tdst + 1) * block_size_q, :],
-                k[idx_n, :(idx_tdst + 1) * block_size_q + TSRC - TDST, :],
+                k[idx_n, :((idx_tdst + 1) * block_size_q + TSRC * block_size_k_group - TDST) // block_size_k_group, :],
                 indices[idx_n, idx_tdst, :],
                 mask_k=mask_k,
                 mask_k_init=mask_k_init,
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
+                block_size_k_group=block_size_k_group,
+                oracle_rep=oracle_rep,
+                sifter_shift=sifter_shift,
+                has_initial_indices=has_initial_indices,
+                has_initial_ks=has_initial_ks,
+                initial_group_sizes=initial_group_sizes[idx_n, idx_tdst, :] if initial_group_sizes is not None else None,
+                sliding_window_size=sliding_window_size,
             )
             ks[idx_n, idx_tdst] = final_k
+
+def masking_iteration_draft_sifter(
+    q: Tensor,
+    k: Tensor,
+    mask_k: int,
+    block_size_q: int,
+    block_size_k: int,
+    block_size_k_group: int,
+    oracle_rep: bool,
+    sifter_shift: int,
+    initial_indices: Optional[Union[Tensor, NdArray]],
+    initial_ks: Optional[Union[Tensor, NdArray]],
+    initial_group_sizes: Optional[Union[Tensor, NdArray]],
+    sliding_window_size: int,
+):
+    mask_k_init = mask_k // 2
+    
+    device = q.device
+    q = q.cpu().float().numpy()
+    k = k.cpu().float().numpy()
+    N, TSRC, HID = k.shape
+    if block_size_k_group > 1:
+        k_group = np.reshape(k, (N, TSRC // block_size_k_group, block_size_k_group, HID))
+        k_group_min = np.min(k_group, axis=-2)
+        k_group_max = np.max(k_group, axis=-2)
+        k = np.concatenate([k_group_min, k_group_max], axis=-1)
+    
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    
+    if initial_indices is None:
+        indices = np.zeros((
+            N, 
+            cdiv(TDST, block_size_q), 
+            cdiv(mask_k, block_size_k * block_size_k_group)
+        ), dtype=np.int32)
+    else:
+        indices = initial_indices if isinstance(initial_indices, NdArray) else initial_indices.cpu().numpy()
+    
+    if initial_ks is None:
+        ks = np.zeros((N, cdiv(TDST, block_size_q),), dtype=np.int32)
+    else:
+        ks = initial_ks if isinstance(initial_ks, NdArray) else initial_ks.cpu().numpy()
+    
+    masking_iteration_draft_numba(
+        q, k, 
+        indices, ks, 
+        mask_k // block_size_k_group, mask_k_init // block_size_k_group,
+        block_size_q, 
+        block_size_k, 
+        block_size_k_group, 
+        oracle_rep, 
+        sifter_shift,
+        initial_indices is not None, initial_ks is not None,
+        (initial_group_sizes if isinstance(initial_group_sizes, NdArray) else initial_group_sizes.cpu().numpy())
+        if initial_group_sizes is not None else None,
+        sliding_window_size,
+    )
+    
+    indices *= block_size_k_group
+    
+    return indices, ks
+
+@numba.njit
+def masking_iteration_initialize_mask(
+    # in
+    indices: NdArray,
+    ks: NdArray,
+    
+    # out
+    initial_indices: NdArray,
+    initial_ks: NdArray,
+    initial_group_sizes: NdArray,
+    
+    TDST: int, TSRC: int, block_size_k: int,
+):
+    N, BDST, MASK_BLOCK_K = indices.shape
+    for idx_n in range(N):
+        for idx_bdst in range(BDST):
+            last_index = -1000
+            group_size = 0
+            j = 0
+            for i in range(MASK_BLOCK_K):
+                curr_index = indices[idx_n, idx_bdst, i]
+                if last_index + block_size_k == curr_index:
+                    group_size += block_size_k
+                else:
+                    last_index = max(0, last_index)
+                    initial_indices[idx_n, idx_bdst, j] = last_index // block_size_k
+                    initial_group_sizes[idx_n, idx_bdst, j] = group_size // block_size_k
+                    if initial_group_sizes[idx_n, idx_bdst, j] > 0:
+                        j += 1
+                    initial_indices[idx_n, idx_bdst, j] = (last_index + group_size) // block_size_k
+                    initial_group_sizes[idx_n, idx_bdst, j] = max(0, curr_index - (last_index + group_size)) // block_size_k
+                    if initial_group_sizes[idx_n, idx_bdst, j] > 0:
+                        j += 1
+                    
+                    last_index = curr_index
+                    group_size = 0
+            initial_ks[idx_n, idx_bdst] = j
 
 def masking_iteration_draft(
     q: Tensor,
@@ -128,29 +290,179 @@ def masking_iteration_draft(
     mask_k: int,
     block_size_q: int,
     block_size_k: int,
+    block_size_k_group: int,
+    oracle_rep: bool,
+    num_sifter: int,
+    recursive_sifter: bool,
+    sliding_window_size: int,
 ):
-    mask_k_init = mask_k // 2
-    
     device = q.device
-    q = q.cpu().numpy()
-    k = k.cpu().numpy()
     
-    N, TDST, HID = q.shape
-    _, TSRC, _ = k.shape
-    
-    indices = np.zeros((
-        N, 
-        cdiv(TDST, block_size_q), 
-        cdiv(mask_k, block_size_k)
-    ), dtype=np.int32)
-    ks = np.zeros((N, cdiv(TDST, block_size_q),), dtype=np.int32)
-    
-    masking_iteration_draft_numba(
-        q, k, 
-        indices, ks, 
-        mask_k, mask_k_init,
-        block_size_q, block_size_k,
-    )
+    if num_sifter == 1:
+        indices, ks = masking_iteration_draft_sifter(
+            q, k, 
+            mask_k, 
+            block_size_q, 
+            block_size_k, 
+            block_size_k_group, 
+            oracle_rep, 
+            0,
+            None,
+            None,
+            None,
+            sliding_window_size,
+        )
+    else:
+        if recursive_sifter:
+            indices, ks = masking_iteration_draft_sifter(
+                q, k, 
+                mask_k // 4, 
+                block_size_q, 
+                block_size_k, 
+                block_size_k_group, 
+                oracle_rep, 
+                0,
+                None,
+                None,
+                None,
+                sliding_window_size,
+            )
+            
+            
+            # N, TDST, HID = q.shape
+            # _, TSRC, _ = k.shape
+            # debug_mask = to_dense(
+            #     indices,
+            #     ks,
+            #     None,
+            #     N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+            # )
+            # # print(debug_mask)
+            # import matplotlib.pyplot as plt
+            # plt.imshow(debug_mask[0])
+            # plt.savefig('dummy1.png')
+            # print('saved dummy.py')
+            
+            
+            N, BDST, MASK_BLOCK_K = indices.shape
+            
+            initial_indices = np.zeros((N, BDST, MASK_BLOCK_K * 2), dtype=np.int32)
+            initial_ks = np.zeros((N, BDST), dtype=np.int32)
+            initial_group_sizes = np.zeros((N, BDST, MASK_BLOCK_K * 2), dtype=np.int32)
+            
+            masking_iteration_initialize_mask(
+                indices,
+                ks,
+                initial_indices,
+                initial_ks,
+                initial_group_sizes,
+                q.shape[1], 
+                k.shape[1], 
+                block_size_k
+            )
+            
+            # print(initial_indices[0, -1])
+            # print(initial_group_sizes[0, -1])
+            # print(initial_ks[0, -1])
+            
+            indices, ks = masking_iteration_draft_sifter(
+                q, k,
+                mask_k // 2,
+                block_size_q,
+                block_size_k,
+                block_size_k_group,
+                oracle_rep,
+                0,
+                initial_indices,
+                initial_ks,
+                initial_group_sizes,
+                sliding_window_size,
+            )
+            
+            # N, TDST, HID = q.shape
+            # _, TSRC, _ = k.shape
+            # debug_mask = to_dense(
+            #     indices,
+            #     ks,
+            #     None,
+            #     N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+            # )
+            # # print(debug_mask)
+            # import matplotlib.pyplot as plt
+            # plt.imshow(debug_mask[0])
+            # plt.savefig('dummy2.png')
+            # print('saved dummy.py')
+            
+            N, BDST, MASK_BLOCK_K = indices.shape
+            
+            initial_indices = np.zeros((N, BDST, MASK_BLOCK_K * 2), dtype=np.int32)
+            initial_ks = np.zeros((N, BDST), dtype=np.int32)
+            initial_group_sizes = np.zeros((N, BDST, MASK_BLOCK_K * 2), dtype=np.int32)
+            
+            masking_iteration_initialize_mask(
+                indices,
+                ks,
+                initial_indices,
+                initial_ks,
+                initial_group_sizes,
+                q.shape[1], 
+                k.shape[1], 
+                block_size_k
+            )
+            
+            # print(initial_indices[0, -1])
+            # print(initial_group_sizes[0, -1])
+            # print(initial_ks[0, -1])
+            
+            indices, ks = masking_iteration_draft_sifter(
+                q, k,
+                mask_k,
+                block_size_q,
+                block_size_k,
+                block_size_k_group,
+                oracle_rep,
+                0,
+                initial_indices,
+                initial_ks,
+                initial_group_sizes,
+                sliding_window_size,
+            )
+            
+            # N, TDST, HID = q.shape
+            # _, TSRC, _ = k.shape
+            # debug_mask = to_dense(
+            #     indices,
+            #     ks,
+            #     None,
+            #     N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+            # )
+            # # print(debug_mask)
+            # import matplotlib.pyplot as plt
+            # plt.imshow(debug_mask[0])
+            # plt.savefig('dummy3.png')
+            # print('saved dummy.py')
+        else:
+            indices_sifters = []
+            ks_sifters = 0
+            for idx_sifter in range(num_sifter):
+                indices, ks = masking_iteration_draft_sifter(
+                    q, k, 
+                    mask_k // num_sifter, 
+                    block_size_q, 
+                    block_size_k, 
+                    block_size_k_group, 
+                    oracle_rep, 
+                    idx_sifter,
+                    None,
+                    None,
+                    None,
+                    sliding_window_size,
+                )
+                indices_sifters.append(indices)
+                ks_sifters += ks
+            indices = np.concatenate(indices_sifters, axis=-1)
+            indices = np.sort(indices, axis=-1)
+            ks = ks_sifters
     
     return (
         torch.tensor(indices, device=device),
@@ -166,10 +478,16 @@ def hip_attention(
     mask_k: int = 512,
     
     block_size_q: int = 32,
-    block_size_k: int = 2,
+    block_size_k: int = 1,
+    block_size_k_group: int = 8,
     
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
+    
+    oracle_rep: bool = False,
+    
+    num_sifter: int = 1,
+    recursive_sifter: bool = False,
 ):
     indices, ks = masking_iteration_draft(
         q, 
@@ -177,22 +495,28 @@ def hip_attention(
         mask_k=mask_k,
         block_size_q=block_size_q,
         block_size_k=block_size_k,
+        block_size_k_group=block_size_k_group,
+        oracle_rep=oracle_rep,
+        num_sifter=num_sifter,
+        recursive_sifter=recursive_sifter,
+        sliding_window_size=sliding_window_size,
     )
     
-    print(*indices[0], sep='\n')
-    print(ks[0])
-    N, TDST, HID = q.shape
-    _, TSRC, _ = k.shape
-    debug_mask = to_dense(
-        indices.cpu().numpy(),
-        ks.cpu().numpy(),
-        None,
-        N, TDST, TSRC, block_size_q, block_size_k,
-    )
-    # print(debug_mask)
-    import matplotlib.pyplot as plt
-    plt.imshow(debug_mask[0])
-    plt.savefig('dummy.png')
+    # print(*indices[0], sep='\n')
+    # print(ks[0])
+    # N, TDST, HID = q.shape
+    # _, TSRC, _ = k.shape
+    # debug_mask = to_dense(
+    #     indices.cpu().numpy(),
+    #     ks.cpu().numpy(),
+    #     None,
+    #     N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+    # )
+    # # print(debug_mask)
+    # import matplotlib.pyplot as plt
+    # plt.imshow(debug_mask[0])
+    # plt.savefig('dummy.png')
+    # print('saved dummy.py')
     
     context = block_sparse_flash_attention(
         q, k, v, 
@@ -202,7 +526,7 @@ def hip_attention(
         IS_CAUSAL=True,
         KV_REPEAT_INTERLEAVE=1,
         BLOCK_SIZE_Q=block_size_q,
-        BLOCK_SIZE_K=block_size_k,
+        BLOCK_SIZE_K=block_size_k * block_size_k_group,
         USING_SLIDING_WINDOW=using_sliding_window,
         SLIDING_WINDOW_SIZE=sliding_window_size,
         ROPE_METHOD='none',
@@ -217,7 +541,15 @@ def hip_attention(
 
 if __name__ == '__main__':
     q, k, v, out = load_checkouts(idx=6, window=1, seq_len=4096)
-    context, _ = hip_attention(q, k, v, mask_k=512, block_size_k=4, block_size_q=32)
+    context, _ = hip_attention(
+        q, k, v, 
+        mask_k=512, 
+        block_size_k=4, 
+        block_size_k_group=1, 
+        block_size_q=32,
+        num_sifter=2,
+        recursive_sifter=True,
+    )
     
     stderr = (out - context).abs().mean().item()
     stdcontext = torch.std_mean(out)[0].item()

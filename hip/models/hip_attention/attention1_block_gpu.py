@@ -1772,14 +1772,14 @@ def main_debug():
         window=1
     )
     
-    reps = 4
+    reps = 1
     q = q.repeat(1, reps, 1)
     k = k.repeat(1, reps, 1)
     v = v.repeat(1, reps, 1)
     out = out.repeat(1, reps, 1)
     
-    q = q[:, k.shape[1]//2:, :]
-    out = out[:, k.shape[1]//2:, :]
+    # q = q[:, k.shape[1]//2:, :]
+    # out = out[:, k.shape[1]//2:, :]
     
     print('q', q.shape)
     print('k', k.shape)

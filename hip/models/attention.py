@@ -7,33 +7,42 @@ from hip.models.attn_l1_loss import compute_attn_lp_loss_triton
 
 
 def custom_attention(
-        query_states, key_states, value_states,
-        attention_mask, causal_mask,
-        attention_dropout,
+    query_states, key_states, value_states,
+    attention_mask, causal_mask,
+    attention_dropout,
 
-        # Attention method
-        attention_method='hip',  # 'none', 'reformer', 'performer', 'hip'
-        tree_reformer=None, tree_performer=None,
+    # Attention method
+    attention_method='hip',  # 'none', 'reformer', 'performer', 'hip'
+    tree_reformer=None, 
+    tree_performer=None,
 
-        # hip parameters
-        tree_k=512, tree_block_size_q=32, tree_block_size_k=2,
-        tree_dense_queries=0, tree_last_dense_queries=0,
-        tree_sampling_method='first',
+    # hip parameters
+    tree_k=512, 
+    tree_block_size_q=32, 
+    tree_block_size_k=2,
+    tree_dense_queries=0, 
+    tree_last_dense_queries=0,
+    tree_sampling_method='first',
 
-        # Latency optimization tweaks
-        tree_enable_flash=False, tree_enable_sparq=False, tree_use_sliding_window=False,
+    # Latency optimization tweaks
+    tree_enable_flash=False, 
+    tree_enable_sparq=False, 
+    tree_use_sliding_window=True,
 
-        # Context averaging parameters
-        tree_using_context_avg=False, tree_avgpool_scaler=None, last_cumsum=None, hidden_states=None,
+    # Context averaging parameters
+    tree_using_context_avg=False, 
+    tree_avgpool_scaler=None, 
+    last_cumsum=None, 
+    hidden_states=None,
 
-        # RoPE parameters
-        tree_rope_method='none', rope_cos=None, rope_sin=None, position_ids=None,
+    # RoPE parameters
+    tree_rope_method='none', rope_cos=None, rope_sin=None, position_ids=None,
 
-        # Attention sparsity loss
-        output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
-        
-        # Hyper attention state
-        hyper_attention=None,
+    # Attention sparsity loss
+    output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
+    
+    # Hyper attention state
+    hyper_attention=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -170,22 +179,38 @@ def custom_attention(
 
         q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
-            attn_output_hip, _ = hip_attention(
+            # attn_output_hip, _ = hip_attention(
+            #     q_hip,
+            #     k[:, :LAST_DENSE_QUERIES, :],
+            #     v[:, :LAST_DENSE_QUERIES, :],
+            #     mask_k=tree_k,
+            #     block_size_q=tree_block_size_q,
+            #     block_size_k=tree_block_size_k,
+            #     dense_queries_exp=tree_dense_queries,
+            #     rope_method=tree_rope_method,
+            #     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+            #     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+            #     position_ids=position_ids,
+            #     enable_sparq=tree_enable_sparq,
+            #     is_flash=tree_enable_flash,
+            #     using_sliding_window=tree_use_sliding_window,
+            #     sampling_method=tree_sampling_method,
+            # )
+            from hip.models.hip_attention.attention2_draft import hip_attention as hip_attention_draft
+            attn_output_hip, _ = hip_attention_draft(
                 q_hip,
                 k[:, :LAST_DENSE_QUERIES, :],
                 v[:, :LAST_DENSE_QUERIES, :],
+                
                 mask_k=tree_k,
+                
                 block_size_q=tree_block_size_q,
                 block_size_k=tree_block_size_k,
-                dense_queries_exp=tree_dense_queries,
-                rope_method=tree_rope_method,
-                rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                position_ids=position_ids,
-                enable_sparq=tree_enable_sparq,
-                is_flash=tree_enable_flash,
+                block_size_k_group=1,
                 using_sliding_window=tree_use_sliding_window,
-                sampling_method=tree_sampling_method,
+                oracle_rep=False,
+                num_sifter=1,
+                recursive_sifter=False,
             )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
