@@ -226,7 +226,15 @@ def _calc_prob_return_context_acc_compute(
             tl.dot(queries_grouped, keys),
         ).to(tl.float32) * 1.44269504
     elif ROPE_METHOD == 'none':
-        qk = tl.dot(queries, keys).to(tl.float32) * 1.44269504
+        queries_max = tl.maximum(1.0, tl.max(tl.abs(queries)).to(tl.float32))
+        keys_max = tl.maximum(1.0, tl.max(tl.abs(keys)).to(tl.float32))
+        queries_scale = (1.0 / queries_max)
+        keys_scale = (1.0 / keys_max)
+        qk = tl.dot(
+            (queries * queries_scale.to(queries.dtype)),
+            (keys * keys_scale.to(keys.dtype)),
+            allow_tf32=True,
+        ).to(tl.float32) * (1.44269504 * queries_max * keys_max)
     else:
         raise Exception()
     
@@ -327,8 +335,10 @@ def _calc_prob_return_context_acc_compute(
     configs=[
         triton.Config(kwargs={}, num_warps=16),
         triton.Config(kwargs={}, num_warps=8),
-        triton.Config(kwargs={}, num_warps=4),
+        # BUG: CUDA misaligned memory address.
+        # triton.Config(kwargs={}, num_warps=4),
         triton.Config(kwargs={}, num_warps=2),
+        triton.Config(kwargs={}, num_warps=1),
     ],
     key=['BLOCK_HID', 'BLOCK_BK'],
     warmup=3,
@@ -746,7 +756,8 @@ def _calc_prob_return_context_compute(
     
     # epilogue
     m_i += tl.math.log2(l_i)
-    acc = (acc / l_i)
+    acc = (acc / (l_i + 1e-8))
+    
     tl.store(
         CONTEXT +\
             idx_n * stride_context_n +\
@@ -795,12 +806,12 @@ def calc_prob_return_context(
     IS_CAUSAL: bool,
     USING_SLIDING_WINDOW: bool,
     SLIDING_WINDOW_SIZE: int,
-    ROPE_METHOD: str,
-    ROPE_COS: Optional[Tensor],
-    ROPE_SIN: Optional[Tensor],
-    POSITION_IDS: Optional[Tensor],
-    SELF_EXTEND_SCALE: int,
-    SELF_EXTEND_WINDOW: int,
+    ROPE_METHOD: str = 'none',
+    ROPE_COS: Optional[Tensor] = None,
+    ROPE_SIN: Optional[Tensor] = None,
+    POSITION_IDS: Optional[Tensor] = None,
+    SELF_EXTEND_SCALE: int = 1,
+    SELF_EXTEND_WINDOW: int = 1,
 ):
     """
     implement flash attention 1, not 2.

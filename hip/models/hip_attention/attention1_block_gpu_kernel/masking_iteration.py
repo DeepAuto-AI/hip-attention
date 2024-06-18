@@ -534,11 +534,16 @@ def _masking_iteration_topk(
                     tl.dot(vec_q_grouped, vec_k),
                 )
             elif ROPE_METHOD == 'none':
-                scores_micro = -tl.dot(
-                    vec_q.to(tl.float16), 
-                    vec_k.to(tl.float16), 
-                    allow_tf32=True
-                ).to(scores_partial.dtype)
+                vec_q_max = tl.maximum(1.0, tl.max(tl.abs(vec_q)).to(scores_partial.dtype))
+                vec_k_max = tl.maximum(1.0, tl.max(tl.abs(vec_k)).to(scores_partial.dtype))
+                vec_q_scale = (1.0 / vec_q_max)
+                vec_k_scale = (1.0 / vec_k_max)
+                scores_micro = tl.dot(
+                    # always use fp16 to save compuational cost. we do not care accuracy in here
+                    (vec_q * vec_q_scale).to(tl.float16),
+                    (vec_k * vec_k_scale).to(tl.float16),
+                    allow_tf32=True,
+                ).to(scores_partial.dtype) * (vec_q_max * vec_k_max)
             else:
                 raise Exception()
             scores_partial += scores_micro.to(scores_partial.dtype)

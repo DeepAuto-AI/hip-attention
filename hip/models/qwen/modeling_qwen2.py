@@ -751,9 +751,9 @@ class Qwen2CustomAttention(Qwen2Attention):
             # 0:4, 1:4, 2:4,
         }
         self.tree_rope_method = 'none'
-        self.tree_enable_sparq = False
-        self.tree_enable_flash = False
-        self.tree_use_sliding_window = False
+        self.tree_enable_sparq = True
+        self.tree_enable_flash = True
+        self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
