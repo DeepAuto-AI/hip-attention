@@ -231,8 +231,8 @@ def _calc_prob_return_context_acc_compute(
         queries_scale = (1.0 / queries_max)
         keys_scale = (1.0 / keys_max)
         qk = tl.dot(
-            (queries * queries_scale.to(queries.dtype)),
-            (keys * keys_scale.to(keys.dtype)),
+            (queries * queries_scale).to(queries.dtype),
+            (keys * keys_scale).to(keys.dtype),
             allow_tf32=True,
         ).to(tl.float32) * (1.44269504 * queries_max * keys_max)
     else:
@@ -756,7 +756,7 @@ def _calc_prob_return_context_compute(
     
     # epilogue
     m_i += tl.math.log2(l_i)
-    acc = (acc / (l_i + 1e-8))
+    acc = (acc / (tl.where(l_i == 0.0, 1e-20, l_i)))
     
     tl.store(
         CONTEXT +\
