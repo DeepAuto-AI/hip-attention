@@ -32,7 +32,7 @@ requires-python = ">=3.11"
 [tool.setuptools.packages]
 
 [tool.setuptools.packages.find]
-include = ["timber"]
+include = ["hip"]
 namespaces = false
 
 # Add package data
