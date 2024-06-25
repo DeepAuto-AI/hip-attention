@@ -10,6 +10,11 @@ TODO:
  - Test estimators
 4. sifters? (not very good)
 5. masking -> allocate cells (not very good)
+6. StreamLLM based traverse
+7. causal-batch
+8. 2d support
+9. support backward across tree
+10. chunk-wise BPTT
 """
 
 # normal                    PPL: 9.7576
@@ -39,6 +44,40 @@ def cdiv(a, b):
     return math.ceil(a / b)
 
 @numba.njit
+def de_rope(vec_rope, cos, sin):
+    assert len(vec_rope.shape) == 1
+    assert vec_rope.shape == cos.shape
+    assert cos.shape == sin.shape
+    out = np.zeros_like(vec_rope)
+    half = len(vec_rope) // 2
+    c0 = cos[:half]
+    ch = cos[half:]
+    s0 = sin[:half]
+    sh = sin[half:]
+    vr0 = vec_rope[:half]
+    vrh = vec_rope[half:]
+    out[:half] = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
+    out[half:] = (out[:half] * c0 - vr0) / (s0 + 1e-20)
+    return out
+
+@numba.njit
+def rotate_half(vec):
+    assert len(vec.shape) == 1
+    out = np.zeros_like(vec)
+    x1 = vec[:len(vec) // 2]
+    x2 = vec[len(vec) // 2:]
+    out[:len(vec) // 2] = -x2
+    out[len(vec) // 2:] = x1
+    return out
+
+@numba.njit
+def apply_rope(vec, cos, sin):
+    assert vec.shape == cos.shape
+    assert cos.shape == sin.shape
+    vec_rope = (vec * cos) + (rotate_half(vec) * sin)
+    return vec_rope
+
+@numba.njit
 def masking_iteration_draft_numba_kernel(
     #in
     q: NdArray, # fp32[block_size_q, HID]
@@ -59,6 +98,11 @@ def masking_iteration_draft_numba_kernel(
     has_initial_ks: bool,
     initial_group_sizes: Optional[NdArray],
     sliding_window_size: int, 
+    using_extend: bool,
+    rope_cos: Optional[Tensor],
+    rope_sin: Optional[Tensor],
+    idx_tdst: int,
+    TDST: int,
 ) -> int:
     mask_block_k = cdiv(mask_k, block_size_k)
     TSRC = max(0, k.shape[0] - sliding_window_size)
@@ -94,6 +138,7 @@ def masking_iteration_draft_numba_kernel(
             dupped_group_sizes[0::2] = dupped_indices[1::2] - dupped_indices[0::2]
             dupped_group_sizes[1::2] = dupped_indices[0::2] + group_sizes - dupped_indices[1::2]
             dupped_mask = dupped_group_sizes >= 1
+            dupped_indices_max = np.max(dupped_indices)
             
             scores = np.zeros_like(dupped_indices, dtype=np.float32)
             for i in range(len(scores)):
@@ -103,6 +148,7 @@ def masking_iteration_draft_numba_kernel(
                 queries = q[1::2, :]
                 if block_size_k_group > 1:
                     assert not oracle_rep
+                    assert not using_extend
                     keys_min = k[idx_tsrc:idx_tsrc+block_size_k, :q.shape[-1]]
                     keys_max = k[idx_tsrc:idx_tsrc+block_size_k, q.shape[-1]:]
                     t_1 = queries @ np.ascontiguousarray(keys_min.T)
@@ -110,14 +156,53 @@ def masking_iteration_draft_numba_kernel(
                     scores[i] = max(t_1.max(), t_2.max())
                 else:
                     if not oracle_rep:
-                        keys = k[idx_tsrc:idx_tsrc+block_size_k, :]
+                        keys = k[idx_tsrc:idx_tsrc+block_size_k, :].copy()
+                        queries = queries.copy()
+                        
+                        if using_extend:
+                            for j in range(len(keys)):
+                                old_idx = idx_tsrc + j
+                                if idx_tsrc >= (idx_tdst - 1024):
+                                    new_idx = old_idx
+                                else:
+                                    new_idx = old_idx // 8
+                                keys[j] = de_rope(
+                                    keys[j], 
+                                    rope_cos[old_idx], 
+                                    rope_sin[old_idx]
+                                )
+                                keys[j] = apply_rope(
+                                    keys[j], 
+                                    rope_cos[new_idx], 
+                                    rope_sin[new_idx]
+                                )
+                            
+                            for j in range(len(queries)):
+                                old_idx = idx_tdst + j + TSRC - TDST
+                                if idx_tsrc >= (idx_tdst - 1024):
+                                    new_idx = old_idx
+                                else:
+                                    new_idx = old_idx // 8
+                                queries[j] = de_rope(
+                                    queries[j],
+                                    rope_cos[old_idx], 
+                                    rope_sin[old_idx]
+                                )
+                                queries[j] = apply_rope(
+                                    queries[j],
+                                    rope_cos[new_idx], 
+                                    rope_sin[new_idx]
+                                )
+                        
                         t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
                         scores[i] = t.max()
                     else:
+                        assert not using_extend
                         for shift in range(dupped_group_sizes[i]):
                             keys = k[idx_tsrc+shift*block_size_k:idx_tsrc+shift*block_size_k+block_size_k, :]
                             t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
                             scores[i] = max(scores[i], t.max())
+            # print(scores)
             scores[:] += -32000.0 * ~dupped_mask
             
             # select
@@ -156,6 +241,9 @@ def masking_iteration_draft_numba(
     has_initial_ks: bool,
     initial_group_sizes: Optional[NdArray],
     sliding_window_size: int,
+    using_extend: bool,
+    rope_cos: Optional[Tensor],
+    rope_sin: Optional[Tensor],
 ):
     """
     grid = (N, TDST)
@@ -166,6 +254,7 @@ def masking_iteration_draft_numba(
     
     for idx_n in numba.prange(N):
         for idx_tdst in numba.prange(cdiv(TDST, block_size_q)):
+            _initial_group_sizes = initial_group_sizes[idx_n, idx_tdst, :] if initial_group_sizes is not None else None
             final_k = masking_iteration_draft_numba_kernel(
                 q[idx_n, idx_tdst * block_size_q: (idx_tdst + 1) * block_size_q, :],
                 k[idx_n, :((idx_tdst + 1) * block_size_q + TSRC * block_size_k_group - TDST) // block_size_k_group, :],
@@ -179,8 +268,13 @@ def masking_iteration_draft_numba(
                 sifter_shift=sifter_shift,
                 has_initial_indices=has_initial_indices,
                 has_initial_ks=has_initial_ks,
-                initial_group_sizes=initial_group_sizes[idx_n, idx_tdst, :] if initial_group_sizes is not None else None,
+                initial_group_sizes=_initial_group_sizes,
                 sliding_window_size=sliding_window_size,
+                using_extend=using_extend,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                idx_tdst=idx_tdst,
+                TDST=TDST,
             )
             ks[idx_n, idx_tdst] = final_k
 
@@ -197,6 +291,9 @@ def masking_iteration_draft_sifter(
     initial_ks: Optional[Union[Tensor, NdArray]],
     initial_group_sizes: Optional[Union[Tensor, NdArray]],
     sliding_window_size: int,
+    using_extend: bool,
+    rope_cos: Optional[Tensor],
+    rope_sin: Optional[Tensor],
 ):
     mask_k_init = mask_k // 2
     
@@ -227,6 +324,16 @@ def masking_iteration_draft_sifter(
     else:
         ks = initial_ks if isinstance(initial_ks, NdArray) else initial_ks.cpu().numpy()
     
+    if rope_cos is not None:
+        assert rope_cos.ndim == 2
+        assert rope_cos.shape[-1] == q.shape[-1]
+        rope_cos = rope_cos.cpu().float().numpy()
+    
+    if rope_sin is not None:
+        assert rope_sin.ndim == 2
+        assert rope_sin.shape[-1] == q.shape[-1]
+        rope_sin = rope_sin.cpu().float().numpy()
+    
     masking_iteration_draft_numba(
         q, k, 
         indices, ks, 
@@ -240,6 +347,9 @@ def masking_iteration_draft_sifter(
         (initial_group_sizes if isinstance(initial_group_sizes, NdArray) else initial_group_sizes.cpu().numpy())
         if initial_group_sizes is not None else None,
         sliding_window_size,
+        using_extend,
+        rope_cos,
+        rope_sin,
     )
     
     indices *= block_size_k_group
@@ -295,6 +405,9 @@ def masking_iteration_draft(
     num_sifter: int,
     recursive_sifter: bool,
     sliding_window_size: int,
+    using_extend: bool,
+    rope_cos: Optional[Tensor],
+    rope_sin: Optional[Tensor]
 ):
     device = q.device
     
@@ -311,6 +424,9 @@ def masking_iteration_draft(
             None,
             None,
             sliding_window_size,
+            using_extend,
+            rope_cos,
+            rope_sin,
         )
     else:
         if recursive_sifter:
@@ -326,6 +442,9 @@ def masking_iteration_draft(
                 None,
                 None,
                 sliding_window_size,
+                using_extend,
+                rope_cos,
+                rope_sin,
             )
             
             
@@ -341,7 +460,7 @@ def masking_iteration_draft(
             # import matplotlib.pyplot as plt
             # plt.imshow(debug_mask[0])
             # plt.savefig('dummy1.png')
-            # print('saved dummy.py')
+            # print('saved dummy.png')
             
             
             N, BDST, MASK_BLOCK_K = indices.shape
@@ -358,7 +477,7 @@ def masking_iteration_draft(
                 initial_group_sizes,
                 q.shape[1], 
                 k.shape[1], 
-                block_size_k
+                block_size_k,
             )
             
             # print(initial_indices[0, -1])
@@ -377,6 +496,9 @@ def masking_iteration_draft(
                 initial_ks,
                 initial_group_sizes,
                 sliding_window_size,
+                using_extend,
+                rope_cos,
+                rope_sin,
             )
             
             # N, TDST, HID = q.shape
@@ -391,7 +513,7 @@ def masking_iteration_draft(
             # import matplotlib.pyplot as plt
             # plt.imshow(debug_mask[0])
             # plt.savefig('dummy2.png')
-            # print('saved dummy.py')
+            # print('saved dummy.png')
             
             N, BDST, MASK_BLOCK_K = indices.shape
             
@@ -426,6 +548,9 @@ def masking_iteration_draft(
                 initial_ks,
                 initial_group_sizes,
                 sliding_window_size,
+                using_extend,
+                rope_cos,
+                rope_sin,
             )
             
             # N, TDST, HID = q.shape
@@ -440,7 +565,7 @@ def masking_iteration_draft(
             # import matplotlib.pyplot as plt
             # plt.imshow(debug_mask[0])
             # plt.savefig('dummy3.png')
-            # print('saved dummy.py')
+            # print('saved dummy.png')
         else:
             indices_sifters = []
             ks_sifters = 0
@@ -457,6 +582,9 @@ def masking_iteration_draft(
                     None,
                     None,
                     sliding_window_size,
+                    using_extend,
+                    rope_cos,
+                    rope_sin,
                 )
                 indices_sifters.append(indices)
                 ks_sifters += ks
@@ -488,6 +616,10 @@ def hip_attention(
     
     num_sifter: int = 1,
     recursive_sifter: bool = False,
+    
+    using_extend: bool = False,
+    rope_cos: Optional[Tensor] = None,
+    rope_sin: Optional[Tensor] = None,
 ):
     indices, ks = masking_iteration_draft(
         q, 
@@ -499,24 +631,25 @@ def hip_attention(
         oracle_rep=oracle_rep,
         num_sifter=num_sifter,
         recursive_sifter=recursive_sifter,
-        sliding_window_size=sliding_window_size,
+        sliding_window_size=sliding_window_size if using_sliding_window else 0,
+        using_extend=using_extend,
+        rope_cos=rope_cos,
+        rope_sin=rope_sin,
     )
     
-    # print(*indices[0], sep='\n')
-    # print(ks[0])
-    # N, TDST, HID = q.shape
-    # _, TSRC, _ = k.shape
-    # debug_mask = to_dense(
-    #     indices.cpu().numpy(),
-    #     ks.cpu().numpy(),
-    #     None,
-    #     N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
-    # )
-    # # print(debug_mask)
-    # import matplotlib.pyplot as plt
-    # plt.imshow(debug_mask[0])
-    # plt.savefig('dummy.png')
-    # print('saved dummy.py')
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    debug_mask = to_dense(
+        indices.cpu().numpy(),
+        ks.cpu().numpy(),
+        None,
+        N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+    )
+    # print(debug_mask)
+    import matplotlib.pyplot as plt
+    plt.imshow(debug_mask[0])
+    plt.savefig('dummy.png')
+    print('saved dummy.png')
     
     context = block_sparse_flash_attention(
         q, k, v, 
@@ -540,15 +673,29 @@ def hip_attention(
     return context, None
 
 if __name__ == '__main__':
-    q, k, v, out = load_checkouts(idx=6, window=1, seq_len=4096)
+    q, k, v, out, cos, sin = load_checkouts(idx=6, window=1, seq_len=32768, return_cos_sin=True, dtype=torch.float32)
+    
+    # q = q[:, -32:, :]
+    # out = out[:, -32:, :]
+    
     context, _ = hip_attention(
         q, k, v, 
+        
         mask_k=512, 
+        
         block_size_k=4, 
-        block_size_k_group=1, 
+        block_size_k_group=1,
         block_size_q=32,
-        num_sifter=2,
-        recursive_sifter=True,
+        
+        num_sifter=1,
+        recursive_sifter=False,
+        
+        using_sliding_window=False,
+        sliding_window_size=128,
+        
+        using_extend=False,
+        rope_cos=cos,
+        rope_sin=sin,
     )
     
     stderr = (out - context).abs().mean().item()
