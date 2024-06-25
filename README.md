@@ -6,6 +6,8 @@
 
 After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
 
+[vLLM Implementation](https://github.com/DeepAuto-AI/vllm)
+
 ## TL;DR
 
 **We provide OpenAI Compatible API server built with vLLM and HiP attention!**
