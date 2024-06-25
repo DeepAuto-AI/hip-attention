@@ -106,8 +106,6 @@ def masking_iteration_draft_numba_kernel(
     
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
-    
-    topk_head_group_size: int,
 ) -> int:
     mask_block_k = cdiv(mask_k, block_size_k)
     TSRC = max(0, k.shape[0] - sliding_window_size)
@@ -261,8 +259,6 @@ def masking_iteration_draft_numba(
     rope_sin: Optional[Tensor],
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
-    
-    topk_head_group_size: int, 
 ):
     """
     grid = (N, TDST)
@@ -296,7 +292,6 @@ def masking_iteration_draft_numba(
                 TDST=TDST,
                 self_extend_neighboor_window=self_extend_neighboor_window,
                 self_extend_group_size=self_extend_group_size,
-                topk_head_group_size=topk_head_group_size, 
             )
             ks[idx_n, idx_tdst] = final_k
 
@@ -318,7 +313,6 @@ def masking_iteration_draft_sifter(
     rope_sin: Optional[Tensor],
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
-    topk_head_group_size: int,
 ):
     mask_k_init = mask_k // 2
     
@@ -377,7 +371,6 @@ def masking_iteration_draft_sifter(
         rope_sin,
         self_extend_neighboor_window,
         self_extend_group_size,
-        topk_head_group_size,
     )
     
     indices *= block_size_k_group
@@ -438,7 +431,6 @@ def masking_iteration_draft(
     rope_sin: Optional[Tensor],
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
-    topk_head_group_size: int,
 ):
     device = q.device
     
@@ -460,7 +452,6 @@ def masking_iteration_draft(
             rope_sin,
             self_extend_neighboor_window,
             self_extend_group_size,
-            topk_head_group_size,
         )
     else:
         if recursive_sifter:
@@ -481,7 +472,6 @@ def masking_iteration_draft(
                 rope_sin,
                 self_extend_neighboor_window,
                 self_extend_group_size,
-                topk_head_group_size,
             )
             
             
@@ -538,7 +528,6 @@ def masking_iteration_draft(
                 rope_sin,
                 self_extend_neighboor_window,
                 self_extend_group_size,
-                topk_head_group_size,
             )
             
             # N, TDST, HID = q.shape
@@ -593,7 +582,6 @@ def masking_iteration_draft(
                 rope_sin,
                 self_extend_neighboor_window,
                 self_extend_group_size,
-                topk_head_group_size,
             )
             
             # N, TDST, HID = q.shape
@@ -630,7 +618,6 @@ def masking_iteration_draft(
                     rope_sin,
                     self_extend_neighboor_window,
                     self_extend_group_size,
-                    topk_head_group_size,
                 )
                 indices_sifters.append(indices)
                 ks_sifters += ks
@@ -668,7 +655,6 @@ def hip_attention(
     rope_sin: Optional[Tensor] = None,
     self_extend_neighboor_window: int = 1024,
     self_extend_group_size: int = 8,
-    topk_head_group_size: int = 8,
 ):
     indices, ks = masking_iteration_draft(
         q, 
@@ -686,7 +672,6 @@ def hip_attention(
         rope_sin=rope_sin,
         self_extend_neighboor_window=self_extend_neighboor_window,
         self_extend_group_size=self_extend_group_size,
-        topk_head_group_size=topk_head_group_size,
     )
     
     N, TDST, HID = q.shape
@@ -725,7 +710,7 @@ def hip_attention(
     return context, None
 
 if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=1, window=16, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
+    q, k, v, out, cos, sin = load_checkouts(idx=6, window=1, seq_len=2048, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
@@ -745,13 +730,9 @@ if __name__ == '__main__':
         using_sliding_window=True,
         sliding_window_size=128,
         
-        using_extend=False,
+        using_extend=True,
         rope_cos=cos,
         rope_sin=sin,
-        self_extend_neighboor_window=1024,
-        self_extend_group_size=8,
-        
-        topk_head_group_size=8,
     )
     
     stderr = (out - context).abs().mean().item()
