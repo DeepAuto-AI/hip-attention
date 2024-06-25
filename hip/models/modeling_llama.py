@@ -704,6 +704,8 @@ class LlamaSdpaAttention(LlamaAttention):
                 'k': key_states,
                 'v': value_states,
                 'out': attn_output,
+                'cos': cos,
+                'sin': sin,
             }, './cache/llama/qkvout.pth')
             input('stored. press enter to continue >>> ')
 

@@ -111,6 +111,8 @@ def custom_attention(
                 'k': key_states,
                 'v': value_states,
                 'out': attn_output,
+                'cos': rope_cos,
+                'sin': rope_sin,
             }, './cache/llama/qkvout.pth')
             input('stored. press enter to continue >>> ')
 
