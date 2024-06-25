@@ -179,39 +179,39 @@ def custom_attention(
 
         q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
-            attn_output_hip, _ = hip_attention(
-                q_hip,
-                k[:, :LAST_DENSE_QUERIES, :],
-                v[:, :LAST_DENSE_QUERIES, :],
-                mask_k=tree_k,
-                block_size_q=tree_block_size_q,
-                block_size_k=tree_block_size_k,
-                dense_queries_exp=tree_dense_queries,
-                rope_method=tree_rope_method,
-                rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                position_ids=position_ids,
-                enable_sparq=tree_enable_sparq,
-                is_flash=tree_enable_flash,
-                using_sliding_window=tree_use_sliding_window,
-                sampling_method=tree_sampling_method,
-            )
-            # from hip.models.hip_attention.attention2_draft import hip_attention as hip_attention_draft
-            # attn_output_hip, _ = hip_attention_draft(
+            # attn_output_hip, _ = hip_attention(
             #     q_hip,
             #     k[:, :LAST_DENSE_QUERIES, :],
             #     v[:, :LAST_DENSE_QUERIES, :],
-                
             #     mask_k=tree_k,
-                
             #     block_size_q=tree_block_size_q,
             #     block_size_k=tree_block_size_k,
-            #     block_size_k_group=1,
+            #     dense_queries_exp=tree_dense_queries,
+            #     rope_method=tree_rope_method,
+            #     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+            #     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+            #     position_ids=position_ids,
+            #     enable_sparq=tree_enable_sparq,
+            #     is_flash=tree_enable_flash,
             #     using_sliding_window=tree_use_sliding_window,
-            #     oracle_rep=False,
-            #     num_sifter=1,
-            #     recursive_sifter=False,
+            #     sampling_method=tree_sampling_method,
             # )
+            from hip.models.hip_attention.attention2_draft import hip_attention as hip_attention_draft
+            attn_output_hip, _ = hip_attention_draft(
+                q_hip,
+                k[:, :LAST_DENSE_QUERIES, :],
+                v[:, :LAST_DENSE_QUERIES, :],
+                
+                mask_k=tree_k,
+                
+                block_size_q=tree_block_size_q,
+                block_size_k=tree_block_size_k,
+                block_size_k_group=1,
+                using_sliding_window=tree_use_sliding_window,
+                oracle_rep=False,
+                num_sifter=1,
+                recursive_sifter=False,
+            )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
             torch.save({
