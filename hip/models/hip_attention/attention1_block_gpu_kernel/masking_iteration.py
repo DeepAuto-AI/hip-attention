@@ -767,6 +767,9 @@ def _masking_iteration_compute(
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
     
+    # dynamic k per query
+    MAX_KS, stride_max_ks_n, stride_max_ks_bdst,
+    
     # block constant
     USING_SCORE_CACHE: tl.constexpr,
     KEY_CACHE_METHOD: tl.constexpr,
@@ -828,6 +831,13 @@ def _masking_iteration_compute(
     if CONTEXT_LENGTH is not None:
         t_src = tl.minimum(context_length, t_src)
     
+    if MAX_KS is not None:
+        max_k = tl.load(
+            MAX_KS + \
+                idx_n * stride_max_ks_n + \
+                idx_bdst * stride_max_ks_bdst,
+        ).to(tl.int64)
+    
     k_old = tl.load(
         KS + \
             idx_n * stride_ks_n +\
@@ -882,6 +892,9 @@ def _masking_iteration_compute(
             tl.cdiv(t_src, BLOCK_SIZE_K * GRID_SRC_STRIDE), 
             k_new,
         )
+        if (MAX_KS is not None):
+            if (idx_iteration > 0):
+                k_new = tl.minimum(k_new, max_k)
         
         """
         # mask -> t_mask
@@ -1265,6 +1278,9 @@ def masking_iteration(
     SELF_EXTEND_SCALE: int,
     SELF_EXTEND_WINDOW: int,
     
+    # dynamic k per query
+    maximum_ks: Optional[Tensor],
+    
     # input constant
     KV_REPEAT_INTERLEAVE: int,
     N: int, 
@@ -1467,6 +1483,16 @@ def masking_iteration(
     assert ks_out.ndim == 3
     assert t_srcs.ndim == 2
 
+    if maximum_ks is not None:
+        assert isinstance(maximum_ks, Tensor)
+        assert maximum_ks.shape == (N, B_DST), f"{maximum_ks.shape} == {(N, B_DST)}"
+        assert maximum_ks.dtype in [torch.int16, torch.int32, torch.int64, torch.long]
+        maximum_ks = torch.ceil(maximum_ks / (BLOCK_SIZE_K * GRID_SRC_STRIDE)).to(maximum_ks.dtype)
+        maximum_ks_stride = maximum_ks.stride()
+        # print(maximum_ks)
+    else:
+        maximum_ks_stride = (0, 0)
+
     # print('mask', mask[0, -1])
     # print('ks', ks, mask_k, BLOCK_SIZE_K, mask.shape, t_mask.shape, BLOCK_MASK_K)
 
@@ -1533,6 +1559,9 @@ def masking_iteration(
         POSITION_IDS, *position_ids_stride,
         SELF_EXTEND_SCALE,
         SELF_EXTEND_WINDOW,
+        
+        # dynamic k per query,
+        maximum_ks, *maximum_ks_stride,
         
         # block constant
         USING_SCORE_CACHE,

@@ -65,8 +65,8 @@ def main():
         n_patches,
         mask_k,
         scale_up,
-        BLOCK_SIZE_Q=BLOCKSIZE_Q,
-        BLOCK_SIZE_K=BLOCKSIZE_K,
+        block_size_q=BLOCKSIZE_Q,
+        block_size_k=BLOCKSIZE_K,
     )
     
     print(q.shape, indices.shape, ks.shape, probs.shape, scores.shape)
