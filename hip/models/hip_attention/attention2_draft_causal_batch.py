@@ -30,9 +30,6 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Union
 from torch import Tensor
-from hip.models.hip_attention.attention1_block_gpu \
-    import calc_prob_return_context \
-        as block_sparse_flash_attention
 from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
 import numpy as np
 from numpy import ndarray as NdArray
@@ -88,7 +85,6 @@ def masking_iteration_draft_numba_kernel(
     
     # param
     mask_k: int,
-    mask_k_init: int,
     block_size_q: int,
     block_size_k: int,
     block_size_k_group: int, 
@@ -97,8 +93,9 @@ def masking_iteration_draft_numba_kernel(
     using_extend: bool,
     rope_cos: Optional[Tensor],
     rope_sin: Optional[Tensor],
-    idx_tdst: int,
+    idx_bdst: int,
     TDST: int,
+    MAX_TSRC: int,
     
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
@@ -106,21 +103,27 @@ def masking_iteration_draft_numba_kernel(
     topk_head_group_size: int,
 ) -> int:
     mask_block_k = cdiv(mask_k, block_size_k)
-    TSRC = max(0, k.shape[0] - sliding_window_size)
+    TSRC = max(0, k.shape[1] - sliding_window_size)
     BSRC = cdiv(TSRC, block_size_k)
+    MAX_BSRC = cdiv(MAX_TSRC, block_size_k)
     
     if TSRC <= mask_k:
-        for i in range(len(indices)):
-            indices[i] = i * block_size_k
-        return BSRC
+        k_out = 0
+        for i in range(topk_head_group_size):
+            for j in range(BSRC):
+                indices[k_out] = i * MAX_TSRC + j * block_size_k
+                k_out += 1
+        return k_out
     else:
         # initialize
         group_sizes = np.zeros_like(indices)
-        for i in range(len(indices)):
-            indices[i] = int(BSRC / mask_block_k * i)
-            group_sizes[i] = int(BSRC / mask_block_k * (i + 1)) - int(BSRC / mask_block_k * i)
-        group_size = BSRC / mask_block_k
+        for i in range(topk_head_group_size):
+            for j in range(mask_block_k):
+                indices[i * mask_block_k + j] = MAX_BSRC * i + int(BSRC / mask_block_k * j)
+                group_sizes[i * mask_block_k + j] = min(BSRC, int(BSRC / mask_block_k * (i + 1))) - int(BSRC / mask_block_k * i)
         
+        group_size = BSRC / mask_block_k
+
         # until converge
         stage = 0
         while group_size > 1:
@@ -131,26 +134,29 @@ def masking_iteration_draft_numba_kernel(
             dupped_group_sizes[0::2] = dupped_indices[1::2] - dupped_indices[0::2]
             dupped_group_sizes[1::2] = dupped_indices[0::2] + group_sizes - dupped_indices[1::2]
             dupped_mask = dupped_group_sizes >= 1
-            dupped_indices_max = np.max(dupped_indices)
             
             scores = np.zeros_like(dupped_indices, dtype=np.float32)
             for i in range(len(scores)):
                 if not dupped_mask[i]:
                     continue
-                idx_tsrc = dupped_indices[i] * block_size_k
-                queries = q[1::2, :]
+                
+                idx_tgsrc = dupped_indices[i] * block_size_k
+                idx_group = idx_tgsrc // MAX_TSRC
+                idx_tsrc = idx_tgsrc % MAX_TSRC
+                
                 if block_size_k_group > 1:
                     assert not oracle_rep
                     assert not using_extend
-                    keys_min = k[idx_tsrc:idx_tsrc+block_size_k, :q.shape[-1]]
-                    keys_max = k[idx_tsrc:idx_tsrc+block_size_k, q.shape[-1]:]
+                    queries = q[idx_group, 1::2, :].copy()
+                    keys_min = k[idx_group, idx_tsrc:idx_tsrc+block_size_k, :q.shape[-1]]
+                    keys_max = k[idx_group, idx_tsrc:idx_tsrc+block_size_k, q.shape[-1]:]
                     t_1 = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys_min.T)
                     t_2 = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys_max.T)
                     scores[i] = max(t_1.max(), t_2.max())
                 else:
                     if not oracle_rep:
-                        keys = k[idx_tsrc:idx_tsrc+block_size_k, :].copy()
-                        queries = queries.copy()
+                        queries = q[idx_group, 1::2, :].copy()
+                        keys = k[idx_group, idx_tsrc:idx_tsrc+block_size_k, :].copy()
                         
                         if using_extend:
                             for j in range(len(keys)):
@@ -160,7 +166,7 @@ def masking_iteration_draft_numba_kernel(
                                 # new_idx = i * block_size_k + j
                                 
                                 # Self Extend (working great)
-                                if idx_tsrc >= (idx_tdst - self_extend_neighboor_window):
+                                if idx_tsrc >= (idx_bdst - self_extend_neighboor_window):
                                     new_idx = old_idx
                                 else:
                                     new_idx = old_idx // self_extend_group_size
@@ -177,11 +183,11 @@ def masking_iteration_draft_numba_kernel(
                                 )
                             
                             for j in range(len(queries)):
-                                old_idx = idx_tdst + j + TSRC - TDST
+                                old_idx = idx_bdst + j + TSRC - TDST
                                 
                                 # new_idx = len(scores) * block_size_k - block_size_q + j
                                 
-                                if idx_tsrc >= (idx_tdst - self_extend_neighboor_window):
+                                if idx_tsrc >= (idx_bdst - self_extend_neighboor_window):
                                     new_idx = old_idx
                                 else:
                                     new_idx = old_idx // self_extend_group_size
@@ -201,25 +207,27 @@ def masking_iteration_draft_numba_kernel(
                         scores[i] = t.max()
                     else:
                         assert not using_extend
+                        queries = q[idx_group, 1::2, :].copy()
                         for shift in range(dupped_group_sizes[i]):
-                            keys = k[idx_tsrc+shift*block_size_k:idx_tsrc+shift*block_size_k+block_size_k, :]
+                            keys = k[idx_group, idx_tsrc+shift*block_size_k:idx_tsrc+shift*block_size_k+block_size_k, :]
                             t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
                             scores[i] = max(scores[i], t.max())
             # print(scores)
             scores[:] += -32000.0 * ~dupped_mask
             
             # select
-            topk_indices = np.argsort(-scores)[:mask_block_k]
+            topk_indices = np.argsort(-scores)[:mask_block_k * topk_head_group_size]
             indices[:] = dupped_indices[topk_indices]
             group_sizes[:] = dupped_group_sizes[topk_indices]
             # print(group_size, indices, topk_indices, group_sizes)
             
             group_size = group_size / 2
             stage += 1
+        
         indices[:] = np.sort(indices) * block_size_k
-        return mask_block_k
+        return mask_block_k * topk_head_group_size
 
-@numba.njit(parallel=True, fastmath=True, cache=True)
+# @numba.njit(parallel=True, fastmath=True, cache=True)
 def masking_iteration_draft_numba(
     # in
     q: NdArray,
@@ -231,7 +239,6 @@ def masking_iteration_draft_numba(
     
     # param
     mask_k: int,
-    mask_k_init: int,
     block_size_q: int,
     block_size_k: int,
     block_size_k_group: int,
@@ -251,17 +258,28 @@ def masking_iteration_draft_numba(
     
     print('booted')
     
-    N, TDST, _ = q.shape
-    _, TSRC, _ = k.shape
+    N, G, TDST, HID = q.shape
+    _, _, TSRC, _ = k.shape
     
     for idx_n in numba.prange(N):
-        for idx_tdst in numba.prange(cdiv(TDST, block_size_q)):
+        for idx_bdst in numba.prange(cdiv(TDST, block_size_q)):
+            q_chunk = q[
+                idx_n,
+                :, 
+                idx_bdst * block_size_q: (idx_bdst + 1) * block_size_q, 
+                :
+            ]
+            k_chunk = k[
+                idx_n, 
+                :, 
+                :((idx_bdst + 1) * block_size_q + TSRC * block_size_k_group - TDST) // block_size_k_group, 
+                :
+            ]
             final_k = masking_iteration_draft_numba_kernel(
-                q[idx_n, idx_tdst * block_size_q: (idx_tdst + 1) * block_size_q, :],
-                k[idx_n, :((idx_tdst + 1) * block_size_q + TSRC * block_size_k_group - TDST) // block_size_k_group, :],
-                indices[idx_n, idx_tdst, :],
+                q_chunk,
+                k_chunk,
+                indices[idx_n, idx_bdst, :],
                 mask_k=mask_k,
-                mask_k_init=mask_k_init,
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
                 block_size_k_group=block_size_k_group,
@@ -270,13 +288,14 @@ def masking_iteration_draft_numba(
                 using_extend=using_extend,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
-                idx_tdst=idx_tdst,
+                idx_bdst=idx_bdst,
                 TDST=TDST,
+                MAX_TSRC=k.shape[-2],
                 self_extend_neighboor_window=self_extend_neighboor_window,
                 self_extend_group_size=self_extend_group_size,
                 topk_head_group_size=topk_head_group_size, 
             )
-            ks[idx_n, idx_tdst] = final_k
+            ks[idx_n, idx_bdst] = final_k
 
 def masking_iteration_draft(
     q: Tensor,
@@ -295,29 +314,10 @@ def masking_iteration_draft(
     topk_head_group_size: int,
 ):
     device = q.device
-        
-    mask_k_init = mask_k // 2
     
     device = q.device
     q = q.cpu().float().numpy()
     k = k.cpu().float().numpy()
-    N, TSRC, HID = k.shape
-    if block_size_k_group > 1:
-        k_group = np.reshape(k, (N, TSRC // block_size_k_group, block_size_k_group, HID))
-        k_group_min = np.min(k_group, axis=-2)
-        k_group_max = np.max(k_group, axis=-2)
-        k = np.concatenate([k_group_min, k_group_max], axis=-1)
-    
-    N, TDST, HID = q.shape
-    _, TSRC, _ = k.shape
-    
-    indices = np.zeros((
-        N, 
-        cdiv(TDST, block_size_q), 
-        cdiv(mask_k, block_size_k * block_size_k_group)
-    ), dtype=np.int32)
-    
-    ks = np.zeros((N, cdiv(TDST, block_size_q),), dtype=np.int32)
     
     if rope_cos is not None:
         assert rope_cos.ndim == 2
@@ -329,11 +329,42 @@ def masking_iteration_draft(
         assert rope_sin.shape[-1] == q.shape[-1]
         rope_sin = rope_sin.cpu().float().numpy()
     
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    
+    assert (N % topk_head_group_size) == 0, 'batch*n_head should divisible by group size'
+    
+    q = q.reshape(N // topk_head_group_size, topk_head_group_size, TDST, HID)
+    k = k.reshape(N // topk_head_group_size, topk_head_group_size, TSRC, HID)
+    
+    N, G, TDST, HID = q.shape
+    _, _, TSRC, _ = k.shape
+    
+    if block_size_k_group > 1:
+        k_group = np.reshape(k, (N, G, TSRC // block_size_k_group, block_size_k_group, HID))
+        k_group_min = np.min(k_group, axis=-2)
+        k_group_max = np.max(k_group, axis=-2)
+        k = np.concatenate([k_group_min, k_group_max], axis=-1)
+    
+    indices = np.zeros((
+        N,
+        cdiv(TDST, block_size_q), 
+        # head group is merged as single sequence
+        G * cdiv(mask_k, block_size_k * block_size_k_group),
+    ), dtype=np.int32)
+    
+    ks = np.zeros((
+        N, 
+        cdiv(TDST, block_size_q),
+    ), dtype=np.int32)
+    
     print('start')
     masking_iteration_draft_numba(
-        q, k, 
-        indices, ks, 
-        mask_k // block_size_k_group, mask_k_init // block_size_k_group,
+        q, 
+        k, 
+        indices, 
+        ks, 
+        mask_k // block_size_k_group,
         block_size_q, 
         block_size_k, 
         block_size_k_group, 
@@ -354,6 +385,23 @@ def masking_iteration_draft(
         torch.tensor(indices, device=device),
         torch.tensor(ks, device=device),
     )
+
+@numba.njit
+def block_sparse_attention(
+    q: NdArray,
+    k: NdArray,
+    v: NdArray,
+    
+    indices: NdArray,
+    ks: NdArray,
+    
+    block_size_q: int,
+    block_size_k: int,
+    mask_k: int,
+) -> NdArray:
+    output = np.zeros_like(q.shape)
+    
+    return output
 
 @torch.inference_mode()
 def hip_attention(
@@ -396,19 +444,27 @@ def hip_attention(
         topk_head_group_size=topk_head_group_size,
     )
     
+    print(indices[0, 0], ks)
+    
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
     debug_mask = to_dense(
         indices.cpu().numpy(),
         ks.cpu().numpy(),
         None,
-        N, TDST, TSRC, block_size_q, block_size_k * block_size_k_group,
+        N, 
+        TDST, 
+        TSRC * topk_head_group_size, 
+        block_size_q, 
+        block_size_k * block_size_k_group,
     )
     # print(debug_mask)
     import matplotlib.pyplot as plt
     plt.imshow(debug_mask[0])
     plt.savefig('dummy.png', dpi=200)
     print('saved dummy.png')
+    
+    return None, None
     
     context = block_sparse_flash_attention(
         q, k, v, 
@@ -432,7 +488,7 @@ def hip_attention(
     return context, None
 
 if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=1, window=16, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
+    q, k, v, out, cos, sin = load_checkouts(idx=6, window=8, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
@@ -442,7 +498,7 @@ if __name__ == '__main__':
         
         mask_k=512, 
         
-        block_size_k=4, 
+        block_size_k=4,
         block_size_k_group=1,
         block_size_q=32,
         
@@ -455,10 +511,11 @@ if __name__ == '__main__':
         self_extend_neighboor_window=1024,
         self_extend_group_size=8,
         
-        topk_head_group_size=8,
+        topk_head_group_size=4,
     )
     
-    stderr = (out - context).abs().mean().item()
-    stdcontext = torch.std_mean(out)[0].item()
-    
-    print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
+    if context is not None:
+        stderr = (out - context).abs().mean().item()
+        stdcontext = torch.std_mean(out)[0].item()
+        
+        print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')

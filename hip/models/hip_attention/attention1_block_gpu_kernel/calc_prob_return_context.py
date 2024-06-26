@@ -825,7 +825,7 @@ def calc_prob_return_context(
     BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     _, _, BK = indices.shape
-    assert ks.shape == (N, BDST)
+    assert ks.shape == (N, BDST), f'{ks.shape}'
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
