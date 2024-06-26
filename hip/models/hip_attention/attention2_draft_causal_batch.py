@@ -234,7 +234,7 @@ def masking_iteration_draft_numba_kernel(
         indices[:] = np.sort(indices) * block_size_k
         return mask_block_k * topk_head_group_size
 
-@numba.njit(parallel=True)
+@numba.njit(parallel=True, fastmath=True, cache=True)
 def masking_iteration_draft_numba(
     # in
     q: NdArray,
@@ -381,6 +381,7 @@ def masking_iteration_draft(
         self_extend_group_size,
         topk_head_group_size,
     )
+    print('done')
     
     indices *= block_size_k_group
     
