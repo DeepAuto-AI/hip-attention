@@ -26,6 +26,9 @@ TODO:
 # bk 4 bkg 1 recurse 2 lv   PPL: 9.1364
 # bk 4 bkg 1 recurse 3 lv   PPL: 9.1930
 
+# topk_head_group
+# 
+
 import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Union
@@ -159,6 +162,8 @@ def masking_iteration_draft_numba_kernel(
                         keys = k[idx_group, idx_tsrc:idx_tsrc+block_size_k, :].copy()
                         
                         if using_extend:
+                            assert rope_cos is not None
+                            assert rope_sin is not None
                             for j in range(len(keys)):
                                 old_idx = idx_tsrc + j
                                 
@@ -227,7 +232,7 @@ def masking_iteration_draft_numba_kernel(
         indices[:] = np.sort(indices) * block_size_k
         return mask_block_k * topk_head_group_size
 
-# @numba.njit(parallel=True, fastmath=True, cache=True)
+@numba.njit(parallel=True)
 def masking_iteration_draft_numba(
     # in
     q: NdArray,
@@ -255,8 +260,6 @@ def masking_iteration_draft_numba(
     """
     grid = (N, TDST)
     """
-    
-    print('booted')
     
     N, G, TDST, HID = q.shape
     _, _, TSRC, _ = k.shape
@@ -358,7 +361,6 @@ def masking_iteration_draft(
         cdiv(TDST, block_size_q),
     ), dtype=np.int32)
     
-    print('start')
     masking_iteration_draft_numba(
         q, 
         k, 
@@ -377,7 +379,6 @@ def masking_iteration_draft(
         self_extend_group_size,
         topk_head_group_size,
     )
-    print('done')
     
     indices *= block_size_k_group
     
@@ -386,7 +387,7 @@ def masking_iteration_draft(
         torch.tensor(ks, device=device),
     )
 
-@numba.njit
+@numba.njit(parallel=True)
 def block_sparse_attention(
     q: NdArray,
     k: NdArray,
@@ -398,8 +399,69 @@ def block_sparse_attention(
     block_size_q: int,
     block_size_k: int,
     mask_k: int,
+    
+    topk_head_group_size: int,
 ) -> NdArray:
-    output = np.zeros_like(q.shape)
+    output = np.zeros_like(q)
+    
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    
+    G = topk_head_group_size
+    B = N // G
+    assert N == (B * G)
+    
+    _, BDST = ks.shape
+    _, _, GKS = indices.shape
+    
+    for idx_n in numba.prange(B):
+        for idx_bdst in numba.prange(BDST):
+            # compute scores for each index
+            idx_tdst = idx_bdst * block_size_q
+            scores = np.zeros((block_size_q, GKS * block_size_k), dtype=q.dtype) - 32000.0
+            for i in range(min(ks[idx_n, idx_bdst], GKS)):
+                idx_index = indices[idx_n, idx_bdst, i]
+                idx_group = idx_index // TSRC
+                idx_tsrc = idx_index % TSRC
+                queries = q[idx_n * G + idx_group, idx_tdst: idx_tdst + block_size_q, :]
+                keys = k[idx_n * G + idx_group, idx_tsrc: idx_tsrc + block_size_k, :]
+                t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
+                for m in range(t.shape[0]):
+                    for n in range(t.shape[1]):
+                        if (idx_tsrc + n) > (idx_tdst + TSRC - TDST + m):
+                            t[m, n] = -32000.0
+                scores[:, i * block_size_k: (i + 1) * block_size_k] = t
+            # compute exp
+            scores_max = np.max(scores)
+            scores = np.exp(scores - scores_max).astype(np.float32)
+            # sum of each head
+            scores_sum = np.zeros((topk_head_group_size, block_size_q), dtype=q.dtype)
+            for i in range(min(ks[idx_n, idx_bdst], GKS)):
+                idx_index = indices[idx_n, idx_bdst, i]
+                idx_group = idx_index // TSRC
+                scores_sum[idx_group, :] += np.sum(
+                    scores[:, i * block_size_k: (i + 1) * block_size_k],
+                    axis=-1
+                )
+            # divide by sum of each
+            for i in range(min(ks[idx_n, idx_bdst], GKS)):
+                idx_index = indices[idx_n, idx_bdst, i]
+                idx_group = idx_index // TSRC
+                for j in range(block_size_k):
+                    scores[:, i * block_size_k + j] /= \
+                        (scores_sum[idx_group, :] + 1e-12)
+            # multiply and acc for each head
+            for i in range(min(ks[idx_n, idx_bdst], GKS)):
+                idx_index = indices[idx_n, idx_bdst, i]
+                idx_group = idx_index // TSRC
+                idx_tsrc = idx_index % TSRC
+                values = np.ascontiguousarray(v[idx_n * G + idx_group, idx_tsrc: idx_tsrc + block_size_k, :])
+                t = np.ascontiguousarray(scores[:, i * block_size_k: (i + 1) * block_size_k]) @ values
+                output[
+                    idx_n * G + idx_group, 
+                    idx_bdst * block_size_q: (idx_bdst + 1) * block_size_q, 
+                    :
+                ] += t
     
     return output
 
@@ -444,51 +506,44 @@ def hip_attention(
         topk_head_group_size=topk_head_group_size,
     )
     
-    print(indices[0, 0], ks)
+    # N, TDST, HID = q.shape
+    # _, TSRC, _ = k.shape
+    # debug_mask = to_dense(
+    #     indices.cpu().numpy(),
+    #     ks.cpu().numpy(),
+    #     None,
+    #     N, 
+    #     TDST, 
+    #     TSRC * topk_head_group_size, 
+    #     block_size_q, 
+    #     block_size_k * block_size_k_group,
+    # )
+    # # print(debug_mask)
+    # import matplotlib.pyplot as plt
+    # plt.imshow(debug_mask[0])
+    # plt.savefig('dummy.png', dpi=200)
+    # print('saved dummy.png')
     
-    N, TDST, HID = q.shape
-    _, TSRC, _ = k.shape
-    debug_mask = to_dense(
-        indices.cpu().numpy(),
-        ks.cpu().numpy(),
-        None,
-        N, 
-        TDST, 
-        TSRC * topk_head_group_size, 
-        block_size_q, 
-        block_size_k * block_size_k_group,
+    context = block_sparse_attention(
+        q.cpu().float().numpy(), 
+        k.cpu().float().numpy(), 
+        v.cpu().float().numpy(),
+        
+        indices.cpu().long().numpy(), 
+        ks.cpu().long().numpy(),
+        
+        block_size_q=block_size_q,
+        block_size_k=block_size_k,
+        mask_k=mask_k,
+        
+        topk_head_group_size=topk_head_group_size,
     )
-    # print(debug_mask)
-    import matplotlib.pyplot as plt
-    plt.imshow(debug_mask[0])
-    plt.savefig('dummy.png', dpi=200)
-    print('saved dummy.png')
-    
-    return None, None
-    
-    context = block_sparse_flash_attention(
-        q, k, v, 
-        attention_mask=None,
-        indices=indices,
-        ks=ks,
-        IS_CAUSAL=True,
-        KV_REPEAT_INTERLEAVE=1,
-        BLOCK_SIZE_Q=block_size_q,
-        BLOCK_SIZE_K=block_size_k * block_size_k_group,
-        USING_SLIDING_WINDOW=using_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_size,
-        ROPE_METHOD='none',
-        ROPE_COS=None,
-        ROPE_SIN=None,
-        POSITION_IDS=None,
-        SELF_EXTEND_SCALE=1,
-        SELF_EXTEND_WINDOW=1,
-    )
+    context = torch.tensor(context, device=q.device)
     
     return context, None
 
 if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=6, window=8, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
@@ -511,7 +566,7 @@ if __name__ == '__main__':
         self_extend_neighboor_window=1024,
         self_extend_group_size=8,
         
-        topk_head_group_size=4,
+        topk_head_group_size=8,
     )
     
     if context is not None:
