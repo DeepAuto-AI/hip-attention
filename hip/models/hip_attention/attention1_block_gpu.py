@@ -982,7 +982,7 @@ def sparse_attention(
     return context
 
 import numba
-@numba.njit
+@numba.njit(parallel=True)
 def to_dense(
     indices: np.ndarray, 
     ks: np.ndarray, 
