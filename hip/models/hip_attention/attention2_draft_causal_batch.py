@@ -570,7 +570,7 @@ if __name__ == '__main__':
         self_extend_neighboor_window=1024,
         self_extend_group_size=8,
         
-        topk_head_group_size=8,
+        topk_head_group_size=4,
     )
     
     if context is not None:
