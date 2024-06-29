@@ -27,7 +27,10 @@ TODO:
 # bk 4 bkg 1 recurse 3 lv   PPL: 9.1930
 
 # topk_head_group
-# 
+# g1    5.9297
+# g4    5.5488
+# g8    5.5473
+
 
 import torch
 import torch.nn.functional as F
@@ -217,7 +220,6 @@ def masking_iteration_draft_numba_kernel(
                             keys = k[idx_group, idx_tsrc+shift*block_size_k:idx_tsrc+shift*block_size_k+block_size_k, :]
                             t = np.ascontiguousarray(queries) @ np.ascontiguousarray(keys.T)
                             scores[i] = max(scores[i], t.max())
-            # print(scores)
             scores[:] += -32000.0 * ~dupped_mask
             
             # select
@@ -566,7 +568,7 @@ if __name__ == '__main__':
         self_extend_neighboor_window=1024,
         self_extend_group_size=8,
         
-        topk_head_group_size=8,
+        topk_head_group_size=4,
     )
     
     if context is not None:

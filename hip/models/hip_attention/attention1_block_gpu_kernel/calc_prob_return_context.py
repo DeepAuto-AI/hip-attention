@@ -582,8 +582,9 @@ def _calc_prob_return_context_compute(
                 idx_bdst * stride_indices_bdst +\
                 idx_bk * stride_indices_bk,
             mask = mask_bk,
-            other = TSRC,
+            # other = TSRC,
         ).to(tl.int64)
+        idx_tsrc_block_start = tl.where(mask_bk, idx_tsrc_block_start, TSRC)
         
         # [BLOCK_BK, BLOCK_SIZE_K]
         idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
@@ -812,6 +813,7 @@ def calc_prob_return_context(
     POSITION_IDS: Optional[Tensor] = None,
     SELF_EXTEND_SCALE: int = 1,
     SELF_EXTEND_WINDOW: int = 1,
+    NUM_SINK: Optional[int] = None,
 ):
     """
     implement flash attention 1, not 2.
@@ -953,7 +955,8 @@ def calc_prob_return_context(
         position_ids_stride = (0, 0)
     
     # NOTE: to match 32x32 tensor-core
-    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K)
+    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K) if NUM_SINK is None else NUM_SINK
+    assert isinstance(NUM_SINK, int)
     
     # grid = (N, BDST, )
     grid = (N * BDST, )

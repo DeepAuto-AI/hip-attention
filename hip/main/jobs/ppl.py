@@ -76,6 +76,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
             prev_end_loc = end_loc
             
             ppl = torch.exp(torch.stack(nlls).mean()).item()
+            print(len(nlls), ppl)
             pbar.set_description(f"ppl: {ppl:.3f}")
             
             if end_loc == seq_len:

@@ -9,6 +9,11 @@ from hip.models.hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compa
     PagedKeyCacheVllmCompat, PagedValueCacheVllmCompat
 )
 
+if hasattr(tl.math, 'round'):
+    tl_device_round = tl.math.round
+else:
+    tl_device_round = tl.extra.cuda.libdevice.round
+
 def next_multiple_of(x: int, multiple_by: int = 16):
     return triton.next_power_of_2(max(x, multiple_by))
 
@@ -849,7 +854,7 @@ def _masking_iteration_compute(
         # tl.device_print("dd", idx_bdst)
         
         w_new = tl.minimum(
-            tl.math.round(w_old.to(tl.float64) * SCALE_UP).to(tl.float64), 
+            tl_device_round(w_old.to(tl.float64) * SCALE_UP).to(tl.float64), 
             t_src
         ).to(tl.int64)
         
