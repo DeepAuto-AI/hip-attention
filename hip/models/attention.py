@@ -36,10 +36,14 @@ def custom_attention(
     hidden_states=None,
 
     # RoPE parameters
-    tree_rope_method='none', rope_cos=None, rope_sin=None, position_ids=None,
+    tree_rope_method='none', 
+    rope_cos=None, 
+    rope_sin=None, 
+    position_ids=None,
 
     # Attention sparsity loss
-    output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
+    output_attn_sparsity_loss=False, 
+    tree_lp_norm_coeff=0.5,
     
     # Hyper attention state
     hyper_attention=None,
@@ -189,18 +193,20 @@ def custom_attention(
                     mask_k=tree_k,
                     block_size_q=tree_block_size_q,
                     block_size_k=tree_block_size_k,
-                    dense_queries_exp=tree_dense_queries,
+                    dense_queries_exp=0, #NOTE DEBUG: tree_dense_queries,
                     rope_method=tree_rope_method,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                     position_ids=position_ids,
-                    enable_sparq=tree_enable_sparq,
-                    is_flash=tree_enable_flash,
-                    using_sliding_window=tree_use_sliding_window,
+                    enable_sparq=False, #NOTE DEUBG: tree_enable_sparq,
+                    is_flash=True, #NOTE DEUBG: tree_enable_flash,
+                    using_sliding_window=True, #NOTE DEBUG: tree_use_sliding_window,
                     sampling_method=tree_sampling_method,
+                    num_sink=0,
                 )
             else:
-                from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft
+                from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
                 
                 attn_output_hip, _ = hip_attention_draft(
                     q_hip,
@@ -212,9 +218,12 @@ def custom_attention(
                     block_size_q=tree_block_size_q,
                     block_size_k=tree_block_size_k,
                     block_size_k_group=1,
-                    using_sliding_window=False, #tree_use_sliding_window,
+                    
+                    sliding_window_size=128,
+                    sink_token_size=16,
+                    
                     oracle_rep=False,
-                    topk_head_group_size=4,
+                    topk_head_group_size=1,
                 )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)

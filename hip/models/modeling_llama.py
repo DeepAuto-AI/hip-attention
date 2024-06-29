@@ -739,11 +739,12 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
-        self.tree_avgpool_scaler = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size // 4),
-            nn.ReLU(),
-            nn.Linear(config.hidden_size // 4, config.num_attention_heads)
-        )
+        # self.tree_avgpool_scaler = nn.Sequential(
+        #     nn.Linear(config.hidden_size, config.hidden_size // 4),
+        #     nn.ReLU(),
+        #     nn.Linear(config.hidden_size // 4, config.num_attention_heads)
+        # )
+        self.tree_avgpool_scaler = None
 
         self.tree_reformer = self.tree_performer = None
 

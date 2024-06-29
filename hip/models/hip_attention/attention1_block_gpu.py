@@ -992,7 +992,7 @@ def to_dense(
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
     out = np.zeros((N, T_DST, T_SRC), dtype=np.float32)
     for idx_n in numba.prange(N):
-        for idx_bdst in range(indices.shape[1]):
+        for idx_bdst in numba.prange(indices.shape[1]):
             for idx_k in range(indices.shape[2]):
                 if idx_k < ks[idx_n, idx_bdst]:
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
@@ -1194,6 +1194,9 @@ def hip_attention(
     
     # dynamic k per query support
     maximum_ks: Optional[Tensor] = None,
+    
+    # number of sink tokens, default to size of tensor core
+    num_sink: Optional[int] = None,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1291,6 +1294,8 @@ def hip_attention(
                     precomputed_indices=precomputed_indices,
                     
                     maximum_ks=maximum_ks,
+                    
+                    num_sink=num_sink,
                 )
                 contexts.append(sparse_context)
             
@@ -1361,6 +1366,8 @@ def hip_attention(
                 precomputed_indices=precomputed_indices,
                 
                 maximum_ks=maximum_ks,
+                
+                num_sink=num_sink,
             )
             contexts.append(context)
             
@@ -1536,6 +1543,7 @@ def hip_attention(
                     SELF_EXTEND_SCALE=self_extend_scale,
                     SELF_EXTEND_WINDOW=self_extend_window,
                     RETURN_SCORES=force_return_scores,
+                    NUM_SINK=num_sink,
                 )
                 if force_return_scores:
                     context, probs = t
