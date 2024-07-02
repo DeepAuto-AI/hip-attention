@@ -30,6 +30,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
+import matplotlib.pyplot as plt
 
 # assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 # assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
@@ -1161,6 +1162,7 @@ def hip_attention(
     
     # using flash attention for sparse attention
     is_flash: bool = True,
+    force_return_scores: bool = False,
     
     # control SparQ attention for score approximation in masking
     enable_sparq: bool = True,
@@ -1266,6 +1268,7 @@ def hip_attention(
                     chunk_size=chunk_size,
                     
                     is_flash=is_flash,
+                    force_return_scores=force_return_scores,
                     
                     enable_sparq=enable_sparq,
                     sampling_method=sampling_method,
@@ -1334,6 +1337,8 @@ def hip_attention(
                 reduce_stride=reduce_stride,
                 
                 is_flash=is_flash,
+                force_return_scores=force_return_scores,
+                
                 enable_sparq=enable_sparq,
                 
                 sampling_method=sampling_method,
@@ -1510,11 +1515,14 @@ def hip_attention(
                     BLOCK_SIZE_K=block_size_k,
                 )
             else:
-                scores = probs = None
-                context = calc_prob_return_context(
-                    queries=q, keys=k, values=v, 
+                probs = None
+                t = calc_prob_return_context(
+                    queries=q, 
+                    keys=k, 
+                    values=v, 
                     attention_mask=attention_mask,
-                    indices=indices, ks=ks,
+                    indices=indices, 
+                    ks=ks,
                     KV_REPEAT_INTERLEAVE=KV_REPEAT_INTERLEAVE,
                     BLOCK_SIZE_Q=block_size_q, 
                     BLOCK_SIZE_K=block_size_k,
@@ -1527,7 +1535,12 @@ def hip_attention(
                     POSITION_IDS=position_ids,
                     SELF_EXTEND_SCALE=self_extend_scale,
                     SELF_EXTEND_WINDOW=self_extend_window,
+                    RETURN_SCORES=force_return_scores,
                 )
+                if force_return_scores:
+                    context, probs = t
+                else:
+                    context = t
     
     return context, (indices, ks, probs)
 
@@ -1825,7 +1838,7 @@ def main_debug():
     context, (
         atten_indices, 
         atten_ks, 
-        atten_probs
+        atten_scores
     ) = hip_attention(
         q,
         k,
@@ -1835,9 +1848,23 @@ def main_debug():
         block_size_k=block_size_k,
         dense_queries_exp=0,
         is_flash=True,
-        using_sliding_window=False,
+        using_sliding_window=True,
         maximum_ks=maximum_ks,
+        force_return_scores=True,
     )
+    
+    atten_probs = atten_scores.softmax(-1)
+    plt.figure(figsize=(4, 5.5))
+    plt.imshow(atten_probs[0].cpu().numpy() ** 0.2)
+    plt.axvline(32, color='red')
+    plt.axvline(32 + 512, color='red')
+    for idx_tdst in range(0, atten_probs.shape[1], block_size_q):
+        plt.axhline(idx_tdst, color='magenta', linestyle=':')
+    plt.colorbar()
+    path = 'saves/models/hip_attention/atten_probs.png'
+    plt.savefig(path, dpi=200)
+    print('saved', path)
+    print(atten_probs.shape)
     
     print(atten_ks, atten_ks.min(), atten_ks.max())
     
