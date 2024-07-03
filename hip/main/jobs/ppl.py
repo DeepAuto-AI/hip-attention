@@ -45,7 +45,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
 
     nlls = []
     prev_end_loc = 0
-    with tqdm(range(0, seq_len, stride)[:args.count]) as pbar:
+    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True) as pbar:
         for begin_loc in pbar:
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop

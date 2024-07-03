@@ -224,6 +224,9 @@ def custom_attention(
                     
                     oracle_rep=False,
                     topk_head_group_size=1,
+                    
+                    traverse_from_last_step=True,
+                    num_samples=4,
                 )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
