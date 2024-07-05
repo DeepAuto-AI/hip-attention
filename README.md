@@ -127,34 +127,35 @@ docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
 ```
 
 ## Setup without docker
+
 ```bash
 conda create --name llm python=3.11
 conda activate llm
-conda install nvidia/label/cuda-12.4.0::cuda-toolkit
-conda install -c conda-forge cupy cuda-version=12.4
+
 cd hip-attention
-pip install -e .
-pip install numba packaging
-cd third_party/vllm-hip
-pip install -r requirements-build.txt
-pip install -r requirements.txt -r requirements-dev.txt
-pip install -e . --no-build-isolation --verbose
+pip install -e "."
+# Optional for development
+pip install -e ".[dev]"
+
+# Optional, depends on your CUDA environment
+export CUDACXX=/usr/local/cuda/bin/nvcc
+# vLLM for serving
+pip install -e ".[vllm]" --no-build-isolation --verbose
 ```
 
 ## Running without docker
 ```bash
+CUDA_VISIBLE_DEVICES=0 \
 VLLM_ATTENTION_BACKEND=HIP_ATTN \
 HIP_K=512 \
 HIP_REFRESH_INTERVAL=8 \
 HIP_DENSE_LAYERS=4 \
-CUDA_VISIBLE_DEVICES=0,1 \
 python3 -m vllm.entrypoints.openai.api_server \
---model togethercomputer/LLaMA-2-7B-32K \
---download-dir "/tmp/$(whoami)" \
---tensor-parallel-size 2 \
---kv-cache-dtype fp8_e5m2 \
---dtype half \
---gpu-memory-utilization 0.85
+    --model  Qwen/Qwen2-1.5B-Instruct \
+    --tensor-parallel-size 1 \
+    --kv-cache-dtype fp8_e5m2 \
+    --dtype half \
+    --gpu-memory-utilization 0.50
 ```
 
 ## vllm + Qwen's Dynamic-NTK
