@@ -65,11 +65,17 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
                     outputs = model.generate(prompt, sampling_params)
 
                 else:
-                    outputs = model(
-                        input_ids,
-                        labels=target_ids,
-                    )
-                    neg_log_likelihood = outputs.loss
+                    sample_counts = int(os.getenv('_SAMPLE_COUNT', '1'))
+                    samples = []
+                    for _ in tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1):
+                        outputs = model(
+                            input_ids,
+                            labels=target_ids,
+                        )
+                        samples.append(outputs.loss)
+                    if len(samples) > 1:
+                        print(samples)
+                    neg_log_likelihood = min(samples)
 
             nlls.append(neg_log_likelihood.cpu())
 

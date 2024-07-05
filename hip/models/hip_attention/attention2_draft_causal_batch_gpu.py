@@ -681,6 +681,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             0,
             dupped_group_sizes - 1,
         )
+    elif SAMPLE_METHOD == 'center':
+        dupped_indices_for_keys = dupped_indices + tl.maximum(
+            0, dupped_group_sizes // 2
+        )
     elif SAMPLE_METHOD == 'oracle':
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
@@ -1078,7 +1082,7 @@ def masking_iteration_draft(
         assert ks_seed.shape == ks.shape
         indices_seed = indices_seed // block_size_k
     
-    assert sample_method in ['first', 'last', 'random', 'oracle']
+    assert sample_method in ['first', 'last', 'random', 'oracle', 'center']
     
     # launch kernels
     BLOCK_MASK_BLOCK_K = triton.next_power_of_2(mask_block_k)
