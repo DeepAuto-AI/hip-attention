@@ -1,0 +1,18 @@
+# trainer only
+torchmetrics
+deepspeed
+lightning
+pytorch_lightning
+scikit-learn
+
+# dataset only
+torchtext
+datasets
+
+# Eval only
+pypareto
+pyrouge
+
+# Other dependencies
+requests
+tqdm
