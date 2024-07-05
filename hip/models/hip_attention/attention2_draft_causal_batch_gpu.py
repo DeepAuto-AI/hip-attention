@@ -104,7 +104,6 @@ def masking_iteration_draft_numba_kernel(
     block_size_q: int,
     block_size_k: int,
     block_size_k_group: int, 
-    oracle_rep: bool,
     sliding_window_size: int, 
     using_extend: bool,
     rope_cos: Optional[Tensor],
@@ -161,7 +160,6 @@ def masking_iteration_draft_numba_kernel(
                 idx_tsrc = idx_tgsrc % MAX_TSRC
                 
                 if block_size_k_group > 1:
-                    assert not oracle_rep
                     assert not using_extend
                     queries = q[idx_group, 1::2, :].copy()
                     keys_min = k[idx_group, idx_tsrc:idx_tsrc+block_size_k, :q.shape[-1]]
@@ -306,7 +304,6 @@ def masking_iteration_draft_numba(
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
                 block_size_k_group=block_size_k_group,
-                oracle_rep=oracle_rep,
                 sliding_window_size=sliding_window_size,
                 using_extend=using_extend,
                 rope_cos=rope_cos,
@@ -464,6 +461,93 @@ def masking_iteration_draft_cuda_initialize(
         )
 
 @triton.jit
+def masking_iteration_draft_cuda_dup_and_score_calc_score(
+    dupped_indices_for_keys,
+    
+    Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
+    K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+    
+    idx_b, 
+    idx_tdst, mask_tdst, pos_tdst,
+    dupped_mask,
+    
+    G, MAX_TSRC, HID,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+    REDUCE_METHOD: tl.constexpr,
+):
+    idx_tsrc = (
+        (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
+        + tl.arange(0, BLOCK_SIZE_K)[None, :]
+    ).reshape(BLOCK_BK * 2 * BLOCK_SIZE_K)
+    idx_group = idx_tsrc // MAX_TSRC
+    idx_tsrc = idx_tsrc % MAX_TSRC
+    
+    acc = tl.zeros((BLOCK_SIZE_Q, BLOCK_BK * 2 * BLOCK_SIZE_K), dtype=tl.float32)
+    for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
+        idx_hid = BLOCK_HID * idx_bhid + tl.arange(0, BLOCK_HID)
+        for i_group in range(G):
+            queries = tl.load(
+                Q +\
+                    idx_b * stride_q_b +\
+                    i_group * stride_q_g +\
+                    idx_tdst[:, None] * stride_q_tdst +\
+                    idx_hid[None, :] * stride_q_hid,
+                mask = mask_tdst[:, None],
+                other = 0
+            )
+            keys = tl.load(
+                K +\
+                    idx_b * stride_k_b +\
+                    idx_group[None, :] * stride_k_g +\
+                    idx_tsrc[None, :] * stride_k_tsrc +\
+                    idx_hid[:, None] * stride_k_hid,
+                mask = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * 2, BLOCK_SIZE_K))\
+                    .reshape(1, BLOCK_BK * 2 * BLOCK_SIZE_K),
+                other = 0,
+            )
+            t = tl.dot(
+                queries, keys,
+            ).to(tl.float32)
+            acc += t
+    acc = tl.where(
+        (
+            (acc == 0.0) |
+            (idx_tsrc[None, :] > pos_tdst[:, None]) |
+            False
+        ), 
+        -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
+        acc
+    )
+    scores = tl.reshape(acc, (BLOCK_SIZE_Q, BLOCK_BK * 2, BLOCK_SIZE_K))
+    if REDUCE_METHOD == 'max':
+        scores = tl.max(
+            scores,
+            axis=0
+        )
+        scores = tl.max(
+            scores,
+            axis=-1,
+        )
+    elif REDUCE_METHOD == 'min':
+        scores = tl.min(
+            scores,
+            axis=0
+        )
+        scores = tl.min(
+            scores,
+            axis=-1,
+        )
+    else:
+        raise Exception()
+    scores = tl.where(dupped_mask, scores, float('-inf'))
+    
+    return scores
+
+@triton.jit
 def masking_iteration_draft_cuda_dup_and_score(
     Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
     K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
@@ -597,63 +681,63 @@ def masking_iteration_draft_cuda_dup_and_score(
             0,
             dupped_group_sizes - 1,
         )
+    elif SAMPLE_METHOD == 'oracle':
+        dupped_indices_for_keys_start = dupped_indices_for_keys
+        dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
+        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
+        for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
+            t_dupped_indices_for_keys = tl.where(
+                i_shift < dupped_group_sizes,
+                dupped_indices_for_keys_start + i_shift,
+                dupped_indices_for_keys_end
+            ).to(tl.int32)
+            t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                t_dupped_indices_for_keys,
+                
+                Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
+                K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+                
+                idx_b, 
+                idx_tdst, mask_tdst, pos_tdst,
+                dupped_mask,
+                
+                G, MAX_TSRC, HID,
+                
+                BLOCK_SIZE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_BK,
+                BLOCK_HID,
+                'max',
+            )
+            dupped_indices_for_keys = tl.where(
+                t_scores > max_scores,
+                t_dupped_indices_for_keys,
+                dupped_indices_for_keys,
+            )
+            max_scores = tl.minimum(max_scores, t_scores)
     else:
         # this should be first
         assert SAMPLE_METHOD == 'first'
     
-    idx_tsrc = (
-        (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
-        + tl.arange(0, BLOCK_SIZE_K)[None, :]
-    ).reshape(BLOCK_BK * 2 * BLOCK_SIZE_K)
-    idx_group = idx_tsrc // MAX_TSRC
-    idx_tsrc = idx_tsrc % MAX_TSRC
+    scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+        dupped_indices_for_keys,
+        
+        Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
+        K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+        
+        idx_b, 
+        idx_tdst, mask_tdst, pos_tdst,
+        dupped_mask,
+        
+        G, MAX_TSRC, HID,
+        
+        BLOCK_SIZE_Q,
+        BLOCK_SIZE_K,
+        BLOCK_BK,
+        BLOCK_HID,
+        'max',
+    )
     
-    acc = tl.zeros((BLOCK_SIZE_Q, BLOCK_BK * 2 * BLOCK_SIZE_K), dtype=tl.float32)
-    for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
-        idx_hid = BLOCK_HID * idx_bhid + tl.arange(0, BLOCK_HID)
-        for i_group in range(G):
-            queries = tl.load(
-                Q +\
-                    idx_b * stride_q_b +\
-                    i_group * stride_q_g +\
-                    idx_tdst[:, None] * stride_q_tdst +\
-                    idx_hid[None, :] * stride_q_hid,
-                mask = mask_tdst[:, None],
-                other = 0
-            )
-            keys = tl.load(
-                K +\
-                    idx_b * stride_k_b +\
-                    idx_group[None, :] * stride_k_g +\
-                    idx_tsrc[None, :] * stride_k_tsrc +\
-                    idx_hid[:, None] * stride_k_hid,
-                mask = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * 2, BLOCK_SIZE_K))\
-                    .reshape(1, BLOCK_BK * 2 * BLOCK_SIZE_K),
-                other = 0,
-            )
-            t = tl.dot(
-                queries, keys,
-            ).to(tl.float32)
-            acc += t
-    acc = tl.where(
-        (
-            (acc == 0.0) |
-            (idx_tsrc[None, :] > pos_tdst[:, None]) |
-            False
-        ), 
-        -32000.0, 
-        acc
-    )
-    scores = tl.reshape(acc, (BLOCK_SIZE_Q, BLOCK_BK * 2, BLOCK_SIZE_K))
-    scores = tl.max(
-        scores,
-        axis=0
-    )
-    scores = tl.max(
-        scores,
-        axis=-1,
-    )
-    scores = tl.where(dupped_mask, scores, float('-inf'))
     tl.store(
         SCORES +\
             idx_b * stride_scores_b +\
@@ -913,7 +997,6 @@ def masking_iteration_draft(
     block_size_q: int,
     block_size_k: int,
     block_size_k_group: int,
-    oracle_rep: bool,
     sliding_window_size: int,
     sink_token_size: int,
     using_extend: bool,
@@ -922,7 +1005,8 @@ def masking_iteration_draft(
     self_extend_neighboor_window: int,
     self_extend_group_size: int,
     topk_head_group_size: int,
-    sample_method: bool,
+    sample_method: str,
+    score_head_group_size: int,
     
     indices_seed: Optional[Tensor] = None,
     ks_seed: Optional[Tensor] = None,
@@ -994,7 +1078,7 @@ def masking_iteration_draft(
         assert ks_seed.shape == ks.shape
         indices_seed = indices_seed // block_size_k
     
-    assert sample_method in ['first', 'last', 'random']
+    assert sample_method in ['first', 'last', 'random', 'oracle']
     
     # launch kernels
     BLOCK_MASK_BLOCK_K = triton.next_power_of_2(mask_block_k)
@@ -1112,9 +1196,20 @@ def masking_iteration_draft(
             num_warps=min(32, BLOCK_SCORE//32),
         )
         
+        if score_head_group_size > 1:
+            assert score_head_group_size <= B
+            assert (B  % score_head_group_size) == 0
+            scores_max = scores\
+                .view(B // score_head_group_size, score_head_group_size, BDST, scores.shape[-1])\
+                .min(1, keepdim=True)[0]
+            # print(scores_max[0, :, 0])
+            # input()
+            scores = scores_max\
+                .repeat(1, score_head_group_size, 1, 1)\
+                .view(-1, scores_max.shape[-2], scores_max.shape[-1])
+        
         # print(dupped_indices[0, -10])
         # print(scores[0, -10])
-        
         # print(scores.sum(-1)[0, -1])
         
         # NOTE: because of sort, we cannot fuse everything...
@@ -1607,8 +1702,6 @@ def hip_attention(
     sliding_window_size: int = 128,
     sink_token_size: int = 4,
     
-    oracle_rep: bool = False,
-    
     using_extend: bool = False,
     rope_cos: Optional[Tensor] = None,
     rope_sin: Optional[Tensor] = None,
@@ -1618,28 +1711,30 @@ def hip_attention(
     sample_method: str = 'first',
     
     traverse_from_last_step: bool = True,
+    step_size: int = 1,
     num_samples: int = 1,
+    
+    score_head_group_size: int = 1,
 ):
     indices_blocks = []
     ks_blocks = []
     ks_count_blocks = []
     ks_start_end_blocks = []
     indices_seed = ks_seed = None
-    for idx_tdst in range(0, q.shape[1], block_size_q):
+    for idx_tdst in range(0, q.shape[1], block_size_q * step_size):
         for idx_sample in range(num_samples):
             indices, ks, ks_count, ks_start_end = masking_iteration_draft(
-                q[:, idx_tdst: idx_tdst+block_size_q, :], 
+                q[:, idx_tdst: idx_tdst+block_size_q * step_size, :], 
                 k[:, :, :], 
                 position_ids=torch.arange(
                     idx_tdst, 
-                    idx_tdst+block_size_q, 
+                    idx_tdst+block_size_q * step_size, 
                     device=q.device
                 ),
                 mask_k=mask_k,
                 block_size_q=block_size_q,
                 block_size_k=block_size_k,
                 block_size_k_group=block_size_k_group,
-                oracle_rep=oracle_rep,
                 sliding_window_size=sliding_window_size,
                 sink_token_size=sink_token_size,
                 using_extend=using_extend,
@@ -1649,6 +1744,7 @@ def hip_attention(
                 self_extend_group_size=self_extend_group_size,
                 topk_head_group_size=topk_head_group_size,
                 sample_method=sample_method,
+                score_head_group_size=score_head_group_size,
                 indices_seed=indices_seed,
                 ks_seed=ks_seed,
             )
@@ -1746,9 +1842,12 @@ if __name__ == '__main__':
         self_extend_group_size=8,
         
         topk_head_group_size=1,
+        sample_method='oracle',
         
         traverse_from_last_step=True,
-        num_samples=1,
+        num_samples=2,
+        
+        score_head_group_size=1,
     )
     
     if context is not None:

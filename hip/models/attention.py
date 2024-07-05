@@ -222,11 +222,14 @@ def custom_attention(
                     sliding_window_size=128,
                     sink_token_size=16,
                     
-                    oracle_rep=False,
                     topk_head_group_size=1,
+                    sample_method='first',
                     
                     traverse_from_last_step=True,
-                    num_samples=4,
+                    step_size=1,
+                    num_samples=2,
+                    
+                    score_head_group_size=1,
                 )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)

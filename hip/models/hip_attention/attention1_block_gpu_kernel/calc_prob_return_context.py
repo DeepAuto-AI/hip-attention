@@ -351,12 +351,12 @@ def _calc_prob_return_context_acc_compute(
 
 @triton.autotune(
     configs=[
-        triton.Config(kwargs={}, num_warps=16),
-        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=16, num_stages=1),
+        triton.Config(kwargs={}, num_warps=8, num_stages=1),
         # BUG: CUDA misaligned memory address.
         # triton.Config(kwargs={}, num_warps=4),
-        triton.Config(kwargs={}, num_warps=2),
-        triton.Config(kwargs={}, num_warps=1),
+        triton.Config(kwargs={}, num_warps=2, num_stages=1),
+        triton.Config(kwargs={}, num_warps=1, num_stages=1),
     ],
     key=['BLOCK_HID', 'BLOCK_BK'],
     warmup=3,
