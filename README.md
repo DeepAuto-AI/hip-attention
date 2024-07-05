@@ -93,9 +93,8 @@ output, _ = paged_hip_attention(
 ## How to clone the repository
 
 ```bash
-git clone <this-repo-url> hip-attention
+git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
-git submodule update --init --remote --recursive  # pull submodules
 ```
 
 ## How to build Docker

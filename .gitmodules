@@ -1,9 +1,0 @@
-[submodule "third_party/vllm"]
-	path = third_party/vllm
-	url = git@github.com:DeepAuto-AI/vllm.git
-[submodule "third_party/LongBench-hip"]
-	path = third_party/LongBench-hip
-	url = git@github.com:gmlwns2000/LongBench-hip.git
-[submodule "third_party/lm-evaluation-harness"]
-	path = third_party/lm-evaluation-harness
-	url = git@github.com:gmlwns2000/lm-evaluation-harness.git
