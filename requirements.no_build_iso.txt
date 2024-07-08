@@ -1,0 +1,2 @@
+# Packages required building from source (needs --no-build-isolation)
+flash-attn

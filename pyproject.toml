@@ -21,7 +21,7 @@ build-backend = "setuptools.build_meta"
 name = "hip-attention"  # Name of package when installed using pip
 version = "0.1.0"
 description = "HiP Attention"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dynamic = ["dependencies", "optional-dependencies"]
 
 [tool.setuptools.dynamic]
@@ -29,7 +29,9 @@ dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools.dynamic.optional-dependencies]
 dev = {file = ["requirements.dev.txt"]}
+no_build_iso = {file = ["requirements.no_build_iso.txt"]}
 vllm = {file = ["requirements.vllm.txt"]}
+openai = {file = ["requirements.openai.txt"]}
 
 # ##############################################################################
 # PEP 518 [tool] table

@@ -97,32 +97,37 @@ git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 ```
 
-## How to build Docker
-
-Run commands below:
-
-```bash
-cd third_party/vllm-hip
-docker build . --build-context hip=../.. --target vllm-openai --tag vllm/vllm-openai
-```
-
 ## Running Docker
 
 After building the container, run commands below (change `--gpus` and `--tensor-parallel-size` according to your environment):
 
 ```bash
-docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
+docker run --runtime nvidia --rm -it --ipc=host \
+    --gpus '"device=0"' \
+    -p 8001:8001 \
     -v ~/.cache/huggingface/:/root/.cache/huggingface \
     -e 'ATTENTION_BACKEND=hip' \
     -e 'HIP_K=512' \
     -e 'HIP_REFRESH_INTERVAL=8' \
     -e 'HIP_DENSE_LAYERS=4' \
-    vllm/vllm-openai \
-        --model togethercomputer/LLaMA-2-7B-32K \
-        --tensor-parallel-size 4 \
+    deepauto/vllm-hip-openai:latest \
+        --port 8001 \
+        --model Qwen/Qwen2-1.5B-Instruct \
+        --tensor-parallel-size 1 \
         --kv-cache-dtype fp8_e5m2 \
         --dtype half \
-        --gpu-memory-utilization 0.85
+        --gpu-memory-utilization 0.50
+```
+
+## How to build Docker
+
+Run commands below:
+
+```bash
+cd ../
+git clone git@github.com:DeepAuto-AI/vllm.git
+cd vllm
+docker build . --build-context hip=../hip-attention --target vllm-openai --tag deepauto/vllm-hip-openai
 ```
 
 ## Setup without docker
@@ -138,8 +143,10 @@ pip install -e ".[dev]"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
-# vLLM for serving
-pip install -e ".[vllm]" --no-build-isolation --verbose
+# Dependencies that requires --no-build-isolation
+pip install -e ".[no_build_iso]" --no-build-isolation --verbose
+# vLLM with OpenAI API support for serving
+pip install -e ".[vllm,openai]" --no-build-isolation --verbose
 ```
 
 ## Running without docker
@@ -150,7 +157,7 @@ HIP_K=512 \
 HIP_REFRESH_INTERVAL=8 \
 HIP_DENSE_LAYERS=4 \
 python3 -m vllm.entrypoints.openai.api_server \
-    --model  Qwen/Qwen2-1.5B-Instruct \
+    --model Qwen/Qwen2-1.5B-Instruct \
     --tensor-parallel-size 1 \
     --kv-cache-dtype fp8_e5m2 \
     --dtype half \
