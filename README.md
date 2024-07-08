@@ -104,12 +104,14 @@ After building the container, run commands below (change `--gpus` and `--tensor-
 ```bash
 docker run --runtime nvidia --rm -it --ipc=host \
     --gpus '"device=0"' \
+    -p 8001:8001 \
     -v ~/.cache/huggingface/:/root/.cache/huggingface \
     -e 'ATTENTION_BACKEND=hip' \
     -e 'HIP_K=512' \
     -e 'HIP_REFRESH_INTERVAL=8' \
     -e 'HIP_DENSE_LAYERS=4' \
     deepauto/vllm-hip-openai:latest \
+        --port 8001 \
         --model Qwen/Qwen2-1.5B-Instruct \
         --tensor-parallel-size 1 \
         --kv-cache-dtype fp8_e5m2 \
