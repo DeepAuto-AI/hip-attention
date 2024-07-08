@@ -138,6 +138,8 @@ pip install -e ".[dev]"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
+# Dependencies that requires --no-build-isolation
+pip install -e ".[no_build_iso]" --no-build-isolation --verbose
 # vLLM for serving
 pip install -e ".[vllm]" --no-build-isolation --verbose
 ```
