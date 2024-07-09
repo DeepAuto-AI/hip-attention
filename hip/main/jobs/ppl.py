@@ -1,3 +1,4 @@
+import math
 import os
 import pathlib
 import time
@@ -67,14 +68,18 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
                 else:
                     sample_counts = int(os.getenv('_SAMPLE_COUNT', '1'))
                     samples = []
-                    for _ in tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1):
-                        outputs = model(
-                            input_ids,
-                            labels=target_ids,
-                        )
-                        samples.append(outputs.loss)
+                    with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
+                        for _ in pbar_sample:
+                            outputs = model(
+                                input_ids,
+                                labels=target_ids,
+                            )
+                            samples.append(outputs.loss)
+                            pbar_sample.set_description(
+                                f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
+                            )
                     if len(samples) > 1:
-                        print(samples)
+                        print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
 
             nlls.append(neg_log_likelihood.cpu())

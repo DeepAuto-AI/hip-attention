@@ -29,7 +29,7 @@ TODO:
 # topk_head_group
 # 
 
-import random
+import random, os
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as NdArrayCuda
 import warnings
 import numba.cuda as cuda
@@ -461,22 +461,103 @@ def masking_iteration_draft_cuda_initialize(
         )
 
 @triton.jit
+def split_half(x: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    x = x.reshape(T, 2, HID // 2)
+    x = x.trans(0, 2, 1)
+    return x.split()
+
+@triton.jit
+def merge_half(left: tl.tensor, right: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    assert left.shape == right.shape
+    x = tl.join(left, right)
+    x = x.trans(0, 2, 1)
+    x = x.reshape(T, HID)
+    return x
+
+@triton.jit
+def de_rope(vec: tl.tensor, cos: tl.tensor, sin: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    c0, ch = split_half(cos, T, HID)
+    s0, sh = split_half(sin, T, HID)
+    vr0, vrh = split_half(vec, T, HID)
+    
+    out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
+    outh = (out0 * c0 - vr0) / (s0 + 1e-20)
+    out = merge_half(out0, outh, T, HID)
+    return out
+
+@triton.jit
+def rotate_half(vec: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    left, right = split_half(vec, T, HID)
+    out0 = -right
+    outh = left
+    return merge_half(out0, outh, T, HID)
+
+@triton.jit
+def apply_rope(vec: tl.tensor, cos: tl.tensor, sin: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    vec = vec * cos + rotate_half(vec, T, HID) * sin
+    return vec
+
+@triton.jit
+def adjust_rope(
+    tokens: tl.tensor,
+    old_t: tl.tensor,
+    new_t: tl.tensor,
+    idx_hid: tl.tensor,
+    
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
+    
+    T: tl.constexpr, HID: tl.constexpr,
+):
+    cos_old = tl.load(
+        COS +\
+            old_t[:, None] * stride_cos_t +\
+            idx_hid[None, :] * stride_cos_hid
+    )
+    sin_old = tl.load(
+        SIN +\
+            old_t[:, None] * stride_sin_t +\
+            idx_hid[None, :] * stride_sin_hid
+    )
+    
+    cos_new = tl.load(
+        COS +\
+            new_t[:, None] * stride_cos_t +\
+            idx_hid[None, :] * stride_cos_hid
+    )
+    sin_new = tl.load(
+        SIN +\
+            new_t[:, None] * stride_sin_t +\
+            idx_hid[None, :] * stride_sin_hid
+    )
+    
+    tokens = de_rope(tokens, cos_old, sin_old, T, HID)
+    tokens = apply_rope(tokens, cos_new, sin_new, T, HID)
+    
+    return tokens
+
+@triton.jit
 def masking_iteration_draft_cuda_dup_and_score_calc_score(
     dupped_indices_for_keys,
     
     Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
     K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
     
     idx_b, 
     idx_tdst, mask_tdst, pos_tdst,
     dupped_mask,
     
-    G, MAX_TSRC, HID,
+    G, MAX_TSRC, HID: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
-    BLOCK_HID: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
 ):
     idx_tsrc = (
@@ -487,32 +568,77 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     idx_tsrc = idx_tsrc % MAX_TSRC
     
     acc = tl.zeros((BLOCK_SIZE_Q, BLOCK_BK * 2 * BLOCK_SIZE_K), dtype=tl.float32)
-    for idx_bhid in range(tl.cdiv(HID, BLOCK_HID)):
-        idx_hid = BLOCK_HID * idx_bhid + tl.arange(0, BLOCK_HID)
-        for i_group in range(G):
-            queries = tl.load(
-                Q +\
-                    idx_b * stride_q_b +\
-                    i_group * stride_q_g +\
-                    idx_tdst[:, None] * stride_q_tdst +\
-                    idx_hid[None, :] * stride_q_hid,
-                mask = mask_tdst[:, None],
-                other = 0
+    idx_hid = tl.arange(0, HID)
+    for i_group in range(G):
+        mask_keys = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * 2, BLOCK_SIZE_K))\
+            .reshape(1, BLOCK_BK * 2 * BLOCK_SIZE_K)
+        queries = tl.load(
+            Q +\
+                idx_b * stride_q_b +\
+                i_group * stride_q_g +\
+                idx_tdst[:, None] * stride_q_tdst +\
+                idx_hid[None, :] * stride_q_hid,
+            mask = mask_tdst[:, None],
+            other = 0
+        )
+        keys = tl.load(
+            K +\
+                idx_b * stride_k_b +\
+                idx_group[None, :] * stride_k_g +\
+                idx_tsrc[None, :] * stride_k_tsrc +\
+                idx_hid[:, None] * stride_k_hid,
+            mask = mask_keys,
+            other = 0,
+        )
+        
+        if USING_EXTEND:
+            assert COS is not None
+            assert SIN is not None
+            
+            old_tsrc = idx_tsrc
+            mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 9999999)) - extend_window_size)
+            new_tsrc = tl.where(
+                mask_tsrc_window,
+                old_tsrc,
+                old_tsrc // extend_group_size
             )
-            keys = tl.load(
-                K +\
-                    idx_b * stride_k_b +\
-                    idx_group[None, :] * stride_k_g +\
-                    idx_tsrc[None, :] * stride_k_tsrc +\
-                    idx_hid[:, None] * stride_k_hid,
-                mask = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * 2, BLOCK_SIZE_K))\
-                    .reshape(1, BLOCK_BK * 2 * BLOCK_SIZE_K),
-                other = 0,
+            
+            keys = keys.trans(1, 0)
+            keys = adjust_rope(
+                keys, old_tsrc, new_tsrc, idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_BK * 2 * BLOCK_SIZE_K, HID,
             )
+            keys = tl.trans(keys, 1, 0)
+            keys = keys * mask_keys
+            
+            old_tdst = pos_tdst
+            new_tdst = old_tdst // extend_group_size
+            
+            queries_grouped = adjust_rope(
+                queries, old_tdst, new_tdst, idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_SIZE_Q, HID,
+            )
+            
+            t_window = tl.dot(
+                queries, keys.to(queries.dtype),
+            )
+            t_grouped = tl.dot(
+                queries_grouped.to(queries.dtype), keys.to(queries.dtype),
+            )
+            t = tl.where(
+                mask_tsrc_window[None, :],
+                t_window,
+                t_grouped,
+            ).to(tl.float32)
+        else:
             t = tl.dot(
                 queries, keys,
             ).to(tl.float32)
-            acc += t
+        acc += t
     acc = tl.where(
         (
             (acc == 0.0) |
@@ -552,6 +678,8 @@ def masking_iteration_draft_cuda_dup_and_score(
     Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
     K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
     POS, stride_pos_tdst,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
     
     INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
     KS, stride_ks_b, stride_ks_bdst,
@@ -576,14 +704,18 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     sliding_window_size,
     
-    G: tl.constexpr, MAX_TDST, MAX_TSRC, BK, HID,
+    G: tl.constexpr, MAX_TDST, MAX_TSRC, BK, HID: tl.constexpr,
     RAND_SEED,
     SAMPLE_METHOD: tl.constexpr,
+    BRANCH_METHOD: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
-    BLOCK_HID: tl.constexpr,
 ):
     idx_b = tl.program_id(0)
     idx_bdst = tl.program_id(1)
@@ -646,11 +778,36 @@ def masking_iteration_draft_cuda_dup_and_score(
         tl.join(group_sizes, group_sizes),
         (BLOCK_BK * 2,)
     )
-    dupped_indices = tl.where(
-        (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
-        dupped_indices,
-        (dupped_indices + dupped_group_sizes * 0.5).to(tl.int32)
-    )
+    if BRANCH_METHOD == 'half':
+        dupped_indices = tl.where(
+            (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
+            dupped_indices,
+            (dupped_indices + dupped_group_sizes * 0.5).to(tl.int32)
+        )
+    elif BRANCH_METHOD == 'random':
+        dupped_indices = tl.where(
+            (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
+            dupped_indices,
+            tl.where(
+                dupped_group_sizes == 0,
+                dupped_indices,
+                tl.maximum(
+                    dupped_indices + 1,
+                    dupped_indices +\
+                        dupped_group_sizes * 0.5 +\
+                        dupped_group_sizes * (0.2 * tl.random.rand(
+                            RAND_SEED, 
+                            tl.arange(0, BLOCK_BK * 2) +\
+                                tl.program_id(0) * 7 +\
+                                tl.program_id(1) * 53 +\
+                                tl.program_id(2) * 157
+                            ) * 0.99 - 0.1
+                        )
+                ).to(tl.int32)
+            )
+        )
+    else:
+        raise Exception(BRANCH_METHOD)
     flipped_dupped_indices = tl.reshape(
         tl.flip(
             tl.reshape(
@@ -672,7 +829,15 @@ def masking_iteration_draft_cuda_dup_and_score(
         offsets = tl.where(
             dupped_group_sizes > 4,
             0, 
-            (tl.randint(RAND_SEED, dupped_indices) % dupped_group_sizes.to(tl.uint32)).to(tl.int32)
+            (
+                tl.randint(
+                    RAND_SEED, 
+                    dupped_indices + \
+                        tl.program_id(0) * 3 + \
+                        tl.program_id(1) * 71 + \
+                        tl.program_id(2) * 13
+                    ) % dupped_group_sizes.to(tl.uint32)
+            ).to(tl.int32)
         )
         dupped_indices_for_keys += offsets
     elif SAMPLE_METHOD == 'last':
@@ -686,6 +851,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             0, dupped_group_sizes // 2
         )
     elif SAMPLE_METHOD == 'oracle':
+        # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
         max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
@@ -700,6 +866,8 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
                 K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
                 
                 idx_b, 
                 idx_tdst, mask_tdst, pos_tdst,
@@ -707,10 +875,13 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 G, MAX_TSRC, HID,
                 
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
                 BLOCK_SIZE_Q,
                 BLOCK_SIZE_K,
                 BLOCK_BK,
-                BLOCK_HID,
                 'max',
             )
             dupped_indices_for_keys = tl.where(
@@ -728,6 +899,8 @@ def masking_iteration_draft_cuda_dup_and_score(
         
         Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
         K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+        COS, stride_cos_t, stride_cos_hid,
+        SIN, stride_sin_t, stride_sin_hid,
         
         idx_b, 
         idx_tdst, mask_tdst, pos_tdst,
@@ -735,10 +908,13 @@ def masking_iteration_draft_cuda_dup_and_score(
         
         G, MAX_TSRC, HID,
         
+        USING_EXTEND,
+        extend_window_size,
+        extend_group_size,
+        
         BLOCK_SIZE_Q,
         BLOCK_SIZE_K,
         BLOCK_BK,
-        BLOCK_HID,
         'max',
     )
     
@@ -1010,6 +1186,7 @@ def masking_iteration_draft(
     self_extend_group_size: int,
     topk_head_group_size: int,
     sample_method: str,
+    branch_method: str,
     score_head_group_size: int,
     
     indices_seed: Optional[Tensor] = None,
@@ -1081,6 +1258,9 @@ def masking_iteration_draft(
         assert indices_seed.shape == indices.shape
         assert ks_seed.shape == ks.shape
         indices_seed = indices_seed // block_size_k
+    if rope_cos is not None:
+        assert len(rope_cos.stride()) == 2
+        assert len(rope_sin.stride()) == 2
     
     assert sample_method in ['first', 'last', 'random', 'oracle', 'center']
     
@@ -1122,7 +1302,7 @@ def masking_iteration_draft(
     )
     scores = torch.zeros_like(dupped_indices, dtype=q.dtype)
     
-    BLOCK_BK = 64 // 2 // block_size_k
+    BLOCK_BK = 16 // 2 // block_size_k
     assert BLOCK_BK > 0
     BLOCK_HID = 64
     assert (HID % BLOCK_HID) == 0
@@ -1146,6 +1326,8 @@ def masking_iteration_draft(
             *k.stride(),
             # (k - k[:, :, :2, :].mean(-2, keepdim=True)), *k.stride(),
             position_ids, *position_ids.stride(),
+            rope_cos, *(rope_cos.stride() if rope_cos is not None else (0, 0)),
+            rope_sin, *(rope_sin.stride() if rope_sin is not None else (0, 0)),
             
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -1164,11 +1346,17 @@ def masking_iteration_draft(
             G, TDST, TSRC, mask_block_k, HID,
             random.randint(0, 1024*1024),
             sample_method,
+            branch_method,
+            
+            using_extend,
+            self_extend_neighboor_window,
+            self_extend_group_size,
             
             block_size_q,
             block_size_k,
             BLOCK_BK,
-            BLOCK_HID,
+            
+            num_stages=1,
         )
         
         # print(indices[0, -10])
@@ -1238,8 +1426,13 @@ def masking_iteration_draft(
             BLOCK_BK,
         )
         
-        t_group_sizes.mul_(0.5)
-        max_group_size = max_group_size / 2
+        if branch_method == 'random':
+            t_group_sizes.mul_(0.7)
+            max_group_size = max_group_size * 0.7
+        else:
+            t_group_sizes.mul_(0.5)
+            max_group_size = max_group_size * 0.5
+        # print('a', max_group_size, t_group_sizes.max())
     
     # torch.cuda.synchronize()
     # print('done', flush=True)
@@ -1385,6 +1578,14 @@ def block_sparse_attention_cuda_step(
     
     sliding_window_size,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
+    pos_tdst,
+    idx_hid, HID: tl.constexpr, BLOCK_TQ, BLOCK_TK,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -1403,12 +1604,64 @@ def block_sparse_attention_cuda_step(
     # keys_max = tl.maximum(1.0, tl.max(tl.abs(keys)).to(tl.float32))
     # queries_scale = (1.0 / queries_max)
     # keys_scale = (1.0 / keys_max)
-    qk = tl.dot(
-        # (queries * queries_scale).to(queries.dtype),
-        # (keys * keys_scale).to(keys.dtype),
-        queries, keys,
-        allow_tf32=True,
-    ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
+    # qk = tl.dot(
+    #     # (queries * queries_scale).to(queries.dtype),
+    #     # (keys * keys_scale).to(keys.dtype),
+    #     queries, keys,
+    #     allow_tf32=True,
+    # ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
+    
+    if USING_EXTEND:
+        assert COS is not None
+        assert SIN is not None
+        
+        old_tsrc = idx_tsrc
+        mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 9999999)) - extend_window_size)
+        new_tsrc = tl.where(
+            mask_tsrc_window,
+            old_tsrc,
+            old_tsrc // extend_group_size
+        )
+        
+        keys = keys.trans(1, 0)
+        keys = adjust_rope(
+            keys, old_tsrc, new_tsrc, idx_hid,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            BLOCK_TK, HID,
+        )
+        keys = tl.trans(keys, 1, 0)
+        keys = keys * mask_tsrc[None, :]
+        
+        old_tdst = pos_tdst
+        new_tdst = old_tdst // extend_group_size
+        
+        queries_grouped = adjust_rope(
+            queries, old_tdst, new_tdst, idx_hid,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            BLOCK_TQ, HID,
+        )
+        queries_grouped = queries_grouped * mask_tdst[:, None]
+        
+        t_window = tl.dot(
+            queries, keys.to(queries.dtype),
+            allow_tf32=True,
+        )
+        t_grouped = tl.dot(
+            queries_grouped.to(queries.dtype), keys.to(queries.dtype),
+            allow_tf32=True,
+        )
+        qk = tl.where(
+            mask_tsrc_window[None, :],
+            t_window,
+            t_grouped,
+        ).to(tl.float32) * 1.44269504
+    else:
+        qk = tl.dot(
+            queries, keys,
+            allow_tf32=True,
+        ).to(tl.float32) * 1.44269504
     
     # qk_mask = (
     #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
@@ -1483,6 +1736,12 @@ def block_sparse_attention_cuda(
     G, BK, MAX_TDST, MAX_TSRC,
     
     sliding_window_size: int,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
     
     HID: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
@@ -1577,7 +1836,17 @@ def block_sparse_attention_cuda(
             MAX_TSRC,
             
             sliding_window_size,
-            True
+            True,
+            
+            USING_EXTEND,
+            extend_window_size,
+            extend_group_size,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            idx_tdst + MAX_TSRC - MAX_TDST,
+            idx_hid, HID, 
+            BLOCK_SIZE_Q, 
+            BLOCK_BK * BLOCK_SIZE_K,
         )
     
     CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
@@ -1617,7 +1886,17 @@ def block_sparse_attention_cuda(
             MAX_TSRC,
             
             sliding_window_size,
-            False
+            False,
+            
+            USING_EXTEND,
+            extend_window_size,
+            extend_group_size,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            idx_tdst + MAX_TSRC - MAX_TDST,
+            idx_hid, HID, 
+            BLOCK_SIZE_Q, 
+            BLOCK_BK,
         )
     
     # epilogue
@@ -1650,6 +1929,12 @@ def block_sparse_attention(
     sliding_window_size: int,
     
     topk_head_group_size: int,
+    
+    using_extend: bool,
+    extend_window_size: int,
+    extend_group_size: int,
+    rope_cos: Optional[torch.Tensor],
+    rope_sin: Optional[torch.Tensor],
 ):
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
@@ -1664,8 +1949,12 @@ def block_sparse_attention(
     
     context = torch.zeros_like(q)
     
-    BLOCK_BK = 64 // block_size_k
+    BLOCK_BK = 32 // block_size_k
     assert BLOCK_BK > 0
+    
+    if rope_cos is not None:
+        assert len(rope_cos.stride()) == 2
+        assert len(rope_sin.stride()) == 2
     
     grid = (B, BDST, G)
     block_sparse_attention_cuda[grid](
@@ -1683,10 +1972,18 @@ def block_sparse_attention(
         
         sliding_window_size,
         
+        using_extend,
+        extend_window_size,
+        extend_group_size,
+        rope_cos, *(rope_cos.stride() if rope_cos is not None else (0, 0)),
+        rope_sin, *(rope_sin.stride() if rope_sin is not None else (0, 0)),
+        
         HID,
         block_size_q,
         block_size_k,
         BLOCK_BK,
+        
+        num_stages=1,
     )
     
     return context
@@ -1713,9 +2010,11 @@ def hip_attention(
     self_extend_group_size: int = 8,
     topk_head_group_size: int = 8,
     sample_method: str = 'first',
+    branch_method: str = 'half',
     
     traverse_from_last_step: bool = True,
     step_size: int = 1,
+    chunk_size: Optional[int] = None,
     num_samples: int = 1,
     
     score_head_group_size: int = 1,
@@ -1748,13 +2047,18 @@ def hip_attention(
                 self_extend_group_size=self_extend_group_size,
                 topk_head_group_size=topk_head_group_size,
                 sample_method=sample_method,
+                branch_method=branch_method,
                 score_head_group_size=score_head_group_size,
                 indices_seed=indices_seed,
                 ks_seed=ks_seed,
             )
-            if traverse_from_last_step:
-                indices_seed = indices
-                ks_seed = ks
+            indices_seed = indices
+            ks_seed = ks
+        
+        if not traverse_from_last_step:
+            indices_seed = ks_seed = None
+        if (chunk_size is not None) and (((idx_tdst // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
+            indices_seed = ks_seed = None
         
         indices_blocks.append(indices)
         ks_blocks.append(ks)
@@ -1773,30 +2077,44 @@ def hip_attention(
     # print(ks[0, 4+16])
     # print(ks[0, 4+16+1])
     
-    # N, TDST, HID = q.shape
-    # _, TSRC, _ = k.shape
-    # debug_mask = to_dense(
-    #     indices.cpu().numpy(),
-    #     ks.cpu().numpy(),
-    #     None,
-    #     cdiv_python(N, topk_head_group_size),
-    #     TDST, 
-    #     TSRC * topk_head_group_size, 
-    #     block_size_q, 
-    #     block_size_k * block_size_k_group,
-    # )
-    # # print(debug_mask)
-    # import matplotlib.pyplot as plt
-    # plt.figure(figsize=(4*topk_head_group_size, 4))
-    # plt.imshow(debug_mask[0])
-    # plt.savefig('dummy.png', dpi=96)
-    # print('saved dummy.png')
+    if os.getenv('HIP_DEBUG', '0') == '1':
+        N, TDST, HID = q.shape
+        _, TSRC, _ = k.shape
+        debug_mask = to_dense(
+            indices.cpu().numpy(),
+            ks.cpu().numpy(),
+            None,
+            cdiv_python(N, topk_head_group_size),
+            TDST, 
+            TSRC * topk_head_group_size, 
+            block_size_q, 
+            block_size_k * block_size_k_group,
+        )
+        # print(debug_mask)
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(4*topk_head_group_size, 4))
+        plt.imshow(debug_mask[len(debug_mask) // 2])
+        plt.savefig('dummy.png', dpi=96)
+        print('saved dummy.png')
     
     context = block_sparse_attention(
         q, k, v, 
+        
         indices, ks, ks_count, ks_start_end,
-        block_size_q, block_size_k, mask_k, sliding_window_size,
+        
+        block_size_q, 
+        block_size_k, 
+        mask_k, 
+        sliding_window_size,
+        
         topk_head_group_size,
+        
+        using_extend,
+        # False,
+        self_extend_neighboor_window,
+        self_extend_group_size,
+        rope_cos,
+        rope_sin,
     )
     
     # print(context[0, :320, 0])
@@ -1822,10 +2140,12 @@ def hip_attention(
     # return context, None
 
 if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=8192, return_cos_sin=True, dtype=torch.float32)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=32768, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
+    
+    os.environ['HIP_DEBUG'] = '1'
     
     context, _ = hip_attention(
         q, k, v, 
@@ -1839,14 +2159,15 @@ if __name__ == '__main__':
         sliding_window_size=128,
         sink_token_size=16,
         
-        using_extend=False,
+        using_extend=True,
         rope_cos=cos,
         rope_sin=sin,
-        self_extend_neighboor_window=1024,
-        self_extend_group_size=8,
+        self_extend_neighboor_window=16384,
+        self_extend_group_size=2,
         
         topk_head_group_size=1,
-        sample_method='oracle',
+        sample_method='first',
+        branch_method='half',
         
         traverse_from_last_step=True,
         num_samples=2,

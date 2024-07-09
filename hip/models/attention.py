@@ -205,8 +205,28 @@ def custom_attention(
                     num_sink=0,
                 )
             else:
-                # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
                 from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
+                
+                # attn_output_hip, _ = hip_attention_draft_cpu(
+                #     q_hip,
+                #     k[:, :LAST_DENSE_QUERIES, :],
+                #     v[:, :LAST_DENSE_QUERIES, :],
+                    
+                #     mask_k=tree_k,
+                    
+                #     block_size_q=tree_block_size_q,
+                #     block_size_k=tree_block_size_k,
+                #     block_size_k_group=1,
+                    
+                #     using_extend=True,
+                #     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                #     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                #     self_extend_neighboor_window=1024,
+                #     self_extend_group_size=8,
+                    
+                #     topk_head_group_size=1,
+                # )
                 
                 attn_output_hip, _ = hip_attention_draft(
                     q_hip,
@@ -222,11 +242,19 @@ def custom_attention(
                     sliding_window_size=128,
                     sink_token_size=16,
                     
+                    using_extend=True,
+                    rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                    rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                    self_extend_neighboor_window=2048,
+                    self_extend_group_size=4,
+                    
                     topk_head_group_size=1,
                     sample_method='first',
+                    branch_method='half',
                     
                     traverse_from_last_step=True,
                     step_size=1,
+                    chunk_size=None,
                     num_samples=2,
                     
                     score_head_group_size=1,
