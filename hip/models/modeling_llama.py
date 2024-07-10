@@ -730,7 +730,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
         self.tree_high_k_layers = {
-            # 0:4, 1:4, 2:4,
+            # 0:4, 1:4, 2:4, 3:4,
         }
         self.tree_rope_method = 'none'
         self.tree_enable_sparq = True

@@ -242,10 +242,10 @@ def custom_attention(
                     sliding_window_size=128,
                     sink_token_size=16,
                     
-                    using_extend=True,
+                    using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                    self_extend_neighboor_window=2048,
+                    self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,

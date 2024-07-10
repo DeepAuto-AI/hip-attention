@@ -592,48 +592,82 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         )
         
         if USING_EXTEND:
-            assert COS is not None
-            assert SIN is not None
-            
-            old_tsrc = idx_tsrc
-            mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 9999999)) - extend_window_size)
-            new_tsrc = tl.where(
-                mask_tsrc_window,
-                old_tsrc,
-                old_tsrc // extend_group_size
-            )
-            
-            keys = keys.trans(1, 0)
-            keys = adjust_rope(
-                keys, old_tsrc, new_tsrc, idx_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_BK * 2 * BLOCK_SIZE_K, HID,
-            )
-            keys = tl.trans(keys, 1, 0)
-            keys = keys * mask_keys
-            
-            old_tdst = pos_tdst
-            new_tdst = old_tdst // extend_group_size
-            
-            queries_grouped = adjust_rope(
-                queries, old_tdst, new_tdst, idx_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_SIZE_Q, HID,
-            )
-            
-            t_window = tl.dot(
-                queries, keys.to(queries.dtype),
-            )
-            t_grouped = tl.dot(
-                queries_grouped.to(queries.dtype), keys.to(queries.dtype),
-            )
-            t = tl.where(
-                mask_tsrc_window[None, :],
-                t_window,
-                t_grouped,
-            ).to(tl.float32)
+            if tl.min(pos_tdst) > extend_window_size:
+                assert COS is not None
+                assert SIN is not None
+                
+                idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - extend_window_size - BLOCK_SIZE_K)
+                idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, 16)
+                mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
+                keys_calib_old = tl.load(
+                    K +\
+                        idx_b * stride_k_b +\
+                        i_group * stride_k_g +\
+                        idx_tsrc_calib[None, :] * stride_k_tsrc +\
+                        idx_hid[:, None] * stride_k_hid,
+                    mask=mask_tsrc_calib[None, :],
+                    other=0
+                )
+                
+                keys_calib_new = adjust_rope(
+                    keys_calib_old.trans(1, 0), idx_tsrc_calib, idx_tsrc_calib // extend_group_size, idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    16, HID,
+                ).trans(1, 0)
+                
+                old_tsrc = idx_tsrc
+                mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 9999999)) - extend_window_size)
+                new_tsrc = tl.where(
+                    mask_tsrc_window,
+                    old_tsrc,
+                    old_tsrc // extend_group_size
+                )
+                
+                keys = keys.trans(1, 0)
+                keys = adjust_rope(
+                    keys, old_tsrc, new_tsrc, idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_BK * 2 * BLOCK_SIZE_K, HID,
+                ).to(keys.dtype)
+                keys = tl.trans(keys, 1, 0)
+                keys = (keys * mask_keys).to(keys.dtype)
+                
+                old_tdst = pos_tdst
+                new_tdst = old_tdst // extend_group_size
+                
+                queries_grouped = adjust_rope(
+                    queries, old_tdst, new_tdst, idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_SIZE_Q, HID,
+                ).to(queries.dtype)
+                
+                t_calib_old = tl.dot(
+                    queries, keys_calib_old.to(queries.dtype),
+                )
+                t_calib_new = tl.dot(
+                    queries_grouped, keys_calib_new.to(queries.dtype),
+                )
+                calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / 16
+                
+                t_window = tl.dot(
+                    queries, keys.to(queries.dtype),
+                )
+                t_grouped = tl.dot(
+                    queries_grouped, keys.to(queries.dtype),
+                ) - calibration[:, None]
+                # NOTE: this calibration trick is very important.
+                t = tl.where(
+                    mask_tsrc_window[None, :],
+                    t_window,
+                    t_grouped,
+                ).to(tl.float32)
+            else:
+                t = tl.dot(
+                    queries, keys,
+                ).to(tl.float32)
         else:
             t = tl.dot(
                 queries, keys,
@@ -1949,7 +1983,7 @@ def block_sparse_attention(
     
     context = torch.zeros_like(q)
     
-    BLOCK_BK = 32 // block_size_k
+    BLOCK_BK = 64 // block_size_k
     assert BLOCK_BK > 0
     
     if rope_cos is not None:
@@ -2093,9 +2127,10 @@ def hip_attention(
         # print(debug_mask)
         import matplotlib.pyplot as plt
         plt.figure(figsize=(4*topk_head_group_size, 4))
-        plt.imshow(debug_mask[len(debug_mask) // 2])
+        plt.imshow(debug_mask[0])
         plt.savefig('dummy.png', dpi=96)
         print('saved dummy.png')
+        # input()
     
     context = block_sparse_attention(
         q, k, v, 
@@ -2140,7 +2175,7 @@ def hip_attention(
     # return context, None
 
 if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=32768, return_cos_sin=True, dtype=torch.float32)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
@@ -2162,8 +2197,8 @@ if __name__ == '__main__':
         using_extend=True,
         rope_cos=cos,
         rope_sin=sin,
-        self_extend_neighboor_window=16384,
-        self_extend_group_size=2,
+        self_extend_neighboor_window=1024,
+        self_extend_group_size=4,
         
         topk_head_group_size=1,
         sample_method='first',
