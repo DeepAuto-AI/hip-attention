@@ -254,11 +254,14 @@ def custom_attention(
                     
                     traverse_from_last_step=True,
                     step_size=1,
-                    num_samples=1,
+                    num_samples=2,
                     chunk_size=512,
                     num_unions=2,
                     
                     score_head_group_size=1,
+                    
+                    using_sparq=True,
+                    sparq_hid=32,
                 )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)

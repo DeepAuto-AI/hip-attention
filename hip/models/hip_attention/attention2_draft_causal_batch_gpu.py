@@ -546,6 +546,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     SIN, stride_sin_t, stride_sin_hid,
     
     idx_b, 
+    idx_bdst,
     idx_tdst, mask_tdst, pos_tdst,
     dupped_mask,
     
@@ -554,6 +555,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     USING_EXTEND: tl.constexpr,
     extend_window_size,
     extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -596,6 +601,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 assert COS is not None
                 assert SIN is not None
                 
+                # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
+                dynamic_group_size = extend_group_size
+                
                 idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - extend_window_size - BLOCK_SIZE_K)
                 idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, 16)
                 mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
@@ -610,7 +618,11 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 )
                 
                 keys_calib_new = adjust_rope(
-                    keys_calib_old.trans(1, 0), idx_tsrc_calib, idx_tsrc_calib // extend_group_size, idx_hid,
+                    keys_calib_old.trans(1, 0), 
+                    idx_tsrc_calib, 
+                    # idx_tsrc_calib // extend_group_size,
+                    (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
+                    idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     16, HID,
@@ -621,7 +633,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 new_tsrc = tl.where(
                     mask_tsrc_window,
                     old_tsrc,
-                    old_tsrc // extend_group_size
+                    # old_tsrc // extend_group_size
+                    (old_tsrc / dynamic_group_size).to(tl.int32)
                 )
                 
                 keys = keys.trans(1, 0)
@@ -635,7 +648,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 keys = (keys * mask_keys).to(keys.dtype)
                 
                 old_tdst = pos_tdst
-                new_tdst = old_tdst // extend_group_size
+                # new_tdst = old_tdst // extend_group_size
+                new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
                 
                 queries_grouped = adjust_rope(
                     queries, old_tdst, new_tdst, idx_hid,
@@ -669,9 +683,43 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     queries, keys,
                 ).to(tl.float32)
         else:
-            t = tl.dot(
-                queries, keys,
-            ).to(tl.float32)
+            if not USING_SPARQ:
+                t = tl.dot(
+                    queries, keys,
+                ).to(tl.float32)
+            else:
+                idx_sparq_hid = tl.arange(0, SPARQ_HID)
+                
+                idx_sparq_hid = tl.load(
+                    Q_IND +\
+                        idx_b * stride_q_ind_b +\
+                        i_group * stride_q_ind_g +\
+                        idx_bdst * stride_q_ind_bdst +\
+                        idx_sparq_hid * stride_q_ind_k
+                )
+                
+                q_sparq = tl.load(
+                    Q +\
+                        idx_b * stride_q_b +\
+                        i_group * stride_q_g +\
+                        idx_tdst[:, None] * stride_q_tdst +\
+                        idx_sparq_hid[None, :] * stride_q_hid,
+                    mask = mask_tdst[:, None],
+                    other = 0
+                )
+                k_sparq = tl.load(
+                    K +\
+                        idx_b * stride_k_b +\
+                        idx_group[None, :] * stride_k_g +\
+                        idx_tsrc[None, :] * stride_k_tsrc +\
+                        idx_sparq_hid[:, None] * stride_k_hid,
+                    mask = mask_keys,
+                    other = 0,
+                )
+                
+                t = tl.dot(
+                    q_sparq, k_sparq,
+                ).to(tl.float32)
         acc += t
     acc = tl.where(
         (
@@ -746,6 +794,10 @@ def masking_iteration_draft_cuda_dup_and_score(
     USING_EXTEND: tl.constexpr,
     extend_window_size,
     extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -904,6 +956,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 SIN, stride_sin_t, stride_sin_hid,
                 
                 idx_b, 
+                idx_bdst,
                 idx_tdst, mask_tdst, pos_tdst,
                 dupped_mask,
                 
@@ -912,6 +965,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 USING_EXTEND,
                 extend_window_size,
                 extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
                 
                 BLOCK_SIZE_Q,
                 BLOCK_SIZE_K,
@@ -937,6 +994,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         SIN, stride_sin_t, stride_sin_hid,
         
         idx_b, 
+        idx_bdst,
         idx_tdst, mask_tdst, pos_tdst,
         dupped_mask,
         
@@ -945,6 +1003,10 @@ def masking_iteration_draft_cuda_dup_and_score(
         USING_EXTEND,
         extend_window_size,
         extend_group_size,
+        
+        USING_SPARQ,
+        SPARQ_HID,
+        Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
         
         BLOCK_SIZE_Q,
         BLOCK_SIZE_K,
@@ -1222,6 +1284,7 @@ def masking_iteration_draft(
     sample_method: str,
     branch_method: str,
     score_head_group_size: int,
+    sparq_ind: Optional[Tensor],
     
     indices_seed: Optional[Tensor] = None,
     ks_seed: Optional[Tensor] = None,
@@ -1279,6 +1342,14 @@ def masking_iteration_draft(
     
     group_sizes = torch.zeros_like(indices)
     t_group_sizes = torch.zeros((B, BDST), dtype=torch.float32, device=q.device)
+    
+    if sparq_ind is None:
+        using_sparq = False
+        sparq_hid = 0
+    else:
+        using_sparq = True
+        sparq_hid = sparq_ind.shape[-1]
+        assert sparq_ind.ndim == 4
     
     assert len(q.stride()) == 4
     assert len(k.stride()) == 4
@@ -1386,6 +1457,10 @@ def masking_iteration_draft(
             using_extend,
             self_extend_neighboor_window,
             self_extend_group_size,
+            
+            using_sparq,
+            sparq_hid,
+            sparq_ind, *(sparq_ind.stride() if sparq_ind is not None else (0, 0, 0, 0)),
             
             block_size_q,
             block_size_k,
@@ -2066,6 +2141,8 @@ def masking_step_loop(
     sample_method,
     branch_method,
     score_head_group_size,
+    
+    sparq_ind,
 ):
     indices_blocks = []
     ks_blocks = []
@@ -2098,6 +2175,7 @@ def masking_step_loop(
                 sample_method=sample_method,
                 branch_method=branch_method,
                 score_head_group_size=score_head_group_size,
+                sparq_ind=sparq_ind,
                 indices_seed=indices_seed,
                 ks_seed=ks_seed,
             )
@@ -2153,6 +2231,9 @@ def hip_attention(
     num_unions: int = 1,
     
     score_head_group_size: int = 1,
+    
+    using_sparq: bool = False,
+    sparq_hid: int = 32,
 ):
     assert q.ndim == 3
     assert k.ndim == 3
@@ -2162,6 +2243,17 @@ def hip_attention(
         chunk_size = q.shape[1]
     assert chunk_size > 0
     assert chunk_size >= num_unions
+    
+    if using_sparq:
+        N, T, D = q.shape
+        q_score = q.view(N // topk_head_group_size, topk_head_group_size, T // block_size_q, block_size_q, D)
+        _, sparq_ind = q_score\
+            .abs()\
+            .sum(dim=-2)\
+            .topk(k=sparq_hid, dim=-1, largest=True, sorted=False)
+        sparq_ind, _ = torch.sort(sparq_ind, dim=-1)
+    else:
+        sparq_ind = None
     
     indices_sampled = []
     ks_sampled = []
@@ -2197,6 +2289,8 @@ def hip_attention(
             sample_method=sample_method,
             branch_method=branch_method,
             score_head_group_size=score_head_group_size,
+            
+            sparq_ind=sparq_ind,
         )
         
         indices_sampled.append(indices)
@@ -2344,6 +2438,9 @@ def main():
         num_unions=2,
         
         score_head_group_size=1,
+        
+        using_sparq=True,
+        sparq_hid=64,
     )
     
     if context is not None:
