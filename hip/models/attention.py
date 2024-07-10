@@ -202,7 +202,7 @@ def custom_attention(
                     is_flash=True, #NOTE DEUBG: tree_enable_flash,
                     using_sliding_window=True, #NOTE DEBUG: tree_use_sliding_window,
                     sampling_method=tree_sampling_method,
-                    num_sink=0,
+                    num_sink=16,
                 )
             else:
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
@@ -236,19 +236,20 @@ def custom_attention(
                     mask_k=tree_k,
                     
                     block_size_q=tree_block_size_q,
+                    block_stride_q=2,
                     block_size_k=tree_block_size_k,
                     block_size_k_group=1,
                     
                     sliding_window_size=128,
                     sink_token_size=16,
                     
-                    using_extend=False,
+                    using_extend=True,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=1,
+                    topk_head_group_size=2,
                     sample_method='first',
                     branch_method='half',
                     
@@ -260,7 +261,7 @@ def custom_attention(
                     
                     score_head_group_size=1,
                     
-                    using_sparq=True,
+                    using_sparq=False,
                     sparq_hid=32,
                 )
         except RuntimeError as ex:

@@ -411,24 +411,27 @@ def masking_iteration_draft_cuda_initialize(
                         idx_b * stride_indices_seed_b +\
                         idx_bdst * stride_indices_seed_bdst +\
                         (idx_group * mask_block_k + idx_bk) * stride_indices_seed_bk,
-                    mask=(
-                        mask_bk &
-                        (idx_bk > 0)
-                    ),
+                    mask=mask_bk,
                     other=idx_group * MAX_BSRC,
                 )
-                indicse_next = tl.load(
+                indices_next = tl.load(
                     INDICES_SEED +\
                         idx_b * stride_indices_seed_b +\
                         idx_bdst * stride_indices_seed_bdst +\
                         (idx_group * mask_block_k + idx_bk + 1) * stride_indices_seed_bk,
                     mask=(
                         mask_bk &
-                        (idx_bk < (BLOCK_MASK_BLOCK_K - 1))
+                        ((idx_group * mask_block_k + idx_bk + 1) < (BLOCK_MASK_BLOCK_K * G))
                     ),
-                    other=idx_group * MAX_BSRC + BSRC,
+                    other=G * MAX_BSRC,
                 )
-                group_sizes = indicse_next - indices
+                indices_group_id = indices // MAX_BSRC
+                indices_next_group_id = indices_next // MAX_BSRC
+                group_sizes = tl.where(
+                    indices_group_id == indices_next_group_id,
+                    indices_next - indices,
+                    indices_group_id * MAX_BSRC + BSRC - indices,
+                ).to(tl.int32)
         
         tl.store(
             INDICES +\
@@ -561,6 +564,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
     
     BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
@@ -572,7 +576,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     idx_group = idx_tsrc // MAX_TSRC
     idx_tsrc = idx_tsrc % MAX_TSRC
     
-    acc = tl.zeros((BLOCK_SIZE_Q, BLOCK_BK * 2 * BLOCK_SIZE_K), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_BK * 2 * BLOCK_SIZE_K), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
     for i_group in range(G):
         mask_keys = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * 2, BLOCK_SIZE_K))\
@@ -655,7 +659,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     queries, old_tdst, new_tdst, idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_SIZE_Q, HID,
+                    BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
                 ).to(queries.dtype)
                 
                 t_calib_old = tl.dot(
@@ -730,7 +734,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
         acc
     )
-    scores = tl.reshape(acc, (BLOCK_SIZE_Q, BLOCK_BK * 2, BLOCK_SIZE_K))
+    scores = tl.reshape(acc, (BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_BK * 2, BLOCK_SIZE_K))
     if REDUCE_METHOD == 'max':
         scores = tl.max(
             scores,
@@ -800,12 +804,13 @@ def masking_iteration_draft_cuda_dup_and_score(
     Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
     
     BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
 ):
     idx_b = tl.program_id(0)
     idx_bdst = tl.program_id(1)
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     mask_tdst = idx_tdst < MAX_TDST
     idx_bk = tl.program_id(2) * BLOCK_BK + tl.arange(0, BLOCK_BK)
     mask_bk = idx_bk < (BK * G)
@@ -971,6 +976,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
                 
                 BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
                 BLOCK_SIZE_K,
                 BLOCK_BK,
                 'max',
@@ -1009,6 +1015,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
         
         BLOCK_SIZE_Q,
+        BLOCK_STRIDE_Q,
         BLOCK_SIZE_K,
         BLOCK_BK,
         'max',
@@ -1271,6 +1278,7 @@ def masking_iteration_draft(
     position_ids: Tensor,
     mask_k: int,
     block_size_q: int,
+    block_stride_q: int,
     block_size_k: int,
     block_size_k_group: int,
     sliding_window_size: int,
@@ -1463,6 +1471,7 @@ def masking_iteration_draft(
             sparq_ind, *(sparq_ind.stride() if sparq_ind is not None else (0, 0, 0, 0)),
             
             block_size_q,
+            block_stride_q,
             block_size_k,
             BLOCK_BK,
             
@@ -1577,6 +1586,13 @@ def masking_iteration_draft(
         # print(indices[0, -1] // TSRC)
         # print(ks_count[0, -1], ks_start_end[0, -1])
         # print(ks_count.float().mean(1).int()[0])
+        if topk_indices is not None:
+            scores_final = scores\
+                .gather(index=topk_indices, dim=-1)\
+                .gather(index=indices_sort_mapping, dim=-1)
+        else:
+            scores_final = scores[:, :, :indices_sort_mapping.shape[-1]]\
+                .gather(index=indices_sort_mapping, dim=-1)
     else:
         ks_count = ks[:, :, None]
         ks_start_end = torch.zeros((B, BDST, G + 1), dtype=torch.int32, device=q.device)
@@ -2125,6 +2141,7 @@ def masking_step_loop(
     
     mask_k: int,
     block_size_q: int,
+    block_stride_q: int,
     block_size_k: int,
     block_size_k_group: int,
     
@@ -2144,24 +2161,36 @@ def masking_step_loop(
     
     sparq_ind,
 ):
+    N, TDST, HID = q.shape
+    _, TSRC, _ = k.shape
+    
     indices_blocks = []
     ks_blocks = []
     ks_count_blocks = []
     ks_start_end_blocks = []
     scores_blocks = []
     indices_seed = ks_seed = None
-    for idx_tdst in range(0, q.shape[1], block_size_q * step_size):
+    for i_chunk_tdst in range(0, chunk_size, block_size_q * step_size):
+        idx_tdst = torch.arange(
+            i_chunk_tdst, 
+            i_chunk_tdst + block_size_q * step_size, 
+            device=q.device
+        )[None, :] + torch.arange(
+            0,
+            TDST,
+            chunk_size,
+            device=q.device,
+        )[:, None] + chunk_offset
+        idx_tdst = idx_tdst % TDST
+        idx_tdst = idx_tdst.reshape(-1)
         for idx_sample in range(num_samples):
             indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
-                q[:, idx_tdst: idx_tdst+block_size_q * step_size, :], 
+                q[:, idx_tdst, :], 
                 k[:, :, :], 
-                position_ids=torch.arange(
-                    idx_tdst, 
-                    idx_tdst+block_size_q * step_size, 
-                    device=q.device
-                ),
+                position_ids=idx_tdst,
                 mask_k=mask_k,
                 block_size_q=block_size_q,
+                block_stride_q=block_stride_q,
                 block_size_k=block_size_k,
                 block_size_k_group=block_size_k_group,
                 sliding_window_size=sliding_window_size,
@@ -2184,8 +2213,9 @@ def masking_step_loop(
         
         if not traverse_from_last_step:
             indices_seed = ks_seed = None
-        if (chunk_size is not None) and ((((idx_tdst + chunk_offset) // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
-            indices_seed = ks_seed = None
+        # if (chunk_size is not None) and ((((i_chunk_tdst + chunk_offset) // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
+        # if ((i_chunk_tdst + 1) % (chunk_size - chunk_offset)) == 0:
+            # indices_seed = ks_seed = None
         
         indices_blocks.append(indices)
         ks_blocks.append(ks)
@@ -2198,6 +2228,31 @@ def masking_step_loop(
     ks_start_end = torch.cat(ks_start_end_blocks, dim=1)
     scores = torch.cat(scores_blocks, dim=1)
     
+    # print(indices.shape)
+    # print(ks.shape)
+    # print(ks_count.shape)
+    # print(ks_start_end.shape)
+    # print(scores.shape)
+    # torch.Size([32, 256, 256])
+    # torch.Size([32, 256])
+    # torch.Size([32, 256, 1])
+    # torch.Size([32, 256, 2])
+    # torch.Size([32, 256, 256])
+    
+    num_chunks = triton.cdiv(TDST, chunk_size)
+    
+    def permute_3d(x: Tensor):
+        N, BDST, K = x.shape
+        return x.view(N, BDST // num_chunks, num_chunks, K)\
+            .permute(0, 2, 1, 3)\
+            .reshape(N, BDST, K)
+    
+    indices = permute_3d(indices)
+    ks = permute_3d(ks.unsqueeze(-1)).squeeze(-1)
+    ks_count = permute_3d(ks_count)
+    ks_start_end = permute_3d(ks_start_end)
+    scores = permute_3d(scores)
+    
     return indices, ks, ks_count, ks_start_end, scores
 
 @torch.inference_mode()
@@ -2209,6 +2264,7 @@ def hip_attention(
     mask_k: int = 512,
     
     block_size_q: int = 32,
+    block_stride_q: int = 2,
     block_size_k: int = 1,
     block_size_k_group: int = 8,
     
@@ -2273,6 +2329,7 @@ def hip_attention(
             
             mask_k=mask_k,
             block_size_q=block_size_q,
+            block_stride_q=block_stride_q,
             block_size_k=block_size_k,
             block_size_k_group=block_size_k_group,
             
@@ -2293,6 +2350,13 @@ def hip_attention(
             sparq_ind=sparq_ind,
         )
         
+        # if i_chunk_offset > 0:
+        #     indices = indices[:, i_chunk_offset // block_size_q:]
+        #     ks = ks[:, i_chunk_offset // block_size_q:]
+        #     ks_count = ks_count[:, i_chunk_offset // block_size_q:]
+        #     ks_start_end = ks_start_end[:, i_chunk_offset // block_size_q:]
+        #     scores = scores[:, i_chunk_offset // block_size_q:]
+        
         indices_sampled.append(indices)
         ks_sampled.append(ks)
         ks_count_sampled.append(ks_count)
@@ -2300,8 +2364,19 @@ def hip_attention(
         scores_sampled.append(scores)
     
     if len(indices_sampled) > 1:
-        indices = torch.cat(indices_sampled, dim=-1)
-        scores = torch.cat(scores_sampled, dim=-1)
+        ignore_ranage = max(cdiv_python(mask_k, block_size_q), cdiv_python(chunk_size, block_size_q * num_unions)) * 2
+        compute_range = cdiv_python(q.shape[-2], block_size_q) - ignore_ranage
+        
+        bcs = chunk_size // block_size_q
+        bcs_step = bcs // num_unions
+        indices = torch.cat([
+            x[:, bcs - bcs_step * ix: x.shape[1] - bcs_step * ix] 
+            for ix, x in enumerate(indices_sampled)
+        ], dim=-1)[:, -compute_range:]
+        scores = torch.cat([
+            x[:, bcs - bcs_step * ix: x.shape[1] - bcs_step * ix] 
+            for ix, x in enumerate(scores_sampled)
+        ], dim=-1)[:, -compute_range:]
         
         indices_to_sorted = torch.argsort(indices, dim=-1)
         
@@ -2313,7 +2388,7 @@ def hip_attention(
         
         scores_to_highest = torch.argsort(
             scores, dim=-1, descending=True
-        )[:, :, :mask_k // block_size_k]
+        )[:, :, :(mask_k * topk_head_group_size) // block_size_k]
         
         indices = indices.gather(dim=-1, index=scores_to_highest)
         scores = scores.gather(dim=-1, index=scores_to_highest)
@@ -2323,11 +2398,40 @@ def hip_attention(
         indices = indices.gather(dim=-1, index=top_indices_to_sorted)
         scores = scores.gather(dim=-1, index=top_indices_to_sorted)
         
+        indices_sampled[0][:, ignore_ranage:, :] = indices
+        
+        indices = indices_sampled[0]
         ks = ks_sampled[0]
-        ks_count = ks_count_sampled[0]
-        ks_start_end = ks_start_end_sampled[0]
-        ignore_ranage = max(mask_k // block_size_q, chunk_size // block_size_q // num_unions) * 2
-        indices[:, :ignore_ranage, :] = indices_sampled[0][:, :ignore_ranage, :]
+        # ks_count = ks_count_sampled[0]
+        # ks_start_end = ks_start_end_sampled[0]
+        
+        N, TDST, _ = q.shape
+        _, TSRC, _ = k.shape
+        G = topk_head_group_size
+        B = N // topk_head_group_size
+        BDST = triton.cdiv(TDST, block_size_q)
+        mask_block_k = triton.cdiv(mask_k, block_size_k)
+        
+        ks_count = torch.zeros((B, BDST, G), dtype=torch.int32, device=q.device)
+        ks_start_end = torch.zeros((B, BDST, G + 1), dtype=torch.int32, device=q.device)
+        
+        BLOCK_BK = 128
+        grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
+        masking_iteration_draft_cuda_epiloge[grid](
+            indices, *indices.stride(),
+            ks, *ks.stride(),
+            
+            ks_count, *ks_count.stride(),
+            ks_start_end, *ks_start_end.stride(),
+            
+            mask_block_k, TSRC, 
+            
+            G,
+            BLOCK_BK,
+        )
+        
+        ks = ks_count.sum(-1)
+        
         # print(indices[0, -1, :])
         # print(scores[0, -1, :])
         # print(ks[0, -1])
