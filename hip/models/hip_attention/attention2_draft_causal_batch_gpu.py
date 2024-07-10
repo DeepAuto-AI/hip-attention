@@ -1345,6 +1345,7 @@ def masking_iteration_draft(
     # print(ks[0, -10])
     # assert indices[0, -10].shape == torch.unique(indices[0, -10]).shape, f'{indices[0, -10].shape} == {torch.unique(indices[0, -10]).shape}'
     
+    topk_indices = None
     # NOTE: this should be removed
     max_group_size = torch.max(t_group_sizes).item()
     while max_group_size >= 1:
@@ -1477,8 +1478,9 @@ def masking_iteration_draft(
     indices.mul_(block_size_k)
     
     # NOTE: before this sort, indices are sorted by imporatnce of each block
-    indices, _ = torch.sort(indices, dim=-1, stable=False)
+    indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
     
+    scores_final = None
     if G > 1:
         ks_count = torch.zeros((B, BDST, G), dtype=torch.int32, device=q.device)
         ks_start_end = torch.zeros((B, BDST, G + 1), dtype=torch.int32, device=q.device)
@@ -1504,7 +1506,14 @@ def masking_iteration_draft(
         ks_count = ks[:, :, None]
         ks_start_end = torch.zeros((B, BDST, G + 1), dtype=torch.int32, device=q.device)
         ks_start_end[:, :, -1] = ks
-        
+        if topk_indices is not None:
+            scores_final = scores\
+                .gather(index=topk_indices, dim=-1)\
+                .gather(index=indices_sort_mapping, dim=-1)
+        else:
+            scores_final = scores[:, :, :indices_sort_mapping.shape[-1]]\
+                .gather(index=indices_sort_mapping, dim=-1)
+    
     # assert indices[0, -10].shape == torch.unique(indices[0, -10]).shape, f'{indices[0, -10].shape} == {torch.unique(indices[0, -10]).shape}'
     # t = indices[0, 16]
     # c = ks[0, 16]
@@ -1513,7 +1522,7 @@ def masking_iteration_draft(
     # print(tu)
     # print(t.shape, tu.shape, c)
     
-    return indices, ks, ks_count, ks_start_end
+    return indices, ks, ks_count, ks_start_end, scores_final
 
 @numba.njit(parallel=True)
 def block_sparse_attention_numba(
@@ -1990,6 +1999,13 @@ def block_sparse_attention(
         assert len(rope_cos.stride()) == 2
         assert len(rope_sin.stride()) == 2
     
+    assert context.ndim == 3
+    assert ks_start_end.ndim == 3
+    assert indices.ndim == 3
+    assert q.ndim == 3
+    assert k.ndim == 3
+    assert v.ndim == 3
+    
     grid = (B, BDST, G)
     block_sparse_attention_cuda[grid](
         q, *q.stride(),
@@ -2022,45 +2038,44 @@ def block_sparse_attention(
     
     return context
 
-@torch.inference_mode()
-def hip_attention(
-    q: Tensor, 
-    k: Tensor, 
-    v: Tensor,
+def masking_step_loop(
+    q: Tensor,
+    k: Tensor,
     
-    mask_k: int = 512,
+    traverse_from_last_step: bool,
+    step_size: int,
+    chunk_size: int,
+    chunk_offset: int,
+    num_samples: int,
     
-    block_size_q: int = 32,
-    block_size_k: int = 1,
-    block_size_k_group: int = 8,
+    mask_k: int,
+    block_size_q: int,
+    block_size_k: int,
+    block_size_k_group: int,
     
-    sliding_window_size: int = 128,
-    sink_token_size: int = 4,
+    sliding_window_size,
+    sink_token_size,
     
-    using_extend: bool = False,
-    rope_cos: Optional[Tensor] = None,
-    rope_sin: Optional[Tensor] = None,
-    self_extend_neighboor_window: int = 1024,
-    self_extend_group_size: int = 8,
-    topk_head_group_size: int = 8,
-    sample_method: str = 'first',
-    branch_method: str = 'half',
+    using_extend,
+    rope_cos,
+    rope_sin,
+    self_extend_neighboor_window,
+    self_extend_group_size,
     
-    traverse_from_last_step: bool = True,
-    step_size: int = 1,
-    chunk_size: Optional[int] = None,
-    num_samples: int = 1,
-    
-    score_head_group_size: int = 1,
+    topk_head_group_size,
+    sample_method,
+    branch_method,
+    score_head_group_size,
 ):
     indices_blocks = []
     ks_blocks = []
     ks_count_blocks = []
     ks_start_end_blocks = []
+    scores_blocks = []
     indices_seed = ks_seed = None
     for idx_tdst in range(0, q.shape[1], block_size_q * step_size):
         for idx_sample in range(num_samples):
-            indices, ks, ks_count, ks_start_end = masking_iteration_draft(
+            indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
                 q[:, idx_tdst: idx_tdst+block_size_q * step_size, :], 
                 k[:, :, :], 
                 position_ids=torch.arange(
@@ -2091,25 +2106,144 @@ def hip_attention(
         
         if not traverse_from_last_step:
             indices_seed = ks_seed = None
-        if (chunk_size is not None) and (((idx_tdst // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
+        if (chunk_size is not None) and ((((idx_tdst + chunk_offset) // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
             indices_seed = ks_seed = None
         
         indices_blocks.append(indices)
         ks_blocks.append(ks)
         ks_count_blocks.append(ks_count)
         ks_start_end_blocks.append(ks_start_end)
+        scores_blocks.append(scores)
     indices = torch.cat(indices_blocks, dim=1)
     ks = torch.cat(ks_blocks, dim=1)
     ks_count = torch.cat(ks_count_blocks, dim=1)
     ks_start_end = torch.cat(ks_start_end_blocks, dim=1)
+    scores = torch.cat(scores_blocks, dim=1)
     
-    # print(indices[0, 4+16-1])
-    # print(indices[0, 4+16])
-    # print(indices[0, 4+16+1])
+    return indices, ks, ks_count, ks_start_end, scores
+
+@torch.inference_mode()
+def hip_attention(
+    q: Tensor, 
+    k: Tensor, 
+    v: Tensor,
     
-    # print(ks[0, 4+16-1])
-    # print(ks[0, 4+16])
-    # print(ks[0, 4+16+1])
+    mask_k: int = 512,
+    
+    block_size_q: int = 32,
+    block_size_k: int = 1,
+    block_size_k_group: int = 8,
+    
+    sliding_window_size: int = 128,
+    sink_token_size: int = 4,
+    
+    using_extend: bool = False,
+    rope_cos: Optional[Tensor] = None,
+    rope_sin: Optional[Tensor] = None,
+    self_extend_neighboor_window: int = 1024,
+    self_extend_group_size: int = 8,
+    topk_head_group_size: int = 8,
+    sample_method: str = 'first',
+    branch_method: str = 'half',
+    
+    traverse_from_last_step: bool = True,
+    step_size: int = 1,
+    chunk_size: Optional[int] = None,
+    num_samples: int = 1,
+    num_unions: int = 1,
+    
+    score_head_group_size: int = 1,
+):
+    assert q.ndim == 3
+    assert k.ndim == 3
+    
+    assert num_unions > 0
+    if chunk_size is None:
+        chunk_size = q.shape[1]
+    assert chunk_size > 0
+    assert chunk_size >= num_unions
+    
+    indices_sampled = []
+    ks_sampled = []
+    ks_count_sampled = []
+    ks_start_end_sampled = []
+    scores_sampled = []
+    for i_chunk_offset in range(0, chunk_size, chunk_size // num_unions):
+        indices, ks, ks_count, ks_start_end, scores = masking_step_loop(
+            q=q,
+            k=k,
+            
+            traverse_from_last_step=traverse_from_last_step,
+            step_size=step_size,
+            chunk_size=chunk_size,
+            chunk_offset=i_chunk_offset,
+            num_samples=num_samples,
+            
+            mask_k=mask_k,
+            block_size_q=block_size_q,
+            block_size_k=block_size_k,
+            block_size_k_group=block_size_k_group,
+            
+            sliding_window_size=sliding_window_size,
+            sink_token_size=sink_token_size,
+            
+            using_extend=using_extend,
+            rope_cos=rope_cos,
+            rope_sin=rope_sin,
+            self_extend_neighboor_window=self_extend_neighboor_window,
+            self_extend_group_size=self_extend_group_size,
+            
+            topk_head_group_size=topk_head_group_size,
+            sample_method=sample_method,
+            branch_method=branch_method,
+            score_head_group_size=score_head_group_size,
+        )
+        
+        indices_sampled.append(indices)
+        ks_sampled.append(ks)
+        ks_count_sampled.append(ks_count)
+        ks_start_end_sampled.append(ks_start_end)
+        scores_sampled.append(scores)
+    
+    if len(indices_sampled) > 1:
+        indices = torch.cat(indices_sampled, dim=-1)
+        scores = torch.cat(scores_sampled, dim=-1)
+        
+        indices_to_sorted = torch.argsort(indices, dim=-1)
+        
+        indices = indices.gather(dim=-1, index=indices_to_sorted)
+        scores = scores.gather(dim=-1, index=indices_to_sorted)
+        
+        unique_indices_mask = indices != torch.roll(indices, shifts=(1,), dims=(2,))
+        scores.masked_fill_(~unique_indices_mask, float('-inf'))
+        
+        scores_to_highest = torch.argsort(
+            scores, dim=-1, descending=True
+        )[:, :, :mask_k // block_size_k]
+        
+        indices = indices.gather(dim=-1, index=scores_to_highest)
+        scores = scores.gather(dim=-1, index=scores_to_highest)
+        
+        top_indices_to_sorted = torch.argsort(indices, dim=-1)
+        
+        indices = indices.gather(dim=-1, index=top_indices_to_sorted)
+        scores = scores.gather(dim=-1, index=top_indices_to_sorted)
+        
+        ks = ks_sampled[0]
+        ks_count = ks_count_sampled[0]
+        ks_start_end = ks_start_end_sampled[0]
+        ignore_ranage = max(mask_k // block_size_q, chunk_size // block_size_q // num_unions) * 2
+        indices[:, :ignore_ranage, :] = indices_sampled[0][:, :ignore_ranage, :]
+        # print(indices[0, -1, :])
+        # print(scores[0, -1, :])
+        # print(ks[0, -1])
+        # print(ks_count[0, -1])
+        # print(ks_start_end[0, -1])
+    else:
+        indices = indices_sampled[0]
+        ks = ks_sampled[0]
+        ks_count = ks_count_sampled[0]
+        ks_start_end = ks_start_end_sampled[0]
     
     if os.getenv('HIP_DEBUG', '0') == '1':
         N, TDST, HID = q.shape
@@ -2174,7 +2308,7 @@ def hip_attention(
     
     # return context, None
 
-if __name__ == '__main__':
+def main():
     q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
     
     # q = q[:, -32:, :]
@@ -2187,14 +2321,14 @@ if __name__ == '__main__':
         
         mask_k=512, 
         
-        block_size_k=4,
-        block_size_k_group=1,
         block_size_q=32,
+        block_size_k=2,
+        block_size_k_group=1,
         
         sliding_window_size=128,
         sink_token_size=16,
         
-        using_extend=True,
+        using_extend=False,
         rope_cos=cos,
         rope_sin=sin,
         self_extend_neighboor_window=1024,
@@ -2206,6 +2340,8 @@ if __name__ == '__main__':
         
         traverse_from_last_step=True,
         num_samples=2,
+        chunk_size=512,
+        num_unions=2,
         
         score_head_group_size=1,
     )
@@ -2215,3 +2351,6 @@ if __name__ == '__main__':
         stdcontext = torch.std_mean(out)[0].item()
         
         print(f'err = {stderr:.8f} ({stderr/stdcontext:.6f} sigma), out_std = {stdcontext:.8f}')
+
+if __name__ == '__main__':
+    main()

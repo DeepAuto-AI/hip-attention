@@ -254,8 +254,9 @@ def custom_attention(
                     
                     traverse_from_last_step=True,
                     step_size=1,
-                    chunk_size=None,
-                    num_samples=2,
+                    num_samples=1,
+                    chunk_size=512,
+                    num_unions=2,
                     
                     score_head_group_size=1,
                 )
