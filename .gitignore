@@ -52,3 +52,4 @@ profile.*
 dummy.jpg
 images/
 dummy.png
+*.sqlite
