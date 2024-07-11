@@ -446,7 +446,7 @@ def masking_iteration_draft_cuda_initialize(
                 idx_b * stride_group_size_b +\
                 idx_bdst * stride_group_size_bdst +\
                 (idx_group * mask_block_k + idx_bk) * stride_group_size_bk,
-            value = group_sizes,
+            value=group_sizes,
             mask=mask_bk,
         )
         
@@ -569,6 +569,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
+    
+    NUM_CALIB: tl.constexpr = 32
 ):
     idx_tsrc = (
         (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
@@ -578,7 +580,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     idx_group = idx_tsrc // MAX_TSRC
     idx_tsrc = idx_tsrc % MAX_TSRC
     
-    acc = tl.zeros((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K), dtype=tl.bfloat16)
     idx_hid = tl.arange(0, HID)
     for i_group in range(G):
         mask_keys = (dupped_mask[:, None] & (idx_group == i_group).reshape(BLOCK_BK * KEY_DUP, BLOCK_SIZE_K))\
@@ -603,15 +605,15 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         )
         
         if USING_EXTEND:
-            if tl.min(pos_tdst) > extend_window_size:
+            if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
                 assert COS is not None
                 assert SIN is not None
                 
                 # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
                 dynamic_group_size = extend_group_size
                 
-                idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - extend_window_size - BLOCK_SIZE_K)
-                idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, 16)
+                idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
+                idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, NUM_CALIB)
                 mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
                 keys_calib_old = tl.load(
                     K +\
@@ -631,7 +633,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
-                    16, HID,
+                    NUM_CALIB, HID,
                 ).trans(1, 0)
                 
                 old_tsrc = idx_tsrc
@@ -670,15 +672,28 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 t_calib_new = tl.dot(
                     queries_grouped, keys_calib_new.to(queries.dtype),
                 )
-                calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / 16
+                
+                calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
+                
+                # calib_old_mean = tl.sum(t_calib_old, axis=-1) / NUM_CALIB
+                # calib_old_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_old - calib_old_mean[:, None], 2), axis=-1) / NUM_CALIB)
+                # calib_new_mean = tl.sum(t_calib_new, axis=-1) / NUM_CALIB
+                # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
                 
                 t_window = tl.dot(
                     queries, keys.to(queries.dtype),
                 )
+                
                 t_grouped = tl.dot(
                     queries_grouped, keys.to(queries.dtype),
-                ) - calibration[:, None]
+                )
+                
                 # NOTE: this calibration trick is very important.
+                # > w/o std
+                t_grouped = t_grouped - calibration[:, None]
+                # > with std
+                # t_grouped = ((t_grouped - calib_new_mean[:, None]) / calib_new_std[:, None]) * calib_old_std[:, None] + calib_old_mean[:, None]
+                
                 t = tl.where(
                     mask_tsrc_window[None, :],
                     t_window,
@@ -729,7 +744,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     q_sparq.to(tl.bfloat16), 
                     k_sparq.to(tl.bfloat16),
                 ).to(tl.float32)
-        acc += t
+        acc += t.to(acc.dtype)
     acc = tl.where(
         (
             (acc == 0.0) |
@@ -1396,6 +1411,7 @@ def masking_iteration_draft(
     
     indices_seed: Optional[Tensor] = None,
     ks_seed: Optional[Tensor] = None,
+    scores_seed: Optional[Tensor] = None,
 ):
     assert q.device == k.device
     assert isinstance(q, Tensor)
@@ -1527,12 +1543,16 @@ def masking_iteration_draft(
     )
     scores = torch.zeros_like(dupped_indices, dtype=q.dtype)
     probs = torch.zeros_like(scores)
-    scores_final = torch.zeros_like(indices, dtype=q.dtype)
-    scores_cached = False
+    if scores_seed is not None:
+        scores_final = scores_seed.clone()
+        scores_cached = True
+    else:
+        scores_final = torch.zeros_like(indices, dtype=q.dtype)
+        scores_cached = False
     
-    BLOCK_BK = 64 // 2 // block_size_k
+    BLOCK_BK = 128 // 2 // block_size_k
     assert BLOCK_BK > 0
-    BLOCK_HID = 64
+    BLOCK_HID = HID
     assert (HID % BLOCK_HID) == 0
     
     # print(indices[0, -10])
@@ -1540,8 +1560,19 @@ def masking_iteration_draft(
     # assert indices[0, -10].shape == torch.unique(indices[0, -10]).shape, f'{indices[0, -10].shape} == {torch.unique(indices[0, -10]).shape}'
     
     topk_indices = None
-    # NOTE: this should be removed
-    max_group_size = torch.max(t_group_sizes).item()
+    
+    # > oracle      5.2777
+    # max_group_size = torch.max(t_group_sizes).item()
+    # > best case   5.2783
+    #   (not complete search if you gave seed)
+    # max_group_size = triton.cdiv(BSRC, mask_block_k)
+    # > worst case  5.2777
+    # max_group_size = triton.cdiv(BSRC, block_size_k)
+    # > greedy      5.2779
+    max_group_size = triton.cdiv(BSRC, mask_block_k)
+    if indices_seed is not None:
+        max_group_size = max(1, max_group_size // 2)
+    
     i_iteration = 0
     while max_group_size >= 1:
         # print('ind', indices[0, 32, :10])
@@ -1551,8 +1582,8 @@ def masking_iteration_draft(
         masking_iteration_draft_cuda_dup_and_score[grid](
             q, *q.stride(),
             # NOTE: need experiment, sink token based normalization is working well for head grouping
-            k if G < 2 else (k - k[:, :, :2, :].mean(-2, keepdim=True)), 
-            # k,
+            # k if G < 2 else (k - k[:, :, :2, :].mean(-2, keepdim=True)), 
+            k,
             *k.stride(),
             # (k - k[:, :, :2, :].mean(-2, keepdim=True)), *k.stride(),
             position_ids, *position_ids.stride(),
@@ -1593,7 +1624,7 @@ def masking_iteration_draft(
             block_size_k,
             BLOCK_BK,
             
-            num_warps=4,
+            num_warps=2 if scores_cached else 4,
             num_stages=2,
         )
         
@@ -2293,6 +2324,9 @@ def masking_step_loop(
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
     
+    if topk_head_group_size > 1:
+        k = k - k[:, :2, :].mean(-2, keepdim=True)
+    
     indices_blocks = []
     ks_blocks = []
     ks_count_blocks = []
@@ -2312,6 +2346,7 @@ def masking_step_loop(
         )[:, None] + chunk_offset
         idx_tdst = idx_tdst % TDST
         idx_tdst = idx_tdst.reshape(-1)
+        scores_seed = None
         for idx_sample in range(num_samples):
             indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
                 q[:, idx_tdst, :], 
@@ -2336,9 +2371,11 @@ def masking_step_loop(
                 sparq_ind=sparq_ind,
                 indices_seed=indices_seed,
                 ks_seed=ks_seed,
+                scores_seed=scores_seed,
             )
             indices_seed = indices
             ks_seed = ks
+            scores_seed = scores
         
         if not traverse_from_last_step:
             indices_seed = ks_seed = None

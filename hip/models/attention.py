@@ -90,13 +90,24 @@ def custom_attention(
             value_states = value_states.contiguous()
 
         if causal_mask is not None:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=causal_mask,
-                dropout_p=attention_dropout,
-            )
+            from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+            
+            if query_states.shape == key_states.shape:
+                attn_output = flash_attn_func(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k=key_states.permute(0, 2, 1, 3),
+                    v=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=None,
+                    causal=True,
+                ).permute(0, 2, 1, 3)
+            else:
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    attn_mask=causal_mask,
+                    dropout_p=attention_dropout,
+                )
         else:
             attn_output = torch.nn.functional.scaled_dot_product_attention(
                 query_states,
@@ -243,20 +254,22 @@ def custom_attention(
                     sliding_window_size=128,
                     sink_token_size=16,
                     
-                    using_extend=False,
+                    using_extend=True,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=1,
+                    topk_head_group_size=2,
                     sample_method='first',
                     branch_method='half',
                     
+                    # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=True,
                     step_size=1,
                     num_samples=2,
                     chunk_size=512,
+                    # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
                     num_unions=2,
                     
                     score_head_group_size=1,
