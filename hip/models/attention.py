@@ -81,7 +81,7 @@ def custom_attention(
     """
     attn_sparsity_loss = None
 
-    if attention_method == 'none':
+    if attention_method in ['none', 'spda', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
         if query_states.device.type == "cuda":
@@ -93,13 +93,24 @@ def custom_attention(
             from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
             
             if query_states.shape == key_states.shape:
-                attn_output = flash_attn_func(
-                    q=query_states.permute(0, 2, 1, 3),
-                    k=key_states.permute(0, 2, 1, 3),
-                    v=value_states.permute(0, 2, 1, 3),
-                    softmax_scale=None,
-                    causal=True,
-                ).permute(0, 2, 1, 3)
+                if attention_method in ['none', 'fa2']:
+                    attn_output = flash_attn_func(
+                        q=query_states.permute(0, 2, 1, 3),
+                        k=key_states.permute(0, 2, 1, 3),
+                        v=value_states.permute(0, 2, 1, 3),
+                        softmax_scale=None,
+                        causal=True,
+                    ).permute(0, 2, 1, 3)
+                elif attention_method in ['spda']:
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=causal_mask,
+                        dropout_p=attention_dropout,
+                    )
+                else:
+                    raise Exception()
             else:
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query_states,
@@ -254,23 +265,23 @@ def custom_attention(
                     sliding_window_size=128,
                     sink_token_size=16,
                     
-                    using_extend=True,
+                    using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=2,
+                    topk_head_group_size=1,
                     sample_method='first',
                     branch_method='half',
                     
                     # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=True,
-                    step_size=1,
-                    num_samples=2,
-                    chunk_size=512,
+                    traverse_from_last_step=False,
+                    step_size=64,
+                    num_samples=1,
+                    chunk_size=None,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    num_unions=2,
+                    num_unions=1,
                     
                     score_head_group_size=1,
                     

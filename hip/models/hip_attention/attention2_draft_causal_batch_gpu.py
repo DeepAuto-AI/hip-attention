@@ -29,6 +29,9 @@ TODO:
 # topk_head_group
 # 
 
+from torch.utils.dlpack import to_dlpack
+from torch.utils.dlpack import from_dlpack
+import cupy as cp
 import random, os
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as NdArrayCuda
 import warnings
@@ -833,13 +836,17 @@ def masking_iteration_draft_cuda_dup_and_score(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
 ):
-    idx_b = tl.program_id(0)
-    idx_bdst = tl.program_id(1)
+    pid_b = tl.program_id(2)
+    pid_bdst = tl.program_id(1)
+    pid_bbk = tl.program_id(0)
+    
+    idx_b = pid_b
+    idx_bdst = pid_bdst
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     mask_tdst = idx_tdst < MAX_TDST
-    idx_bk = tl.program_id(2) * BLOCK_BK + tl.arange(0, BLOCK_BK)
+    idx_bk = pid_bbk * BLOCK_BK + tl.arange(0, BLOCK_BK)
     mask_bk = idx_bk < (BK * G)
-    idx_bk_dup = tl.program_id(2) * BLOCK_BK * 2 + tl.arange(0, BLOCK_BK * 2)
+    idx_bk_dup = pid_bbk * BLOCK_BK * 2 + tl.arange(0, BLOCK_BK * 2)
     mask_bk_dup = idx_bk_dup < (BK * 2 * G)
     idx_n = idx_b * G + tl.arange(0, G)
     
@@ -1387,7 +1394,57 @@ def masking_iteration_draft_cuda_partial_softmax(
         mask=mask_bk,
     )
 
-def masking_iteration_draft(
+from hip.utils.triton_argsort import argsort as tl_argsort
+
+@triton.jit
+def masking_iteration_draft_cuda_argsort(
+    PROBS, stride_probs_b, stride_probs_bdst, stride_probs_bk,
+    IDS, stride_ids_b, stride_ids_bdst, stride_ids_bk,
+    
+    T_GROUP_SIZES, stride_t_group_size_b, stride_t_group_size_bdst,
+    
+    BDST,
+    
+    BK: tl.constexpr,
+    TOP_BK: tl.constexpr,
+    BLOCK_BDST: tl.constexpr,
+):
+    idx_b = tl.program_id(0)
+    idx_bdst = tl.program_id(1) * BLOCK_BDST + tl.arange(0, BLOCK_BDST)
+    mask_bdst = idx_bdst < BDST
+    idx_bk = tl.arange(0, BK)
+    
+    t_group_size = tl.load(
+        T_GROUP_SIZES +\
+            idx_b * stride_t_group_size_b +\
+            idx_bdst * stride_t_group_size_bdst,
+        mask=mask_bdst,
+        other=1.0,
+    )
+    if tl.max(t_group_size) < 1.0:
+        return
+
+    probs = tl.load(
+        PROBS +\
+            idx_b * stride_probs_b +\
+            idx_bdst[:, None] * stride_probs_bdst +\
+            idx_bk[None, :] * stride_probs_bk,
+        mask=mask_bdst[:, None]
+    )
+    ids = tl.broadcast_to(tl.arange(0, BK)[None, :], (BLOCK_BDST, BK))
+    
+    _, ids = tl_argsort(probs.to(tl.float16), ids, 1, True)
+    
+    tl.store(
+        IDS +\
+            idx_b * stride_ids_b +\
+            idx_bdst[:, None] * stride_ids_bdst +\
+            idx_bk[None, :] * stride_ids_bk,
+        value=ids,
+        mask=(idx_bk < TOP_BK)[None, :] & mask_bdst[:, None]
+    )
+
+def masking_iteration_draft( 
     q: Tensor,
     k: Tensor,
     position_ids: Tensor,
@@ -1452,20 +1509,25 @@ def masking_iteration_draft(
         k = torch.concat([k_group_min, k_group_max], dim=-1)
     del block_size_k_group
     
-    indices = torch.full((
-        B,
-        cdiv_python(TDST, block_size_q), 
-        # head group is merged as single sequence
-        G * mask_block_k,
-    ), fill_value=(BSRC + block_size_k + block_size_q) * G, dtype=torch.int32, device=q.device)
+    indices = torch.full(
+        (
+            B,
+            cdiv_python(TDST, block_size_q), 
+            # head group is merged as single sequence
+            G * mask_block_k,
+        ), 
+        fill_value=(BSRC + block_size_k + block_size_q) * G, 
+        dtype=torch.int32, 
+        device=q.device
+    )
     
     ks = torch.zeros((
         B, 
         cdiv_python(TDST, block_size_q),
     ), dtype=torch.int32, device=q.device)
     
-    group_sizes = torch.zeros_like(indices)
-    t_group_sizes = torch.zeros((B, BDST), dtype=torch.float32, device=q.device)
+    group_sizes = torch.empty_like(indices)
+    t_group_sizes = torch.empty((B, BDST), dtype=torch.float32, device=q.device)
     
     if sparq_ind is None:
         using_sparq = False
@@ -1541,16 +1603,16 @@ def masking_iteration_draft(
         (B, BDST, indices.shape[-1] * 2),
         dtype=torch.int32, device=q.device,
     )
-    scores = torch.zeros_like(dupped_indices, dtype=q.dtype)
-    probs = torch.zeros_like(scores)
+    scores = torch.empty_like(dupped_indices, dtype=q.dtype)
+    probs = torch.empty_like(scores)
     if scores_seed is not None:
         scores_final = scores_seed.clone()
         scores_cached = True
     else:
-        scores_final = torch.zeros_like(indices, dtype=q.dtype)
+        scores_final = torch.empty_like(indices, dtype=q.dtype)
         scores_cached = False
     
-    BLOCK_BK = 128 // 2 // block_size_k
+    BLOCK_BK = 256 // 2 // block_size_k
     assert BLOCK_BK > 0
     BLOCK_HID = HID
     assert (HID % BLOCK_HID) == 0
@@ -1570,15 +1632,22 @@ def masking_iteration_draft(
     # max_group_size = triton.cdiv(BSRC, block_size_k)
     # > greedy      5.2779
     max_group_size = triton.cdiv(BSRC, mask_block_k)
-    if indices_seed is not None:
-        max_group_size = max(1, max_group_size // 2)
+    # if indices_seed is not None:
+    #     max_group_size = max(1, triton.cdiv(max_group_size, 2))
     
     i_iteration = 0
-    while max_group_size >= 1:
+    while max_group_size > 1:
         # print('ind', indices[0, 32, :10])
         # print('gs', group_sizes[0, 32, :10])
         
-        grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
+        #> 3.4349 s
+        # grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
+        #> 3.3770 s
+        grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B,)
+        #> 3.4233 s
+        # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), B, BDST,)
+        #> 3.3770
+        # grid = (BDST, triton.cdiv(indices.shape[-1], BLOCK_BK), B,)
         masking_iteration_draft_cuda_dup_and_score[grid](
             q, *q.stride(),
             # NOTE: need experiment, sink token based normalization is working well for head grouping
@@ -1624,8 +1693,12 @@ def masking_iteration_draft(
             block_size_k,
             BLOCK_BK,
             
-            num_warps=2 if scores_cached else 4,
-            num_stages=2,
+            num_warps=(
+                (2 if scores_cached else 4)
+                if not using_sparq else
+                (2 if scores_cached else 4)
+            ) * G,
+            num_stages=max(1, 4 // G),
         )
         
         # print(indices[0, -10])
@@ -1674,9 +1747,31 @@ def masking_iteration_draft(
         # print(scores.sum(-1)[0, -1])
         
         # NOTE: because of sort, we cannot fuse everything...
-        topk_indices = torch.argsort(
-            probs, dim=-1, descending=True, stable=False
-        )[:, :, :mask_block_k * G]
+        # topk_indices = torch.argsort(
+        #     probs, dim=-1, descending=True, stable=False
+        # )[:, :, :mask_block_k * G]
+        topk_indices = torch.empty(
+            (probs.shape[0], probs.shape[1], mask_block_k * G),
+            device=probs.device,
+            dtype=torch.int32,
+        )
+        BLOCK_BDST = 1
+        grid = (B, triton.cdiv(BDST, BLOCK_BDST),)
+        masking_iteration_draft_cuda_argsort[grid](
+            probs, *probs.stride(),
+            topk_indices, *topk_indices.stride(),
+            
+            t_group_sizes, *t_group_sizes.stride(),
+            
+            BDST,
+            
+            probs.shape[-1],
+            mask_block_k * G,
+            BLOCK_BDST,
+            
+            num_warps=min(32, max(1, (probs.shape[-1] * BLOCK_BDST) // 256)),
+            num_stages=8,
+        )
         
         grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
         masking_iteration_draft_cuda_gather[grid](
@@ -2244,6 +2339,8 @@ def block_sparse_attention(
     context = torch.zeros_like(q)
     
     BLOCK_BK = 64 // block_size_k
+    if block_size_k > 4:
+        BLOCK_BK = 128 // block_size_k
     assert BLOCK_BK > 0
     
     if rope_cos is not None:
@@ -2284,11 +2381,15 @@ def block_sparse_attention(
         block_size_k,
         BLOCK_BK,
         
-        num_stages=1,
+        num_warps=4,
+        num_stages=5,
     )
     
     return context
 
+import nvtx
+
+@nvtx.annotate("masking_step_loop")
 def masking_step_loop(
     q: Tensor,
     k: Tensor,
@@ -2347,35 +2448,37 @@ def masking_step_loop(
         idx_tdst = idx_tdst % TDST
         idx_tdst = idx_tdst.reshape(-1)
         scores_seed = None
-        for idx_sample in range(num_samples):
-            indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
-                q[:, idx_tdst, :], 
-                k[:, :, :], 
-                position_ids=idx_tdst,
-                mask_k=mask_k,
-                block_size_q=block_size_q,
-                block_stride_q=block_stride_q,
-                block_size_k=block_size_k,
-                block_size_k_group=block_size_k_group,
-                sliding_window_size=sliding_window_size,
-                sink_token_size=sink_token_size,
-                using_extend=using_extend,
-                rope_cos=rope_cos,
-                rope_sin=rope_sin,
-                self_extend_neighboor_window=self_extend_neighboor_window,
-                self_extend_group_size=self_extend_group_size,
-                topk_head_group_size=topk_head_group_size,
-                sample_method=sample_method,
-                branch_method=branch_method,
-                score_head_group_size=score_head_group_size,
-                sparq_ind=sparq_ind,
-                indices_seed=indices_seed,
-                ks_seed=ks_seed,
-                scores_seed=scores_seed,
-            )
-            indices_seed = indices
-            ks_seed = ks
-            scores_seed = scores
+        with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
+            for idx_sample in range(num_samples):
+                with nvtx.annotate(f'masking_iteration_draft(idx_sample={idx_sample})'):
+                    indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
+                        q[:, idx_tdst, :], 
+                        k[:, :, :], 
+                        position_ids=idx_tdst,
+                        mask_k=mask_k,
+                        block_size_q=block_size_q,
+                        block_stride_q=block_stride_q,
+                        block_size_k=block_size_k,
+                        block_size_k_group=block_size_k_group,
+                        sliding_window_size=sliding_window_size,
+                        sink_token_size=sink_token_size,
+                        using_extend=using_extend,
+                        rope_cos=rope_cos,
+                        rope_sin=rope_sin,
+                        self_extend_neighboor_window=self_extend_neighboor_window,
+                        self_extend_group_size=self_extend_group_size,
+                        topk_head_group_size=topk_head_group_size,
+                        sample_method=sample_method,
+                        branch_method=branch_method,
+                        score_head_group_size=score_head_group_size,
+                        sparq_ind=sparq_ind,
+                        indices_seed=indices_seed,
+                        ks_seed=ks_seed,
+                        scores_seed=scores_seed,
+                    )
+                indices_seed = indices
+                ks_seed = ks
+                scores_seed = scores
         
         if not traverse_from_last_step:
             indices_seed = ks_seed = None
@@ -2421,6 +2524,7 @@ def masking_step_loop(
     
     return indices, ks, ks_count, ks_start_end, scores
 
+@nvtx.annotate('hip_attention')
 @torch.inference_mode()
 def hip_attention(
     q: Tensor, 
