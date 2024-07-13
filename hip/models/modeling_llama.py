@@ -704,6 +704,8 @@ class LlamaSdpaAttention(LlamaAttention):
                 'k': key_states,
                 'v': value_states,
                 'out': attn_output,
+                'cos': cos,
+                'sin': sin,
             }, './cache/llama/qkvout.pth')
             input('stored. press enter to continue >>> ')
 
@@ -728,7 +730,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_last_dense_queries = None
         self.tree_dense_layers = []
         self.tree_high_k_layers = {
-            # 0:4, 1:4, 2:4,
+            # 0:4, 1:4, 2:4, 3:4,
         }
         self.tree_rope_method = 'none'
         self.tree_enable_sparq = True
@@ -737,11 +739,12 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
 
-        self.tree_avgpool_scaler = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size // 4),
-            nn.ReLU(),
-            nn.Linear(config.hidden_size // 4, config.num_attention_heads)
-        )
+        # self.tree_avgpool_scaler = nn.Sequential(
+        #     nn.Linear(config.hidden_size, config.hidden_size // 4),
+        #     nn.ReLU(),
+        #     nn.Linear(config.hidden_size // 4, config.num_attention_heads)
+        # )
+        self.tree_avgpool_scaler = None
 
         self.tree_reformer = self.tree_performer = None
 

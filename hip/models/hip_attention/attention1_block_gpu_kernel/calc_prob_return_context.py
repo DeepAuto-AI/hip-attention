@@ -351,12 +351,12 @@ def _calc_prob_return_context_acc_compute(
 
 @triton.autotune(
     configs=[
-        triton.Config(kwargs={}, num_warps=16),
-        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=16, num_stages=1),
+        triton.Config(kwargs={}, num_warps=8, num_stages=1),
         # BUG: CUDA misaligned memory address.
         # triton.Config(kwargs={}, num_warps=4),
-        triton.Config(kwargs={}, num_warps=2),
-        triton.Config(kwargs={}, num_warps=1),
+        triton.Config(kwargs={}, num_warps=2, num_stages=1),
+        triton.Config(kwargs={}, num_warps=1, num_stages=1),
     ],
     key=['BLOCK_HID', 'BLOCK_BK'],
     warmup=3,
@@ -617,8 +617,9 @@ def _calc_prob_return_context_compute(
                 idx_bdst * stride_indices_bdst +\
                 idx_bk * stride_indices_bk,
             mask = mask_bk,
-            other = TSRC,
+            # other = TSRC,
         ).to(tl.int64)
+        idx_tsrc_block_start = tl.where(mask_bk, idx_tsrc_block_start, TSRC)
         
         # [BLOCK_BK, BLOCK_SIZE_K]
         idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
@@ -873,6 +874,7 @@ def calc_prob_return_context(
     SELF_EXTEND_SCALE: int = 1,
     SELF_EXTEND_WINDOW: int = 1,
     RETURN_SCORES: bool = False,
+    NUM_SINK: Optional[int] = None,
 ):
     """
     implement flash attention 1, not 2.
@@ -886,7 +888,7 @@ def calc_prob_return_context(
     BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     _, _, BK = indices.shape
-    assert ks.shape == (N, BDST)
+    assert ks.shape == (N, BDST), f'{ks.shape}'
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
@@ -1014,7 +1016,8 @@ def calc_prob_return_context(
         position_ids_stride = (0, 0)
     
     # NOTE: to match 32x32 tensor-core
-    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K)
+    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K) if NUM_SINK is None else NUM_SINK
+    assert isinstance(NUM_SINK, int)
     
     if RETURN_SCORES:
         if USING_SLIDING_WINDOW:

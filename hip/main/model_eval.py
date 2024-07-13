@@ -108,6 +108,7 @@ def load_model(args):
     MODELS = {
         'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
+        'llama7b': 'meta-llama/Llama-2-7b-chat-hf',
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
@@ -115,6 +116,7 @@ def load_model(args):
         'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
+        'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
     }
     if args.model in MODELS:

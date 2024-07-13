@@ -20,7 +20,7 @@ import json
 import math
 import os
 import warnings
-from typing import Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -154,6 +154,7 @@ def hip_attention_mask(
     grid_k_stride=1,
     
     maximum_ks=None,
+    maximum_ks_config=None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
@@ -174,6 +175,8 @@ def hip_attention_mask(
         n_patches = n_patches // estimator_lower_resolution
         if maximum_ks is not None:
             maximum_ks = maximum_ks // estimator_lower_resolution
+            assert maximum_ks_config is not None
+            maximum_ks_config = list([x // estimator_lower_resolution for x in maximum_ks_config])
     
     if enable_sparq and ((mask_k // block_size_k) < sparq_start_bk):
         enable_sparq = False
@@ -337,6 +340,7 @@ def hip_attention_mask(
             
             # dynamic k per query
             maximum_ks,
+            maximum_ks_config,
             
             # input constant
             kv_repeat_interleave,
@@ -982,7 +986,7 @@ def sparse_attention(
     return context
 
 import numba
-@numba.njit
+@numba.njit(parallel=True)
 def to_dense(
     indices: np.ndarray, 
     ks: np.ndarray, 
@@ -992,7 +996,7 @@ def to_dense(
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
     out = np.zeros((N, T_DST, T_SRC), dtype=np.float32)
     for idx_n in numba.prange(N):
-        for idx_bdst in range(indices.shape[1]):
+        for idx_bdst in numba.prange(indices.shape[1]):
             for idx_k in range(indices.shape[2]):
                 if idx_k < ks[idx_n, idx_bdst]:
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
@@ -1194,6 +1198,10 @@ def hip_attention(
     
     # dynamic k per query support
     maximum_ks: Optional[Tensor] = None,
+    maximum_ks_config: Optional[List[int]] = None,
+    
+    # number of sink tokens, default to size of tensor core
+    num_sink: Optional[int] = None,
 ):
     assert sampling_method in ['random', 'first']
     
@@ -1291,6 +1299,9 @@ def hip_attention(
                     precomputed_indices=precomputed_indices,
                     
                     maximum_ks=maximum_ks,
+                    maximum_ks_config=maximum_ks_config,
+                    
+                    num_sink=num_sink,
                 )
                 contexts.append(sparse_context)
             
@@ -1361,6 +1372,9 @@ def hip_attention(
                 precomputed_indices=precomputed_indices,
                 
                 maximum_ks=maximum_ks,
+                maximum_ks_config=maximum_ks_config,
+                
+                num_sink=num_sink,
             )
             contexts.append(context)
             
@@ -1447,6 +1461,7 @@ def hip_attention(
                     grid_k_stride=estimated_ksrc_stride,
                     
                     maximum_ks=maximum_ks,
+                    maximum_ks_config=maximum_ks_config,
                 )
         else:
             assert precomputed_ks is not None
@@ -1536,6 +1551,7 @@ def hip_attention(
                     SELF_EXTEND_SCALE=self_extend_scale,
                     SELF_EXTEND_WINDOW=self_extend_window,
                     RETURN_SCORES=force_return_scores,
+                    NUM_SINK=num_sink,
                 )
                 if force_return_scores:
                     context, probs = t
@@ -1830,10 +1846,12 @@ def main_debug():
     block_size_q = 32
     block_size_k = 2
     
-    maximum_ks = ((torch.arange(
-        0, q.shape[1] // block_size_q, device=q.device
-    ) % 2) * (mask_k // 2) + mask_k // 2)[None, :].repeat(q.shape[0], 1)
-    maximum_ks = None
+    maximum_ks = torch.where(
+        torch.rand((q.shape[0], q.shape[1] // block_size_q), device=q.device) < 0.5,
+        mask_k,
+        mask_k // 4,
+    ).to(torch.int32)
+    # maximum_ks = None
     
     context, (
         atten_indices, 
@@ -1850,8 +1868,13 @@ def main_debug():
         is_flash=True,
         using_sliding_window=True,
         maximum_ks=maximum_ks,
+        maximum_ks_config=[128, 512],
         force_return_scores=True,
     )
+    
+    print(maximum_ks[0])
+    print(atten_indices[0])
+    print(atten_ks[0])
     
     atten_probs = atten_scores.softmax(-1)
     plt.figure(figsize=(4, 5.5))
@@ -1907,11 +1930,111 @@ def main_debug_mask():
     
     print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
 
+def main_debug_max_ks():
+    import nvtx
+    global DEBUG
+    DEBUG = False
+    
+    block = 1024
+    # block = 256
+    q, k, v, out = load_checkouts(
+        dtype=torch.float32, 
+        seq_len=block * 32, 
+        idx=6, 
+        window=1
+    )
+    
+    reps = 1
+    q = q.repeat(1, reps, 1)
+    k = k.repeat(1, reps, 1)
+    v = v.repeat(1, reps, 1)
+    out = out.repeat(1, reps, 1)
+    
+    # q = q[:, -k.shape[1]//4:, :]
+    # out = out[:, -k.shape[1]//4:, :]
+    
+    print('q', q.shape)
+    print('k', k.shape)
+    print('v', v.shape)
+    print('out', out.shape)
+    
+    low_k = 128
+    mask_k = 2048
+    # low_k = 512
+    # mask_k = 512
+    block_size_q = 32
+    block_size_k = 2
+    
+    def sample(ratio: float, n: int = 100):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        
+        maximum_ks = torch.where(
+            torch.rand((q.shape[0], q.shape[1] // block_size_q), device=q.device) < ratio,
+            mask_k,
+            low_k
+        ).to(torch.int32)
+        
+        def fn():
+            hip_attention(
+                q,
+                k,
+                v,
+                mask_k=mask_k,
+                block_size_q=block_size_q,
+                block_size_k=block_size_k,
+                dense_queries_exp=0,
+                is_flash=True,
+                using_sliding_window=True,
+                maximum_ks=maximum_ks,
+                maximum_ks_config=[low_k, mask_k],
+                force_return_scores=False,
+            )
+        
+        start.record()
+        graph = None
+        for i in range(n):
+            if graph is None:
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                for i in range(3):
+                    fn()
+                torch.cuda.current_stream().wait_stream(s)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    fn()
+            
+            start.record()
+            graph.replay()
+            end.record()
+            
+            if i > 3:
+                torch.cuda.synchronize()
+                elapsed = start.elapsed_time(end)
+                samples.append(elapsed)
+        
+        return sum(samples) / len(samples)
+
+    for ratio in range(0, 10):
+        ratio = ratio / 20
+        samples = []
+        with nvtx.annotate(f'ratio={ratio}'):
+            for i in range(10):
+                t = sample(ratio)
+                if i > 3:
+                    samples.append(t)
+        
+        if len(samples) > 0:
+            latency = sum(samples) / len(samples)
+            print(ratio, ratio * mask_k + (1-ratio) * low_k, latency)
+
 if __name__ == '__main__':
     import sys
     if sys.argv[-1] == 'debug':
         main_debug()
     elif sys.argv[-1] == 'debug_mask':
         main_debug_mask()
+    elif sys.argv[-1] == 'debug_max_ks':
+        main_debug_max_ks()
     else:
         main_latency_benchmark()
