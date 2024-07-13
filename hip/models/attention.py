@@ -208,6 +208,12 @@ def custom_attention(
         q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
             if os.getenv('HIP_LEGACY', '0') == '1':
+                # maximum_ks = torch.where(
+                #     torch.rand((q.shape[0], q.shape[1] // tree_block_size_q), device=q.device) < 0.5,
+                #     512,
+                #     128
+                # ).to(torch.int32)
+                
                 attn_output_hip, _ = hip_attention(
                     q_hip,
                     k[:, :LAST_DENSE_QUERIES, :],
@@ -224,6 +230,8 @@ def custom_attention(
                     is_flash=True, #NOTE DEUBG: tree_enable_flash,
                     using_sliding_window=True, #NOTE DEBUG: tree_use_sliding_window,
                     sampling_method=tree_sampling_method,
+                    # maximum_ks=maximum_ks,
+                    # maximum_ks_config=[128, 512],
                     num_sink=16,
                 )
             else:

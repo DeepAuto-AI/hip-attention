@@ -774,6 +774,7 @@ def _masking_iteration_compute(
     
     # dynamic k per query
     MAX_KS, stride_max_ks_n, stride_max_ks_bdst,
+    SELECTED_MAX_KS: tl.constexpr,
     
     # block constant
     USING_SCORE_CACHE: tl.constexpr,
@@ -842,6 +843,9 @@ def _masking_iteration_compute(
                 idx_n * stride_max_ks_n + \
                 idx_bdst * stride_max_ks_bdst,
         ).to(tl.int64)
+        
+        if max_k != SELECTED_MAX_KS:
+            return
     
     k_old = tl.load(
         KS + \
@@ -861,380 +865,383 @@ def _masking_iteration_compute(
         """
         if w_old != w_new:
         """
-        # if w_old == w_new:
-        #     return
-
         tl.debug_barrier()
         mask_w = w_old != w_new
         tl.debug_barrier()
         
-        """
-        k_old = ks[i, j, 0]
-        k_new = max(n_patches, int(min(mask_k * BLOCK_SIZE / t_src, 1.0) * w_new) c/ BLOCK_SIZE)
-        k_new = min(t_src c/ BLOCK_SIZE, max(n_patches, k_new))
-        """
-        
-        # """
-        k_new = tl.maximum(
-            N_PATCHES,
-            (
-                tl.minimum(
-                    MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float64),
-                    1.0
-                ) * tl.cdiv(w_new, BLOCK_SIZE_K)
-            ).to(tl.int64),
-        )
-        # """
-            # k_new = tl.maximum(
-            #     N_PATCHES,
-            #     tl.cdiv(
-            #         (tl.minimum((MASK_K * BLOCK_SIZE).to(tl.float32) / t_src.to(tl.float32), 1.0) * w_new.to(tl.float32)).to(tl.int64),
-            #         BLOCK_SIZE
-            #     ),
-            # )
-        # tl.device_print("before", t_src)
-        k_new = tl.minimum(
-            tl.cdiv(t_src, BLOCK_SIZE_K * GRID_SRC_STRIDE), 
-            k_new,
-        )
-        if (MAX_KS is not None):
-            if (idx_iteration > 0):
-                k_new = tl.minimum(k_new, max_k)
-        
-        """
-        # mask -> t_mask
-        num_pixels = 0
-        for k in range(k_old):
-            loc = mask[i, j, k]
-            loc_idx_start = int(loc * w_old)
-            loc_idx_end = loc_idx_start + 1
-            loc_idx_start = int(loc_idx_start / w_old * w_new)
-            loc_idx_end = int(loc_idx_end / w_old * w_new)
-            dup_pixels = loc_idx_end - loc_idx_start
-            for l in range(dup_pixels):
-                t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
-            num_pixels += dup_pixels
-        """
-        
-        k_old_range = tl.arange(0, BLOCK_MASK_K_PADDED).to(tl.int64)
-        k_old_mask = (
-            (k_old_range < k_old) &
-            (k_old_range < BLOCK_MASK_K) & 
-            True
-        )
-        # tl.debug_barrier()
-        loc_vec = tl.load(
-            MASK +\
-                idx_n * stride_mask_n +\
-                idx_bdst * stride_mask_bdst +\
-                idx_src_grid * stride_mask_src_grid +\
-                k_old_range * stride_mask_k,
-            mask = mask_w & k_old_mask,
-            other = 0
-        )
-        k_old_mask = k_old_mask & (loc_vec < 1.0)
-        tl.debug_barrier()
-        
-        # w_old_fp = w_old.to(tl.float32)
-        # w_new_fp = w_new.to(tl.float32)
-        b_old_fp = tl.cdiv(w_old, BLOCK_SIZE_K).to(tl.float64)
-        b_new_fp = tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
-        loc_idx_start_vec = (loc_vec * b_old_fp).to(tl.int64)
-        # tl.device_print('aa', loc_vec)
-        # tl.device_print('aa', (loc_vec * b_old_fp))
-        loc_idx_start_origin = loc_idx_start_vec
-        loc_idx_end_vec = loc_idx_start_vec + 1
-        loc_idx_start_vec = (loc_idx_start_vec.to(tl.float64) * (b_new_fp / b_old_fp)).to(tl.int64)
-        loc_idx_end_vec = (loc_idx_end_vec.to(tl.float64) * (b_new_fp / b_old_fp)).to(tl.int64)
-        
-        dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
-        dup_pixels_vec = dup_pixels_vec * k_old_mask
-        num_pixels_vec = tl.cumsum(dup_pixels_vec)
-        dup_pixels_first = tl.min(num_pixels_vec)
-        num_pixels_scalar = tl.max(num_pixels_vec)
-        
-        # num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - tl.cdiv(TMASK_K, grid_kstride), 0)
-        # num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
-        dup_pixels_first = tl.min(num_pixels_vec)
-        num_pixels_scalar = tl.max(num_pixels_vec)
-        
-        # NOTE: hey?
-        # loc_idx_start_vec = loc_vec * b_new_fp
-        # loc_idx_start_vec = BLOCK_SIZE_K * b_new_fp
-        
-        # NOTE: compiler bug?
-        
-        """
-        dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)
-        dup_pixels_mask = (dup_pixels_range[None, :] <= dup_pixels_vec[:, None]) & k_old_mask[:, None]
-        
-        tl.store(
-            TMASK + \
-                idx_n * stride_tmask_n +\
-                idx_bdst * stride_tmask_bdst +\
-                ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
-            mask=dup_pixels_mask,
-            value=(
-                (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
-            )
-            # value = num_pixels_scalar=
-        )
-        """
-        
-        # interp_loc_vec_padded = (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
-        # mask_interp_loc_vec_padded = tl.arange(0, BLOCK_MAX_DUP)[None, :] < dup_pixels_vec[:, None]
-        # interp_loc_vec_padded = tl.reshape(interp_loc_vec_padded, BLOCK_MASK_K * BLOCK_MAX_DUP)
-        
-        
-        # idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
-        # mask_block_k = idx_block_k < BLOCK_SIZE_K
-        idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64) * REDUCE_STRDIE
-        if BLOCK_SIZE_Q_PADDED == BLOCK_SIZE_Q:
-            mask_block_q = True
-        else:
-            mask_block_q = idx_block_q < BLOCK_SIZE_Q
-        
-        """
-        # t_mask -> mask (using scores)
-        if k_new < num_pixels:
-        """
-        if (((k_new < num_pixels_scalar) or False) or (REDUCE_STRDIE > 1) ):
-            # if (idx_iteration == 0) or (idx_iteration == (N_ITERATION - 1)):
-            if (idx_iteration == 0):
-                # first iteration should use 
-                # - full block_tmask_k
-                # - half sparq hid
-                _masking_iteration_topk(
-                    # buffers
-                    QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
-                    QUERIES_GROUPED_ROPE,
-                    KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid, 
-                    MASK, stride_mask_n, stride_mask_bdst, stride_mask_src_grid, stride_mask_k,
-                    TMASK, stride_tmask_n, stride_tmask_bdst, stride_tmask_src_grid, stride_tmask_k,
-                    ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
-                    SPARQ_INDICES, stride_sparq_indices_n, stride_sparq_indices_bdst, stride_sparq_indices_hid, 
-                    BLOCK_TABLES, stride_block_tables_num_seqs, stride_block_tables_max_num_blocks_per_seq,
-                    SCORES, stride_scores_n, stride_scores_bdst, stride_scores_k, 
-                    CONTEXT_LENGTH, 
-                    
-                    # local tensors
-                    idx_n,
-                    idx_bdst,
-                    idx_src_grid,
-                    idx_iteration,
-                    idx_block_q,
-                    
-                    mask_w,
-                    mask_block_q,
-                    k_old_mask,
-                    
-                    k_new, 
-                    w_old,
-                    w_new,
-                    t_src,
-                    context_length,
-                    loc_idx_start_vec,
-                    loc_idx_start_origin,
-                    num_pixels_vec,
-                    num_pixels_scalar,
-                    dup_pixels_vec,
-                    dup_pixels_first,
-                    
-                    # block constant
-                    IS_CAUSAL,
-                    
-                    USING_SCORE_CACHE,
-                    
-                    N_ITERATION,
-                    
-                    T_DST,
-                    T_SRC,
-                    
-                    KEY_CACHE_METHOD,
-                    KV_REPEAT_INTERLEAVE, 
-                    
-                    REDUCE_METHOD,
-                    
-                    SAMPLING_METHOD,
-                    
-                    GRID_SRC_STRIDE,
-                    GRID_K_STRIDE,
-                    
-                    USING_SLIDING_WINDOW,
-                    SLIDING_WINDOW_SIZE,
-                    
-                    HID, 
-                    SPARQ, 
-                    SPARQ_HID_HALF, # NOTE: this hurt accuracy little
-                    
-                    BLOCK_MAX_DUP,
-                    BLOCK_SIZE_Q,
-                    BLOCK_SIZE_Q_PADDED,
-                    BLOCK_SIZE_K,
-                    BLOCK_MASK_K,
-                    BLOCK_MASK_K_PADDED,
-                    BLOCK_TMASK_K,
-                    BLOCK_TMASK_K_PADDED,
-                    BLOCK_HID, 
-                    
-                    VLLM_NUM_KV_HEADS, 
-                    VLLM_BLOCK_SIZE,
-                    VLLM_X, 
-                    
-                    stride_keys_vllm_num_blcoks, 
-                    stride_keys_vllm_num_kv_heads, 
-                    stride_keys_vllm_head_size_x, 
-                    stride_keys_vllm_block_size, 
-                    stride_keys_vllm_x, 
-                    
-                    ROPE_METHOD,
-                    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
-                    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
-                    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
-                    SELF_EXTEND_SCALE,
-                    SELF_EXTEND_WINDOW,
-                )
-            else:
-                # otherwise
-                # - use half block_tmask_k
-                # - use full sparq_hid
-                _masking_iteration_topk(
-                    # buffers
-                    QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
-                    QUERIES_GROUPED_ROPE,
-                    KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid, 
-                    MASK, stride_mask_n, stride_mask_bdst, stride_mask_src_grid, stride_mask_k,
-                    TMASK, stride_tmask_n, stride_tmask_bdst, stride_tmask_src_grid, stride_tmask_k,
-                    ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
-                    SPARQ_INDICES, stride_sparq_indices_n, stride_sparq_indices_bdst, stride_sparq_indices_hid, 
-                    BLOCK_TABLES, stride_block_tables_num_seqs, stride_block_tables_max_num_blocks_per_seq,
-                    SCORES, stride_scores_n, stride_scores_bdst, stride_scores_k, 
-                    CONTEXT_LENGTH, 
-                    
-                    # local tensors
-                    idx_n,
-                    idx_bdst,
-                    idx_src_grid,
-                    idx_iteration,
-                    idx_block_q,
-                    
-                    mask_w,
-                    mask_block_q,
-                    k_old_mask,
-                    
-                    k_new, 
-                    w_old,
-                    w_new,
-                    t_src,
-                    context_length,
-                    loc_idx_start_vec,
-                    loc_idx_start_origin,
-                    num_pixels_vec,
-                    num_pixels_scalar,
-                    dup_pixels_vec,
-                    dup_pixels_first,
-                    
-                    # block constant
-                    IS_CAUSAL,
-                    
-                    USING_SCORE_CACHE,
-                    
-                    N_ITERATION,
-                    
-                    T_DST,
-                    T_SRC,
-                    
-                    KEY_CACHE_METHOD,
-                    KV_REPEAT_INTERLEAVE, 
-                    
-                    REDUCE_METHOD,
-                    
-                    SAMPLING_METHOD,
-                    
-                    GRID_SRC_STRIDE,
-                    GRID_K_STRIDE,
-                    
-                    USING_SLIDING_WINDOW,
-                    SLIDING_WINDOW_SIZE,
-                    
-                    HID, 
-                    SPARQ, 
-                    SPARQ_HID,
-                    
-                    BLOCK_MAX_DUP,
-                    BLOCK_SIZE_Q,
-                    BLOCK_SIZE_Q_PADDED,
-                    BLOCK_SIZE_K,
-                    BLOCK_MASK_K,
-                    BLOCK_MASK_K_PADDED,
-                    BLOCK_TMASK_K_HALF,
-                    BLOCK_TMASK_K_HALF_PADDED,
-                    BLOCK_HID, 
-                    
-                    VLLM_NUM_KV_HEADS, 
-                    VLLM_BLOCK_SIZE,
-                    VLLM_X, 
-                    
-                    stride_keys_vllm_num_blcoks, 
-                    stride_keys_vllm_num_kv_heads, 
-                    stride_keys_vllm_head_size_x, 
-                    stride_keys_vllm_block_size, 
-                    stride_keys_vllm_x, 
-                    
-                    ROPE_METHOD,
-                    ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
-                    ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
-                    POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
-                    SELF_EXTEND_SCALE,
-                    SELF_EXTEND_WINDOW,
-                )
-        else:
-            """
-            else:
-                mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
-            """
-            for _idx in range(BLOCK_MAX_DUP):
-                idx_mask_out = ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64)
-                mask_mask_out = (idx_mask_out < BLOCK_MASK_K) & (idx_mask_out < num_pixels_scalar) & (_idx <= dup_pixels_vec) & k_old_mask
-                value_mask_out = (loc_idx_start_vec + _idx).to(tl.float64)
-                value_mask_out = value_mask_out / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
-                
-                tl.store(
-                    MASK +\
-                        idx_n * stride_mask_n +\
-                        idx_bdst * stride_mask_bdst +\
-                        idx_src_grid * stride_mask_src_grid +\
-                        idx_mask_out * stride_mask_k,
-                    mask=mask_w & mask_mask_out,
-                    value=value_mask_out,
-                )
-            tl.debug_barrier()
-        
-        """
-        ws[i, j, 0] = w_new
-        ks[i, j, 0] = min(k_new, num_pixels)
-        """
         if mask_w:
+            """
+            k_old = ks[i, j, 0]
+            k_new = max(n_patches, int(min(mask_k * BLOCK_SIZE / t_src, 1.0) * w_new) c/ BLOCK_SIZE)
+            k_new = min(t_src c/ BLOCK_SIZE, max(n_patches, k_new))
+            """
+            
+            # """
+            k_new = tl.maximum(
+                N_PATCHES,
+                (
+                    tl.minimum(
+                        MASK_K / tl.cdiv(t_src, BLOCK_SIZE_K).to(tl.float64),
+                        1.0
+                    ) * tl.cdiv(w_new, BLOCK_SIZE_K)
+                ).to(tl.int64),
+            )
+            # """
+                # k_new = tl.maximum(
+                #     N_PATCHES,
+                #     tl.cdiv(
+                #         (tl.minimum((MASK_K * BLOCK_SIZE).to(tl.float32) / t_src.to(tl.float32), 1.0) * w_new.to(tl.float32)).to(tl.int64),
+                #         BLOCK_SIZE
+                #     ),
+                # )
+            # tl.device_print("before", t_src)
+            k_new = tl.minimum(
+                tl.cdiv(t_src, BLOCK_SIZE_K * GRID_SRC_STRIDE), 
+                k_new,
+            )
+            if (MAX_KS is not None):
+                if (idx_iteration > 0):
+                    k_new = tl.minimum(k_new, max_k)
+            
+            """
+            # mask -> t_mask
+            num_pixels = 0
+            for k in range(k_old):
+                loc = mask[i, j, k]
+                loc_idx_start = int(loc * w_old)
+                loc_idx_end = loc_idx_start + 1
+                loc_idx_start = int(loc_idx_start / w_old * w_new)
+                loc_idx_end = int(loc_idx_end / w_old * w_new)
+                dup_pixels = loc_idx_end - loc_idx_start
+                for l in range(dup_pixels):
+                    t_mask[i, j, num_pixels + l] = (loc_idx_start + l) / w_new
+                num_pixels += dup_pixels
+            """
+            
+            k_old_range = tl.arange(0, BLOCK_MASK_K_PADDED).to(tl.int64)
+            k_old_mask = (
+                (k_old_range < k_old) &
+                (k_old_range < BLOCK_MASK_K) & 
+                True
+            )
+            # tl.debug_barrier()
+            loc_vec = tl.load(
+                MASK +\
+                    idx_n * stride_mask_n +\
+                    idx_bdst * stride_mask_bdst +\
+                    idx_src_grid * stride_mask_src_grid +\
+                    k_old_range * stride_mask_k,
+                mask = mask_w & k_old_mask,
+                other = 0
+            )
+            k_old_mask = k_old_mask & (loc_vec < 1.0)
+            tl.debug_barrier()
+            
+            # w_old_fp = w_old.to(tl.float32)
+            # w_new_fp = w_new.to(tl.float32)
+            b_old_fp = tl.cdiv(w_old, BLOCK_SIZE_K).to(tl.float64)
+            b_new_fp = tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
+            loc_idx_start_vec = (loc_vec * b_old_fp).to(tl.int64)
+            # tl.device_print('aa', loc_vec)
+            # tl.device_print('aa', (loc_vec * b_old_fp))
+            loc_idx_start_origin = loc_idx_start_vec
+            loc_idx_end_vec = loc_idx_start_vec + 1
+            loc_idx_start_vec = (loc_idx_start_vec.to(tl.float64) * (b_new_fp / b_old_fp)).to(tl.int64)
+            loc_idx_end_vec = (loc_idx_end_vec.to(tl.float64) * (b_new_fp / b_old_fp)).to(tl.int64)
+            
+            dup_pixels_vec = loc_idx_end_vec - loc_idx_start_vec
+            dup_pixels_vec = dup_pixels_vec * k_old_mask
+            num_pixels_vec = tl.cumsum(dup_pixels_vec)
+            dup_pixels_first = tl.min(num_pixels_vec)
+            num_pixels_scalar = tl.max(num_pixels_vec)
+            
+            # num_pixels_scalar_exceed = tl.maximum(num_pixels_scalar - tl.cdiv(TMASK_K, grid_kstride), 0)
+            # num_pixels_vec = tl.maximum(0, num_pixels_vec - num_pixels_scalar_exceed)
+            dup_pixels_first = tl.min(num_pixels_vec)
+            num_pixels_scalar = tl.max(num_pixels_vec)
+            
+            # NOTE: hey?
+            # loc_idx_start_vec = loc_vec * b_new_fp
+            # loc_idx_start_vec = BLOCK_SIZE_K * b_new_fp
+            
+            # NOTE: compiler bug?
+            
+            """
+            dup_pixels_range = tl.arange(0, BLOCK_MAX_DUP)
+            dup_pixels_mask = (dup_pixels_range[None, :] <= dup_pixels_vec[:, None]) & k_old_mask[:, None]
+            
+            tl.store(
+                TMASK + \
+                    idx_n * stride_tmask_n +\
+                    idx_bdst * stride_tmask_bdst +\
+                    ((num_pixels_vec - dup_pixels_first)[:, None] + dup_pixels_range[None, :]) * stride_tmask_k,
+                mask=dup_pixels_mask,
+                value=(
+                    (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
+                )
+                # value = num_pixels_scalar=
+            )
+            """
+            
+            # interp_loc_vec_padded = (loc_idx_start_vec[:, None] + tl.arange(0, BLOCK_MAX_DUP)[None, :]).to(tl.float32) / w_new.to(tl.float32)
+            # mask_interp_loc_vec_padded = tl.arange(0, BLOCK_MAX_DUP)[None, :] < dup_pixels_vec[:, None]
+            # interp_loc_vec_padded = tl.reshape(interp_loc_vec_padded, BLOCK_MASK_K * BLOCK_MAX_DUP)
+            
+            
+            # idx_block_k = tl.arange(0, BLOCK_SIZE_K_PADDED)
+            # mask_block_k = idx_block_k < BLOCK_SIZE_K
+            idx_block_q = tl.arange(0, BLOCK_SIZE_Q_PADDED).to(tl.int64) * REDUCE_STRDIE
+            if BLOCK_SIZE_Q_PADDED == BLOCK_SIZE_Q:
+                mask_block_q = True
+            else:
+                mask_block_q = idx_block_q < BLOCK_SIZE_Q
+            
+            """
+            # t_mask -> mask (using scores)
+            if k_new < num_pixels:
+            """
+            if (((k_new < num_pixels_scalar) or False) or (REDUCE_STRDIE > 1) ):
+                # if (idx_iteration == 0) or (idx_iteration == (N_ITERATION - 1)):
+                if (idx_iteration == 0):
+                    # first iteration should use 
+                    # - full block_tmask_k
+                    # - half sparq hid
+                    _masking_iteration_topk(
+                        # buffers
+                        QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
+                        QUERIES_GROUPED_ROPE,
+                        KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid, 
+                        MASK, stride_mask_n, stride_mask_bdst, stride_mask_src_grid, stride_mask_k,
+                        TMASK, stride_tmask_n, stride_tmask_bdst, stride_tmask_src_grid, stride_tmask_k,
+                        ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
+                        SPARQ_INDICES, stride_sparq_indices_n, stride_sparq_indices_bdst, stride_sparq_indices_hid, 
+                        BLOCK_TABLES, stride_block_tables_num_seqs, stride_block_tables_max_num_blocks_per_seq,
+                        SCORES, stride_scores_n, stride_scores_bdst, stride_scores_k, 
+                        CONTEXT_LENGTH, 
+                        
+                        # local tensors
+                        idx_n,
+                        idx_bdst,
+                        idx_src_grid,
+                        idx_iteration,
+                        idx_block_q,
+                        
+                        mask_w,
+                        mask_block_q,
+                        k_old_mask,
+                        
+                        k_new, 
+                        w_old,
+                        w_new,
+                        t_src,
+                        context_length,
+                        loc_idx_start_vec,
+                        loc_idx_start_origin,
+                        num_pixels_vec,
+                        num_pixels_scalar,
+                        dup_pixels_vec,
+                        dup_pixels_first,
+                        
+                        # block constant
+                        IS_CAUSAL,
+                        
+                        USING_SCORE_CACHE,
+                        
+                        N_ITERATION,
+                        
+                        T_DST,
+                        T_SRC,
+                        
+                        KEY_CACHE_METHOD,
+                        KV_REPEAT_INTERLEAVE, 
+                        
+                        REDUCE_METHOD,
+                        
+                        SAMPLING_METHOD,
+                        
+                        GRID_SRC_STRIDE,
+                        GRID_K_STRIDE,
+                        
+                        USING_SLIDING_WINDOW,
+                        SLIDING_WINDOW_SIZE,
+                        
+                        HID, 
+                        SPARQ, 
+                        SPARQ_HID_HALF, # NOTE: this hurt accuracy little
+                        
+                        BLOCK_MAX_DUP,
+                        BLOCK_SIZE_Q,
+                        BLOCK_SIZE_Q_PADDED,
+                        BLOCK_SIZE_K,
+                        BLOCK_MASK_K,
+                        BLOCK_MASK_K_PADDED,
+                        BLOCK_TMASK_K,
+                        BLOCK_TMASK_K_PADDED,
+                        BLOCK_HID, 
+                        
+                        VLLM_NUM_KV_HEADS, 
+                        VLLM_BLOCK_SIZE,
+                        VLLM_X, 
+                        
+                        stride_keys_vllm_num_blcoks, 
+                        stride_keys_vllm_num_kv_heads, 
+                        stride_keys_vllm_head_size_x, 
+                        stride_keys_vllm_block_size, 
+                        stride_keys_vllm_x, 
+                        
+                        ROPE_METHOD,
+                        ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+                        ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+                        POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
+                        SELF_EXTEND_SCALE,
+                        SELF_EXTEND_WINDOW,
+                    )
+                else:
+                    # otherwise
+                    # - use half block_tmask_k
+                    # - use full sparq_hid
+                    _masking_iteration_topk(
+                        # buffers
+                        QUERIES, stride_queries_n, stride_queries_tdst, stride_queries_hid, 
+                        QUERIES_GROUPED_ROPE,
+                        KEYS, stride_keys_n, stride_keys_tsrc, stride_keys_hid, 
+                        MASK, stride_mask_n, stride_mask_bdst, stride_mask_src_grid, stride_mask_k,
+                        TMASK, stride_tmask_n, stride_tmask_bdst, stride_tmask_src_grid, stride_tmask_k,
+                        ATTEN_MASK, stride_atten_mask_n, stride_atten_mask_tsrc,
+                        SPARQ_INDICES, stride_sparq_indices_n, stride_sparq_indices_bdst, stride_sparq_indices_hid, 
+                        BLOCK_TABLES, stride_block_tables_num_seqs, stride_block_tables_max_num_blocks_per_seq,
+                        SCORES, stride_scores_n, stride_scores_bdst, stride_scores_k, 
+                        CONTEXT_LENGTH, 
+                        
+                        # local tensors
+                        idx_n,
+                        idx_bdst,
+                        idx_src_grid,
+                        idx_iteration,
+                        idx_block_q,
+                        
+                        mask_w,
+                        mask_block_q,
+                        k_old_mask,
+                        
+                        k_new, 
+                        w_old,
+                        w_new,
+                        t_src,
+                        context_length,
+                        loc_idx_start_vec,
+                        loc_idx_start_origin,
+                        num_pixels_vec,
+                        num_pixels_scalar,
+                        dup_pixels_vec,
+                        dup_pixels_first,
+                        
+                        # block constant
+                        IS_CAUSAL,
+                        
+                        USING_SCORE_CACHE,
+                        
+                        N_ITERATION,
+                        
+                        T_DST,
+                        T_SRC,
+                        
+                        KEY_CACHE_METHOD,
+                        KV_REPEAT_INTERLEAVE, 
+                        
+                        REDUCE_METHOD,
+                        
+                        SAMPLING_METHOD,
+                        
+                        GRID_SRC_STRIDE,
+                        GRID_K_STRIDE,
+                        
+                        USING_SLIDING_WINDOW,
+                        SLIDING_WINDOW_SIZE,
+                        
+                        HID, 
+                        SPARQ, 
+                        SPARQ_HID,
+                        
+                        BLOCK_MAX_DUP,
+                        BLOCK_SIZE_Q,
+                        BLOCK_SIZE_Q_PADDED,
+                        BLOCK_SIZE_K,
+                        BLOCK_MASK_K,
+                        BLOCK_MASK_K_PADDED,
+                        BLOCK_TMASK_K_HALF,
+                        BLOCK_TMASK_K_HALF_PADDED,
+                        BLOCK_HID, 
+                        
+                        VLLM_NUM_KV_HEADS, 
+                        VLLM_BLOCK_SIZE,
+                        VLLM_X, 
+                        
+                        stride_keys_vllm_num_blcoks, 
+                        stride_keys_vllm_num_kv_heads, 
+                        stride_keys_vllm_head_size_x, 
+                        stride_keys_vllm_block_size, 
+                        stride_keys_vllm_x, 
+                        
+                        ROPE_METHOD,
+                        ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
+                        ROPE_SIN, stride_rope_sin_idx, stride_rope_sin_hid,
+                        POSITION_IDS, stride_position_ids_n, stride_position_ids_tdst,
+                        SELF_EXTEND_SCALE,
+                        SELF_EXTEND_WINDOW,
+                    )
+            else:
+                """
+                else:
+                    mask[i, j, :num_pixels] = t_mask[i, j, :num_pixels]
+                """
+                for _idx in range(BLOCK_MAX_DUP):
+                    idx_mask_out = ((num_pixels_vec - dup_pixels_first) + _idx).to(tl.int64)
+                    mask_mask_out = (idx_mask_out < BLOCK_MASK_K) & (idx_mask_out < num_pixels_scalar) & (_idx <= dup_pixels_vec) & k_old_mask
+                    value_mask_out = (loc_idx_start_vec + _idx).to(tl.float64)
+                    value_mask_out = value_mask_out / tl.cdiv(w_new, BLOCK_SIZE_K).to(tl.float64)
+                    
+                    tl.store(
+                        MASK +\
+                            idx_n * stride_mask_n +\
+                            idx_bdst * stride_mask_bdst +\
+                            idx_src_grid * stride_mask_src_grid +\
+                            idx_mask_out * stride_mask_k,
+                        mask=mask_w & mask_mask_out,
+                        value=value_mask_out,
+                    )
+                tl.debug_barrier()
+            
+            """
+            ws[i, j, 0] = w_new
+            ks[i, j, 0] = min(k_new, num_pixels)
+            """
             w_old = w_new
             k_old = tl.minimum(k_new, num_pixels_scalar)
-        tl.debug_barrier()
-    tl.debug_barrier()
-    if idx_src_grid == 0:
-        tl.store(
-            WS_OUT +\
-                idx_n * stride_ws_out_n +\
-                idx_bdst * stride_ws_out_bdst,
-            # mask = mask_w,
-            value = w_old
-        )
-    tl.store(
-        KS_OUT +\
-            idx_n * stride_ks_out_n +\
-            idx_bdst * stride_ks_out_bdst +\
-            idx_src_grid * stride_ks_out_src_grid,
-        # mask = mask_w,
-        value = k_old
-    )
+            
+            t_w_new = tl.minimum(
+                tl_device_round(w_old.to(tl.float64) * SCALE_UP).to(tl.float64), 
+                t_src
+            ).to(tl.int64)
+            
+            if t_w_new == w_old:
+                if idx_src_grid == 0:
+                    tl.store(
+                        WS_OUT +\
+                            idx_n * stride_ws_out_n +\
+                            idx_bdst * stride_ws_out_bdst,
+                        # mask = mask_w,
+                        value = w_old
+                    )
+                tl.store(
+                    KS_OUT +\
+                        idx_n * stride_ks_out_n +\
+                        idx_bdst * stride_ks_out_bdst +\
+                        idx_src_grid * stride_ks_out_src_grid,
+                    # mask = mask_w,
+                    value = k_old
+                )
+    
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -1285,6 +1292,7 @@ def masking_iteration(
     
     # dynamic k per query
     maximum_ks: Optional[Tensor],
+    maximum_ks_config: Optional[List[int]],
     
     # input constant
     KV_REPEAT_INTERLEAVE: int,
@@ -1380,7 +1388,7 @@ def masking_iteration(
     BLOCK_HID = triton.next_power_of_2(HID)
     if SPARQ:
         BLOCK_HID = triton.next_power_of_2(max(16, SPARQ_HID))
-    if BLOCK_TMASK_K >= 1024:
+    if BLOCK_TMASK_K >= 2048:
         BLOCK_HID = min(BLOCK_HID, 16)
     elif BLOCK_TMASK_K >= 512:
         BLOCK_HID = min(BLOCK_HID, 32)
@@ -1388,7 +1396,7 @@ def masking_iteration(
         BLOCK_HID = min(BLOCK_HID, 64)
     elif BLOCK_TMASK_K >= 128:
         BLOCK_HID = min(BLOCK_HID, 128)
-    # print(BLOCK_HID, BLOCK_TMASK_K)
+    # print(BLOCK_HID, BLOCK_TMASK_K, SPARQ, SPARQ_HID)
     
     if isinstance(keys, Tensor):
         KEY_CACHE_METHOD = 'cont'
@@ -1494,6 +1502,8 @@ def masking_iteration(
         assert maximum_ks.dtype in [torch.int16, torch.int32, torch.int64, torch.long]
         maximum_ks = torch.ceil(maximum_ks / (BLOCK_SIZE_K * GRID_SRC_STRIDE)).to(maximum_ks.dtype)
         maximum_ks_stride = maximum_ks.stride()
+        assert maximum_ks_config is not None
+        maximum_ks_config = list([math.ceil(x / (BLOCK_SIZE_K * GRID_SRC_STRIDE)) for x in maximum_ks_config])
         # print(maximum_ks)
     else:
         maximum_ks_stride = (0, 0)
@@ -1503,103 +1513,216 @@ def masking_iteration(
 
     orig_device = torch.cuda.current_device()
     torch.cuda.set_device(queries.device)
-    _masking_iteration_compute[grid](
-        # input matrices
-        queries, *queries.stride(),
-        queries_grouped,
-        keys, *keys.stride(),
-        attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
-        sparq_indices, *sparq_indices_strides,
+    if maximum_ks is not None:
+        calculated_maximum_ks_config = []
+        for max_k in maximum_ks_config:
+            calculated_maximum_ks_config.append((
+                max_k,
+                max(maximum_ks_config) // max_k,
+            ))
         
-        # input matrices (blocked)
-        mask, *mask.stride(),
-        t_mask, *t_mask.stride(),
-        
-        # temp vectors (blocked)
-        ws, *ws.stride(),
-        ks, *ks.stride(),
-        ws_out, *ws_out.stride(),
-        ks_out, *ks_out.stride(),
-        t_srcs, *t_srcs.stride(),
-        scores, *(scores.stride() if scores is not None else (0, 0, 0)),
-        
-        # operation variables
-        float(scale_up), 
-        int(triton.cdiv(n_patches, GRID_K_STRIDE)), 
-        int(mask.shape[-1]), 
-        int(t_mask.shape[-1]), 
-        is_causal,
-        
-        # input variables
-        KV_REPEAT_INTERLEAVE, 
-        N, 
-        T_DST, 
-        T_SRC, 
-        int(B_DST), 
-        int(B_SRC), 
-        HID, 
-        SPARQ_HID, 
-        SPARQ_HID // 2 if SPARQ_HID > 16 else SPARQ_HID,
-        N_COMPLETED,
-        min(n_iteration, int(os.getenv('HIP_DEBUG_LIMIT_N_ITER', '99999999'))),
-        
-        # vLLM compat inputs
-        *stride_keys_vllm,
-        
-        VLLM_NUM_BLOCKS,
-        VLLM_NUM_KV_HEADS,
-        VLLM_HEAD_SIZE_X,
-        VLLM_BLOCK_SIZE,
-        VLLM_X,
-        VLLM_HEAD_SIZE,
-        
-        block_tables, *block_tables_stride,
-        
-        context_length, *context_length_stride,
-        
-        # rope methods
-        ROPE_METHOD,
-        ROPE_COS, *rope_cos_stride,
-        ROPE_SIN, *rope_sin_stride,
-        POSITION_IDS, *position_ids_stride,
-        SELF_EXTEND_SCALE,
-        SELF_EXTEND_WINDOW,
-        
-        # dynamic k per query,
-        maximum_ks, *maximum_ks_stride,
-        
-        # block constant
-        USING_SCORE_CACHE,
-        KEY_CACHE_METHOD,
-        SPARQ,
-        REDUCE_METHOD,
-        BLOCK_MASK_K,
-        next_multiple_of(BLOCK_MASK_K),
-        BLOCK_TMASK_K,
-        next_multiple_of(BLOCK_TMASK_K),
-        BLOCK_MASK_K // 2,
-        next_multiple_of(BLOCK_MASK_K // 2),
-        BLOCK_TMASK_K // 2,
-        next_multiple_of(BLOCK_TMASK_K // 2),
-        triton.next_power_of_2(math.ceil(scale_up)),
-        int(BLOCK_HID),
-        int(BLOCK_SIZE_Q),
-        next_multiple_of(triton.cdiv(BLOCK_SIZE_Q, REDUCE_STRIDE), 16),
-        int(BLOCK_SIZE_K),
-        next_multiple_of(BLOCK_SIZE_K, 1),
-        REDUCE_STRIDE,
-        SAMPLING_METHOD,
-        GRID_SRC_STRIDE,
-        GRID_K_STRIDE,
-        USING_SLIDING_WINDOW,
-        SLIDING_WINDOW_SIZE,
-        
-        # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
-        # num_warps=1,
-        num_warps=2,
-        num_stages=2,
-        # enable_warp_specialization=False,
-    )
+        for selected_max_k, scale in calculated_maximum_ks_config:
+            # scale = 1
+            _BLOCK_MASK_K = BLOCK_MASK_K // scale
+            _BLOCK_TMASK_K = BLOCK_TMASK_K // scale
+            
+            _masking_iteration_compute[grid](
+                # input matrices
+                queries, *queries.stride(),
+                queries_grouped,
+                keys, *keys.stride(),
+                attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
+                sparq_indices, *sparq_indices_strides,
+                
+                # input matrices (blocked)
+                mask, *mask.stride(),
+                t_mask, *t_mask.stride(),
+                
+                # temp vectors (blocked)
+                ws, *ws.stride(),
+                ks, *ks.stride(),
+                ws_out, *ws_out.stride(),
+                ks_out, *ks_out.stride(),
+                t_srcs, *t_srcs.stride(),
+                scores, *(scores.stride() if scores is not None else (0, 0, 0)),
+                
+                # operation variables
+                float(scale_up), 
+                int(triton.cdiv(n_patches, GRID_K_STRIDE)) // scale, 
+                int(mask.shape[-1]) // scale, 
+                int(t_mask.shape[-1]) // scale, 
+                is_causal,
+                
+                # input variables
+                KV_REPEAT_INTERLEAVE, 
+                N, 
+                T_DST, 
+                T_SRC, 
+                int(B_DST), 
+                int(B_SRC), 
+                HID, 
+                SPARQ_HID, 
+                SPARQ_HID // 2 if SPARQ_HID > 16 else SPARQ_HID,
+                N_COMPLETED,
+                min(n_iteration, int(os.getenv('HIP_DEBUG_LIMIT_N_ITER', '99999999'))),
+                
+                # vLLM compat inputs
+                *stride_keys_vllm,
+                
+                VLLM_NUM_BLOCKS,
+                VLLM_NUM_KV_HEADS,
+                VLLM_HEAD_SIZE_X,
+                VLLM_BLOCK_SIZE,
+                VLLM_X,
+                VLLM_HEAD_SIZE,
+                
+                block_tables, *block_tables_stride,
+                
+                context_length, *context_length_stride,
+                
+                # rope methods
+                ROPE_METHOD,
+                ROPE_COS, *rope_cos_stride,
+                ROPE_SIN, *rope_sin_stride,
+                POSITION_IDS, *position_ids_stride,
+                SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW,
+                
+                # dynamic k per query,
+                maximum_ks, *maximum_ks_stride,
+                selected_max_k,
+                
+                # block constant
+                USING_SCORE_CACHE,
+                KEY_CACHE_METHOD,
+                SPARQ,
+                REDUCE_METHOD,
+                _BLOCK_MASK_K,
+                next_multiple_of(_BLOCK_MASK_K),
+                _BLOCK_TMASK_K,
+                next_multiple_of(_BLOCK_TMASK_K),
+                _BLOCK_MASK_K // 2,
+                next_multiple_of(_BLOCK_MASK_K // 2),
+                _BLOCK_TMASK_K // 2,
+                next_multiple_of(_BLOCK_TMASK_K // 2),
+                triton.next_power_of_2(math.ceil(scale_up)),
+                int(BLOCK_HID),
+                int(BLOCK_SIZE_Q),
+                next_multiple_of(triton.cdiv(BLOCK_SIZE_Q, REDUCE_STRIDE), 16),
+                int(BLOCK_SIZE_K),
+                next_multiple_of(BLOCK_SIZE_K, 1),
+                REDUCE_STRIDE,
+                SAMPLING_METHOD,
+                GRID_SRC_STRIDE,
+                GRID_K_STRIDE,
+                USING_SLIDING_WINDOW,
+                SLIDING_WINDOW_SIZE,
+                
+                # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
+                # num_warps=1,
+                num_warps=8,
+                num_stages=2,
+                # enable_warp_specialization=False,
+            )
+    else:
+        _masking_iteration_compute[grid](
+            # input matrices
+            queries, *queries.stride(),
+            queries_grouped,
+            keys, *keys.stride(),
+            attention_mask, *(attention_mask.stride() if attention_mask is not None else (0, 0)),
+            sparq_indices, *sparq_indices_strides,
+            
+            # input matrices (blocked)
+            mask, *mask.stride(),
+            t_mask, *t_mask.stride(),
+            
+            # temp vectors (blocked)
+            ws, *ws.stride(),
+            ks, *ks.stride(),
+            ws_out, *ws_out.stride(),
+            ks_out, *ks_out.stride(),
+            t_srcs, *t_srcs.stride(),
+            scores, *(scores.stride() if scores is not None else (0, 0, 0)),
+            
+            # operation variables
+            float(scale_up), 
+            int(triton.cdiv(n_patches, GRID_K_STRIDE)), 
+            int(mask.shape[-1]), 
+            int(t_mask.shape[-1]), 
+            is_causal,
+            
+            # input variables
+            KV_REPEAT_INTERLEAVE, 
+            N, 
+            T_DST, 
+            T_SRC, 
+            int(B_DST), 
+            int(B_SRC), 
+            HID, 
+            SPARQ_HID, 
+            SPARQ_HID // 2 if SPARQ_HID > 16 else SPARQ_HID,
+            N_COMPLETED,
+            min(n_iteration, int(os.getenv('HIP_DEBUG_LIMIT_N_ITER', '99999999'))),
+            
+            # vLLM compat inputs
+            *stride_keys_vllm,
+            
+            VLLM_NUM_BLOCKS,
+            VLLM_NUM_KV_HEADS,
+            VLLM_HEAD_SIZE_X,
+            VLLM_BLOCK_SIZE,
+            VLLM_X,
+            VLLM_HEAD_SIZE,
+            
+            block_tables, *block_tables_stride,
+            
+            context_length, *context_length_stride,
+            
+            # rope methods
+            ROPE_METHOD,
+            ROPE_COS, *rope_cos_stride,
+            ROPE_SIN, *rope_sin_stride,
+            POSITION_IDS, *position_ids_stride,
+            SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW,
+            
+            # dynamic k per query,
+            maximum_ks, *maximum_ks_stride,
+            0,
+            
+            # block constant
+            USING_SCORE_CACHE,
+            KEY_CACHE_METHOD,
+            SPARQ,
+            REDUCE_METHOD,
+            BLOCK_MASK_K,
+            next_multiple_of(BLOCK_MASK_K),
+            BLOCK_TMASK_K,
+            next_multiple_of(BLOCK_TMASK_K),
+            BLOCK_MASK_K // 2,
+            next_multiple_of(BLOCK_MASK_K // 2),
+            BLOCK_TMASK_K // 2,
+            next_multiple_of(BLOCK_TMASK_K // 2),
+            triton.next_power_of_2(math.ceil(scale_up)),
+            int(BLOCK_HID),
+            int(BLOCK_SIZE_Q),
+            next_multiple_of(triton.cdiv(BLOCK_SIZE_Q, REDUCE_STRIDE), 16),
+            int(BLOCK_SIZE_K),
+            next_multiple_of(BLOCK_SIZE_K, 1),
+            REDUCE_STRIDE,
+            SAMPLING_METHOD,
+            GRID_SRC_STRIDE,
+            GRID_K_STRIDE,
+            USING_SLIDING_WINDOW,
+            SLIDING_WINDOW_SIZE,
+            
+            # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
+            # num_warps=1,
+            num_warps=8,
+            num_stages=2,
+            # enable_warp_specialization=False,
+        )
     torch.cuda.set_device(orig_device)
     
     ks_out = ks_out.sum(-1)
