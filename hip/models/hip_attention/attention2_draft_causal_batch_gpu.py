@@ -457,7 +457,8 @@ def masking_iteration_draft_cuda_initialize(
             T_GROUP_SIZE +\
                 idx_b * stride_t_group_size_b +\
                 idx_bdst * stride_t_group_size_bdst,
-            val = tl.max(group_sizes)
+            # val = tl.max(group_sizes)
+            val = tl.minimum(tl.max(group_sizes), tl.cdiv(BSRC, mask_block_k))
         )
         tl.atomic_add(
             KS +\
@@ -1469,6 +1470,7 @@ def masking_iteration_draft(
     indices_seed: Optional[Tensor] = None,
     ks_seed: Optional[Tensor] = None,
     scores_seed: Optional[Tensor] = None,
+    group_size_seed: Optional[Tensor] = None,
 ):
     assert q.device == k.device
     assert isinstance(q, Tensor)
@@ -2341,7 +2343,11 @@ def block_sparse_attention(
     BLOCK_BK = 64 // block_size_k
     if block_size_k > 4:
         BLOCK_BK = 128 // block_size_k
+    elif block_size_k > 8:
+        BLOCK_BK = 256 // block_size_k
     assert BLOCK_BK > 0
+    
+    # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
     if rope_cos is not None:
         assert len(rope_cos.stride()) == 2
@@ -2421,6 +2427,9 @@ def masking_step_loop(
     score_head_group_size,
     
     sparq_ind,
+    
+    low_res_sample_scale = 1,
+    low_res_oversample_rate = 1,
 ):
     N, TDST, HID = q.shape
     _, TSRC, _ = k.shape
@@ -2451,31 +2460,97 @@ def masking_step_loop(
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(num_samples):
                 with nvtx.annotate(f'masking_iteration_draft(idx_sample={idx_sample})'):
-                    indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
-                        q[:, idx_tdst, :], 
-                        k[:, :, :], 
-                        position_ids=idx_tdst,
-                        mask_k=mask_k,
-                        block_size_q=block_size_q,
-                        block_stride_q=block_stride_q,
-                        block_size_k=block_size_k,
-                        block_size_k_group=block_size_k_group,
-                        sliding_window_size=sliding_window_size,
-                        sink_token_size=sink_token_size,
-                        using_extend=using_extend,
-                        rope_cos=rope_cos,
-                        rope_sin=rope_sin,
-                        self_extend_neighboor_window=self_extend_neighboor_window,
-                        self_extend_group_size=self_extend_group_size,
-                        topk_head_group_size=topk_head_group_size,
-                        sample_method=sample_method,
-                        branch_method=branch_method,
-                        score_head_group_size=score_head_group_size,
-                        sparq_ind=sparq_ind,
-                        indices_seed=indices_seed,
-                        ks_seed=ks_seed,
-                        scores_seed=scores_seed,
-                    )
+                    if low_res_sample_scale <= 1:
+                        indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
+                            q[:, idx_tdst, :], 
+                            k[:, :, :], 
+                            position_ids=idx_tdst,
+                            mask_k=mask_k,
+                            block_size_q=block_size_q,
+                            block_stride_q=block_stride_q,
+                            block_size_k=block_size_k,
+                            block_size_k_group=block_size_k_group,
+                            sliding_window_size=sliding_window_size,
+                            sink_token_size=sink_token_size,
+                            using_extend=using_extend,
+                            rope_cos=rope_cos,
+                            rope_sin=rope_sin,
+                            self_extend_neighboor_window=self_extend_neighboor_window,
+                            self_extend_group_size=self_extend_group_size,
+                            topk_head_group_size=topk_head_group_size,
+                            sample_method=sample_method,
+                            branch_method=branch_method,
+                            score_head_group_size=score_head_group_size,
+                            sparq_ind=sparq_ind,
+                            indices_seed=indices_seed,
+                            ks_seed=ks_seed,
+                            scores_seed=scores_seed,
+                        )
+                    else:
+                        assert isinstance(low_res_sample_scale, int)
+                        low_mask_k = mask_k * low_res_oversample_rate
+                        low_block_size_k = block_size_k * low_res_oversample_rate * low_res_sample_scale
+                        
+                        # low_res_oversample_rate == group_size
+                        # low_res_sample_scale == num block split
+                        
+                        # TODO: reduce initial seeds
+                        
+                        indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
+                            q[:, idx_tdst, :], 
+                            k[:, :, :], 
+                            position_ids=idx_tdst,
+                            mask_k=mask_k,
+                            block_size_q=block_size_q,
+                            block_stride_q=block_stride_q,
+                            block_size_k=block_size_k,
+                            block_size_k_group=block_size_k_group,
+                            sliding_window_size=sliding_window_size,
+                            sink_token_size=sink_token_size,
+                            using_extend=using_extend,
+                            rope_cos=rope_cos,
+                            rope_sin=rope_sin,
+                            self_extend_neighboor_window=self_extend_neighboor_window,
+                            self_extend_group_size=self_extend_group_size,
+                            topk_head_group_size=topk_head_group_size,
+                            sample_method=sample_method,
+                            branch_method=branch_method,
+                            score_head_group_size=score_head_group_size,
+                            sparq_ind=sparq_ind,
+                            indices_seed=indices_seed,
+                            ks_seed=ks_seed,
+                            scores_seed=scores_seed,
+                        )
+                        
+                        group_sizes = torch.empty_like(indices)
+                        
+                        indices, ks, ks_count, ks_start_end, scores = masking_iteration_draft(
+                            q[:, idx_tdst, :], 
+                            k[:, :, :], 
+                            position_ids=idx_tdst,
+                            mask_k=mask_k,
+                            block_size_q=block_size_q,
+                            block_stride_q=block_stride_q,
+                            block_size_k=block_size_k,
+                            block_size_k_group=block_size_k_group,
+                            sliding_window_size=sliding_window_size,
+                            sink_token_size=sink_token_size,
+                            using_extend=using_extend,
+                            rope_cos=rope_cos,
+                            rope_sin=rope_sin,
+                            self_extend_neighboor_window=self_extend_neighboor_window,
+                            self_extend_group_size=self_extend_group_size,
+                            topk_head_group_size=topk_head_group_size,
+                            sample_method=sample_method,
+                            branch_method=branch_method,
+                            score_head_group_size=score_head_group_size,
+                            sparq_ind=sparq_ind,
+                            indices_seed=indices,
+                            ks_seed=ks,
+                            scores_seed=None,
+                            group_size_seed=group_sizes,
+                        )
+                    
                 indices_seed = indices
                 ks_seed = ks
                 scores_seed = scores
