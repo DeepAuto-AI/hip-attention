@@ -187,22 +187,22 @@ def masking_iteration_draft_cuda_initialize(
             )
         
         if T_GROUP_SIZE is not None:
-            tl.atomic_max(
+            tl.store(
                 T_GROUP_SIZE +\
                     idx_b * stride_t_group_size_b +\
                     idx_bdst * stride_t_group_size_bdst,
-                val = tl.max(group_sizes)
-                # val = tl.minimum(
+                value = tl.max(group_sizes)
+                # value = tl.minimum(
                 #     tl.max(group_sizes), 
                 #     tl.maximum(tl.cdiv(BSRC, mask_block_k), 8)
                 # )
             )
         if KS is not None:
-            tl.atomic_add(
+            tl.store(
                 KS +\
                     idx_b * stride_ks_b +\
                     idx_bdst * stride_ks_bdst,
-                val = mask_block_k
+                value = mask_block_k
             )
 
 @triton.jit
@@ -326,7 +326,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     acc = tl.zeros((
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
         BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K
-    ), dtype=tl.bfloat16)
+    ), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
     for i_group in range(G):
         mask_keys = (
@@ -460,8 +460,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         else:
             if not USING_SPARQ:
                 t = tl.dot(
-                    queries.to(tl.bfloat16), 
-                    keys.to(tl.bfloat16),
+                    queries, 
+                    keys,
                     allow_tf32=True,
                 ).to(tl.float32)
             else:
@@ -495,8 +495,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 )
                 
                 t = tl.dot(
-                    q_sparq.to(tl.bfloat16), 
-                    k_sparq.to(tl.bfloat16),
+                    q_sparq, 
+                    k_sparq,
                 ).to(tl.float32)
         acc += t.to(acc.dtype)
     acc = tl.where(
@@ -1435,8 +1435,6 @@ def masking_iteration_draft_cuda_fused(
     if max_group_size <= 1.0:
         return
     
-    tl.debug_barrier()
-    
     while max_group_size > 1:
         n_program = tl.cdiv(indices_bk_len, BLOCK_BK)
         for i_program in range(n_program):
@@ -1539,7 +1537,7 @@ def masking_iteration_draft_cuda_fused(
             sink_token_size,
             BK,
             G, 
-            BK, 
+            probs_bk_len, 
             MAX_BSRC,
             BLOCK_SIZE_K,
             
@@ -1551,7 +1549,7 @@ def masking_iteration_draft_cuda_fused(
         
         # same grid with master (BDST, B)
         masking_iteration_draft_cuda_argsort(
-            PROBS, 
+            PROBS,
             stride_probs_b, 
             stride_probs_bdst, 
             stride_probs_bk,
@@ -1627,13 +1625,144 @@ def masking_iteration_draft_cuda_fused(
             max_group_size *= 0.7
         else:
             max_group_size *= 0.5
-        tl.atomic_xchg(
+        tl.store(
             T_GROUP_SIZE +\
                 idx_b * stride_t_group_size_b +\
                 idx_bdst * stride_t_group_size_bdst,
-            val=max_group_size
+            value=max_group_size
         )
         tl.debug_barrier()
+
+@triton.jit
+def masking_iteration_draft_cuda_initialize_score(
+    Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
+    K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+    POS, stride_pos_tdst,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
+    
+    INDICES, 
+    stride_indices_b, 
+    stride_indices_bdst, 
+    stride_indices_bk,
+    
+    SCORES,
+    stride_scores_b,
+    stride_scores_bdst,
+    stride_scores_bk,
+    
+    T_GROUP_SIZE, 
+    stride_t_group_size_b, 
+    stride_t_group_size_bdst,
+    INDICES_TDST,
+    stride_indices_tdst_t,
+    
+    sliding_window_size,
+    indices_bk_len,
+    G: tl.constexpr, MAX_TDST, MAX_TSRC, HID: tl.constexpr,
+                
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    
+    KEY_DUP: tl.constexpr = 1,
+):
+    idx_bk = tl.program_id(0) * BLOCK_BK + tl.arange(0, BLOCK_BK)
+    mask_bk = idx_bk < indices_bk_len
+    idx_bdst = tl.program_id(1)
+    idx_b = tl.program_id(2)
+    
+    t_group_size = tl.load(
+        T_GROUP_SIZE +\
+            idx_b * stride_t_group_size_b +\
+            idx_bdst * stride_t_group_size_bdst,
+    )
+    if t_group_size <= 1.0:
+        return
+    
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+    idx_tdst_no_proj = idx_tdst
+    mask_tdst = idx_tdst < MAX_TDST
+    if INDICES_TDST is not None:
+        idx_tdst = tl.load(
+            INDICES_TDST +\
+                idx_tdst.to(tl.int64) * stride_indices_tdst_t,
+            mask=mask_tdst,
+            other=MAX_TDST,
+        ).to(tl.int64)
+    
+    pos_tdst = tl.load(
+        POS +\
+            idx_tdst_no_proj * stride_pos_tdst,
+        mask=mask_tdst
+    )
+    TSRC = tl.max(pos_tdst)
+    TSRC = tl.maximum(0, TSRC - sliding_window_size)
+    BSRC = tl.cdiv(TSRC, BLOCK_SIZE_K)
+    
+    indices = tl.load(
+        INDICES +\
+            idx_b * stride_indices_b +\
+            idx_bdst * stride_indices_bdst +\
+            idx_bk * stride_indices_bk,
+        mask=mask_bk,
+        other=0
+    )
+    
+    scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+        indices,
+        KEY_DUP,
+        
+        Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
+        K, stride_k_b, stride_k_g, stride_k_tsrc, stride_k_hid,
+        COS, stride_cos_t, stride_cos_hid,
+        SIN, stride_sin_t, stride_sin_hid,
+        
+        idx_b,
+        idx_bdst,
+        idx_tdst, mask_tdst, pos_tdst,
+        mask_bk,
+        
+        G, MAX_TSRC, HID,
+                
+        USING_EXTEND,
+        extend_window_size,
+        extend_group_size,
+        
+        USING_SPARQ,
+        SPARQ_HID,
+        Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+        
+        BLOCK_SIZE_Q,
+        BLOCK_STRIDE_Q,
+        BLOCK_SIZE_K,
+        BLOCK_STRIDE_K,
+        BLOCK_BK,
+        'max',
+    )
+    
+    tl.store(
+        SCORES +\
+            idx_b * stride_scores_b +\
+            idx_bdst * stride_scores_bdst +\
+            idx_bk * stride_scores_bk,
+        mask=mask_bk,
+        value=scores,
+    )
 
 @nvtx.annotate('masking_iteration_draft')
 def masking_iteration_draft( 
@@ -1818,10 +1947,43 @@ def masking_iteration_draft(
     probs = torch.empty_like(scores)
     if scores_seed is not None:
         scores_final = scores_seed.clone()
-        scores_cached = True
     else:
-        scores_final = torch.empty_like(indices, dtype=q.dtype)
-        scores_cached = False
+        scores_final = torch.zeros_like(indices, dtype=q.dtype)
+        BLOCK_BK = 128 // block_size_k
+        grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
+        masking_iteration_draft_cuda_initialize_score[grid](
+            q, *q.stride(),
+            k, *k.stride(),
+            position_ids, *position_ids.stride(),
+            rope_cos, *(rope_cos.stride() if rope_cos is not None else (0, 0)),
+            rope_sin, *(rope_sin.stride() if rope_sin is not None else (0, 0)),
+            
+            indices, *indices.stride(),
+            
+            scores_final, *scores_final.stride(),
+            
+            t_group_sizes, *t_group_sizes.stride(),
+            indices_tdst, *indices_tdst_stride,
+            
+            sliding_window_size,
+            indices.shape[-1],
+            G, TDST, TSRC, HID,
+            
+            using_extend,
+            self_extend_neighboor_window,
+            self_extend_group_size,
+            
+            using_sparq,
+            sparq_hid,
+            sparq_ind, *(sparq_ind.stride() if sparq_ind is not None else (0, 0, 0, 0)),
+            
+            block_size_q,
+            block_stride_q,
+            block_size_k,
+            block_stride_k,
+            BLOCK_BK,
+        )
+    scores_cached = True
     
     BLOCK_BK = 256 // 2 // block_size_k
     assert BLOCK_BK > 0
@@ -1872,7 +2034,7 @@ def masking_iteration_draft(
     if using_fused_iteration:
         assert score_head_group_size == 1
         
-        BLOCK_BK = 128 // block_size_k
+        BLOCK_BK = 256 // block_size_k
         
         grid = (BDST, B)
         masking_iteration_draft_cuda_fused[grid](
@@ -1931,8 +2093,8 @@ def masking_iteration_draft(
             indices_bk_len=indices.shape[-1],
             probs_bk_len=probs.shape[-1],
             
-            num_warps=1,
-            num_stages=1,
+            num_warps=4,
+            num_stages=2,
         )
     else:
         i_iteration = 0
@@ -3146,7 +3308,7 @@ def main():
         seq_len = 32768
         debug_only = False
     
-    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.bfloat16)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.float16)
     
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
@@ -3186,8 +3348,8 @@ def main():
             using_sparq=False,
             sparq_hid=64,
             
-            low_res_sample_scale=1,
-            low_res_oversample_rate=1,
+            low_res_sample_scale=4,
+            low_res_oversample_rate=2,
             low_res_oversample_block_stride_k=2,
         )
     

@@ -280,7 +280,7 @@ def custom_attention(
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=4,
+                    topk_head_group_size=1,
                     sample_method='first',
                     branch_method='half',
                     
