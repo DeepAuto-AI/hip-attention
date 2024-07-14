@@ -236,7 +236,8 @@ def custom_attention(
                 )
             else:
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
-                from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
+                from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
                 
                 # attn_output_hip, _ = hip_attention_draft_cpu(
                 #     q_hip,
