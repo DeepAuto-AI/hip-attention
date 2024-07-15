@@ -17,18 +17,6 @@ TODO:
 10. chunk-wise BPTT
 """
 
-# normal                    PPL: 9.7576
-# bk 1 bkg 4                PPL: 9.3042
-# bk 4 bkg 1                PPL: 9.1336
-# bk 1 bkg 4 oracle_rep 
-# bk 4 bkg 1 oracle_rep     PPL: 9.1336
-# bk 4 bkg 1 2 sifters      PPL: 9.2236
-# bk 4 bkg 1 recurse 2 lv   PPL: 9.1364
-# bk 4 bkg 1 recurse 3 lv   PPL: 9.1930
-
-# topk_head_group
-# 
-
 import nvtx
 from torch.utils.dlpack import to_dlpack
 from torch.utils.dlpack import from_dlpack
@@ -187,22 +175,22 @@ def masking_iteration_draft_cuda_initialize(
             )
         
         if T_GROUP_SIZE is not None:
-            tl.store(
+            tl.atomic_max(
                 T_GROUP_SIZE +\
                     idx_b * stride_t_group_size_b +\
                     idx_bdst * stride_t_group_size_bdst,
-                value = tl.max(group_sizes)
+                val = tl.max(group_sizes)
                 # value = tl.minimum(
                 #     tl.max(group_sizes), 
                 #     tl.maximum(tl.cdiv(BSRC, mask_block_k), 8)
                 # )
             )
         if KS is not None:
-            tl.store(
+            tl.atomic_add(
                 KS +\
                     idx_b * stride_ks_b +\
                     idx_bdst * stride_ks_bdst,
-                value = mask_block_k
+                val = mask_block_k
             )
 
 @triton.jit
@@ -1199,8 +1187,8 @@ def masking_iteration_draft_cuda_partial_softmax(
         if G == 1:
             scores_softmax = tl.sigmoid(scores_masked)
         else:
-            count = tl.max(mask_softmax.to(tl.int32))
-            t = tl.extra.cuda.libdevice.pow(count / BK, 2)
+            count = tl.max(mask_softmax.to(tl.int32)).to(tl.float32)
+            t = count / (BK * G)
             scores_softmax = tl.softmax(scores_masked * t)
             neg_scores_softmax_sorted = tl.sort(-scores_softmax)
             scores_promote_thresh = -tl.min(neg_scores_softmax_sorted * (tl.arange(0, BLOCK_SCORE) == (MASK_BLOCK_K * 0.5).to(tl.int32)))
@@ -1633,6 +1621,37 @@ def masking_iteration_draft_cuda_fused(
         )
         tl.debug_barrier()
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_BK': 16}, num_warps=1),
+        triton.Config({'BLOCK_BK': 32}, num_warps=1),
+        # triton.Config({'BLOCK_BK': 64}, num_warps=1),
+        # triton.Config({'BLOCK_BK': 128}, num_warps=1),
+        
+        # triton.Config({'BLOCK_BK': 16}, num_warps=2),
+        triton.Config({'BLOCK_BK': 32}, num_warps=2),
+        triton.Config({'BLOCK_BK': 64}, num_warps=2),
+        # triton.Config({'BLOCK_BK': 128}, num_warps=2),
+        
+        # triton.Config({'BLOCK_BK': 16}, num_warps=4),
+        # triton.Config({'BLOCK_BK': 32}, num_warps=4),
+        triton.Config({'BLOCK_BK': 64}, num_warps=4),
+        triton.Config({'BLOCK_BK': 128}, num_warps=4),
+        
+        # triton.Config({'BLOCK_BK': 16}, num_warps=8),
+        # triton.Config({'BLOCK_BK': 32}, num_warps=8),
+        triton.Config({'BLOCK_BK': 64}, num_warps=8),
+        triton.Config({'BLOCK_BK': 128}, num_warps=8),
+        
+        # triton.Config({'BLOCK_BK': 16}, num_warps=16),
+        # triton.Config({'BLOCK_BK': 32}, num_warps=16),
+        triton.Config({'BLOCK_BK': 64}, num_warps=16),
+        triton.Config({'BLOCK_BK': 128}, num_warps=16),
+    ],
+    key=['BLOCK_SIZE_K', 'BLOCK_SIZE_Q'],
+    rep=200,
+    use_cuda_graph=True,
+)
 @triton.jit
 def masking_iteration_draft_cuda_initialize_score(
     Q, stride_q_b, stride_q_g, stride_q_tdst, stride_q_hid,
@@ -1949,8 +1968,11 @@ def masking_iteration_draft(
         scores_final = scores_seed.clone()
     else:
         scores_final = torch.zeros_like(indices, dtype=q.dtype)
-        BLOCK_BK = 128 // block_size_k
-        grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
+        
+        # BLOCK_BK = 128 // block_size_k
+        # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
+        
+        grid = lambda META: (triton.cdiv(indices.shape[-1], META['BLOCK_BK']), BDST, B)
         masking_iteration_draft_cuda_initialize_score[grid](
             q, *q.stride(),
             k, *k.stride(),
@@ -1981,7 +2003,7 @@ def masking_iteration_draft(
             block_stride_q,
             block_size_k,
             block_stride_k,
-            BLOCK_BK,
+            # BLOCK_BK,
         )
     scores_cached = True
     
@@ -3304,12 +3326,21 @@ def hip_attention(
 def main():
     debug_only = True
     seq_len = 4096
+    seq_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
         seq_len = 32768
+        seq_repeat = 2
         debug_only = False
     
     q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.float16)
     
+    if seq_repeat > 1:
+        q = q.repeat(1, seq_repeat, 1)
+        k = k.repeat(1, seq_repeat, 1)
+        v = v.repeat(1, seq_repeat, 1)
+        out = out.repeat(1, seq_repeat, 1)
+        cos = cos.repeat(seq_repeat, 1)
+        sin = sin.repeat(seq_repeat, 1)
     # q = q[:, -32:, :]
     # out = out[:, -32:, :]
     print(q.shape, k.shape, v.shape)
@@ -3387,9 +3418,11 @@ def main():
             
             print('graph compiled')
         
-        start.record()
+        if i > 3:
+            start.record()
         graph.replay()
-        end.record()
+        if i > 3:
+            end.record()
         
         if i > 3:
             torch.cuda.synchronize()

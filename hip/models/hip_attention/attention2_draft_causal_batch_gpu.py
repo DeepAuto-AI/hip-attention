@@ -3156,7 +3156,7 @@ def hip_attention(
 
 def main():
     seq_len = 4096
-    if 'HIP_DEBUG' in os.environ:
+    if os.getenv('HIP_DEBUG', '1') == '0':
         seq_len = 32768
     
     q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.bfloat16)
@@ -3183,7 +3183,7 @@ def main():
             self_extend_neighboor_window=1024,
             self_extend_group_size=4,
             
-            topk_head_group_size=1,
+            topk_head_group_size=2,
             sample_method='first',
             branch_method='half',
             
@@ -3198,8 +3198,8 @@ def main():
             using_sparq=False,
             sparq_hid=64,
             
-            low_res_sample_scale=4,
-            low_res_oversample_rate=2,
+            low_res_sample_scale=1,
+            low_res_oversample_rate=1,
             low_res_oversample_block_stride_k=2,
         )
     

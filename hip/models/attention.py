@@ -285,12 +285,12 @@ def custom_attention(
                     branch_method='half',
                     
                     # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=True,
-                    step_size=1,
-                    num_samples=2,
-                    chunk_size=512,
+                    traverse_from_last_step=False,
+                    step_size=32,
+                    num_samples=1,
+                    chunk_size=None,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    num_unions=2,
+                    num_unions=1,
                     
                     score_head_group_size=1,
                     
