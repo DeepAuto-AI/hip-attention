@@ -114,6 +114,7 @@ def load_model(args):
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+        'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',

@@ -1447,6 +1447,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        output_logits = False,
     ) -> Union[Tuple, CausalLMOutputWithPastAndL1]:
         r"""
         Args:
@@ -1495,26 +1496,33 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
-            logits = torch.cat(logits, dim=-1)
+        
+        if not self.training and not output_logits:
+            if labels is not None:
+                loss = 0
+            logits = None
+            내일 해야징
         else:
-            logits = self.lm_head(hidden_states)
-        logits = logits.float()
+            if self.config.pretraining_tp > 1:
+                lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+                logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+                logits = torch.cat(logits, dim=-1)
+            else:
+                logits = self.lm_head(hidden_states)
 
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = None
+            if labels is not None:
+                logits = logits.float()
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]

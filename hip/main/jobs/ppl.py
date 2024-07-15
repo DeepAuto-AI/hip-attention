@@ -74,6 +74,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
                             outputs = model(
                                 input_ids,
                                 labels=target_ids,
+                                output_logits=False,
                             )
                             samples.append(outputs.loss)
                             pbar_sample.set_description(
