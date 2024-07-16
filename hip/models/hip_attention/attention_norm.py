@@ -17,27 +17,27 @@ def load_tokens(
         mask = mask_t[:, None]
     )
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_T': 128}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_T': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_T': 128}, num_warps=8, num_stages=2),
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'BLOCK_T': 128}, num_warps=2, num_stages=2),
+#         triton.Config({'BLOCK_T': 128}, num_warps=4, num_stages=2),
+#         triton.Config({'BLOCK_T': 128}, num_warps=8, num_stages=2),
         
-        triton.Config({'BLOCK_T': 256}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_T': 256}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_T': 256}, num_warps=16, num_stages=2),
+#         triton.Config({'BLOCK_T': 256}, num_warps=4, num_stages=2),
+#         triton.Config({'BLOCK_T': 256}, num_warps=8, num_stages=2),
+#         triton.Config({'BLOCK_T': 256}, num_warps=16, num_stages=2),
         
-        triton.Config({'BLOCK_T': 64}, num_warps=1, num_stages=2),
-        triton.Config({'BLOCK_T': 64}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_T': 64}, num_warps=4, num_stages=2),
-    ],
-    key=[
-        'HID',
-        'BLOCK_SIZE_Q', 
-        'BLOCK_SIZE_K',
-    ],
-    use_cuda_graph=True,
-)
+#         triton.Config({'BLOCK_T': 64}, num_warps=1, num_stages=2),
+#         triton.Config({'BLOCK_T': 64}, num_warps=2, num_stages=2),
+#         triton.Config({'BLOCK_T': 64}, num_warps=4, num_stages=2),
+#     ],
+#     key=[
+#         'HID',
+#         'BLOCK_SIZE_Q', 
+#         'BLOCK_SIZE_K',
+#     ],
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def attention_norm_cuda(
     Q, stride_q_n, stride_q_tdst, stride_q_hid,
@@ -192,6 +192,7 @@ def attention_norm(
         q.shape[-1],
         BLOCK_SIZE_Q, 
         BLOCK_SIZE_K,
+        64
     )
     torch.set_default_device(pre_device)
     

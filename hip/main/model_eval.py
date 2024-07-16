@@ -152,7 +152,10 @@ def load_model(args):
         device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
-            llm_int8_skip_modules=['tree_avgpool_scaler'],
+            llm_int8_skip_modules=[
+                'tree_avgpool_scaler',
+                'lm_head',
+            ],
             bnb_4bit_compute_dtype=infer_dtype,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",

@@ -1342,6 +1342,10 @@ class LlamaModel(LlamaPreTrainedModel):
     # (`recording cudagraph tree for symint key 13`, etc.), which is VERY slow. A workaround is `@torch.compiler.disable`, but this prevents using
     # `fullgraph=True`. See more context in https://github.com/huggingface/transformers/pull/29114
     def _update_causal_mask(self, attention_mask, input_tensor, cache_position):
+        if attention_mask is not None and 0.0 in attention_mask:
+            return attention_mask
+        return None
+        
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and 0.0 in attention_mask:
                 return attention_mask
@@ -1499,9 +1503,23 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         
         if not self.training and not output_logits:
             if labels is not None:
-                loss = 0
+                from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
+                
+                # Shift so that tokens < n predict n
+                shift_states = hidden_states[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                shift_states = shift_states.view(-1, shift_states.shape[-1])
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_states.device)
+                
+                loss = memory_efficient_llm_ce(
+                    shift_states,
+                    self.lm_head.weight,
+                    shift_labels,
+                )
             logits = None
-            내일 해야징
         else:
             if self.config.pretraining_tp > 1:
                 lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)

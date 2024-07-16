@@ -280,17 +280,17 @@ def custom_attention(
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=2,
+                    topk_head_group_size=8,
                     sample_method='first',
                     branch_method='half',
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=True,
                     step_size=1,
-                    num_samples=2,
+                    num_samples=8,
                     chunk_size=512,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    num_unions=2,
+                    num_unions=8,
                     
                     score_head_group_size=1,
                     
