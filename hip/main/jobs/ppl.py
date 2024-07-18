@@ -24,7 +24,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
         LLM = torch.Tensor
         warnings.warn('vllm is not installed, this may cause error when you gave vLLM LLM')
     
-    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
+    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     print("Will write to", outfile)
     if os.path.exists(outfile) and not args.overwrite:
@@ -32,10 +32,16 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
         return
 
     os.makedirs('./cache', exist_ok=True)
-    cache_path = f'./cache/llama_eval_{args.model}.pth'
+    cache_path = f'./cache/llama_eval_{args.dataset}_{args.model}.pth'
     if not os.path.exists(cache_path):
-        test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        encodings = tokenizer("\n\n".join(test["text"]), return_tensors="pt").input_ids
+        assert args.dataset in ['wikitext', 'pg19']
+        if args.dataset == 'wikitext':
+            test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+            sequence = "\n\n".join(test["text"])
+        elif args.dataset == 'pg19':
+            test = load_dataset("emozilla/pg19-test", split="test")
+            sequence = "\n\n".join(test["text"])
+        encodings = tokenizer(sequence, return_tensors="pt").input_ids
         torch.save(encodings, cache_path)
     else:
         encodings = torch.load(cache_path)
@@ -43,6 +49,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
     max_length = model.config.max_position_embeddings if hasattr(model, 'config') else 2048
     max_length = stride = args.stride if args.stride > 0 else max_length
     seq_len = encodings.size(1)
+    
+    print(f'[{args.dataset}] {seq_len} tokens loaded')
 
     nlls = []
     prev_end_loc = 0

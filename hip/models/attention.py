@@ -81,7 +81,7 @@ def custom_attention(
     """
     attn_sparsity_loss = None
 
-    if attention_method in ['none', 'spda', 'fa2']:
+    if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
         if query_states.device.type == "cuda":
@@ -89,46 +89,42 @@ def custom_attention(
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        if causal_mask is not None:
-            from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
-            
-            if query_states.shape == key_states.shape:
-                if attention_method in ['none', 'fa2']:
-                    attn_output = flash_attn_func(
-                        q=query_states.permute(0, 2, 1, 3),
-                        k=key_states.permute(0, 2, 1, 3),
-                        v=value_states.permute(0, 2, 1, 3),
-                        softmax_scale=None,
-                        causal=True,
-                    ).permute(0, 2, 1, 3)
-                elif attention_method in ['spda']:
+        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+        
+        if query_states.shape == key_states.shape:
+            if attention_method in ['none', 'fa2']:
+                assert causal_mask is None
+                attn_output = flash_attn_func(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k=key_states.permute(0, 2, 1, 3),
+                    v=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=None,
+                    causal=True,
+                ).permute(0, 2, 1, 3)
+            elif attention_method in ['spda']:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                     attn_output = torch.nn.functional.scaled_dot_product_attention(
                         query_states,
                         key_states,
                         value_states,
                         attn_mask=causal_mask,
+                        is_causal=causal_mask is None,
                         dropout_p=attention_dropout,
                     )
-                else:
-                    raise Exception()
             else:
+                raise Exception()
+        else:
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query_states,
                     key_states,
                     value_states,
                     attn_mask=causal_mask,
+                    is_causal=causal_mask is None,
                     dropout_p=attention_dropout,
                 )
-        else:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=attention_mask,
-                dropout_p=attention_dropout,
-                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                is_causal=attention_mask is None and query_states.shape[-2] > 1,
-            )
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -269,6 +265,7 @@ def custom_attention(
                     block_size_q=tree_block_size_q,
                     block_stride_q=2,
                     block_size_k=tree_block_size_k,
+                    block_stride_k=2,
                     block_size_k_group=1,
                     
                     sliding_window_size=128,
@@ -280,17 +277,17 @@ def custom_attention(
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
                     
-                    topk_head_group_size=8,
+                    topk_head_group_size=1,
                     sample_method='first',
                     branch_method='half',
                     
                     # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=True,
-                    step_size=1,
-                    num_samples=8,
-                    chunk_size=512,
+                    traverse_from_last_step=False,
+                    step_size=64,
+                    num_samples=1,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    num_unions=8,
+                    chunk_size=None,
+                    num_unions=1,
                     
                     score_head_group_size=1,
                     
@@ -299,7 +296,7 @@ def custom_attention(
                     
                     low_res_sample_scale=4,
                     low_res_oversample_rate=2,
-                    low_res_oversample_block_stride_k=2,
+                    low_res_oversample_block_stride_k=8,
                 )
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
