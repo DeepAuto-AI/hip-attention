@@ -185,23 +185,19 @@ def custom_attention(
                 attend_lengths=selection.expand(N, select_n)
             ).mean(-1)
 
-        q = q.reshape(N * H, TDST, HID)  # .contiguous()
-        k = k.reshape(N * H, TSRC, HID)  # .contiguous()
-        v = v.reshape(N * H, TSRC, HID)  # .contiguous()
-
         LAST_DENSE_QUERIES = tree_last_dense_queries
 
         if LAST_DENSE_QUERIES == 0:
             LAST_DENSE_QUERIES = None
         if isinstance(LAST_DENSE_QUERIES, int):
             assert LAST_DENSE_QUERIES < 0
+            # prevent dense queries
         else:
             assert LAST_DENSE_QUERIES == None
 
         current_query_index = TSRC - TDST
         attn_outputs = []
 
-        q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
             if os.getenv('HIP_LEGACY', '0') == '1':
                 # maximum_ks = torch.where(
@@ -209,6 +205,11 @@ def custom_attention(
                 #     512,
                 #     128
                 # ).to(torch.int32)
+                
+                q = q.reshape(N * H, TDST, HID)  # .contiguous()
+                k = k.reshape(N * H, TSRC, HID)  # .contiguous()
+                v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+                q_hip = q[:, :, :]
                 
                 attn_output_hip, _ = hip_attention(
                     q_hip,
@@ -233,7 +234,8 @@ def custom_attention(
             else:
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
-                from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
+                from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
                 
                 # attn_output_hip, _ = hip_attention_draft_cpu(
                 #     q_hip,
@@ -255,10 +257,18 @@ def custom_attention(
                 #     topk_head_group_size=1,
                 # )
                 
+                q = q.permute(0, 2, 1, 3)
+                k = k.permute(0, 2, 1, 3)
+                v = v.permute(0, 2, 1, 3)
+                
+                # q = q.reshape(N * H, TDST, HID)
+                # k = k.reshape(N * H, TSRC, HID)
+                # v = v.reshape(N * H, TSRC, HID)
+                
+                # print(q.shape, k.shape, v.shape)
+                
                 attn_output_hip, _ = hip_attention_draft(
-                    q_hip,
-                    k[:, :LAST_DENSE_QUERIES, :],
-                    v[:, :LAST_DENSE_QUERIES, :],
+                    q, k, v,
                     
                     mask_k=tree_k,
                     
@@ -283,7 +293,7 @@ def custom_attention(
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=False,
-                    step_size=64,
+                    step_size=q.shape[1] // tree_block_size_q,
                     num_samples=1,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
                     chunk_size=None,
@@ -296,8 +306,9 @@ def custom_attention(
                     
                     low_res_sample_scale=4,
                     low_res_oversample_rate=2,
-                    low_res_oversample_block_stride_k=8,
+                    low_res_oversample_block_stride_k=4,
                 )
+                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3).contiguous()
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
             torch.save({
@@ -404,3 +415,4 @@ def custom_attention(
         raise Exception(attention_method)
 
     return attn_output, last_cumsum, attn_sparsity_loss
+
