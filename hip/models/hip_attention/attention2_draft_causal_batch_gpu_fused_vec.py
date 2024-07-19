@@ -3444,12 +3444,12 @@ def hip_attention(
     
     block_size_q: int = 32,
     block_stride_q: int = 2,
-    block_size_k: int = 1,
-    block_stride_k: int = 1,
-    block_size_k_group: int = 8,
+    block_size_k: int = 2,
+    block_stride_k: int = 2,
+    block_size_k_group: int = 1,
     
-    sliding_window_size: int = 128,
-    sink_token_size: int = 4,
+    sliding_window_size: int = 256,
+    sink_token_size: int = 16,
     
     using_extend: bool = False,
     rope_cos: Optional[Tensor] = None,
@@ -3462,7 +3462,7 @@ def hip_attention(
     branch_method: str = 'half',
     
     traverse_from_last_step: bool = False,
-    step_size: int = 32,
+    step_size: int = 64,
     num_samples: int = 1,
     chunk_size: Optional[int] = None,
     num_unions: int = 1,
@@ -3474,7 +3474,7 @@ def hip_attention(
     
     low_res_sample_scale: int = 4,
     low_res_oversample_rate: int = 2,
-    low_res_oversample_block_stride_k: int = 2,
+    low_res_oversample_block_stride_k: int = 4,
 ):
     assert q.ndim == 4
     assert k.ndim == 4
@@ -3737,8 +3737,8 @@ def main():
             block_stride_k=2,
             block_size_k_group=1,
             
-            sliding_window_size=128,
-            sink_token_size=16,
+            sliding_window_size=256,
+            sink_token_size=32,
             
             using_extend=False,
             rope_cos=cos,

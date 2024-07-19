@@ -278,8 +278,8 @@ def custom_attention(
                     block_stride_k=2,
                     block_size_k_group=1,
                     
-                    sliding_window_size=128,
-                    sink_token_size=16,
+                    sliding_window_size=256,
+                    sink_token_size=32,
                     
                     using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
