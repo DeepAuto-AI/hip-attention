@@ -348,6 +348,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_access * stride_key_access_log_t,
             value=idx_tsrc_grouped,
             mask=mask_access,
+            eviction_policy='evict_first'
         )
     
     acc = tl.zeros((
@@ -365,7 +366,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_hid[None, :].to(tl.int64) * stride_q_hid,
             mask = mask_tdst[:, None],
             other = 0,
+            cache_modifier='.cs',
         )
+        if queries.dtype == tl.uint8:
+            queries = queries.to(tl.float8e5, bitcast=True)
         if G == 1:
             mask_keys = tl.broadcast_to(
                 dupped_mask[:, None],
@@ -392,9 +396,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_hid[:, None].to(tl.int64) * stride_k_hid,
             mask = mask_keys,
             other = 0,
-            # cache_modifier = '.ca',
-            # eviction_policy = 'evict_last',
+            cache_modifier='.cs',
         )
+        if keys.dtype == tl.uint8:
+            keys = keys.to(tl.float8e5, bitcast=True)
         
         if USING_EXTEND:
             if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
@@ -2244,12 +2249,12 @@ def masking_iteration_draft(
         (B, BDST, indices.shape[-1] * 2),
         dtype=torch.int32, device=q.device,
     )
-    scores = torch.empty_like(dupped_indices, dtype=q.dtype)
+    scores = torch.empty_like(dupped_indices, dtype=torch.bfloat16)
     probs = torch.empty_like(scores)
     if scores_seed is not None:
         scores_final = scores_seed.clone()
     else:
-        scores_final = torch.zeros_like(indices, dtype=q.dtype)
+        scores_final = torch.zeros_like(indices, dtype=torch.bfloat16)
         
         # BLOCK_BK = 128 // block_size_k
         # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
@@ -3534,9 +3539,19 @@ def hip_attention(
     low_res_sample_scale: int = 1,
     low_res_oversample_rate: int = 1,
     low_res_oversample_block_stride_k: int = 1,
+    
+    q_quant: Optional[Tensor] = None,
+    k_quant: Optional[Tensor] = None,
 ):
     assert q.ndim == 4
     assert k.ndim == 4
+    
+    if q_quant is not None:
+        assert q_quant.ndim == 4
+        assert k_quant.ndim == 4
+    else:
+        q_quant = q
+        k_quant = k
     
     assert num_unions > 0
     if chunk_size is None:
@@ -3570,8 +3585,8 @@ def hip_attention(
     scores_sampled = []
     for i_chunk_offset in range(0, chunk_size, chunk_size // num_unions):
         indices, ks, ks_count, ks_start_end, scores = masking_step_loop(
-            q=q,
-            k=k,
+            q=q_quant,
+            k=k_quant,
             
             traverse_from_last_step=traverse_from_last_step,
             step_size=step_size,
@@ -3788,6 +3803,10 @@ def main():
     k = reshape(k)
     v = reshape(v)
     out = reshape(out)
+    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
+    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
+    # q_quant = q
+    # k_quant = k
     
     print(q.shape, k.shape, v.shape)
     
@@ -3830,6 +3849,9 @@ def main():
             low_res_sample_scale=1,
             low_res_oversample_rate=1,
             low_res_oversample_block_stride_k=1,
+            
+            q_quant=q_quant,
+            k_quant=k_quant,
         )
     
     if 'HIP_DEBUG' not in os.environ:
