@@ -2877,6 +2877,8 @@ def block_sparse_attention_cuda(
             idx_hid[None, :] * stride_q_hid,
         mask=mask_tdst[:, None],
         other=0,
+        cache_modifier='.cg',
+        # eviction_policy='evict_last',
     )
     
     for i_bk in range(range_start, range_end, BLOCK_BK):
@@ -2889,6 +2891,7 @@ def block_sparse_attention_cuda(
                 idx_bdst * stride_indices_bdst +\
                 idx_bk * stride_indices_bk,
             mask=mask_bk,
+            cache_modifier='.cs',
             # other=(MAX_TSRC + 1) * G,
         )
         idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
@@ -2908,7 +2911,8 @@ def block_sparse_attention_cuda(
                 idx_head * stride_k_head +\
                 idx_hid[:, None] * stride_k_hid,
             mask=mask_tsrc[None, :],
-            other=0
+            other=0,
+            cache_modifier='.cs',
         )
         values = tl.load(
             V +\
@@ -2917,7 +2921,8 @@ def block_sparse_attention_cuda(
                 idx_head * stride_v_head +\
                 idx_hid[None, :] * stride_v_hid,
             mask=mask_tsrc[:, None],
-            other=0
+            other=0,
+            cache_modifier='.cs',
         )
         
         acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -2964,7 +2969,8 @@ def block_sparse_attention_cuda(
                 idx_head * stride_k_head +\
                 idx_hid[:, None] * stride_k_hid,
             mask=mask_tsrc[None, :],
-            other=0
+            other=0,
+            cache_modifier='.cs',
         )
         values = tl.load(
             V +\
@@ -2973,7 +2979,8 @@ def block_sparse_attention_cuda(
                 idx_head * stride_v_head +\
                 idx_hid[None, :] * stride_v_hid,
             mask=mask_tsrc[:, None],
-            other=0
+            other=0,
+            cache_modifier='.cs',
         )
         
         acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -3015,6 +3022,7 @@ def block_sparse_attention_cuda(
             idx_hid[None, :] * stride_context_hid,
         mask = mask_tdst[:, None],
         value = acc.to(CONTEXT.type.element_ty),
+        cache_modifier='.cs',
         # value = l_i
     )
 
