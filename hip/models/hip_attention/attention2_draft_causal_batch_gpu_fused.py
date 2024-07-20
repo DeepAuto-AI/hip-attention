@@ -3564,7 +3564,7 @@ def main():
         # seq_len = 16384
         # seq_len = 8192
         seq_repeat = 1
-        batch_repeat = 16
+        batch_repeat = 1
         debug_only = False
     
     q, k, v, out, cos, sin = load_checkouts(
@@ -3612,8 +3612,8 @@ def main():
             block_stride_k=2,
             block_size_k_group=1,
             
-            sliding_window_size=128,
-            sink_token_size=16,
+            sliding_window_size=256,
+            sink_token_size=32,
             
             using_extend=False,
             rope_cos=cos,
@@ -3638,7 +3638,7 @@ def main():
             
             low_res_sample_scale=4,
             low_res_oversample_rate=2,
-            low_res_oversample_block_stride_k=8,
+            low_res_oversample_block_stride_k=4,
         )
     
     if 'HIP_DEBUG' not in os.environ:

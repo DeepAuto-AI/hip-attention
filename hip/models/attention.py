@@ -275,7 +275,7 @@ def custom_attention(
                     block_size_q=tree_block_size_q,
                     block_stride_q=2,
                     block_size_k=tree_block_size_k,
-                    block_stride_k=2,
+                    block_stride_k=max(1, tree_block_size_k // 2),
                     block_size_k_group=1,
                     
                     sliding_window_size=256,
@@ -304,9 +304,9 @@ def custom_attention(
                     using_sparq=False,
                     sparq_hid=32,
                     
-                    low_res_sample_scale=4,
-                    low_res_oversample_rate=2,
-                    low_res_oversample_block_stride_k=4,
+                    low_res_sample_scale=1,
+                    low_res_oversample_rate=1,
+                    low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
                 )
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3).contiguous()
         except RuntimeError as ex:
