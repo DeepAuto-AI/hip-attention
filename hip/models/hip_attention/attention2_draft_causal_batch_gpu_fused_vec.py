@@ -17,6 +17,8 @@ TODO:
 10. chunk-wise BPTT
 """
 
+from dataclasses import dataclass
+from importlib import metadata
 import nvtx
 from torch.utils.dlpack import to_dlpack
 from torch.utils.dlpack import from_dlpack
@@ -341,6 +343,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             val=len_access,
         )
         idx_access = (key_access_location + tl.cumsum(mask_access.to(tl.int32)) - 1) % MAX_ACCESS_COUNT
+        # idx_access = tl.arange(0, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K)
         tl.store(
             KEY_ACCESS_LOG +\
                 idx_b * stride_key_access_log_b +\
@@ -348,7 +351,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_access * stride_key_access_log_t,
             value=idx_tsrc_grouped,
             mask=mask_access,
-            eviction_policy='evict_first'
+            # cache_modifier='.cs',
+            # eviction_policy='evict_first'
         )
     
     acc = tl.zeros((
@@ -2097,6 +2101,8 @@ def masking_iteration_draft(
     score_head_group_size: int,
     sparq_ind: Optional[Tensor],
     
+    output_key_access_log: bool,
+    
     # seeds
     indices_seed: Optional[Tensor] = None,
     ks_seed: Optional[Tensor] = None,
@@ -2173,9 +2179,38 @@ def masking_iteration_draft(
     group_sizes = torch.zeros_like(indices)
     t_group_sizes = torch.zeros((B, BDST), dtype=torch.float32, device=q.device)
     
-    KEY_ACCESS_LEN = mask_k * math.ceil(math.log2(TSRC))
-    output_access_log = False
-    if output_access_log:
+    if max_group_size_seed is None:
+        max_group_strategy = 'worst'
+        
+        if indices_seed is None:
+            # always chunks are evenly distributed. fastest.
+            max_group_strategy = 'best'
+        
+        if max_group_strategy == 'oracle':
+            # > oracle      5.1117  18.4503 sec
+            max_group_size = torch.max(t_group_sizes).item()
+        elif max_group_strategy == 'best':
+            # > best case   5.1218  10.3745 sec
+            #   (not complete search if you gave seed)
+            max_group_size = triton.cdiv(BSRC, mask_block_k)
+        elif max_group_strategy == 'worst':
+            # > worst case  5.1097  17.6545 sec
+            #   (always complete search)
+            max_group_size = triton.cdiv(BSRC, block_size_k)
+        elif max_group_strategy == 'greedy':
+            # > greedy      5.1202  11.4861 sec
+            #   (slightly generous then best stratgy)
+            max_group_size = triton.cdiv(BSRC, mask_block_k) * 2
+        elif max_group_strategy == 'constant':
+            # TODO: test this
+            max_group_size = min(triton.cdiv(BSRC, block_size_k), 8)
+        else:
+            raise Exception()
+    else:
+        max_group_size = max_group_size_seed
+    
+    KEY_ACCESS_LEN = mask_k * math.ceil(math.log2(max_group_size))
+    if output_key_access_log:
         key_access_log = torch.empty(
             (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
             # fill_value=torch.iinfo(torch.int32).max,
@@ -2347,36 +2382,6 @@ def masking_iteration_draft(
     # assert indices[0, -10].shape == torch.unique(indices[0, -10]).shape, f'{indices[0, -10].shape} == {torch.unique(indices[0, -10]).shape}'
     
     topk_indices = None
-    
-    if max_group_size_seed is None:
-        max_group_strategy = 'worst'
-        
-        if indices_seed is None:
-            # always chunks are evenly distributed. fastest.
-            max_group_strategy = 'best'
-        
-        if max_group_strategy == 'oracle':
-            # > oracle      5.1117  18.4503 sec
-            max_group_size = torch.max(t_group_sizes).item()
-        elif max_group_strategy == 'best':
-            # > best case   5.1218  10.3745 sec
-            #   (not complete search if you gave seed)
-            max_group_size = triton.cdiv(BSRC, mask_block_k)
-        elif max_group_strategy == 'worst':
-            # > worst case  5.1097  17.6545 sec
-            #   (always complete search)
-            max_group_size = triton.cdiv(BSRC, block_size_k)
-        elif max_group_strategy == 'greedy':
-            # > greedy      5.1202  11.4861 sec
-            #   (slightly generous then best stratgy)
-            max_group_size = triton.cdiv(BSRC, mask_block_k) * 2
-        elif max_group_strategy == 'constant':
-            # TODO: test this
-            max_group_size = min(triton.cdiv(BSRC, block_size_k), 8)
-        else:
-            raise Exception()
-    else:
-        max_group_size = max_group_size_seed
     
     # max_group_size = max_group_size
     
@@ -2631,11 +2636,6 @@ def masking_iteration_draft(
                     t_group_sizes.mul_(0.5)
             i_iteration += 1
     
-    # print('-- after iterations')
-    # print(key_access_log.shape, key_access_count.shape)
-    # print('access count', key_access_count[0])
-    # print('access log', key_access_log[0, -1, :key_access_count[0, -1].item()])
-    
     indices.mul_(block_size_k)
     
     # NOTE: before this sort, indices are sorted by imporatnce of each block
@@ -2660,7 +2660,7 @@ def masking_iteration_draft(
     # print(tu)
     # print(t.shape, tu.shape, c)
     
-    return indices, ks, ks_count, ks_start_end, scores_final, group_sizes
+    return indices, ks, ks_count, ks_start_end, scores_final, group_sizes, key_access_log, key_access_count
 
 @triton.jit
 def block_sparse_attention_cuda_step(
@@ -3218,6 +3218,8 @@ def masking_step_loop(
     # you need to do HPO for this
     low_res_oversample_rate,
     low_res_oversample_block_stride_k,
+    
+    output_key_access_log,
 ):
     BSZ, TDST, HEAD, HID = q.shape
     _, TSRC, _, _ = k.shape
@@ -3233,6 +3235,8 @@ def masking_step_loop(
     ks_count_blocks = []
     ks_start_end_blocks = []
     scores_blocks = []
+    key_access_log_blocks = []
+    key_access_count_blocks = []
     indices_seed = ks_seed = None
     for i_chunk_tdst in range(0, chunk_size, block_size_q * step_size):
         idx_tdst = torch.arange(
@@ -3252,7 +3256,7 @@ def masking_step_loop(
             for idx_sample in range(num_samples):
                 with nvtx.annotate(f'masking_iteration_draft(idx_sample={idx_sample})'):
                     if low_res_sample_scale <= 1 and low_res_oversample_rate <= 1:
-                        indices, ks, ks_count, ks_start_end, scores, group_sizes = masking_iteration_draft(
+                        indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                             q[:, :, :], 
                             k[:, :, :], 
                             position_ids=idx_tdst,
@@ -3278,11 +3282,16 @@ def masking_step_loop(
                             ks_seed=ks_seed,
                             scores_seed=scores_seed,
                             indices_tdst=idx_tdst,
+                            output_key_access_log=output_key_access_log,
                         )
                         
                         indices_seed = indices
                         ks_seed = ks
                         scores_seed = scores
+                        if key_access_log is not None:
+                            key_access_log_blocks.append(key_access_log)
+                        if key_access_count is not None:
+                            key_access_count_blocks.append(key_access_count)
                     else:
                         assert isinstance(low_res_sample_scale, int)
                         low_mask_k = mask_k * low_res_oversample_rate
@@ -3332,7 +3341,7 @@ def masking_step_loop(
                         
                         with nvtx.annotate('low_res_sample'):
                             # TODO: reduce initial seeds
-                            indices, ks, ks_count, ks_start_end, scores, group_sizes = masking_iteration_draft(
+                            indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                                 q[:, :, :], 
                                 k[:, :, :], 
                                 position_ids=idx_tdst,
@@ -3460,7 +3469,7 @@ def masking_step_loop(
                                     ks,
                                 )
                                 
-                                indices, ks, ks_count, ks_start_end, scores, group_sizes = masking_iteration_draft(
+                                indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                                     q[:, :, :], 
                                     k[:, :, :], 
                                     position_ids=idx_tdst,
@@ -3522,6 +3531,16 @@ def masking_step_loop(
         ks_count = torch.cat(ks_count_blocks, dim=1)
         ks_start_end = torch.cat(ks_start_end_blocks, dim=1)
         scores = torch.cat(scores_blocks, dim=1)
+        
+    if len(key_access_log_blocks) == 0:
+        key_access_log = None
+        key_access_count = None
+    elif len(key_access_log_blocks) == 1:
+        key_access_log = key_access_log_blocks[0]
+        key_access_count = key_access_count_blocks[0]
+    else:
+        key_access_log = torch.cat(key_access_log_blocks, dim=1)
+        key_access_count = torch.cat(key_access_count_blocks, dim=1)
     
     # print(indices.shape)
     # print(ks.shape)
@@ -3549,7 +3568,7 @@ def masking_step_loop(
         ks_start_end = permute_3d(ks_start_end)
         scores = permute_3d(scores)
     
-    return indices, ks, ks_count, ks_start_end, scores
+    return indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count
 
 @nvtx.annotate('hip_masking')
 def hip_masking(
@@ -3591,6 +3610,8 @@ def hip_masking(
     low_res_sample_scale: int = 1,
     low_res_oversample_rate: int = 1,
     low_res_oversample_block_stride_k: int = 1,
+    
+    output_key_access_log: bool = False,
 ):
     assert q.ndim == 4
     assert k.ndim == 4
@@ -3634,8 +3655,10 @@ def hip_masking(
     ks_count_sampled = []
     ks_start_end_sampled = []
     scores_sampled = []
+    key_access_log_sampled = []
+    key_access_count_sampled = []
     for i_chunk_offset in range(0, chunk_size, chunk_size // num_unions):
-        indices, ks, ks_count, ks_start_end, scores = masking_step_loop(
+        indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count = masking_step_loop(
             q=q,
             k=k,
             
@@ -3671,6 +3694,8 @@ def hip_masking(
             low_res_sample_scale=low_res_sample_scale,
             low_res_oversample_rate=low_res_oversample_rate,
             low_res_oversample_block_stride_k=low_res_oversample_block_stride_k,
+            
+            output_key_access_log=output_key_access_log,
         )
         
         # if i_chunk_offset > 0:
@@ -3685,6 +3710,10 @@ def hip_masking(
         ks_count_sampled.append(ks_count)
         ks_start_end_sampled.append(ks_start_end)
         scores_sampled.append(scores)
+        if key_access_log is not None:
+            key_access_log_sampled.append(key_access_log)
+        if key_access_count is not None:
+            key_access_count_sampled.append(key_access_count)
     
     if len(indices_sampled) > 1:
         ignore_ranage = max(cdiv_python(mask_k, block_size_q), cdiv_python(chunk_size, block_size_q * num_unions)) * 2
@@ -3752,11 +3781,23 @@ def hip_masking(
         )
         
         ks = ks_count.sum(-1)
+        if len(key_access_log_sampled) > 0:
+            key_access_log = torch.cat(key_access_log_sampled, dim=1)
+            key_access_count = torch.cat(key_access_count_sampled, dim=1)
+        else:
+            key_access_log = None
+            key_access_count = None
     else:
         indices = indices_sampled[0]
         ks = ks_sampled[0]
         ks_count = ks_count_sampled[0]
         ks_start_end = ks_start_end_sampled[0]
+        if len(key_access_log_sampled) > 0:
+            key_access_log = key_access_log_sampled[0]
+            key_access_count = key_access_count_sampled[0]
+        else:
+            key_access_log = None
+            key_access_count = None
     
     if os.getenv('HIP_DEBUG', '0') == '1':
         B, TDST, H, HID = q.shape
@@ -3779,9 +3820,21 @@ def hip_masking(
         plt.tight_layout()
         plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
         print('saved dummy.png')
+        
+        if key_access_log is not None:
+            이거 시각화 하자!
         # input('>>>')
     
-    return indices, ks, ks_count, ks_start_end
+    return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
+
+@dataclass
+class HiPAttentionOutputMetadata:
+    indices: Tensor
+    ks: Tensor
+    ks_count: Tensor
+    ks_start_end: Tensor
+    key_access_log: Optional[Tensor]
+    key_access_count: Optional[Tensor]
 
 @nvtx.annotate('hip_attention')
 @torch.inference_mode()
@@ -3826,6 +3879,8 @@ def hip_attention(
     low_res_oversample_rate: int = 1,
     low_res_oversample_block_stride_k: int = 1,
     
+    output_key_access_log: bool = False,
+    
     q_quant: Optional[Tensor] = None,
     k_quant: Optional[Tensor] = None,
 ):
@@ -3839,7 +3894,7 @@ def hip_attention(
         q_quant = q
         k_quant = k
     
-    indices, ks, ks_count, ks_start_end = hip_masking(
+    indices, ks, ks_count, ks_start_end, key_access_log, key_access_count = hip_masking(
         q=q_quant,
         k=k_quant,
         
@@ -3878,6 +3933,8 @@ def hip_attention(
         low_res_sample_scale=low_res_sample_scale,
         low_res_oversample_rate=low_res_oversample_rate,
         low_res_oversample_block_stride_k=low_res_oversample_block_stride_k,
+        
+        output_key_access_log=output_key_access_log,
     )
     
     # return None, None
@@ -3902,7 +3959,14 @@ def hip_attention(
         rope_sin,
     )
     
-    return context, None
+    return context, HiPAttentionOutputMetadata(
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        key_access_log=key_access_log,
+        key_access_count=key_access_count,
+    )
 
 def main():
     debug_only = True
@@ -3999,12 +4063,14 @@ def main():
             
             q_quant=q_quant,
             k_quant=k_quant,
+            
+            output_key_access_log=False,
         )
     
     if 'HIP_DEBUG' not in os.environ:
         os.environ['HIP_DEBUG'] = '1'
     
-    context, _ = fn()
+    context, metadata = fn()
     
     if context is not None:
         stderr = (out - context).abs().mean().item()
@@ -4024,7 +4090,7 @@ def main():
     end = torch.cuda.Event(enable_timing=True)
     sample = 0
     elapsed = 0
-    for i in range(20):
+    for i in range(50):
         if graph is None:
             for _ in range(3):
                 fn()
