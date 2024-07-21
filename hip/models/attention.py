@@ -278,7 +278,7 @@ def custom_attention(
                     block_stride_k=max(1, tree_block_size_k // 2),
                     block_size_k_group=1,
                     
-                    sliding_window_size=256,
+                    sliding_window_size=512,
                     sink_token_size=32,
                     
                     using_extend=False,
