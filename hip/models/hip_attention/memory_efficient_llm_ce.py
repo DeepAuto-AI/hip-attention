@@ -122,7 +122,7 @@ def memory_efficient_llm_ce(
     
     losses = torch.empty((N,), dtype=torch.float32, device=hidden_states.device)
     
-    BLOCK_N = 128
+    BLOCK_N = 64
     BLOCK_HID = 128
     BLOCK_KOUT = 128
     
