@@ -38,7 +38,7 @@ import math
 from hip.utils.triton_argsort import argsort as tl_argsort
 
 def cdiv_python(a, b):
-    return math.ceil(a / b)
+    return math.ceil(float(a) / float(b))
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
 
@@ -84,8 +84,10 @@ def masking_iteration_draft_cuda_initialize(
         POS +\
             idx_tdst * stride_pos_tdst,
         mask=mask_tdst,
+        other=0,
     )
     TSRC = tl.max(pos_tdst)
+    tl.debug_barrier()
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
     BSRC = tl.cdiv(TSRC, block_size_k)
     MAX_BSRC = tl.cdiv(MAX_TSRC, block_size_k)
@@ -1509,6 +1511,43 @@ def masking_iteration_draft_python_epilog(
     
     return ks_count, ks_start_end
 
+def get_masking_iteration_draft_cuda_fused_configs():
+    warnings.warn('triton autotune will slow down startup!')
+    configs = []
+    for num_warps in [1, 2, 4, 8, 16]:
+        for num_stages in [2]:
+            for num_regs in [64, 128, 256]:
+                configs.append(triton.Config(
+                    {}, 
+                    num_warps=num_warps, 
+                    num_stages=num_stages,
+                    maxnreg=num_regs,
+                ))
+    return configs
+
+@triton.autotune(
+    configs=get_masking_iteration_draft_cuda_fused_configs(),
+    key=[
+        'BLOCK_BK',
+        'BLOCK_SIZE_K', 
+        'BLOCK_SIZE_Q', 
+        'HID'
+    ],
+    restore_value=[
+        'KEY_ACCESS_LOG',
+        'KEY_ACCESS_COUNT',
+        'INDICES',
+        'KS',
+        'GROUP_SIZE',
+        'DUPPED_INDICES',
+        'DUPPED_GROUP_SIZE',
+        'SCORES', 
+        'SCORES_FINAL',
+        'PROBS',
+        'TOPK_IDS',
+        'T_GROUP_SIZE',
+    ]
+)
 @triton.jit
 def masking_iteration_draft_cuda_fused(
     Q, 
@@ -2403,7 +2442,7 @@ def masking_iteration_draft(
         # BLOCK_BK = indices.shape[-1]
         # BLOCK_BK = indices.shape[-1] // 4
         
-        BLOCK_BK = indices.shape[-1] // 4
+        # BLOCK_BK = indices.shape[-1] // 4
         
         GROUP_BDST = 1
         GROUP_BH = 1
@@ -2487,8 +2526,8 @@ def masking_iteration_draft(
             indices_bk_len=indices.shape[-1],
             probs_bk_len=probs.shape[-1],
             
-            num_warps=2,
-            num_stages=2,
+            # num_warps=2,
+            # num_stages=2,
         )
     else:
         raise NotImplementedError()
@@ -2831,6 +2870,7 @@ def block_sparse_attention_cuda_step(
     return acc, l_i, m_i
 
 def get_block_sparse_attention_configs():
+    warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
     configs = []
     for block_bk in [4, 8, 16, 32]:
         for max_nreg in [128, 256, 512]:
@@ -3109,7 +3149,7 @@ def block_sparse_attention(
     BSZ, TDST, HEAD, HID = q.shape
     _, TSRC, _, _ = k.shape
     N = BSZ * HEAD
-    assert q.shape == k.shape
+    # assert q.shape == k.shape
     BDST = cdiv_python(TDST, block_size_q)
     BSRC = cdiv_python(TSRC, block_size_k)
     
@@ -3251,6 +3291,7 @@ def masking_step_loop(
         )[:, None] + chunk_offset
         idx_tdst = idx_tdst % TDST
         idx_tdst = idx_tdst.reshape(-1)
+        pos_tdst = idx_tdst + TSRC - TDST
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(num_samples):
@@ -3259,7 +3300,7 @@ def masking_step_loop(
                         indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                             q[:, :, :], 
                             k[:, :, :], 
-                            position_ids=idx_tdst,
+                            position_ids=pos_tdst,
                             mask_k=mask_k,
                             block_size_q=block_size_q,
                             block_stride_q=block_stride_q,
@@ -3344,7 +3385,7 @@ def masking_step_loop(
                             indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                                 q[:, :, :], 
                                 k[:, :, :], 
-                                position_ids=idx_tdst,
+                                position_ids=pos_tdst,
                                 # NOTE: low res mask k
                                 mask_k=low_mask_k,
                                 block_size_q=block_size_q,
@@ -3423,7 +3464,7 @@ def masking_step_loop(
                                 masking_iteration_draft_cuda_initialize[grid](
                                     None, *(0, 0, 0),
                                     None, *(0, 0),
-                                    idx_tdst, *idx_tdst.stride(),
+                                    pos_tdst, *pos_tdst.stride(),
                                     
                                     init_indices, *init_indices.stride(),
                                     init_ks, *init_ks.stride(),
@@ -3452,7 +3493,7 @@ def masking_step_loop(
                                 # print(init_group_sizes[0, idx_tdst[::32] < 1024, :10])
                                 # print(group_sizes_scaled[0, idx_tdst[::32] < 1024, :10])
                                 
-                                mask_tdst = idx_tdst[::block_size_q] < mask_k * 2
+                                mask_tdst = pos_tdst[::block_size_q] < mask_k * 2
                                 group_sizes = torch.where(
                                     mask_tdst[None, :, None],
                                     init_group_sizes,
@@ -3472,7 +3513,7 @@ def masking_step_loop(
                                 indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
                                     q[:, :, :], 
                                     k[:, :, :], 
-                                    position_ids=idx_tdst,
+                                    position_ids=pos_tdst,
                                     mask_k=mask_k,
                                     block_size_q=block_size_q,
                                     block_stride_q=block_stride_q,
@@ -3974,7 +4015,7 @@ def main():
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
-        seq_len = 32768
+        seq_len = 32760
         # seq_len = 16384
         # seq_len = 8192
         seq_repeat = 1
@@ -3997,8 +4038,6 @@ def main():
         out = out.repeat(batch_repeat, seq_repeat, 1)
         cos = cos.repeat(seq_repeat, 1)
         sin = sin.repeat(seq_repeat, 1)
-    # q = q[:, -32:, :]
-    # out = out[:, -32:, :]
     
     def reshape(x):
         N, T, H = x.shape
@@ -4018,6 +4057,11 @@ def main():
     k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
     # q_quant = q
     # k_quant = k
+    
+    # num_queries = 1
+    # q = q[:, -num_queries:]
+    # q_quant = q_quant[:, -num_queries:]
+    # out = out[:, -num_queries:,]
     
     print(q.shape, k.shape, v.shape)
     
@@ -4047,7 +4091,7 @@ def main():
             branch_method='half',
             
             traverse_from_last_step=False,
-            step_size=seq_len // 32,
+            step_size=None,
             num_samples=1,
             chunk_size=None,
             num_unions=1,
