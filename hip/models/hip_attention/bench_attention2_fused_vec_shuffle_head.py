@@ -71,9 +71,9 @@ def main():
     num_samples = 50
     num_tests = 10
     
-    # num_warmups = 1
-    # num_samples = 1
-    # num_tests = 1
+    num_warmups = 1
+    num_samples = 1
+    num_tests = 1
     
     mask_k = 512
     sliding_window_size = 512

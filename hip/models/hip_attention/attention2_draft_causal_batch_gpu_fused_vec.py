@@ -2832,10 +2832,10 @@ def block_sparse_attention_cuda_step(
 
 def get_block_sparse_attention_configs():
     configs = []
-    for block_bk in [8, 16, 32]:
+    for block_bk in [4, 8, 16, 32]:
         for max_nreg in [128, 256, 512]:
-            for num_warps in [2, 4, 8]:
-                for num_stages in [1, 2, 4]:
+            for num_warps in [4]:
+                for num_stages in [2]:
                     configs.append(triton.Config(
                         {
                             'BLOCK_BK': block_bk
