@@ -2831,6 +2831,7 @@ def block_sparse_attention_cuda_step(
     return acc, l_i, m_i
 
 def get_block_sparse_attention_configs():
+    warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
     configs = []
     for block_bk in [4, 8, 16, 32]:
         for max_nreg in [128, 256, 512]:
