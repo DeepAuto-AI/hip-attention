@@ -83,7 +83,14 @@ def main():
             torch.cuda.synchronize()
             t = time.time()
         if mask_k > 0:
-            indices, ks, ks_count, ks_start_end = hip_masking(
+            (
+                indices, 
+                ks, 
+                ks_count, 
+                ks_start_end, 
+                key_access_log, 
+                key_access_count
+            ) = hip_masking(
                 q=q_quant,
                 k=k_quant,
                 
@@ -122,10 +129,36 @@ def main():
     torch.cuda.synchronize()
     elapsed_flash = (time.time() - t) * 1000 / num_samples
     
+    from mamba_ssm import Mamba2
+    mamba = Mamba2(
+        d_model=4096,
+        d_state=128,
+        d_conv=4,
+        expand=2,
+        headdim=64,
+        ngroups=8,
+        D_has_hdim=False,
+        rmsnorm=True,
+        norm_before_gate=False,
+        bias=False,
+        conv_bias=True,
+        chunk_size=128,
+    ).to("cuda").eval().half()
+    x = v.reshape(v.shape[0], v.shape[1], -1)
+    for i in range(num_warmups + num_samples):
+        if i == num_warmups:
+            torch.cuda.synchronize()
+            t = time.time()
+        with torch.no_grad():
+            mamba(x)
+    torch.cuda.synchronize()
+    elapsed_mamba = (time.time() - t) * 1000 / num_samples
+    
     print(f'hip masking      : {elapsed:.4f} ms')
     print(f'sparse attention : {samples[0][1]:.4f} ms')
-    print(f'total            : {elapsed + samples[0][1]:.4f} ms')
+    print(f'total (hip)      : {elapsed + samples[0][1]:.4f} ms')
     print(f'total (flash)    : {elapsed_flash:.4f} ms')
+    print(f'total (mamba2)   : {elapsed_mamba:.4f} ms')
 
 if __name__ == '__main__':
     main()

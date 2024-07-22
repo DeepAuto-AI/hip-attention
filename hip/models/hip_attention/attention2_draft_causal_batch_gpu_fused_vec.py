@@ -375,8 +375,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             cache_modifier='.cs',
             # eviction_policy='evict_last'
         )
+        # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float16)
+        
         if queries.dtype == tl.uint8:
-            queries = queries.to(tl.float8e5, bitcast=True)
+            queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
         if G == 1:
             mask_keys = tl.broadcast_to(
                 dupped_mask[:, None],
@@ -405,8 +407,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             other = 0,
             cache_modifier='.cs',
         )
+        # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
         if keys.dtype == tl.uint8:
-            keys = keys.to(tl.float8e5, bitcast=True)
+            keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
         if USING_EXTEND:
             if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
@@ -506,7 +509,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(tl.float32)
             else:
                 t = tl.dot(
-                    queries.to(tl.float16), 
+                    queries.to(tl.float16),
                     keys.to(tl.float16),
                     out_dtype=tl.float16,
                 ).to(tl.float32)
@@ -2526,7 +2529,7 @@ def masking_iteration_draft(
             indices_bk_len=indices.shape[-1],
             probs_bk_len=probs.shape[-1],
             
-            # num_warps=2,
+            # num_warps=4,
             # num_stages=2,
         )
     else:
@@ -2872,7 +2875,8 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
     configs = []
-    for block_bk in [4, 8, 16, 32]:
+    # for block_bk in [4, 8, 16, 32]:
+    for block_bk in [8, 16, 32]:
         for max_nreg in [128, 256, 512]:
             for num_warps in [4]:
                 for num_stages in [2]:
@@ -3862,8 +3866,8 @@ def hip_masking(
         plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
         print('saved dummy.png')
         
-        if key_access_log is not None:
-            이거 시각화 하자!
+        # if key_access_log is not None:
+        #     이거 시각화 하자!
         # input('>>>')
     
     return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
@@ -4015,7 +4019,7 @@ def main():
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
-        seq_len = 32760
+        seq_len = 32768
         # seq_len = 16384
         # seq_len = 8192
         seq_repeat = 1

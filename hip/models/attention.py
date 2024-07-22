@@ -265,6 +265,11 @@ def custom_attention(
                 # k = k.reshape(N * H, TSRC, HID)
                 # v = v.reshape(N * H, TSRC, HID)
                 
+                q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                # q_quant = q
+                # k_quant = k
+                
                 # print(q.shape, k.shape, v.shape)
                 
                 attn_output_hip, _ = hip_attention_draft(
@@ -275,11 +280,11 @@ def custom_attention(
                     block_size_q=tree_block_size_q,
                     block_stride_q=2,
                     block_size_k=tree_block_size_k,
-                    block_stride_k=max(1, tree_block_size_k // 2),
+                    block_stride_k=max(2, tree_block_size_k // 2),
                     block_size_k_group=1,
                     
-                    sliding_window_size=512,
-                    sink_token_size=32,
+                    sliding_window_size=128,
+                    sink_token_size=16,
                     
                     using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
@@ -293,7 +298,7 @@ def custom_attention(
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=False,
-                    step_size=q.shape[1] // tree_block_size_q,
+                    step_size=None,
                     num_samples=1,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
                     chunk_size=None,
@@ -307,6 +312,9 @@ def custom_attention(
                     low_res_sample_scale=1,
                     low_res_oversample_rate=1,
                     low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
+                    
+                    q_quant=q_quant,
+                    k_quant=k_quant,
                 )
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3).contiguous()
         except RuntimeError as ex:
