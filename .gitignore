@@ -55,3 +55,6 @@ dummy.png
 *.sqlite
 
 third_party/
+
+dummy*.png
+dummy*.jpg

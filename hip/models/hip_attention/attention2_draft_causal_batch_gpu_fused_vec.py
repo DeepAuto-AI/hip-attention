@@ -17,6 +17,7 @@ TODO:
 10. chunk-wise BPTT
 """
 
+import numba
 from dataclasses import dataclass
 from importlib import metadata
 import nvtx
@@ -3615,6 +3616,37 @@ def masking_step_loop(
     
     return indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count
 
+@numba.njit
+def access_log_to_dense(
+    key_access_log: NdArray,
+    key_access_count: NdArray,
+    TSRC,
+):
+    B, BDST, K = key_access_log.shape
+    out = np.zeros((B, BDST, TSRC))
+    for ib in numba.prange(B):
+        for ibdst in numba.prange(BDST):
+            nk = key_access_count[ib, ibdst]
+            for ik in range(nk):
+                out[ib, ibdst, key_access_log[ib, ibdst, ik]] += 1
+    return out
+
+@numba.njit
+def img_reduce(
+    img: NdArray,
+    rh: int, rw: int
+):
+    H, W = img.shape
+    RH = H // rh
+    RW = W // rw
+    out = np.zeros((RH, RW))
+    for ih in range(RH):
+        for iw in range(RW):
+            chunk = img[ih * rh: ih * rh + rh, iw * rw: iw * rw + rw]
+            scaler = np.mean(chunk)
+            out[ih, iw] = scaler
+    return out
+
 @nvtx.annotate('hip_masking')
 def hip_masking(
     q: Tensor, 
@@ -3866,8 +3898,75 @@ def hip_masking(
         plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
         print('saved dummy.png')
         
-        # if key_access_log is not None:
-        #     이거 시각화 하자!
+        if key_access_log is not None:
+            # plot key access map
+            key_access_map = access_log_to_dense(
+                key_access_log.cpu().numpy(),
+                key_access_count.cpu().numpy(),
+                TSRC,
+            )
+            img = key_access_map[0]
+            img = img_reduce(img, 1, block_size_q)
+            plt.figure(figsize=(4, 4))
+            plt.imshow(img)
+            plt.colorbar()
+            plt.title(f'avg access count (T={TSRC}, bq={block_size_q}, bk={block_size_k})')
+            plt.tight_layout()
+            plt.savefig('dummy_access.png', dpi=96, bbox_inches='tight')
+            print('saved dummy_access.png')
+            
+            # plot num unique keys for each query
+            plt.figure(figsize=(4, 4))
+            unique_accesses = np.sum((key_access_map > 0).astype(np.int32), axis=-1)
+            xs = np.arange(0, TDST, block_size_q)
+            for i in range(unique_accesses.shape[0]):
+                plt.plot(xs, unique_accesses[i], linestyle='--')
+            
+            # plot num newly introduced key
+            key_access_mask = (key_access_map > 0).astype(np.int32)
+            unique_issue = np.clip(key_access_mask[:, 1:, :] - key_access_mask[:, :-1, :], 0, 1)
+            unique_issue = np.sum(unique_issue, axis=-1)
+            xs = np.arange(block_size_q, TDST, block_size_q)
+            for i in range(unique_issue.shape[0]):
+                plt.plot(xs, unique_issue[i])
+            
+            plt.title(f'unique access (T={TSRC})')
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig('dummy_unique_access.png', dpi=96, bbox_inches='tight')
+            print('saved dummy_unique_access.png')
+            
+            def render_remain(window_size):
+                plt.figure(figsize=(6, 4))
+                key_access_mask = (key_access_map > 0).astype(np.int32)
+                key_remain_mask = key_access_mask[:, window_size-1:, :].copy()
+                for i in range(window_size - 1):
+                    key_remain_mask += key_access_mask[:, i:key_access_mask.shape[1] - window_size + 1 + i, :]
+                key_remain_mask = np.clip(key_remain_mask, 0, 1)
+                
+                unique_remain_issue = np.clip(key_remain_mask[:, 1:, :] - key_remain_mask[:, :-1, :], 0, 1)
+                unique_remain_issue = np.sum(unique_remain_issue, axis=-1)
+                xs = np.arange(block_size_q * window_size, TDST, block_size_q)
+                for i in range(unique_remain_issue.shape[0]):
+                    plt.plot(xs, unique_remain_issue[i])
+                
+                cache_keys = np.sum(key_remain_mask, axis=-1)[:, 1:]
+                for i in range(cache_keys.shape[0]):
+                    plt.plot(xs, cache_keys[i])
+                
+                last_unique_remain_issue = unique_remain_issue[:, -1].mean()
+                last_cache_keys = cache_keys[:, -1].mean()
+                
+                plt.title(f'newly requested key\n(T={TSRC}, wnd={window_size * block_size_q} steps, last cache size={int(last_cache_keys)}, last request size={int(last_unique_remain_issue)})')
+                plt.grid()
+                plt.tight_layout()
+                plt.savefig(f'dummy_unique_remain_{window_size}.png', dpi=96, bbox_inches='tight')
+                print(f'saved dummy_unique_remain_{window_size}.png')
+            render_remain(1)
+            render_remain(2)
+            render_remain(4)
+            render_remain(8)
+            render_remain(16)
         # input('>>>')
     
     return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
@@ -4015,7 +4114,7 @@ def hip_attention(
 
 def main():
     debug_only = True
-    seq_len = 4096
+    seq_len = 32768
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
@@ -4112,7 +4211,7 @@ def main():
             q_quant=q_quant,
             k_quant=k_quant,
             
-            output_key_access_log=False,
+            output_key_access_log=True,
         )
     
     if 'HIP_DEBUG' not in os.environ:
