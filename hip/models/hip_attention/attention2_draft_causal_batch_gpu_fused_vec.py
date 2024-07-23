@@ -3778,29 +3778,15 @@ def perform_lru_scaling(
     loaded_key_value = np.zeros((B, lru_budget,), dtype=np.int32) - 1
     loaded_key_first_value = np.zeros((B, lru_budget,), dtype=np.int32) - 1
     loaded_key_first_stamp = np.zeros((B, lru_budget,), dtype=np.int32)
-    loaded_key_last_stamp = np.zeros((B, lru_budget,), dtype=np.int32)
+    loaded_key_importance = np.zeros((B, lru_budget,), dtype=np.int32)
     
     for ib in numba.prange(B): #prange
         for ibdst in range(1, BDST):
             last_accessed = key_access_log[:, ibdst-1, :]
             last_accessed_count = key_access_count[:, ibdst-1]
             
-            # scale cache first
+            # prefetch keys using scaling
             if ibdst > (sliding_window_size // block_size_q):
-                # for _icache in range(lru_budget):
-                #     icache = lru_budget - _icache - 1
-                #     current_pointer = loaded_key_value[ib, icache]
-                #     if current_pointer >= 0:
-                #         first_ibdst = loaded_key_first_stamp[ib, icache]
-                #         new_position = loaded_key_first_value[ib, icache] * (ibdst / (first_ibdst - 1))
-                #         new_position = (new_position // block_size_k) * block_size_k + loaded_key_first_value[ib, icache] % block_size_k
-                #         loaded_key_value[ib, icache] = -1
-                #         if new_position not in loaded_key_value[ib]:
-                #             loaded_key_value[ib, icache] = new_position
-                #             if current_pointer != new_position:
-                #                 loaded_key_last_stamp[ib, icache] = first_ibdst
-                #         else:
-                #             loaded_key_value[ib, icache] = current_pointer
                 for _icache in range(lru_budget):
                     icache = lru_budget - _icache - 1
                     current_pointer = loaded_key_value[ib, icache]
@@ -3816,11 +3802,12 @@ def perform_lru_scaling(
                         loaded_key_value[ib, icache] = -1
                         if new_position not in loaded_key_value[ib]:
                             loaded_key_value[ib, icache] = new_position
-                            if current_pointer != new_position:
-                                loaded_key_last_stamp[ib, icache] = first_ibdst
+                            # if current_pointer != new_position:
+                            #     loaded_key_last_stamp[ib, icache] = first_ibdst
                         else:
                             loaded_key_value[ib, icache] = current_pointer
             # try to add last accessed to LRU cache
+            loaded_key_importance[ib] -= 1 # decay freq if LFU
             for ik in range(last_accessed_count[ib]):
                 current_pointer = last_accessed[ib, ik]
                 in_cache = False
@@ -3828,12 +3815,13 @@ def perform_lru_scaling(
                 least_timestamp_idx = -1
                 for icache in range(lru_budget):
                     if loaded_key_value[ib, icache] == current_pointer:
-                        loaded_key_last_stamp[ib, icache] = ibdst
+                        # loaded_key_importance[ib, icache] = ibdst
+                        loaded_key_importance[ib, icache] += 3
                         # if in LRU cache, update life
                         in_cache = True
                     else:
-                        if loaded_key_last_stamp[ib, icache] < least_timestamp_val:
-                            least_timestamp_val = loaded_key_last_stamp[ib, icache]
+                        if loaded_key_importance[ib, icache] < least_timestamp_val:
+                            least_timestamp_val = loaded_key_importance[ib, icache]
                             least_timestamp_idx = icache
                 # else, evict victim
                 if not in_cache:
@@ -3843,12 +3831,12 @@ def perform_lru_scaling(
                         loaded_key_value[ib, least_timestamp_idx] = new_position
                         loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
                         loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
-                        loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
+                        loaded_key_importance[ib, least_timestamp_idx] = ibdst
                     else:
                         loaded_key_value[ib, least_timestamp_idx] = current_pointer
                         loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
                         loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
-                        loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
+                        loaded_key_importance[ib, least_timestamp_idx] = ibdst
             # submit to mask for debug, in realworld, time to fetch
             for icache in range(lru_budget):
                 idx = loaded_key_value[ib, icache]
@@ -4329,7 +4317,10 @@ def hip_masking(
                     key_access_map, 
                     key_access_log.cpu().numpy(), 
                     key_access_count.cpu().numpy(), 
-                    lru_budget
+                    lru_budget, 
+                    block_size_q,
+                    block_size_k,
+                    sliding_window_size,
                 )
                 # incr_first_iteration(
                 #     loaded_key_mask,
