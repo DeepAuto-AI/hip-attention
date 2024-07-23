@@ -17,6 +17,8 @@ TODO:
 10. chunk-wise BPTT
 """
 
+import cv2
+import matplotlib.pyplot as plt
 import numba
 from dataclasses import dataclass
 from importlib import metadata
@@ -1518,9 +1520,11 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     warnings.warn('triton autotune will slow down startup!')
     configs = []
-    for num_warps in [1, 2, 4, 8, 16]:
+    # for num_warps in [1, 2, 4, 8, 16]:
+    for num_warps in [4,]:
         for num_stages in [2]:
-            for num_regs in [64, 128, 256]:
+            # for num_regs in [64, 128, 256]:
+            for num_regs in [256]:
                 configs.append(triton.Config(
                     {}, 
                     num_warps=num_warps, 
@@ -3616,14 +3620,14 @@ def masking_step_loop(
     
     return indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count
 
-@numba.njit
+@numba.njit(parallel=True)
 def access_log_to_dense(
     key_access_log: NdArray,
     key_access_count: NdArray,
     TSRC,
 ):
     B, BDST, K = key_access_log.shape
-    out = np.zeros((B, BDST, TSRC))
+    out = np.zeros((B, BDST, TSRC), dtype=np.int32)
     for ib in numba.prange(B):
         for ibdst in numba.prange(BDST):
             nk = key_access_count[ib, ibdst]
@@ -3646,6 +3650,185 @@ def img_reduce(
             scaler = np.mean(chunk)
             out[ih, iw] = scaler
     return out
+
+@numba.njit
+def incr_first_iteration(
+    mask: NdArray, 
+    block_size_q: int,
+    mask_k: int,
+    block_size_k: int,
+    block_stride_k: int,
+    sliding_window_size: int,
+):
+    B, BDST, TSRC = mask.shape
+    for ib in range(B):
+        for ibdst in range(BDST):
+            _mask_k = mask_k * max(1, int(math.log2(ibdst * block_size_q / 8192)))
+            for ibk in range(_mask_k // block_size_k):
+                tsrc = ((ibdst + 1) * block_size_q - sliding_window_size) * (ibk / (_mask_k // block_size_k))
+                tsrc = round(tsrc)
+                if tsrc >= 0:
+                    tsrc = tsrc - (tsrc % block_size_k)
+                    for ioffset in range(block_stride_k - 1, block_size_k, block_stride_k):
+                        mask[ib, ibdst, tsrc + ioffset] += 1
+
+@numba.njit
+def perform_lru(
+    key_access_map,
+    key_access_log,
+    key_access_count,
+    lru_budget,
+):
+    B, BDST, K = key_access_log.shape
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_list = np.zeros((B, lru_budget,), dtype=np.int32) - 1
+    loaded_key_timestamp = np.zeros((B, lru_budget,), dtype=np.int32)
+    
+    for ib in numba.prange(B): #prange
+        for ibdst in range(1, BDST):
+            last_accessed = key_access_log[:, ibdst-1, :]
+            last_accessed_count = key_access_count[:, ibdst-1]
+            # try to add last accessed to LRU cache
+            for ik in range(last_accessed_count[ib]):
+                current_pointer = last_accessed[ib, ik]
+                in_cache = False
+                least_timestamp_val = 999999999
+                least_timestamp_idx = -1
+                for icache in range(lru_budget):
+                    if loaded_key_list[ib, icache] == current_pointer:
+                        loaded_key_timestamp[ib, icache] = ibdst
+                        # if in LRU cache, update life
+                        in_cache = True
+                    else:
+                        if loaded_key_timestamp[ib, icache] < least_timestamp_val:
+                            least_timestamp_val = loaded_key_timestamp[ib, icache]
+                            least_timestamp_idx = icache
+                # else, evict victim
+                if not in_cache:
+                    loaded_key_list[ib, least_timestamp_idx] = current_pointer
+                    loaded_key_timestamp[ib, least_timestamp_idx] = ibdst
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ib, icache]
+                if idx > 0:
+                    loaded_key_mask[ib, ibdst, idx] = 1
+    
+    return loaded_key_mask
+
+@numba.njit
+def perform_lfu(
+    key_access_map,
+    key_access_log,
+    key_access_count,
+    lru_budget,
+):
+    B, BDST, K = key_access_log.shape
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_list = np.zeros((B, lru_budget,), dtype=np.int32) - 1
+    loaded_key_freq = np.zeros((B, lru_budget,), dtype=np.int32)
+    
+    for ib in numba.prange(B): #prange
+        for ibdst in range(1, BDST):
+            last_accessed = key_access_log[:, ibdst-1, :]
+            last_accessed_count = key_access_count[:, ibdst-1]
+            for icache in range(lru_budget):
+                loaded_key_freq[ib, icache] -= 1
+            # try to add last accessed to LRU cache
+            for ik in range(last_accessed_count[ib]):
+                current_pointer = last_accessed[ib, ik]
+                in_cache = False
+                least_freq_val = 999999999
+                least_freq_idx = -1
+                for icache in range(lru_budget):
+                    if loaded_key_list[ib, icache] == current_pointer:
+                        loaded_key_freq[ib, icache] += 1
+                        # if in cache, update life
+                        in_cache = True
+                    else:
+                        if loaded_key_freq[ib, icache] < least_freq_val:
+                            least_freq_val = loaded_key_freq[ib, icache]
+                            least_freq_idx = icache
+                # else, evict victim
+                if not in_cache:
+                    loaded_key_list[ib, least_freq_idx] = current_pointer
+                    loaded_key_freq[ib, least_freq_idx] = 1
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ib, icache]
+                if idx >= 0:
+                    loaded_key_mask[ib, ibdst, idx] = 1
+    
+    return loaded_key_mask
+
+@numba.njit(parallel=True)
+def perform_lru_scaling(
+    key_access_map,
+    key_access_log,
+    key_access_count,
+    lru_budget,
+    block_size_q = 32,
+    block_size_k = 8,
+    sliding_window_size = 512,
+):
+    B, BDST, K = key_access_log.shape
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_value = np.zeros((B, lru_budget,), dtype=np.int32) - 1
+    loaded_key_first_value = np.zeros((B, lru_budget,), dtype=np.int32) - 1
+    loaded_key_first_stamp = np.zeros((B, lru_budget,), dtype=np.int32)
+    loaded_key_last_stamp = np.zeros((B, lru_budget,), dtype=np.int32)
+    
+    for ib in numba.prange(B): #prange
+        for ibdst in range(1, BDST):
+            last_accessed = key_access_log[:, ibdst-1, :]
+            last_accessed_count = key_access_count[:, ibdst-1]
+            
+            # scale cache first
+            if ibdst > (sliding_window_size // block_size_q):
+                for _icache in range(lru_budget):
+                    icache = lru_budget - _icache - 1
+                    current_pointer = loaded_key_value[ib, icache]
+                    if current_pointer >= 0:
+                        first_ibdst = loaded_key_first_stamp[ib, icache]
+                        new_position = loaded_key_first_value[ib, icache] * (ibdst / (first_ibdst - 1))
+                        new_position = (new_position // block_size_k) * block_size_k + loaded_key_first_value[ib, icache] % block_size_k
+                        loaded_key_value[ib, icache] = -1
+                        if new_position not in loaded_key_value[ib]:
+                            loaded_key_value[ib, icache] = new_position
+                            if current_pointer != new_position:
+                                loaded_key_last_stamp[ib, icache] = first_ibdst
+                        else:
+                            loaded_key_value[ib, icache] = current_pointer
+            # try to add last accessed to LRU cache
+            for ik in range(last_accessed_count[ib]):
+                current_pointer = last_accessed[ib, ik]
+                in_cache = False
+                least_timestamp_val = 999999999
+                least_timestamp_idx = -1
+                for icache in range(lru_budget):
+                    if loaded_key_value[ib, icache] == current_pointer:
+                        loaded_key_last_stamp[ib, icache] = ibdst
+                        # if in LRU cache, update life
+                        in_cache = True
+                    else:
+                        if loaded_key_last_stamp[ib, icache] < least_timestamp_val:
+                            least_timestamp_val = loaded_key_last_stamp[ib, icache]
+                            least_timestamp_idx = icache
+                # else, evict victim
+                if not in_cache:
+                    loaded_key_value[ib, least_timestamp_idx] = current_pointer
+                    loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
+                    loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst
+                    loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_value[ib, icache]
+                if idx > 0:
+                    loaded_key_mask[ib, ibdst, idx] = 1
+    
+    return loaded_key_mask
 
 @nvtx.annotate('hip_masking')
 def hip_masking(
@@ -3880,69 +4063,71 @@ def hip_masking(
         B, TDST, H, HID = q.shape
         _, TSRC, _, _ = k.shape
         N = B * H
-        debug_mask = to_dense(
-            indices.cpu().numpy(),
-            ks.cpu().numpy(),
-            None,
-            cdiv_python(N, topk_head_group_size),
-            TDST, 
-            TSRC * topk_head_group_size, 
-            block_size_q, 
-            block_size_k * block_size_k_group,
-        )
-        # print(debug_mask)
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(4*topk_head_group_size, 4))
-        plt.imshow(debug_mask[0])
-        plt.tight_layout()
-        plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
-        print('saved dummy.png')
+        def render_mask():
+            debug_mask = to_dense(
+                indices.cpu().numpy(),
+                ks.cpu().numpy(),
+                None,
+                cdiv_python(N, topk_head_group_size),
+                TDST, 
+                TSRC * topk_head_group_size, 
+                block_size_q, 
+                block_size_k * block_size_k_group,
+            )
+            plt.figure(figsize=(4*topk_head_group_size, 4))
+            plt.imshow(debug_mask[0])
+            plt.tight_layout()
+            plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
+            print('saved dummy.png')
+        # render_mask()
         
         if key_access_log is not None:
-            # plot key access map
             key_access_map = access_log_to_dense(
                 key_access_log.cpu().numpy(),
                 key_access_count.cpu().numpy(),
                 TSRC,
             )
-            img = key_access_map[0]
-            img = img_reduce(img, 1, block_size_q)
-            plt.figure(figsize=(4, 4))
-            plt.imshow(img)
-            plt.colorbar()
-            plt.title(f'avg access count (T={TSRC}, bq={block_size_q}, bk={block_size_k})')
-            plt.tight_layout()
-            plt.savefig('dummy_access.png', dpi=96, bbox_inches='tight')
-            print('saved dummy_access.png')
+            key_access_mask = np.clip(key_access_map, 0, 1)
             
-            # plot num unique keys for each query
-            plt.figure(figsize=(4, 4))
-            unique_accesses = np.sum((key_access_map > 0).astype(np.int32), axis=-1)
-            xs = np.arange(0, TDST, block_size_q)
-            for i in range(unique_accesses.shape[0]):
-                plt.plot(xs, unique_accesses[i], linestyle='--')
+            def render_access_map_fullres():
+                # mat = cv2.applyColorMap(key_access_map[0], cv2.COLORMAP_JET)
+                for i in range(key_access_map.shape[0]):
+                    path = f'dummy_access_map_fullres_{i}.png'
+                    cv2.imwrite(path, (key_access_map[i] * 255).astype(np.uint8))
+                    print(f'saved {path}')
+            # render_access_map_fullres()
             
-            # plot num newly introduced key
-            key_access_mask = (key_access_map > 0).astype(np.int32)
-            unique_issue = np.clip(key_access_mask[:, 1:, :] - key_access_mask[:, :-1, :], 0, 1)
-            unique_issue = np.sum(unique_issue, axis=-1)
-            xs = np.arange(block_size_q, TDST, block_size_q)
-            for i in range(unique_issue.shape[0]):
-                plt.plot(xs, unique_issue[i])
+            # plot key access map
+            def render_access_map():
+                img = key_access_map[0]
+                img = img_reduce(img, 1, block_size_q)
+                plt.figure(figsize=(4, 4))
+                plt.imshow(img)
+                plt.colorbar()
+                plt.title(f'avg access count (T={TSRC}, bq={block_size_q}, bk={block_size_k})')
+                plt.tight_layout()
+                plt.savefig('dummy_access.png', dpi=96, bbox_inches='tight')
+                print('saved dummy_access.png')
+            # render_access_map()
             
-            plt.title(f'unique access (T={TSRC})')
-            plt.grid()
-            plt.tight_layout()
-            plt.savefig('dummy_unique_access.png', dpi=96, bbox_inches='tight')
-            print('saved dummy_unique_access.png')
-            
-            def render_remain(window_size):
+            def render_remain(window_size, prefetch_next_tokens, prefetch_middle_tokens):
                 plt.figure(figsize=(6, 4))
                 key_access_mask = (key_access_map > 0).astype(np.int32)
                 key_remain_mask = key_access_mask[:, window_size-1:, :].copy()
+                
+                # rule 1: keep past N steps
                 for i in range(window_size - 1):
                     key_remain_mask += key_access_mask[:, i:key_access_mask.shape[1] - window_size + 1 + i, :]
                 key_remain_mask = np.clip(key_remain_mask, 0, 1)
+                
+                # rule 2: prefetch next tokens
+                if prefetch_next_tokens:
+                    shift = block_size_k
+                    key_remain_mask[:, 1:, shift:] = np.clip(key_remain_mask[:, 1:, shift:] + key_access_mask[:, window_size-1:-1, :-shift], 0, 1)
+                
+                # rule 3: prefetch middle tokens
+                if prefetch_middle_tokens:
+                    pass
                 
                 unique_remain_issue = np.clip(key_remain_mask[:, 1:, :] - key_remain_mask[:, :-1, :], 0, 1)
                 unique_remain_issue = np.sum(unique_remain_issue, axis=-1)
@@ -3960,13 +4145,178 @@ def hip_masking(
                 plt.title(f'newly requested key\n(T={TSRC}, wnd={window_size * block_size_q} steps, last cache size={int(last_cache_keys)}, last request size={int(last_unique_remain_issue)})')
                 plt.grid()
                 plt.tight_layout()
-                plt.savefig(f'dummy_unique_remain_{window_size}.png', dpi=96, bbox_inches='tight')
-                print(f'saved dummy_unique_remain_{window_size}.png')
-            render_remain(1)
-            render_remain(2)
-            render_remain(4)
-            render_remain(8)
-            render_remain(16)
+                path = f'dummy_unique_remain_wnd{window_size}_pnext{prefetch_next_tokens}.png'
+                plt.savefig(path, dpi=96, bbox_inches='tight')
+                print(f'saved {path}')
+            # render_remain(1, False, False)
+            # render_remain(2, False, False)
+            # render_remain(4, False, False)
+            # render_remain(8, False, False)
+            # render_remain(16, False, False)
+            
+            # render_remain(1, True, False)
+            # render_remain(2, True, False)
+            
+            def plot_stats(
+                name,
+                loaded_key_mask,
+            ):
+                # calc fetchs
+                fetched_key_mask = loaded_key_mask[:, 1:, :] - loaded_key_mask[:, :-1, :]
+                fetched_key_mask = np.clip(fetched_key_mask, 0, 1)
+                
+                # calc misses
+                missed_key_mask = np.clip(key_access_mask[:, 1:, :] - loaded_key_mask[:, 1:, :], 0, 1)
+                
+                cv2.imwrite(f'dummy_{name}_loaded.png', loaded_key_mask[0, 1:, :] * 255)
+                cv2.imwrite(f'dummy_{name}_fetched.png', fetched_key_mask[0] * 255)
+                cv2.imwrite(f'dummy_{name}_missed.png', missed_key_mask[0] * 255)
+                cv2.imwrite(f'dummy_{name}_accessed.png', key_access_mask[0, 1:, :] * 255)
+                
+                # 0 (black): not loaded
+                # 1 (white): loaded but not used
+                # 2 (green): cache hit
+                # 3 (red): missed
+                load_map = cache_map = loaded_key_mask[0, 1:, :]
+                access_map = key_access_map[0, 1:, :]
+                cache_map = np.where(load_map * access_map, 2, cache_map)
+                cache_map = np.where((1 - load_map) * access_map, 3, cache_map)
+                colormap = np.array([
+                    [0, 0, 0],
+                    [255,255,255],
+                    [0,255,0],
+                    [0,0,255],
+                ], dtype=np.int64)
+                H, W = cache_map.shape
+                cache_image = np.take(colormap.reshape(1, 1, 4, 3), cache_map.reshape(H, W, 1, 1), axis=-2)
+                cache_image = np.reshape(cache_image, (H, W, 3))
+                cv2.imwrite(f'dummy_{name}_combined.png', cache_image)
+                
+                accessed_key_counts = key_access_mask[:, 1:, :].sum(axis=-1)
+                loaded_key_counts = loaded_key_mask[:, 1:, :].sum(axis=-1)
+                fetched_key_counts = fetched_key_mask.sum(axis=-1)
+                missed_key_counts = missed_key_mask.sum(axis=-1)
+                xs = np.arange(block_size_q, TDST, block_size_q)
+                
+                plt.figure(figsize=(8, 12))
+                plt.plot(xs, loaded_key_counts.T, color='gray')
+                plt.plot(xs, fetched_key_counts.T, color='green')
+                plt.plot(xs, missed_key_counts.T, color='red')
+                plt.plot(xs, fetched_key_counts.T + missed_key_counts.T, color='orange')
+                plt.plot(xs, accessed_key_counts.T, color='blue')
+                plt.axhline(TSRC / block_stride_k, color='darkgray')
+                plt.grid()
+                filename = f'dummy_{name}_stats'
+                path = f'{filename}.png'
+                plt.savefig(path, dpi=96)
+                print(f'saved {path}')
+                
+                accessed_count = accessed_key_counts.T[-1].mean()
+                missed_count = missed_key_counts.T[-1].mean()
+                print(f'cache hit ratio: {(1 - missed_count / accessed_count) * 100:.4f}')
+                
+                fetched_count = fetched_key_counts.T[-1].mean()
+                fetched_mb = fetched_count * 32 * 32 * 128 / 1024 / 1024
+                print(f'fetched tokens: {fetched_count:.1f}, {fetched_mb:.4f} MB, took {fetched_mb / 32:.2f} ms (bsz=1) / {fetched_mb / 32 * 16:.2f} ms (bsz=16) in PCIe 4.0')
+            
+            def render_heuristics():
+                loaded_key_mask = np.zeros_like(key_access_mask)
+
+                # load pre N steps
+                keep_past_n_steps = 1
+                for i in range(1, keep_past_n_steps+1):
+                    loaded_key_mask[:, i:, :] += key_access_mask[:, :-i, :]
+                loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                
+                # prefetch few iteration representatives and shift others
+                first_iteration_mask = np.zeros_like(loaded_key_mask)
+                incr_first_iteration(
+                    first_iteration_mask,
+                    block_size_q,
+                    mask_k,
+                    block_size_k,
+                    block_stride_k,
+                    sliding_window_size,
+                )
+                
+                # uncomment this, for adding shift
+                loaded_key_mask = np.clip(loaded_key_mask - first_iteration_mask, 0, 1)
+                # loaded_key_mask[:, 1:, block_size_k:] += loaded_key_mask[:, :-1, :-block_size_k].copy()
+                
+                # union pre N steps
+                union_past_n_steps = 1
+                loaded_key_mask_no_union = loaded_key_mask.copy()
+                for i in range(1, union_past_n_steps+1):
+                    loaded_key_mask[:, i:, :] += loaded_key_mask_no_union[:, :-i, :]
+                loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                
+                loaded_key_mask += first_iteration_mask
+                loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                
+                # plot stats
+                plot_stats('heuristic', loaded_key_mask)
+            # render_heuristics()
+            
+            def render_lru(lru_budget=1024):
+                loaded_key_mask = perform_lru(
+                    key_access_map, 
+                    key_access_log.cpu().numpy(), 
+                    key_access_count.cpu().numpy(), 
+                    lru_budget
+                )
+                # incr_first_iteration(
+                #     loaded_key_mask,
+                #     block_size_q,
+                #     mask_k,
+                #     block_size_k,
+                #     block_stride_k,
+                #     sliding_window_size,
+                # )
+                loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                plot_stats(f'lru_{lru_budget}', loaded_key_mask)
+            # render_lru(1024) # 3.12%
+            # render_lru(2048) # 6.25%
+            
+            def render_lfu(lfu_budget=1024):
+                loaded_key_map = perform_lfu(
+                    key_access_map, 
+                    key_access_log.cpu().numpy(), 
+                    key_access_count.cpu().numpy(), 
+                    lfu_budget
+                )
+                # incr_first_iteration(
+                #     loaded_key_mask,
+                #     block_size_q,
+                #     mask_k,
+                #     block_size_k,
+                #     block_stride_k,
+                #     sliding_window_size,
+                # )
+                loaded_key_mask = np.clip(loaded_key_map, 0, 1)
+                plot_stats(f'lfu_{lfu_budget}', loaded_key_mask)
+            # render_lfu(1024) # 3.12%
+            # render_lfu(2048) # 6.25%
+            
+            def render_lru_scaling(lru_budget=1024):
+                loaded_key_mask = perform_lru_scaling(
+                    key_access_map, 
+                    key_access_log.cpu().numpy(), 
+                    key_access_count.cpu().numpy(), 
+                    lru_budget
+                )
+                # incr_first_iteration(
+                #     loaded_key_mask,
+                #     block_size_q,
+                #     mask_k,
+                #     block_size_k,
+                #     block_stride_k,
+                #     sliding_window_size,
+                # )
+                loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                plot_stats(f'lru_scaling_{lru_budget}', loaded_key_mask)
+            render_lru_scaling(1024) # 12.5%
+            render_lru_scaling(2048) # 25.0%
+            render_lru_scaling(4096) # 50.0%
         # input('>>>')
     
     return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
