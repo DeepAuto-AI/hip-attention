@@ -3787,13 +3787,32 @@ def perform_lru_scaling(
             
             # scale cache first
             if ibdst > (sliding_window_size // block_size_q):
+                # for _icache in range(lru_budget):
+                #     icache = lru_budget - _icache - 1
+                #     current_pointer = loaded_key_value[ib, icache]
+                #     if current_pointer >= 0:
+                #         first_ibdst = loaded_key_first_stamp[ib, icache]
+                #         new_position = loaded_key_first_value[ib, icache] * (ibdst / (first_ibdst - 1))
+                #         new_position = (new_position // block_size_k) * block_size_k + loaded_key_first_value[ib, icache] % block_size_k
+                #         loaded_key_value[ib, icache] = -1
+                #         if new_position not in loaded_key_value[ib]:
+                #             loaded_key_value[ib, icache] = new_position
+                #             if current_pointer != new_position:
+                #                 loaded_key_last_stamp[ib, icache] = first_ibdst
+                #         else:
+                #             loaded_key_value[ib, icache] = current_pointer
                 for _icache in range(lru_budget):
                     icache = lru_budget - _icache - 1
                     current_pointer = loaded_key_value[ib, icache]
                     if current_pointer >= 0:
                         first_ibdst = loaded_key_first_stamp[ib, icache]
-                        new_position = loaded_key_first_value[ib, icache] * (ibdst / (first_ibdst - 1))
-                        new_position = (new_position // block_size_k) * block_size_k + loaded_key_first_value[ib, icache] % block_size_k
+                        first_value = loaded_key_first_value[ib, icache]
+                        first_offset = first_value % block_size_k
+                        new_position = (first_value // block_size_k) / first_ibdst * ibdst
+                        new_position = math.ceil(new_position) * block_size_k + first_offset
+                        
+                        # print(first_value, first_offset, current_pointer, new_position, new_position % )
+                        
                         loaded_key_value[ib, icache] = -1
                         if new_position not in loaded_key_value[ib]:
                             loaded_key_value[ib, icache] = new_position
@@ -3818,11 +3837,19 @@ def perform_lru_scaling(
                             least_timestamp_idx = icache
                 # else, evict victim
                 if not in_cache:
-                    loaded_key_value[ib, least_timestamp_idx] = current_pointer
-                    loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
-                    loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst
-                    loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
-            # submit to mask for debug
+                    new_position = (current_pointer // block_size_k) / (ibdst - 1) * ibdst
+                    new_position = math.ceil(new_position) * block_size_k + (current_pointer % block_size_k)
+                    if new_position not in loaded_key_value[ib, :]:
+                        loaded_key_value[ib, least_timestamp_idx] = new_position
+                        loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
+                        loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
+                        loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
+                    else:
+                        loaded_key_value[ib, least_timestamp_idx] = current_pointer
+                        loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
+                        loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
+                        loaded_key_last_stamp[ib, least_timestamp_idx] = ibdst
+            # submit to mask for debug, in realworld, time to fetch
             for icache in range(lru_budget):
                 idx = loaded_key_value[ib, icache]
                 if idx > 0:
