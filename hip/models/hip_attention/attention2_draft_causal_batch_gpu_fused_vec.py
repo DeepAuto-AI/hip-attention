@@ -3763,7 +3763,7 @@ def perform_lfu(
     return loaded_key_mask
 
 @numba.njit(parallel=True)
-def perform_lru_scaling(
+def perform_lru_heuristic(
     key_access_map,
     key_access_log,
     key_access_count,
@@ -3797,17 +3797,18 @@ def perform_lru_scaling(
                         new_position = (first_value // block_size_k) / first_ibdst * ibdst
                         new_position = math.ceil(new_position) * block_size_k + first_offset
                         
-                        # print(first_value, first_offset, current_pointer, new_position, new_position % )
-                        
-                        loaded_key_value[ib, icache] = -1
                         if new_position not in loaded_key_value[ib]:
                             loaded_key_value[ib, icache] = new_position
-                            # if current_pointer != new_position:
-                            #     loaded_key_last_stamp[ib, icache] = first_ibdst
                         else:
                             loaded_key_value[ib, icache] = current_pointer
+                            if new_position == current_pointer:
+                                # when keep position
+                                loaded_key_importance[ib, icache] -= 0
+                            else:
+                                # when collide
+                                loaded_key_importance[ib, icache] -= 1
             # try to add last accessed to LRU cache
-            loaded_key_importance[ib] -= 1 # decay freq if LFU
+            # loaded_key_importance[ib] -= 1 # decay freq if LFU
             for ik in range(last_accessed_count[ib]):
                 current_pointer = last_accessed[ib, ik]
                 in_cache = False
@@ -3815,8 +3816,8 @@ def perform_lru_scaling(
                 least_timestamp_idx = -1
                 for icache in range(lru_budget):
                     if loaded_key_value[ib, icache] == current_pointer:
-                        # loaded_key_importance[ib, icache] = ibdst
-                        loaded_key_importance[ib, icache] += 3
+                        loaded_key_importance[ib, icache] = ibdst
+                        # loaded_key_importance[ib, icache] += 3
                         # if in LRU cache, update life
                         in_cache = True
                     else:
@@ -3833,6 +3834,12 @@ def perform_lru_scaling(
                         loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
                         loaded_key_importance[ib, least_timestamp_idx] = ibdst
                     else:
+                        for i in range(len(loaded_key_value[ib, :])):
+                            if loaded_key_value[ib, i] == new_position:
+                                loaded_key_value[ib, i] = new_position
+                                loaded_key_first_value[ib, i] = current_pointer
+                                loaded_key_first_stamp[ib, i] = ibdst - 1
+                                loaded_key_importance[ib, i] = ibdst
                         loaded_key_value[ib, least_timestamp_idx] = current_pointer
                         loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
                         loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
@@ -4312,8 +4319,8 @@ def hip_masking(
             # render_lfu(1024) # 3.12%
             # render_lfu(2048) # 6.25%
             
-            def render_lru_scaling(lru_budget=1024):
-                loaded_key_mask = perform_lru_scaling(
+            def render_lru_heuristic(lru_budget=1024):
+                loaded_key_mask = perform_lru_heuristic(
                     key_access_map, 
                     key_access_log.cpu().numpy(), 
                     key_access_count.cpu().numpy(), 
@@ -4331,10 +4338,10 @@ def hip_masking(
                 #     sliding_window_size,
                 # )
                 loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
-                plot_stats(f'lru_scaling_{lru_budget}', loaded_key_mask)
-            render_lru_scaling(1024) # 12.5%
-            render_lru_scaling(2048) # 25.0%
-            render_lru_scaling(4096) # 50.0%
+                plot_stats(f'lru_heuristic_{lru_budget}', loaded_key_mask)
+            render_lru_heuristic(1024) # 12.5%
+            render_lru_heuristic(2048) # 25.0%
+            render_lru_heuristic(4096) # 50.0%
         # input('>>>')
     
     return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
