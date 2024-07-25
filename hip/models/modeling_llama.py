@@ -320,7 +320,7 @@ class LlamaAttention(nn.Module):
                 base=self.rope_theta,
             )
         else:
-            scaling_type = self.config.rope_scaling["type"]
+            scaling_type = self.config.rope_scaling.get("rope_type", self.config.rope_scaling.get("type"))
             scaling_factor = self.config.rope_scaling["factor"]
             if scaling_type == "linear":
                 self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
@@ -331,6 +331,14 @@ class LlamaAttention(nn.Module):
                 )
             elif scaling_type == "dynamic":
                 self.rotary_emb = LlamaDynamicNTKScalingRotaryEmbedding(
+                    self.head_dim,
+                    max_position_embeddings=self.max_position_embeddings,
+                    scaling_factor=scaling_factor,
+                    base=self.rope_theta,
+                )
+            elif scaling_type == 'llama3':
+                warnings.warn('LLAMA3 IS NOT SUPPORTED YET!!!')
+                self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
                     self.head_dim,
                     max_position_embeddings=self.max_position_embeddings,
                     scaling_factor=scaling_factor,
@@ -733,7 +741,7 @@ class LlamaCustomAttention(LlamaAttention):
             # 0:4, 1:4, 2:4, 3:4,
         }
         self.tree_rope_method = 'none'
-        self.tree_enable_sparq = True
+        self.tree_enable_sparq = False
         self.tree_enable_flash = True
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
@@ -791,15 +799,15 @@ class LlamaCustomAttention(LlamaAttention):
 
     # Adapted from LlamaAttention.forward
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional["HiPCache"] = None,
-            output_attentions: bool = False,
-            output_attn_sparsity_loss: bool = False,
-            use_cache: bool = False,
-            cache_position: Optional[torch.LongTensor] = None,
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional["HiPCache"] = None,
+        output_attentions: bool = False,
+        output_attn_sparsity_loss: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
         bsz, q_len, _ = hidden_states.size()
@@ -835,8 +843,11 @@ class LlamaCustomAttention(LlamaAttention):
                     torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
                 )
 
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        if self.attention_method in ['hip', 'fa2', 'none']:
+            pass
+        else:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         causal_mask = attention_mask
         # if attention_mask is not None and cache_position is not None:
@@ -849,8 +860,8 @@ class LlamaCustomAttention(LlamaAttention):
 
         last_cumsum = None
         if past_key_value is not None:
-            assert hasattr(past_key_value, "cumsum")
-            last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+            if hasattr(past_key_value, "cumsum"):
+                last_cumsum = past_key_value.get_cumsum(self.layer_idx)
         
         # import matplotlib.pyplot as plt
         # q, k = apply_rotary_pos_emb(query_states[0].float(), key_states[0].float(), cos, sin, None)

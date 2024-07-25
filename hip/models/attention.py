@@ -1,11 +1,13 @@
 import os
 import torch
+import nvtx
 
 from hip.models.hip_attention.attention1_gpu import flash_attention
 from hip.models.hip_attention.attention1_block_gpu import hip_attention
 from hip.models.attn_l1_loss import compute_attn_lp_loss_triton
 
 
+@nvtx.annotate('custom_attention')
 def custom_attention(
     query_states, key_states, value_states,
     attention_mask, causal_mask,
@@ -89,7 +91,7 @@ def custom_attention(
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
         
         if query_states.shape == key_states.shape:
             if attention_method in ['none', 'fa2']:
@@ -115,16 +117,25 @@ def custom_attention(
             else:
                 raise Exception()
         else:
-            from torch.nn.attention import SDPBackend, sdpa_kernel
-            with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states,
-                    key_states,
-                    value_states,
-                    attn_mask=causal_mask,
-                    is_causal=causal_mask is None,
-                    dropout_p=attention_dropout,
+            if attention_method in ['none', 'fa2']:
+                attn_output = flash_attn_with_kvcache(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k_cache=key_states.permute(0, 2, 1, 3),
+                    v_cache=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=None,
+                    causal=True,
                 )
+            elif attention_method in ['sdpa']:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=causal_mask,
+                        is_causal=causal_mask is None,
+                        dropout_p=attention_dropout,
+                    )
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -265,10 +276,12 @@ def custom_attention(
                 # k = k.reshape(N * H, TSRC, HID)
                 # v = v.reshape(N * H, TSRC, HID)
                 
-                q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                # q_quant = q
-                # k_quant = k
+                if q.shape == k.shape:
+                    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                else:
+                    q_quant = q
+                    k_quant = k
                 
                 # print(q.shape, k.shape, v.shape)
                 
