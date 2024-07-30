@@ -3,12 +3,12 @@ from hip.models.hip_attention.attention1_block_gpu import (
     paged_hip_attention,
 )
 from hip.models.attention import custom_attention
-from hip.models.modeling_llama import HiPCache
+from hip.models.modeling_llama import LlamaForCausalLM as HipLlamaForCausalLM
 
 __version__ = '0.0.1'
 __all__ = [
     'hip_attention',
     'paged_hip_attention',
     'custom_attention',
-    'HiPCache',
+    'HipLlamaForCausalLM',
 ]

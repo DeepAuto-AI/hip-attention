@@ -82,18 +82,24 @@ def custom_attention(
     @return: Attention output, last cumsum, attention sparsity loss
     """
     attn_sparsity_loss = None
+    
+    N, H, T, HID = query_states.shape
+    _N, _H, _T, _HID = key_states.shape
+    is_prompt = (N, T, HID) == (_N, _T, _HID)
+    assert (H % _H) == 0
+    H_KV = _H
 
     if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda":
+        if query_states.device.type == "cuda" and attention_method == 'sdpa':
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
         from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
         
-        if query_states.shape == key_states.shape:
+        if is_prompt:
             if attention_method in ['none', 'fa2']:
                 assert causal_mask is None
                 attn_output = flash_attn_func(
@@ -124,7 +130,7 @@ def custom_attention(
                     v_cache=value_states.permute(0, 2, 1, 3),
                     softmax_scale=None,
                     causal=True,
-                )
+                ).permute(0, 2, 1, 3)
             elif attention_method in ['sdpa']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
                 with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
@@ -218,8 +224,8 @@ def custom_attention(
                 # ).to(torch.int32)
                 
                 q = q.reshape(N * H, TDST, HID)  # .contiguous()
-                k = k.reshape(N * H, TSRC, HID)  # .contiguous()
-                v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+                k = k.reshape(N * H_KV, TSRC, HID)  # .contiguous()
+                v = v.reshape(N * H_KV, TSRC, HID)  # .contiguous()
                 q_hip = q[:, :, :]
                 
                 attn_output_hip, _ = hip_attention(
@@ -283,8 +289,6 @@ def custom_attention(
                     q_quant = q
                     k_quant = k
                 
-                # print(q.shape, k.shape, v.shape)
-                
                 attn_output_hip, _ = hip_attention_draft(
                     q, k, v,
                     
@@ -329,13 +333,13 @@ def custom_attention(
                     q_quant=q_quant,
                     k_quant=k_quant,
                 )
-                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3).contiguous()
+                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
             torch.save({
-                'q': q_hip,
-                'k': k[:, :LAST_DENSE_QUERIES, :],
-                'v': v[:, :LAST_DENSE_QUERIES, :],
+                'q': q,
+                'k': k,
+                'v': v,
                 'mask_k': tree_k,
                 'block_size_q': tree_block_size_q,
                 'block_size_k': tree_block_size_k,
