@@ -33,6 +33,9 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
 
     os.makedirs('./cache', exist_ok=True)
     cache_path = f'./cache/llama_eval_{args.dataset}_{args.model}.pth'
+    PG19_BOOK_INDEX = int(os.getenv('PG19_BOOK_INDEX', '-1'))
+    if PG19_BOOK_INDEX >= 0:
+        cache_path = 'none'
     if not os.path.exists(cache_path):
         assert args.dataset in ['wikitext', 'pg19']
         if args.dataset == 'wikitext':
@@ -40,9 +43,19 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
             sequence = "\n\n".join(test["text"])
         elif args.dataset == 'pg19':
             test = load_dataset("emozilla/pg19-test", split="test")
-            sequence = "\n\n".join(test["text"])
-        encodings = tokenizer(sequence, return_tensors="pt").input_ids
-        torch.save(encodings, cache_path)
+            books = test["text"]
+            if PG19_BOOK_INDEX >= 0:
+                books = list(sorted(books, key=lambda x: tokenizer(x, return_tensors="pt").input_ids.size(1)))
+                sequence = books[PG19_BOOK_INDEX]
+            else:
+                sequence = "\n\n".join(books)
+        if isinstance(sequence, torch.Tensor):
+            encodings = sequence
+        else:
+            encodings = tokenizer(sequence, return_tensors="pt").input_ids
+        print(encodings.shape)
+        if PG19_BOOK_INDEX < 0:
+            torch.save(encodings, cache_path)
     else:
         encodings = torch.load(cache_path)
 

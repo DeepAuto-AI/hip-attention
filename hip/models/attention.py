@@ -300,7 +300,7 @@ def custom_attention(
                     block_stride_k=max(2, tree_block_size_k // 2),
                     block_size_k_group=1,
                     
-                    sliding_window_size=512,
+                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '512')),
                     sink_token_size=32,
                     
                     using_extend=False,
@@ -310,8 +310,8 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method='first',
-                    branch_method='half',
+                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
+                    branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=False,

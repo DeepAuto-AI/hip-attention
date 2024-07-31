@@ -28,6 +28,7 @@ from torch.utils.dlpack import from_dlpack
 import cupy as cp
 import random, os
 import warnings
+import tqdm
 import triton
 import triton.language as tl
 import torch
@@ -3922,7 +3923,7 @@ def hip_masking(
     if step_size is None:
         step_size = cdiv_python(q.shape[1], block_size_q)
     assert step_size > 0
-    assert step_size <= cdiv_python(q.shape[1], block_size_q)
+    assert step_size <= cdiv_python(q.shape[1], block_size_q), f'{step_size} <= {cdiv_python(q.shape[1], block_size_q)}'
     
     if using_sparq:
         raise Exception('vectorized head')
@@ -4377,12 +4378,12 @@ def hip_attention(
     
     block_size_q: int = 32,
     block_stride_q: int = 2,
-    block_size_k: int = 2,
-    block_stride_k: int = 2,
+    block_size_k: int = 8,
+    block_stride_k: int = 4,
     block_size_k_group: int = 1,
     
-    sliding_window_size: int = 256,
-    sink_token_size: int = 16,
+    sliding_window_size: int = 512,
+    sink_token_size: int = 32,
     
     using_extend: bool = False,
     rope_cos: Optional[Tensor] = None,
@@ -4395,7 +4396,7 @@ def hip_attention(
     branch_method: str = 'half',
     
     traverse_from_last_step: bool = False,
-    step_size: int = 64,
+    step_size: Optional[int] = None,
     num_samples: int = 1,
     chunk_size: Optional[int] = None,
     num_unions: int = 1,
@@ -4470,6 +4471,20 @@ def hip_attention(
         
         output_key_access_log=output_key_access_log,
     )
+    
+    HIP_RANDOM_MASK = os.getenv('HIP_RANDOM_MASK', '0') == '1'
+    if HIP_RANDOM_MASK:
+        for ib in tqdm.tqdm(range(indices.shape[0])):
+            for ibdst in range(indices.shape[1]):
+                assert topk_head_group_size == 1
+                K = indices.shape[-1]
+                tsrc = (ibdst + 1) * block_size_q - sliding_window_size
+                if tsrc > mask_k:
+                    rand_ids = torch.arange(block_size_k, tsrc, block_size_k, device=indices.device)
+                    rp = torch.randperm(len(rand_ids), device=indices.device)
+                    rand_ids = rand_ids[rp][:K-1] * block_size_k
+                    indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
+                    indices[ib, ibdst, 0] = 0
     
     # return None, None
     
