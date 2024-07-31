@@ -4601,7 +4601,8 @@ def main():
             q_quant=q_quant,
             k_quant=k_quant,
             
-            output_key_access_log=False,
+            # NOTE: change this to True to simulate key cache algorithms
+            output_key_access_log=True,
         )
     
     if 'HIP_DEBUG' not in os.environ:

@@ -115,7 +115,8 @@ def load_model(args):
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
-        'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+        'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
+        'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
@@ -146,6 +147,12 @@ def load_model(args):
     ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
         ModelClass = Qwen2ForCausalLM
+    if args.method == 'h2o':
+        from hip.models.h2o_llama import H2OLlamaForCausalLM
+        ModelClass = H2OLlamaForCausalLM
+        config.hh_size = args.k // 2
+        config.recent_size = args.k // 2
+        config._attn_implementation = config.attn_implementation = 'eager'
 
     model = ModelClass.from_pretrained(
         model_id,
@@ -162,6 +169,7 @@ def load_model(args):
             bnb_4bit_quant_type="nf4",
         ) if not args.no_quantize else None,
         torch_dtype=infer_dtype,
+        # torch_dtype=torch.float32,
         trust_remote_code=True,
     )
     
