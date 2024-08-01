@@ -524,12 +524,25 @@ class LlamaCustomAttention(LlamaAttention):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            
+        if self.layer_idx in self.tree_dense_layers:
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        else:
+            if self.attention_method == 'streaming_llm':
+                cos = sin = None
+            else:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if cos is None:
+                cos, sin = self.rotary_emb(
+                    value_states,
+                    torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                )
         
         # NOTE: HiP, FA2 supports GQA, MQA natively.
         if self.attention_method not in ['hip', 'fa2', 'none']:
