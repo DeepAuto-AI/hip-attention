@@ -1735,7 +1735,7 @@ def main_latency_benchmark():
                     block_size_k=args.block_size_k,
                     q_quant=q_quant,
                     k_quant=k_quant,
-                    sample_method='center'
+                    # sample_method='center'
                 )
             elif METHOD == 'hip':
                 if state is None:
