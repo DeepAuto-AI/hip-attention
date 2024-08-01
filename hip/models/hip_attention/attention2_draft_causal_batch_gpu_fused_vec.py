@@ -2361,12 +2361,12 @@ def masking_iteration_draft(
         (B, BDST, indices.shape[-1] * 2),
         dtype=torch.int32, device=q.device,
     )
-    scores = torch.empty_like(dupped_indices, dtype=torch.float32)
+    scores = torch.empty_like(dupped_indices, dtype=torch.bfloat16)
     probs = torch.empty_like(scores)
     if (scores_seed is not None) and sample_method == 'first':
         scores_final = scores_seed.clone()
     else:
-        scores_final = torch.zeros_like(indices, dtype=torch.float32)
+        scores_final = torch.zeros_like(indices, dtype=torch.bfloat16)
         
         # BLOCK_BK = 128 // block_size_k
         # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
@@ -4479,7 +4479,8 @@ def hip_attention(
             for ibdst in range(indices.shape[1]):
                 assert topk_head_group_size == 1
                 K = indices.shape[-1]
-                tsrc = (ibdst + 1) * block_size_q - sliding_window_size
+                tsrc = (ibdst + 1) * block_size_q - sliding_window_size + k.shape[-2] - q.shape[-2]
+                tsrc = tsrc - (tsrc % block_size_q)
                 if tsrc > mask_k:
                     rand_ids = torch.arange(block_size_k, tsrc, block_size_k, device=indices.device)
                     rp = torch.randperm(len(rand_ids), device=indices.device)
