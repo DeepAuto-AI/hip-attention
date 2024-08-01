@@ -1524,11 +1524,12 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     warnings.warn('triton autotune will slow down startup!')
     configs = []
-    # for num_warps in [1, 2, 4, 8, 16]:
-    for num_warps in [4,]:
-        for num_stages in [2]:
-            # for num_regs in [64, 128, 256]:
-            for num_regs in [256]:
+    for num_warps in [2, 4, 8]:
+    # for num_warps in [4,]:
+        for num_stages in [2,]:
+        # for num_stages in [2]:
+            for num_regs in [64, 128, 256]:
+            # for num_regs in [256]:
                 configs.append(triton.Config(
                     {}, 
                     num_warps=num_warps, 
@@ -2453,9 +2454,9 @@ def masking_iteration_draft(
         assert score_head_group_size == 1
         
         if not scores_cached:
-            BLOCK_BK = mask_k // block_size_k * G
+            BLOCK_BK = mask_k // (block_size_k // block_stride_k) * G // 4
         else:
-            BLOCK_BK = mask_k // block_size_k * G // 2
+            BLOCK_BK = mask_k // (block_size_k // block_stride_k) * G // 8
         # BLOCK_BK = indices.shape[-1]
         # BLOCK_BK = indices.shape[-1] // 4
         
