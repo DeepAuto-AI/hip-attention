@@ -1517,8 +1517,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             cache_position=cache_position,
         )
 
+        loss = None
         hidden_states = outputs[0]
-        if not self.training and not output_logits:
+        if not self.training and not output_logits and past_key_values is None:
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
                 from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce

@@ -2361,12 +2361,12 @@ def masking_iteration_draft(
         (B, BDST, indices.shape[-1] * 2),
         dtype=torch.int32, device=q.device,
     )
-    scores = torch.empty_like(dupped_indices, dtype=torch.bfloat16)
+    scores = torch.empty_like(dupped_indices, dtype=torch.float32)
     probs = torch.empty_like(scores)
-    if scores_seed is not None:
+    if (scores_seed is not None) and sample_method == 'first':
         scores_final = scores_seed.clone()
     else:
-        scores_final = torch.zeros_like(indices, dtype=torch.bfloat16)
+        scores_final = torch.zeros_like(indices, dtype=torch.float32)
         
         # BLOCK_BK = 128 // block_size_k
         # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
@@ -2425,7 +2425,8 @@ def masking_iteration_draft(
         # print(scores.shape, key_access_log.shape, key_access_count.shape)
         # print('access count', key_access_count[0])
         # print('access log', key_access_log[0, -1, :key_access_count[0, -1].item()].tolist())
-    scores_cached = True
+    scores_cached = sample_method == 'first'
+    # scores_cached = False
     
     BLOCK_BK = 256 // 2 // block_size_k
     assert BLOCK_BK > 0

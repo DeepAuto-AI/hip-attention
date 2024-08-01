@@ -298,6 +298,7 @@ def custom_attention(
                     block_stride_q=2,
                     block_size_k=tree_block_size_k,
                     block_stride_k=max(2, tree_block_size_k // 2),
+                    # block_stride_k=1,
                     block_size_k_group=1,
                     
                     sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '512')),

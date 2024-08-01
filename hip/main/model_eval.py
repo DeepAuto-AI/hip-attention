@@ -20,6 +20,8 @@ from hip.main.jobs.mmlu import job_mmlu
 from hip.main.jobs.ppl import job_ppl
 from hip.main.jobs.stream import job_stream
 from hip.main.jobs.stream_demo import job_stream_demo
+from hip.main.jobs.greedy_replace import job_greedy_replace
+from hip.main.jobs.passkey import job_passkey
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from hip.utils import seed
@@ -249,7 +251,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey']
     
     model, tokenizer, device = load_model(args)
 
@@ -267,6 +269,10 @@ def main():
         job_merge_lora(args, model, tokenizer, device)
     elif args.job == 'stream_demo':
         job_stream_demo(args, model, tokenizer, device)
+    elif args.job == 'greedy_replace':
+        job_greedy_replace(args, model, tokenizer, device)
+    elif args.job == 'passkey':
+        job_passkey(args, model, tokenizer, device)
     else:
         raise Exception()
 

@@ -17,7 +17,7 @@ from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.utils import seed, get_bench
 
 @torch.inference_mode
-def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
+def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=False):
     try:
         from vllm import LLM, SamplingParams
     except ModuleNotFoundError:
@@ -26,7 +26,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
     
     outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
-    print("Will write to", outfile)
+    if not quite:
+        print("Will write to", outfile)
     if os.path.exists(outfile) and not args.overwrite:
         print(f'PPL already computed, skipping: {outfile}')
         return
@@ -63,12 +64,13 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
     max_length = stride = args.stride if args.stride > 0 else max_length
     seq_len = encodings.size(1)
     
-    print(f'[{args.dataset}] {seq_len} tokens loaded')
+    if not quite:
+        print(f'[{args.dataset}] {seq_len} tokens loaded')
 
     nlls = []
     prev_end_loc = 0
     t = time.time()
-    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True) as pbar:
+    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True, disable=quite) as pbar:
         for begin_loc in pbar:
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
@@ -145,7 +147,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
             prev_end_loc = end_loc
             
             ppl = torch.exp(torch.stack(nlls).mean()).item()
-            tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
+            if not quite:
+                tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
             t = time.time()
             pbar.set_description(f"ppl: {ppl:.3f}")
             
@@ -158,4 +161,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device):
     with open(outfile, 'w') as f:
         json.dump({'ppl': ppl}, f)
 
-    print(f'PPL: {ppl:.4f}')
+    if not quite:
+        print(f'PPL: {ppl:.4f}')
+
+    return ppl
