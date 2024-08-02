@@ -155,6 +155,9 @@ def load_model(args):
         config.hh_size = args.k // 2
         config.recent_size = args.k // 2
         config._attn_implementation = config.attn_implementation = 'eager'
+    if args.method == 'tova':
+        from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
+        ModelClass = OriginalLlamaForCausalLM
 
     model = ModelClass.from_pretrained(
         model_id,
@@ -174,6 +177,11 @@ def load_model(args):
         # torch_dtype=torch.float32,
         trust_remote_code=True,
     )
+    
+    if args.method == 'tova':
+        from hip.models.tova.tova_cache import TOVACache
+        from hip.models.tova.convert_tova import enable_tova_caching
+        enable_tova_caching(model)
     
     for m in model.modules():
         if hasattr(m, 'attention_method'):

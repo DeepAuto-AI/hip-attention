@@ -35,13 +35,21 @@ def job_passkey(args, model, tokenizer, device):
         truth = tokenizer.batch_decode(target_ids)
         est = [get_numbers(s.strip())[:5] for s in tokenizer.batch_decode(output)]
         
+        t = tokenizer.batch_decode(input_ids)[0] # type: str
+        e = truth[0] # type: str
+        idx = t.find(e)
+        
+        location = idx / len(t)
+        location = int(location / 0.2) / 5
+        
         seq_len = input_ids.shape[1]
-        acc_sum, acc_count = accuracy.get(seq_len, (0, 0))
+        accuracy_key = (seq_len, location)
+        acc_sum, acc_count = accuracy.get(accuracy_key, (0, 0))
         for x, y in zip(truth, est):
             for cx, cy in zip(x, y):
                 if cx == cy:
                     acc_sum += 1
                 acc_count += 1
-        accuracy[seq_len] = (acc_sum, acc_count)
+        accuracy[accuracy_key] = (acc_sum, acc_count)
         
         tqdm.write(f"current accuracy { {k: f'{v[0] / v[1]*100:.2f}' for k, v in accuracy.items()} } | {truth[0]}, {est[0]}")

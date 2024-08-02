@@ -182,6 +182,16 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
+    elif attention_method == 'dynamic_sparse_flash_attention':
+        from hip.models.dynamic_sparse_flash_attention import attention_fn as dynamic_sparse_flash
+        q = query_states  # / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+        
+        attn_output = dynamic_sparse_flash(
+            q[:, :, :, :128], k[:, :, :, :128], v[:, :, :, :128], nb_hash=16, attention_dropout=0
+        )
+
     elif attention_method == 'hip' or attention_method == 'hip' or attention_method == 'tree':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states

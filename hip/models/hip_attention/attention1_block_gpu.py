@@ -1707,7 +1707,7 @@ def main_latency_benchmark():
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
-            elif METHOD == 'flash':
+            elif METHOD in ['flash', 'fa2']:
                 flash_attention(q, k, v, is_causal=is_causal)
             elif METHOD == 'landmark':
                 landmark_attention(q, k, v)
@@ -1733,9 +1733,10 @@ def main_latency_benchmark():
                     mask_k=args.k,
                     block_size_q=args.block_size_q,
                     block_size_k=args.block_size_k,
+                    block_stride_k=max(2, args.block_size_k//2),
                     q_quant=q_quant,
                     k_quant=k_quant,
-                    # sample_method='center'
+                    sample_method='center'
                 )
             elif METHOD == 'hip':
                 if state is None:

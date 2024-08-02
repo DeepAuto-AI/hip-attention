@@ -94,17 +94,31 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method == 'h2o':
+                            if args.method in ['h2o', 'tova']:
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
                                 prompt_target_ids = target_ids[:, :args.k]
                                 decode_ids = input_ids[:, args.k:]
-                                # decode_target_ids = target_ids[:, args.k:]
+                                
+                                kwargs = {
+                                    'output_logits': True
+                                }
+                                
+                                past_key_values = None
+                                if args.method == 'tova':
+                                    from hip.models.tova.tova_cache import TOVACache
+                                    past_key_values = TOVACache(args.k)
+                                    del kwargs['output_logits']
+                                    prompt_ids = input_ids[:, :2]
+                                    prompt_target_ids = target_ids[:, :2]
+                                    decode_ids = input_ids[:, 2:]
+                                
                                 outputs = model(
                                     prompt_ids,
                                     labels=prompt_target_ids,
-                                    output_logits=True,
+                                    past_key_values=past_key_values,
+                                    **kwargs,
                                 )
                                 loss_sum += outputs.loss * prompt_ids.shape[-1]
                                 loss_count += prompt_ids.shape[-1]
@@ -114,9 +128,10 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     outputs = model(
                                         curr_token,
                                         # labels=curr_target,
-                                        output_logits=True,
+                                        # output_logits=True,
                                         position_ids=torch.arange(curr_idx, curr_idx+1, device=curr_token.device)[None, :],
-                                        past_key_values=outputs.past_key_values
+                                        past_key_values=outputs.past_key_values,
+                                        **kwargs,
                                     )
                                     loss = torch.nn.functional.cross_entropy(
                                         outputs.logits.view(-1, model.config.vocab_size), 
@@ -124,7 +139,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     )
                                     loss_sum += loss * curr_token.shape[-1]
                                     loss_count += curr_token.shape[-1]
-                                    tqdm.write(f'H2O Loss idx={args.k+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                    tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
                                 for m in model.modules():
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
