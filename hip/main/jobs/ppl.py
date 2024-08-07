@@ -125,11 +125,26 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                 tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
                                 for curr_idx in tqdm(range(decode_ids.shape[-1]), dynamic_ncols=True):
                                     curr_token = decode_ids[:, curr_idx:curr_idx+1]
+                                    if args.method == 'tova':
+                                        position_ids = torch.arange(
+                                            curr_idx, 
+                                            curr_idx+1, 
+                                            device=curr_token.device
+                                        )[None, :]
+                                    elif args.method == 'h2o':
+                                        position_ids = torch.arange(
+                                            prompt_ids.shape[1]+curr_idx, 
+                                            prompt_ids.shape[1]+curr_idx+1, 
+                                            device=curr_token.device
+                                        )[None, :]
+                                    else:
+                                        raise Exception()
+
                                     outputs = model(
                                         curr_token,
                                         # labels=curr_target,
                                         # output_logits=True,
-                                        position_ids=torch.arange(curr_idx, curr_idx+1, device=curr_token.device)[None, :],
+                                        position_ids=position_ids,
                                         past_key_values=outputs.past_key_values,
                                         **kwargs,
                                     )

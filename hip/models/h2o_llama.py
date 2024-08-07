@@ -469,31 +469,69 @@ class H2OLlamaAttention(nn.Module):
         if not position_ids.nelement() > 1:
             if position_length < position_ids.item()+1:
                 position_length = position_ids.item()+1
-
-        # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
-        cos, sin = self.rotary_emb(value_states, position_ids)
         
-        ### Shift Pos: query pos is min(cache_size, idx)
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        query_states = apply_rotary_pos_emb_single(
-            query_states, 
-            cos, 
-            sin, 
-            torch.arange(0, position_ids.shape[-1], device=position_ids.device)[None, :].expand(position_ids.shape),
-        )
-        key_states = apply_rotary_pos_emb_single(
-            key_states, 
-            cos, 
-            sin, 
-            torch.arange(0, position_ids.shape[-1], device=position_ids.device)[None, :].expand(position_ids.shape),
-        )
+        """
+        NOTE: H2O has 3 variants
+        1. No touch on RoPE: official implementation
+        2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
+        3. StreamingLLM style RoPE: my own implementation
+        """
 
-        if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
+        shift_q_pos = False
+        streaming = True
+        
+        if streaming:
+            if past_key_value is not None:
+                # reuse k, v, self_attention
+                key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                value_states = torch.cat([past_key_value[1], value_states], dim=2)
+            
+            past_key_value = (key_states, value_states) if use_cache else None
+            
+            position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+            
+            # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+            # NOTE: grab all position embeddings
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            
+            ### Shift Pos: query pos is min(cache_size, idx)
+            query_states = apply_rotary_pos_emb_single(
+                query_states, 
+                cos, 
+                sin, 
+                position_ids[:, -q_len:],
+            )
+            key_states = apply_rotary_pos_emb_single(
+                key_states, 
+                cos, 
+                sin, 
+                position_ids,
+            )
+        else:
+            # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+            # NOTE: grab all position embeddings
+            cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+            
+            ### Shift Pos: query pos is min(cache_size, idx)
+            query_states = apply_rotary_pos_emb_single(
+                query_states, 
+                cos, 
+                sin, 
+                torch.clamp_max(position_ids, kv_seq_len) if shift_q_pos else position_ids,
+            )
+            key_states = apply_rotary_pos_emb_single(
+                key_states, 
+                cos, 
+                sin, 
+                position_ids,
+            )
+            
+            if past_key_value is not None:
+                # reuse k, v, self_attention
+                key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                value_states = torch.cat([past_key_value[1], value_states], dim=2)
+            
+            past_key_value = (key_states, value_states) if use_cache else None
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -524,7 +562,7 @@ class H2OLlamaAttention(nn.Module):
         past_key_value = self.kv_cache(past_key_value, attn_weights.detach().clone())
 
         attn_output = torch.matmul(attn_weights, value_states)
-
+        
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
