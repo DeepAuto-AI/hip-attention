@@ -325,11 +325,12 @@ def custom_attention(
                     branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=False,
-                    step_size=None,
-                    num_samples=1,
+                    traverse_from_last_step=True,
+                    step_size=1,
+                    num_samples=2,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    chunk_size=None,
+                    chunk_size=512,
+                    # BUG: union has bug now...
                     num_unions=1,
                     
                     score_head_group_size=1,
