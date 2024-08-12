@@ -24,7 +24,7 @@ def custom_attention(
     tree_block_size_k=2,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
-    tree_sampling_method='first',
+    tree_sampling_method='center',
 
     # Latency optimization tweaks
     tree_enable_flash=False, 
@@ -321,7 +321,7 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
+                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
                     branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
