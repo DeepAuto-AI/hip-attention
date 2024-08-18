@@ -338,7 +338,7 @@ class AttentionScoreFunc(Function):
                 
                 BLOCK_HID,
                 
-                num_warps=2,
+                num_warps=1,
                 num_stages=1,
             )
         except RuntimeError as ex:

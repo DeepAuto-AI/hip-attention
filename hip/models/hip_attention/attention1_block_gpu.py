@@ -1615,7 +1615,7 @@ def main_latency_benchmark():
     parser.add_argument('--query_size', type=int, default=1)
     parser.add_argument('--method', type=str, default='hip')
     parser.add_argument('--samples', type=int, default=200)
-    parser.add_argument('--block_size_q', type=int, default=16)
+    parser.add_argument('--block_size_q', type=int, default=32)
     parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--scale_up', type=int, default=2)
@@ -1673,7 +1673,7 @@ def main_latency_benchmark():
     head_size = q.shape[0]
     cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
     
-    if METHOD in ['flash', 'hip1.1']:
+    if METHOD in ['flash', 'fa2', 'hip1.1']:
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()

@@ -2026,6 +2026,24 @@ def masking_iteration_draft_cuda_initialize_score(
     stride_q_ind_bdst, 
     stride_q_ind_k,
     
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page,
+    stride_v_cache_offset,
+    stride_v_cache_kv_head,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_bsz,
+    
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -2153,9 +2171,10 @@ def masking_iteration_draft(
     max_group_size_seed: Optional[float] = None,
     indices_tdst: Optional[Tensor] = None,
 ):
-    assert q.device == k.device
     assert isinstance(q, Tensor)
-    assert isinstance(k, Tensor)
+    if k is not None:
+        assert q.device == k.device
+        assert isinstance(k, Tensor)
     
     if args.rope_cos is not None and args.using_extend:
         assert args.rope_cos.ndim == 2
@@ -2169,7 +2188,11 @@ def masking_iteration_draft(
         assert isinstance(args.rope_sin, Tensor)
     
     BSZ, TDST, HEAD, HID = q.shape
-    _, TSRC, KV_HEAD, HID = k.shape
+    if k is not None:
+        _, TSRC, KV_HEAD, HID = k.shape
+    else:
+        assert args.k_cache is not None
+        N_PAGES, PAGE_SIZE, KV_HEAD, HID = args.k_cache.shape
     KV_HEAD_REPEAT = HEAD // KV_HEAD
     assert KV_HEAD_REPEAT * KV_HEAD
     N = BSZ * HEAD
@@ -2179,15 +2202,23 @@ def masking_iteration_draft(
         indices_tdst_stride = indices_tdst.stride()
     else:
         indices_tdst_stride = (0,)
-    _, TSRC, _, _ = k.shape
     BDST = cdiv_python(TDST, args.block_size_q)
-    BSRC = cdiv_python(TSRC, args.block_size_k)
+    if k is not None:
+        _, TSRC, _, _ = k.shape
+        BSRC = cdiv_python(TSRC, args.block_size_k)
+        MAX_TSRC = TSRC
+        MAX_BSRC = BSRC
+    else:
+        TSRC = BSRC = None
+        MAX_TSRC = N_PAGES * PAGE_SIZE
+        MAX_BSRC = cdiv_python(MAX_TSRC, args.block_size_k)
     
     assert (N % args.topk_head_group_size) == 0, 'batch * n_head should divisible by head group size'
     
     # split batch-head dim into head groups
     q = q.view(BSZ, -1, HEAD // args.topk_head_group_size, args.topk_head_group_size, HID)
-    k = k.view(BSZ, TSRC, KV_HEAD, HID)
+    if k is not None:
+        k = k.view(BSZ, TSRC, KV_HEAD, HID)
     
     BSZ, _, BH, G, HID = q.shape
     B = BSZ * BH
@@ -2208,7 +2239,7 @@ def masking_iteration_draft(
             # head group is merged as single sequence
             G * mask_block_k,
         ), 
-        fill_value=(BSRC + args.block_size_k + args.block_size_q) * G, 
+        fill_value=(MAX_BSRC + args.block_size_k + args.block_size_q) * G, 
         dtype=torch.int32, 
         device=q.device
     )
@@ -2228,30 +2259,37 @@ def masking_iteration_draft(
             # always chunks are evenly distributed. fastest.
             max_group_strategy = 'best'
         
-        if max_group_strategy == 'oracle':
-            # > oracle      5.1117  18.4503 sec
-            max_group_size = torch.max(t_group_sizes).item()
-        elif max_group_strategy == 'best':
-            # > best case   5.1218  10.3745 sec
-            #   (not complete search if you gave seed)
-            max_group_size = triton.cdiv(BSRC, mask_block_k)
-        elif max_group_strategy == 'worst':
-            # > worst case  5.1097  17.6545 sec
-            #   (always complete search)
-            max_group_size = triton.cdiv(BSRC, args.block_size_k)
-        elif max_group_strategy == 'greedy':
-            # > greedy      5.1202  11.4861 sec
-            #   (slightly generous then best stratgy)
-            max_group_size = triton.cdiv(BSRC, mask_block_k) * 2
-        elif max_group_strategy == 'constant':
-            # TODO: test this
-            max_group_size = min(triton.cdiv(BSRC, args.block_size_k), 8)
+        if k is not None:
+            if max_group_strategy == 'oracle':
+                # > oracle      5.1117  18.4503 sec
+                max_group_size = torch.max(t_group_sizes).item()
+            elif max_group_strategy == 'best':
+                # > best case   5.1218  10.3745 sec
+                #   (not complete search if you gave seed)
+                max_group_size = triton.cdiv(BSRC, mask_block_k)
+            elif max_group_strategy == 'worst':
+                # > worst case  5.1097  17.6545 sec
+                #   (always complete search)
+                max_group_size = triton.cdiv(BSRC, args.block_size_k)
+            elif max_group_strategy == 'greedy':
+                # > greedy      5.1202  11.4861 sec
+                #   (slightly generous then best stratgy)
+                max_group_size = triton.cdiv(BSRC, mask_block_k) * 2
+            elif max_group_strategy == 'constant':
+                # TODO: test this
+                max_group_size = min(triton.cdiv(BSRC, args.block_size_k), 8)
+            else:
+                raise Exception()
         else:
-            raise Exception()
+            assert args.k_cache is not None
+            max_group_size = None
     else:
         max_group_size = max_group_size_seed
     
-    KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(max_group_size))
+    if max_group_size is not None:
+        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(max_group_size))
+    else:
+        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(triton.cdiv(MAX_BSRC, args.block_size_k)))
     if args.output_key_access_log:
         key_access_log = torch.empty(
             (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
@@ -2268,7 +2306,12 @@ def masking_iteration_draft(
         key_access_count = None
     
     assert len(q.stride()) == 5 # BSZ, MAX_TDST, BH, G, HID
-    assert len(k.stride()) == 4 # BSZ, MAX_TSRC, KV_HEAD, HID
+    if k is not None:
+        assert len(k.stride()) == 4 # BSZ, MAX_TSRC, KV_HEAD, HID
+    if args.k_cache is not None:
+        assert args.k_cache.ndim == 4 # N_PAGES, PAGE_SIZE, KV_HEAD, HID
+        assert args.block_table.ndim == 2 # BSZ, N_PAGES
+        assert args.cache_seq_lens.ndim == 1 # BSZ
     assert len(indices.stride()) == 3
     assert len(ks.stride()) == 2
     assert len(group_sizes.stride()) == 3
@@ -2312,7 +2355,7 @@ def masking_iteration_draft(
             
             args.sliding_window_size,
             
-            G, TDST, TSRC, HEAD,
+            G, TDST, MAX_TSRC, HEAD,
             
             BLOCK_MASK_BLOCK_K,
             
@@ -2382,6 +2425,7 @@ def masking_iteration_draft(
             
             *args.args_extend(),
             *args.args_sparq(),
+            *args.args_paged_kv_cache(),
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
@@ -2396,6 +2440,9 @@ def masking_iteration_draft(
         # print('access log', key_access_log[0, -1, :key_access_count[0, -1].item()].tolist())
     scores_cached = args.sample_method == 'first'
     # scores_cached = False
+    
+    torch.cuda.synchronize()
+    raise NotImplementedError()
     
     BLOCK_BK = 256 // 2 // args.block_size_k
     assert BLOCK_BK > 0
@@ -3224,7 +3271,7 @@ def masking_step_loop(
         if TSRC is not None:
             pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1)
         else:
-            pos_tdst = idx_tdst[None, :] + args.cache_seq_lens - TDST
+            pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(args.num_samples):
@@ -3791,7 +3838,15 @@ def hip_masking(
     key_access_log_sampled = []
     key_access_count_sampled = []
     for i_chunk_offset in range(0, args.chunk_size, args.chunk_size // args.num_unions):
-        indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count = masking_step_loop(
+        (
+            indices, 
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            scores, 
+            key_access_log, 
+            key_access_count
+        ) = masking_step_loop(
             q=q,
             k=k,
             chunk_offset=i_chunk_offset,
@@ -4227,6 +4282,12 @@ class HiPAttentionArgs:
     def clone(self):
         return copy.copy(self)
 
+    def safe_stride(self, x: Optional[Tensor], ndim: int):
+        if x is None:
+            return tuple([0,] * ndim)
+        else:
+            return x.stride()
+
     def get_q_quant(self, q: Tensor):
         return self.q_quant if self.q_quant is not None else q
 
@@ -4243,10 +4304,10 @@ class HiPAttentionArgs:
         )
     
     def args_rope_cos(self):
-        return self.rope_cos, *(self.rope_cos.stride() if self.rope_cos is not None else (0, 0)),
+        return self.rope_cos, *self.safe_stride(self.rope_cos, 2),
     
     def args_rope_sin(self):
-        return self.rope_sin, *(self.rope_sin.stride() if self.rope_sin is not None else (0, 0)),
+        return self.rope_sin, *self.safe_stride(self.rope_sin, 2),
 
     def args_sparq(self):
         if self.sparq_ind is None:
@@ -4260,7 +4321,7 @@ class HiPAttentionArgs:
         return (
             using_sparq,
             sparq_hid,
-            self.sparq_ind, *(self.sparq_ind.stride() if self.sparq_ind is not None else (0, 0, 0, 0)),
+            self.sparq_ind, *self.safe_stride(self.sparq_ind, 4),
         )
     
     def args_bq_bsq_bk_bsk(self):
@@ -4269,6 +4330,24 @@ class HiPAttentionArgs:
             self.block_stride_q,
             self.block_size_k,
             self.block_stride_k,
+        )
+    
+    def args_paged_kv_cache(self):
+        if self.k_cache is not None:
+            assert self.v_cache is not None
+            assert self.k_cache.ndim == self.v_cache.ndim
+            assert self.k_cache.ndim == 4
+            assert self.block_table is not None
+            assert self.block_table.ndim == 2
+            assert self.cache_seq_lens is not None
+            assert self.cache_seq_lens.ndim == 1
+        
+        return (
+            self.k_cache is not None,
+            self.k_cache, *self.safe_stride(self.k_cache, 4),
+            self.v_cache, *self.safe_stride(self.v_cache, 4),
+            self.block_table, *self.safe_stride(self.block_table, 2),
+            self.cache_seq_lens, *self.safe_stride(self.cache_seq_lens, 1),
         )
 
 @nvtx.annotate('hip_attention')
@@ -4333,7 +4412,7 @@ def hip_attention(
         key_access_count=key_access_count,
     )
 
-def hip_attention_paged_kv_cache(
+def paged_hip_attention(
     q: Tensor,
     k_cache: Tensor,
     v_cache: Tensor,
@@ -4341,7 +4420,7 @@ def hip_attention_paged_kv_cache(
     cache_seq_lens: Tensor,
     softmax_scale: float,
     
-    config: HiPAttentionArgs
+    args: HiPAttentionArgs
 ):
     B, TDST, HEAD, HID = q.shape
     assert k_cache.shape[-1] == HID
@@ -4351,10 +4430,10 @@ def hip_attention_paged_kv_cache(
     assert block_table.shape[0] == B
     assert cache_seq_lens.shape[0] == B
     
-    config.k_cache = k_cache
-    config.v_cache = v_cache
-    config.cache_seq_lens = cache_seq_lens
-    config.block_table = block_table
+    args.k_cache = k_cache
+    args.v_cache = v_cache
+    args.cache_seq_lens = cache_seq_lens
+    args.block_table = block_table
     
     q = q * softmax_scale
     
@@ -4368,7 +4447,7 @@ def hip_attention_paged_kv_cache(
     ) = hip_masking(
         q=q,
         k=None,
-        config=config,
+        args=args
     )
     
     context = block_sparse_attention(
