@@ -12,7 +12,7 @@ from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
 from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
     import varlen_hip_attention as varlen_hip_attention_11
 from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
-    import paged_varlen_hiop_attention as paged_varlen_hip_attention_11
+    import paged_varlen_hip_attention as paged_varlen_hip_attention_11
 from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
     import HiPAttentionArgs as HiPAttentionArgs11
 

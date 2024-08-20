@@ -4859,7 +4859,7 @@ def varlen_hip_attention(
     pass
 
 @nvtx.annotate('paged_varlen_hiop_attention')
-def paged_varlen_hiop_attention(
+def paged_varlen_hip_attention(
     q: Tensor,
     args: HiPAttentionArgs,
 ):
