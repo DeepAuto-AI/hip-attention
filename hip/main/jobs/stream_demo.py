@@ -77,6 +77,10 @@ def generate_stream(
             token_ids = stream.outputs[-1].token_ids
             
             text = tokenizer.convert_ids_to_tokens(token_ids[-1]).replace('Ġ', ' ').replace('Ċ', '\n').replace('âĢĿ', '').replace('âĢľ', '').replace('âĢĻ', '').replace('âĢĶ', '')
+            if text.startswith('▁'):
+                text = ' ' + text[1:]
+            if text == '<0x0A>':
+                text = '\n'
             print(text, end='', flush=True)
             
             t_decode += time.time() - t

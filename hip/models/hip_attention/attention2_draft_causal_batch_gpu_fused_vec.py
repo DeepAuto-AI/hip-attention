@@ -285,6 +285,77 @@ def adjust_rope(
     return tokens
 
 @triton.jit
+def load_tokens(
+    K, 
+    stride_k_bsz,
+    stride_k_tsrc,
+    stride_k_head,
+    stride_k_hid,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
+    idx_bsz,
+    idx_tsrc,
+    idx_kv_head,
+    idx_hid,
+    
+    mask_keys,
+):
+    if not USING_PAGES:
+        keys = tl.load(
+            K +\
+                idx_bsz.to(tl.int64) * stride_k_bsz +\
+                idx_tsrc.to(tl.int64) * stride_k_tsrc +\
+                idx_kv_head.to(tl.int64) * stride_k_head +\
+                idx_hid.to(tl.int64) * stride_k_hid,
+            mask = mask_keys,
+            other = 0,
+            # cache_modifier='.cs', # TODO: uncomment this
+        )
+    else:
+        seq_len = tl.load(
+            CACHE_SEQ_LENS +\
+                idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
+        )
+        tl.debug_barrier()
+        mask_tsrc = idx_tsrc < seq_len
+        tl.debug_barrier()
+        ptrs = BLOCK_TABLE +\
+            idx_bsz.to(tl.int64) * stride_block_table_bsz + \
+            (idx_tsrc // PAGE_SIZE).to(tl.int64) * stride_block_table_page
+        tl.debug_barrier()
+        idx_page = tl.load(
+            ptrs,
+            mask=mask_tsrc,
+            other=0,
+        )
+        offset_page = idx_tsrc % PAGE_SIZE
+        
+        keys = tl.load(
+            K_CACHE +\
+                idx_page.to(tl.int64) * stride_k_cache_page +\
+                offset_page.to(tl.int64) * stride_k_cache_offset +\
+                idx_kv_head.to(tl.int64) * stride_k_cache_kv_head +\
+                idx_hid.to(tl.int64) * stride_k_cache_hid,
+            mask=mask_keys,
+            other=0,
+        )
+    
+    return keys
+
+@triton.jit
 def masking_iteration_draft_cuda_dup_and_score_calc_score(
     dupped_indices_for_keys,
     KEY_DUP: tl.constexpr,
@@ -319,7 +390,30 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     USING_SPARQ: tl.constexpr,
     SPARQ_HID: tl.constexpr,
-    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page,
+    stride_v_cache_offset,
+    stride_v_cache_kv_head,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
@@ -406,15 +500,31 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             mask_keys = tl.ravel(mask_keys)[None, :]
         idx_head = idx_bh.to(tl.int64) * G + idx_group[None, :].to(tl.int64)
         idx_kv_head = idx_head // KV_HEAD_REPEAT
-        keys = tl.load(
-            K +\
-                idx_bsz.to(tl.int64) * stride_k_bsz +\
-                idx_tsrc[None, :].to(tl.int64) * stride_k_tsrc +\
-                idx_kv_head * stride_k_head +\
-                idx_hid[:, None].to(tl.int64) * stride_k_hid,
-            mask = mask_keys,
-            other = 0,
-            # cache_modifier='.cs', # TODO: uncomment this
+        keys = load_tokens(
+            K, 
+            stride_k_bsz, 
+            stride_k_tsrc, 
+            stride_k_head, 
+            stride_k_hid,
+            
+            USING_PAGES, 
+            PAGE_SIZE,
+            K_CACHE,
+            stride_k_cache_page,
+            stride_k_cache_offset,
+            stride_k_cache_kv_head,
+            stride_k_cache_hid,
+            BLOCK_TABLE,
+            stride_block_table_bsz,
+            stride_block_table_page,
+            CACHE_SEQ_LENS,
+            stride_cache_seq_lens_b,
+            
+            idx_bsz,
+            idx_tsrc[None, :],
+            idx_kv_head,
+            idx_hid[:, None],
+            mask_keys,
         )
         # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
         if keys.dtype == tl.uint8:
@@ -433,10 +543,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
                 keys_calib_old = tl.load(
                     K +\
-                        idx_bsz * stride_k_bsz +\
+                        idx_bsz.to(tl.int64) * stride_k_bsz +\
                         idx_tsrc_calib[None, :] * stride_k_tsrc +\
-                        idx_bh * stride_k_bh +\
-                        i_group * stride_k_g +\
+                        (idx_bh * BH + i_group) * stride_k_head +\
                         idx_hid[:, None] * stride_k_hid,
                     mask=mask_tsrc_calib[None, :],
                     other=0
@@ -554,8 +663,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     K +\
                         idx_b * stride_k_bsz +\
                         idx_tsrc[None, :] * stride_k_tsrc +\
-                        idx_bh * stride_k_bh +\
-                        idx_group[None, :] * stride_k_g +\
+                        (idx_bh * BH + idx_group[None, :]) * stride_k_head +\
                         idx_sparq_hid[:, None] * stride_k_hid,
                     mask = mask_keys,
                     other = 0,
@@ -693,7 +801,30 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     USING_SPARQ: tl.constexpr,
     SPARQ_HID: tl.constexpr,
-    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page,
+    stride_v_cache_offset,
+    stride_v_cache_kv_head,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_bsz,
     
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
@@ -755,7 +886,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     TSRC = tl.max(pos_tdst)
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
     BSRC = tl.cdiv(TSRC, BLOCK_SIZE_K)
-    MAX_BSRC = tl.cdiv(MAX_TSRC, BLOCK_SIZE_K)
+    # MAX_BSRC = tl.cdiv(MAX_TSRC, BLOCK_SIZE_K)
     
     if TSRC <= mask_k:
         return
@@ -912,7 +1043,30 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 USING_SPARQ,
                 SPARQ_HID,
-                Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_bsz,
                 
                 BLOCK_SIZE_Q,
                 BLOCK_STRIDE_Q,
@@ -1008,7 +1162,30 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             USING_SPARQ,
             SPARQ_HID,
-            Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+            Q_IND, 
+            stride_q_ind_b, 
+            stride_q_ind_g, 
+            stride_q_ind_bdst, 
+            stride_q_ind_k,
+            
+            # paged attention args template
+            USING_PAGES,
+            PAGE_SIZE,
+            K_CACHE, 
+            stride_k_cache_page, 
+            stride_k_cache_offset, 
+            stride_k_cache_kv_head, 
+            stride_k_cache_hid,
+            V_CACHE,
+            stride_v_cache_page,
+            stride_v_cache_offset,
+            stride_v_cache_kv_head,
+            stride_v_cache_hid,
+            BLOCK_TABLE,
+            stride_block_table_bsz,
+            stride_block_table_page,
+            CACHE_SEQ_LENS,
+            stride_cache_seq_lens_bsz,
             
             BLOCK_SIZE_Q,
             BLOCK_STRIDE_Q,
@@ -1066,7 +1243,30 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             USING_SPARQ,
             SPARQ_HID,
-            Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+            Q_IND, 
+            stride_q_ind_b, 
+            stride_q_ind_g, 
+            stride_q_ind_bdst, 
+            stride_q_ind_k,
+            
+            # paged attention args template
+            USING_PAGES,
+            PAGE_SIZE,
+            K_CACHE, 
+            stride_k_cache_page, 
+            stride_k_cache_offset, 
+            stride_k_cache_kv_head, 
+            stride_k_cache_hid,
+            V_CACHE,
+            stride_v_cache_page,
+            stride_v_cache_offset,
+            stride_v_cache_kv_head,
+            stride_v_cache_hid,
+            BLOCK_TABLE,
+            stride_block_table_bsz,
+            stride_block_table_page,
+            CACHE_SEQ_LENS,
+            stride_cache_seq_lens_bsz,
             
             BLOCK_SIZE_Q,
             BLOCK_STRIDE_Q,
@@ -1481,7 +1681,7 @@ def masking_iteration_draft_cuda_argsort(
 def masking_iteration_draft_python_epilog(
     indices: Tensor, ks: Tensor, 
     
-    mask_block_k, TSRC,
+    mask_block_k, MAX_TSRC,
     B, BDST, G
 ):
     if G > 1:
@@ -1497,7 +1697,7 @@ def masking_iteration_draft_python_epilog(
             ks_count, *ks_count.stride(),
             ks_start_end, *ks_start_end.stride(),
             
-            mask_block_k, TSRC, 
+            mask_block_k, MAX_TSRC, 
             
             G,
             BLOCK_BK,
@@ -1671,6 +1871,25 @@ def masking_iteration_draft_cuda_fused(
     stride_q_ind_bdst, 
     stride_q_ind_k,
     
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page,
+    stride_v_cache_offset,
+    stride_v_cache_kv_head,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_bsz,
+    
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -1800,6 +2019,25 @@ def masking_iteration_draft_cuda_fused(
                     stride_q_ind_g, 
                     stride_q_ind_bdst, 
                     stride_q_ind_k,
+                    
+                    # paged attention args template
+                    USING_PAGES,
+                    PAGE_SIZE,
+                    K_CACHE, 
+                    stride_k_cache_page, 
+                    stride_k_cache_offset, 
+                    stride_k_cache_kv_head, 
+                    stride_k_cache_hid,
+                    V_CACHE,
+                    stride_v_cache_page,
+                    stride_v_cache_offset,
+                    stride_v_cache_kv_head,
+                    stride_v_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_bsz,
                     
                     BLOCK_SIZE_Q,
                     BLOCK_STRIDE_Q,
@@ -2028,6 +2266,7 @@ def masking_iteration_draft_cuda_initialize_score(
     
     # paged attention args template
     USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
     K_CACHE, 
     stride_k_cache_page, 
     stride_k_cache_offset, 
@@ -2075,7 +2314,6 @@ def masking_iteration_draft_cuda_initialize_score(
     )
     if t_group_size <= 1.0:
         return
-
     
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     idx_tdst_no_proj = idx_tdst
@@ -2137,7 +2375,30 @@ def masking_iteration_draft_cuda_initialize_score(
         
         USING_SPARQ,
         SPARQ_HID,
-        Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+        Q_IND, 
+        stride_q_ind_b, 
+        stride_q_ind_g, 
+        stride_q_ind_bdst, 
+        stride_q_ind_k,
+        
+        # paged attention args template
+        USING_PAGES,
+        PAGE_SIZE,
+        K_CACHE, 
+        stride_k_cache_page, 
+        stride_k_cache_offset, 
+        stride_k_cache_kv_head, 
+        stride_k_cache_hid,
+        V_CACHE,
+        stride_v_cache_page,
+        stride_v_cache_offset,
+        stride_v_cache_kv_head,
+        stride_v_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_bsz,
         
         BLOCK_SIZE_Q,
         BLOCK_STRIDE_Q,
@@ -2159,7 +2420,7 @@ def masking_iteration_draft_cuda_initialize_score(
 @nvtx.annotate('masking_iteration_draft')
 def masking_iteration_draft( 
     q: Tensor,
-    k: Tensor,
+    k: Optional[Tensor],
     position_ids: Tensor,
     args: "HiPAttentionArgs",
     
@@ -2262,6 +2523,8 @@ def masking_iteration_draft(
         if k is not None:
             if max_group_strategy == 'oracle':
                 # > oracle      5.1117  18.4503 sec
+                # This is impossible at this point, because t_group_size is initilized by following kernel
+                raise NotImplementedError() 
                 max_group_size = torch.max(t_group_sizes).item()
             elif max_group_strategy == 'best':
                 # > best case   5.1218  10.3745 sec
@@ -2406,7 +2669,7 @@ def masking_iteration_draft(
         # grid = lambda META: (triton.cdiv(indices.shape[-1], META['BLOCK_BK']), BDST, B)
         masking_iteration_draft_cuda_initialize_score[grid](
             q, *q.stride(),
-            k, *k.stride(),
+            k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
             key_access_log, *(key_access_log.stride() if key_access_log is not None else (0, 0, 0)),
             key_access_count, *(key_access_count.stride() if key_access_count is not None else (0, 0)),
@@ -2421,7 +2684,7 @@ def masking_iteration_draft(
             
             args.sliding_window_size,
             indices.shape[-1],
-            BH, G, TDST, TSRC, HID, KV_HEAD_REPEAT,
+            BH, G, TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             *args.args_extend(),
             *args.args_sparq(),
@@ -2440,9 +2703,6 @@ def masking_iteration_draft(
         # print('access log', key_access_log[0, -1, :key_access_count[0, -1].item()].tolist())
     scores_cached = args.sample_method == 'first'
     # scores_cached = False
-    
-    torch.cuda.synchronize()
-    raise NotImplementedError()
     
     BLOCK_BK = 256 // 2 // args.block_size_k
     assert BLOCK_BK > 0
@@ -2469,9 +2729,9 @@ def masking_iteration_draft(
         assert args.score_head_group_size == 1
         
         if not scores_cached:
-            BLOCK_BK = args.mask_k // (args.block_size_k // args.block_stride_k) * G // 4 * G
+            BLOCK_BK = 512 // (args.block_size_k // args.block_stride_k) * G // 4 * G
         else:
-            BLOCK_BK = args.mask_k // (args.block_size_k // args.block_stride_k) * G // 8 * G
+            BLOCK_BK = 512 // (args.block_size_k // args.block_stride_k) * G // 8 * G
         # BLOCK_BK = indices.shape[-1]
         # BLOCK_BK = indices.shape[-1] // 4
         
@@ -2499,10 +2759,10 @@ def masking_iteration_draft(
         
         masking_iteration_draft_cuda_fused[grid](
             q, *q.stride(),
-            k, *k.stride(),
+            k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
-            key_access_log, *(key_access_log.stride() if key_access_log is not None else (0, 0, 0)),
-            key_access_count, *(key_access_count.stride() if key_access_count is not None else (0, 0)),
+            key_access_log, *args.safe_stride(key_access_log, 3),
+            key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
             
             indices, *indices.stride(),
@@ -2527,10 +2787,14 @@ def masking_iteration_draft(
             
             BH,
             G, 
-            TDST, 
-            TSRC,
+            # TDST, 
+            # TSRC,
+            # cdiv_python(TDST, args.block_size_q),
+            # cdiv_python(TSRC, args.block_size_k),
+            TDST,
+            MAX_TSRC,
             cdiv_python(TDST, args.block_size_q),
-            cdiv_python(TSRC, args.block_size_k),
+            MAX_BSRC,
             mask_block_k, 
             HID,
             random.randint(0, 1024*1024),
@@ -2540,6 +2804,7 @@ def masking_iteration_draft(
             
             *args.args_extend(),
             *args.args_sparq(),
+            *args.args_paged_kv_cache(),
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
@@ -2711,7 +2976,7 @@ def masking_iteration_draft(
     
     ks_count, ks_start_end = masking_iteration_draft_python_epilog(
         indices, ks, 
-        mask_block_k, TSRC,
+        mask_block_k, MAX_TSRC,
         B, BDST, G
     )
     
@@ -2739,8 +3004,8 @@ def block_sparse_attention_cuda_step(
     # rolling value
     acc, l_i, m_i,
     
-    TDST,
-    TSRC,
+    # TDST,
+    # TSRC,
     
     sliding_window_size,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
@@ -2750,6 +3015,7 @@ def block_sparse_attention_cuda_step(
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    
     pos_tdst,
     idx_hid, HID: tl.constexpr, BLOCK_TQ, BLOCK_TK,
 ):
@@ -2838,13 +3104,13 @@ def block_sparse_attention_cuda_step(
     
     if EXCLUDE_SLIDING_WINDOW:
         qk_mask = (
-            ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc + sliding_window_size)[None, :]) |
+            (pos_tdst[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     else:
         qk_mask = (
-            ((idx_tdst[:, None] + TSRC - TDST) < idx_tsrc[None, :]) |
-            ((idx_tdst[:, None] + TSRC - TDST) >= (idx_tsrc + sliding_window_size)[None, :]) |
+            (pos_tdst[:, None] < idx_tsrc[None, :]) |
+            (pos_tdst[:, None] >= (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     
@@ -2924,6 +3190,7 @@ def block_sparse_attention_cuda(
     Q, stride_q_bsz, stride_q_tdst, stride_q_head, stride_q_hid,
     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
     V, stride_v_bsz, stride_v_tsrc, stride_v_head, stride_v_hid,
+    POS, stride_pos_bsz, stride_pos_tdst,
     
     INDICES, 
     stride_indices_b, stride_indices_bdst, stride_indices_bk,
@@ -2952,6 +3219,25 @@ def block_sparse_attention_cuda(
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page,
+    stride_v_cache_offset,
+    stride_v_cache_kv_head,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
     HID: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -2970,6 +3256,12 @@ def block_sparse_attention_cuda(
     idx_bdst = pid_bdst
     idx_tdst = BLOCK_SIZE_Q * idx_bdst + tl.arange(0, BLOCK_SIZE_Q)
     mask_tdst = idx_tdst < MAX_TDST
+    pos_tdst = tl.load(
+        POS +\
+            idx_bsz * stride_pos_bsz +\
+            idx_tdst * stride_pos_tdst,
+        mask=mask_tdst,
+    )
     
     idx_hid = tl.arange(0, HID)
     
@@ -3026,25 +3318,58 @@ def block_sparse_attention_cuda(
             idx_tsrc = idx_tsrc % MAX_TSRC
             
             # idx_n = idx_b * G + idx_group
-            keys = tl.load(
-                K +\
-                    idx_bsz * stride_k_bsz +\
-                    idx_tsrc[None, :] * stride_k_tsrc +\
-                    idx_head // KV_HEAD_REPEAT * stride_k_head +\
-                    idx_hid[:, None] * stride_k_hid,
-                mask=mask_tsrc[None, :],
-                other=0,
-                # cache_modifier='.cs', # TODO: uncomment this
+            keys = load_tokens(
+                K, 
+                stride_k_bsz, 
+                stride_k_tsrc, 
+                stride_k_head, 
+                stride_k_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                K_CACHE,
+                stride_k_cache_page,
+                stride_k_cache_offset,
+                stride_k_cache_kv_head,
+                stride_k_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                idx_bsz,
+                idx_tsrc[None, :],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[:, None],
+                mask_tsrc[None, :],
             )
-            values = tl.load(
-                V +\
-                    idx_bsz * stride_v_bsz +\
-                    idx_tsrc[:, None] * stride_v_tsrc +\
-                    idx_head // KV_HEAD_REPEAT * stride_v_head +\
-                    idx_hid[None, :] * stride_v_hid,
-                mask=mask_tsrc[:, None],
-                other=0,
-                # cache_modifier='.cs', # TODO: uncomment this
+            
+            values = load_tokens(
+                V, 
+                stride_v_bsz, 
+                stride_v_tsrc, 
+                stride_v_head, 
+                stride_v_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                idx_bsz,
+                idx_tsrc[:, None],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[None, :],
+                mask_tsrc[:, None],
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -3056,9 +3381,6 @@ def block_sparse_attention_cuda(
                 idx_tdst, mask_tdst,
                 
                 acc, l_i, m_i,
-                
-                MAX_TDST,
-                MAX_TSRC,
                 
                 sliding_window_size,
                 True,
@@ -3068,40 +3390,73 @@ def block_sparse_attention_cuda(
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
-                idx_tdst + MAX_TSRC - MAX_TDST,
+                
+                pos_tdst,
                 idx_hid, HID, 
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
             )
     
     if sliding_window_size > 0:
-        CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
+        CURR_TSRC = tl.max(pos_tdst)
+        # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
         for i_tsrc in range(tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q), CURR_TSRC, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < MAX_TSRC
             
             # idx_n = idx_b * G + idx_group
-            keys = tl.load(
-                K +\
-                    idx_bsz * stride_k_bsz +\
-                    idx_tsrc[None, :] * stride_k_tsrc +\
-                    idx_head // KV_HEAD_REPEAT * stride_k_head +\
-                    idx_hid[:, None] * stride_k_hid,
-                mask=mask_tsrc[None, :],
-                other=0,
-                # cache_modifier='.cs', # TODO: uncomment this
-                # volatile=True,
+            keys = load_tokens(
+                K, 
+                stride_k_bsz, 
+                stride_k_tsrc, 
+                stride_k_head, 
+                stride_k_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                K_CACHE,
+                stride_k_cache_page,
+                stride_k_cache_offset,
+                stride_k_cache_kv_head,
+                stride_k_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                idx_bsz,
+                idx_tsrc[None, :],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[:, None],
+                mask_tsrc[None, :],
             )
-            values = tl.load(
-                V +\
-                    idx_bsz * stride_v_bsz +\
-                    idx_tsrc[:, None] * stride_v_tsrc +\
-                    idx_head // KV_HEAD_REPEAT * stride_v_head +\
-                    idx_hid[None, :] * stride_v_hid,
-                mask=mask_tsrc[:, None],
-                other=0,
-                # cache_modifier='.cs', # TODO: uncomment this
-                # volatile=True,
+            
+            values = load_tokens(
+                V, 
+                stride_v_bsz, 
+                stride_v_tsrc, 
+                stride_v_head, 
+                stride_v_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                idx_bsz,
+                idx_tsrc[:, None],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[None, :],
+                mask_tsrc[:, None],
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -3114,9 +3469,6 @@ def block_sparse_attention_cuda(
                 
                 acc, l_i, m_i,
                 
-                MAX_TDST,
-                MAX_TSRC,
-                
                 sliding_window_size,
                 False,
                 
@@ -3125,7 +3477,8 @@ def block_sparse_attention_cuda(
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
-                idx_tdst + MAX_TSRC - MAX_TDST,
+                
+                pos_tdst,
                 idx_hid, HID, 
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
@@ -3150,45 +3503,55 @@ def block_sparse_attention_cuda(
 
 def block_sparse_attention(
     q: Tensor,
-    k: Tensor,
-    v: Tensor,
+    k: Optional[Tensor],
+    v: Optional[Tensor],
+    position_ids: Tensor,
     
     indices: Tensor,
     ks: Tensor,
     ks_count: Tensor,
     ks_start_end: Tensor,
     
-    config: "HiPAttentionArgs",
+    args: "HiPAttentionArgs",
 ):
     BSZ, TDST, HEAD, HID = q.shape
-    _, TSRC, KV_HEAD, _ = k.shape
+    if k is not None:
+        _, TSRC, KV_HEAD, _ = k.shape
+        BSRC = cdiv_python(TSRC, args.block_size_k)
+        MAX_TSRC = TSRC
+        MAX_BSRC = BSRC
+    else:
+        NUM_PAGE, PAGE_SIZE, KV_HEAD, _ = args.k_cache.shape
+        TSRC = None
+        BSRC = None
+        MAX_TSRC = NUM_PAGE * PAGE_SIZE
+        MAX_BSRC = cdiv_python(MAX_TSRC, args.block_size_k)
     N = BSZ * HEAD
     # assert q.shape == k.shape
-    BDST = cdiv_python(TDST, config.block_size_q)
-    BSRC = cdiv_python(TSRC, config.block_size_k)
+    BDST = cdiv_python(TDST, args.block_size_q)
     KV_HEAD_REPEAT = HEAD // KV_HEAD
     assert KV_HEAD_REPEAT * KV_HEAD == HEAD
     
-    G = config.topk_head_group_size
+    G = args.topk_head_group_size
     B = N // G
     assert (B * G) == N
-    BK = cdiv_python(config.mask_k, config.block_size_k)
+    BK = cdiv_python(args.mask_k, args.block_size_k)
     
-    context = torch.empty(q.shape, dtype=v.dtype, device=q.device)
+    context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
     
     # BLOCK_BK = 64 // block_size_k
     # if block_size_k > 4:
     #     BLOCK_BK = 128 // block_size_k
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
-    BLOCK_BK = 64 // config.block_size_k
+    BLOCK_BK = 64 // args.block_size_k
     assert BLOCK_BK > 0
     
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
-    if config.rope_cos is not None:
-        assert len(config.rope_cos.stride()) == 2
-        assert len(config.rope_sin.stride()) == 2
+    if args.rope_cos is not None:
+        assert len(args.rope_cos.stride()) == 2
+        assert len(args.rope_sin.stride()) == 2
     
     assert context.ndim == 4
     if ks_start_end is not None:
@@ -3196,30 +3559,39 @@ def block_sparse_attention(
     if indices is not None:
         assert indices.ndim == 3
     assert q.ndim == 4
-    assert k.ndim == 4
-    assert v.ndim == 4
+    if k is not None:
+        assert k.ndim == 4
+        assert v.ndim == 4
+    elif args.using_paged_cache:
+        assert args.k_cache.ndim == 4
+        assert args.v_cache.ndim == 4
+    else:
+        raise Exception()
+    assert position_ids.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
     block_sparse_attention_cuda[grid](
         q, *q.stride(),
-        k, *k.stride(),
-        v, *v.stride(),
+        k, *args.safe_stride(k, 4),
+        v, *args.safe_stride(v, 4),
+        position_ids, *position_ids.stride(),
         
-        indices, *(indices.stride() if indices is not None else (0, 0, 0)),
+        indices, *args.safe_stride(indices, 3),
         
-        ks_start_end, *(ks_start_end.stride() if ks_start_end is not None else (0, 0, 0)),
+        ks_start_end, *args.safe_stride(ks_start_end, 3),
         
         context, *context.stride(),
         
-        HEAD, G, BK, TDST, TSRC, KV_HEAD_REPEAT,
+        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT,
         
-        config.sliding_window_size,
+        args.sliding_window_size,
         
-        *config.args_extend(),
+        *args.args_extend(),
+        *args.args_paged_kv_cache(),
         
         HID,
-        config.block_size_q,
-        config.block_size_k,
+        args.block_size_q,
+        args.block_size_k,
         # BLOCK_BK,
         
         # num_warps=4,
@@ -3269,9 +3641,9 @@ def masking_step_loop(
         idx_tdst = idx_tdst % TDST
         idx_tdst = idx_tdst.reshape(-1)
         if TSRC is not None:
-            pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1)
+            pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
         else:
-            pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST
+            pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(args.num_samples):
@@ -3949,7 +4321,10 @@ def hip_masking(
     
     if os.getenv('HIP_DEBUG', '0') == '1':
         B, TDST, H, HID = q.shape
-        _, TSRC, _, _ = k.shape
+        if k is not None:
+            _, TSRC, _, _ = k.shape
+        else:
+            TSRC = torch.max(args.cache_seq_lens).item()
         N = B * H
         def render_mask():
             debug_mask = to_dense(
@@ -4278,6 +4653,7 @@ class HiPAttentionArgs:
         if self.q_quant is not None:
             assert self.q_quant.ndim == 4
             assert self.k_quant.ndim == 4
+        self.using_paged_cache = self.k_cache is not None
 
     def clone(self):
         return copy.copy(self)
@@ -4333,7 +4709,9 @@ class HiPAttentionArgs:
         )
     
     def args_paged_kv_cache(self):
-        if self.k_cache is not None:
+        using_page = self.using_paged_cache
+        
+        if using_page:
             assert self.v_cache is not None
             assert self.k_cache.ndim == self.v_cache.ndim
             assert self.k_cache.ndim == 4
@@ -4341,9 +4719,13 @@ class HiPAttentionArgs:
             assert self.block_table.ndim == 2
             assert self.cache_seq_lens is not None
             assert self.cache_seq_lens.ndim == 1
+            page_size = self.k_cache.shape[1]
+        else:
+            page_size = 0
         
         return (
-            self.k_cache is not None,
+            using_page,
+            page_size,
             self.k_cache, *self.safe_stride(self.k_cache, 4),
             self.v_cache, *self.safe_stride(self.v_cache, 4),
             self.block_table, *self.safe_stride(self.block_table, 2),
@@ -4390,17 +4772,21 @@ def hip_attention(
     
     # return None, None
     
+    position_ids = (
+        torch.arange(0, q.shape[1], device=q.device) + k.shape[1] - q.shape[1] + 1
+    )[None, :].expand(q.shape[0], -1)
     context = block_sparse_attention(
         q=q, 
         k=k, 
-        v=v, 
+        v=v,
+        position_ids=position_ids,
         
         indices=indices, 
         ks=ks, 
         ks_count=ks_count, 
         ks_start_end=ks_start_end,
         
-        config=config
+        args=config
     )
     
     return context, HiPAttentionOutputMetadata(
@@ -4414,26 +4800,16 @@ def hip_attention(
 
 def paged_hip_attention(
     q: Tensor,
-    k_cache: Tensor,
-    v_cache: Tensor,
-    block_table: Tensor,
-    cache_seq_lens: Tensor,
     softmax_scale: float,
-    
     args: HiPAttentionArgs
 ):
     B, TDST, HEAD, HID = q.shape
-    assert k_cache.shape[-1] == HID
-    N_PAGES, PAGE_SIZE, HEAD_KV, HID = k_cache.shape
-    assert v_cache.shape == k_cache.shape
+    assert args.k_cache.shape[-1] == HID
+    N_PAGES, PAGE_SIZE, HEAD_KV, HID = args.k_cache.shape
+    assert args.v_cache.shape == args.k_cache.shape
     
-    assert block_table.shape[0] == B
-    assert cache_seq_lens.shape[0] == B
-    
-    args.k_cache = k_cache
-    args.v_cache = v_cache
-    args.cache_seq_lens = cache_seq_lens
-    args.block_table = block_table
+    assert args.block_table.shape[0] == B
+    assert args.cache_seq_lens.shape[0] == B
     
     q = q * softmax_scale
     
@@ -4450,8 +4826,18 @@ def paged_hip_attention(
         args=args
     )
     
+    position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
+        args.cache_seq_lens[:, None] - TDST + 1
     context = block_sparse_attention(
-        
+        q=q,
+        k=None,
+        v=None,
+        position_ids=position_ids,
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        args=args,
     )
     
     return context, HiPAttentionOutputMetadata(
