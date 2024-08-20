@@ -4798,6 +4798,7 @@ def hip_attention(
         key_access_count=key_access_count,
     )
 
+@nvtx.annotate('paged_hip_attention')
 def paged_hip_attention(
     q: Tensor,
     softmax_scale: float,
@@ -4848,6 +4849,21 @@ def paged_hip_attention(
         key_access_log=key_access_log,
         key_access_count=key_access_count,
     )
+
+@nvtx.annotate('varlen_hip_attention')
+def varlen_hip_attention(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+):
+    pass
+
+@nvtx.annotate('paged_varlen_hiop_attention')
+def paged_varlen_hiop_attention(
+    q: Tensor,
+    args: HiPAttentionArgs,
+):
+    pass
 
 def main():
     debug_only = True
