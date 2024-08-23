@@ -12,6 +12,11 @@ from transformers.models.auto import AutoTokenizer
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.utils import seed, get_bench
 
+decoded_tokens = 0
+decoded_latency = 0
+prefilled_tokens = 0
+prefilled_latency = 0
+
 def generate_stream(
     args,
     llm,
@@ -21,6 +26,8 @@ def generate_stream(
     prompt_token_ids = None,
     use_tqdm: bool = False,
 ):
+    global decoded_tokens, decoded_latency, prefilled_tokens, prefilled_latency
+    
     from vllm import SamplingParams
     if prompts is None and prompt_token_ids is None:
         raise ValueError("Either prompts or prompt_token_ids must be "
@@ -61,6 +68,7 @@ def generate_stream(
     t = time.time()
     t_decode = 0
     n_decode = 0
+    cleared = False
     while llm.llm_engine.has_unfinished_requests():
         step_outputs = llm.llm_engine.step()
         for output in step_outputs:
@@ -70,29 +78,41 @@ def generate_stream(
                     pbar.update(1)
         
         if istep >= args.batch_size:
-            if istep == args.batch_size:
-                if os.getenv('CLEAR_AT_START', '1') == '1':
-                    os.system('clear')
-                print('\n----- Decoding Starts -----\n')
             stream = step_outputs[0]
             token_ids = stream.outputs[-1].token_ids
             
-            text = tokenizer.convert_ids_to_tokens(token_ids[-1]).replace('Ġ', ' ').replace('Ċ', '\n').replace('âĢĿ', '').replace('âĢľ', '').replace('âĢĻ', '').replace('âĢĶ', '')
-            if text.startswith('▁'):
-                text = ' ' + text[1:]
-            if text == '<0x0A>':
-                text = '\n'
-            print(text, end='', flush=True)
+            if len(token_ids) > 0 and not cleared:
+                if os.getenv('CLEAR_AT_START', '1') == '1':
+                    os.system('clear')
+                print('\n----- Decoding Starts -----\n')
+                cleared = True
             
-            t_decode += time.time() - t
-            n_decode += 1
-            
-            if stream.finished:
-                print(f'\n\n{"="*60}\n[VLLM_ATTENTION_BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "oops")}] (model={args.model}, prompt_len={len(stream.prompt_token_ids)}, response_len={len(token_ids)})\nEnd-to-End vLLM Decoding Latency: {t_decode / n_decode*1000:.2f} ms\n{"="*60}')
+            if len(token_ids) > 0:
+                text = tokenizer.convert_ids_to_tokens(token_ids[-1]).replace('Ġ', ' ').replace('Ċ', '\n').replace('âĢĿ', '').replace('âĢľ', '').replace('âĢĻ', '').replace('âĢĶ', '')
+                if text.startswith('▁'):
+                    text = ' ' + text[1:]
+                if text == '<0x0A>':
+                    text = '\n'
+                print(text, end='', flush=True)
+                
+                t_decode += time.time() - t
+                n_decode += 1
+                
+                decoded_tokens += 1 * len(step_outputs)
+                decoded_latency += time.time() - t
+            else:
+                # print(stream)
+                text = '[Prefix Prefill]'
+                print(text, end='', flush=True)
+                prefilled_latency += time.time() - t
         else:
             if istep == 0:
                 print()
-            print(f'[Prompt Processed] index = {istep + 1} / {args.batch_size}, took {time.time() - t:.2f} sec')
+            # print(f'[Prompt Processed] index = {istep + 1} / {args.batch_size}, took {time.time() - t:.2f} sec')
+            stream = step_outputs[0]
+            prefilled_tokens += len(stream.prompt_token_ids)
+            prefilled_latency += time.time() - t
+            print('[Prefill]', end='', flush=True)
         t = time.time()
         istep += 1
     if use_tqdm:
@@ -150,6 +170,15 @@ def job_stream_demo(args, model, tokenizer, device):
     except KeyboardInterrupt:
         traceback.print_exc()
         print('Interrupted')
+    
+    print(f'''
+
+{"="*60}
+[VLLM_ATTENTION_BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] (model={args.model}, #prefill={prefilled_tokens}, #decode={decoded_tokens})
+End-to-End vLLM Prefill Throughput: {prefilled_tokens / (prefilled_latency / args.batch_size):.2f} tok/sec
+End-to-End vLLM Decoding Throughput: {decoded_tokens / (decoded_latency / args.batch_size):.2f} tok/sec
+{"="*60}''')
+    
     if elapsed == 0:
         elapsed = time.time() - t
     print(f'elapsed {elapsed:.4f} sec')

@@ -63,6 +63,7 @@ def load_vllm_model(args: ArgsType):
         'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
         "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
         'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
+        "vllm_llama3.1_8b_instruct": "meta-llama/Meta-Llama-3.1-8B-Instruct",
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
@@ -87,6 +88,7 @@ def load_vllm_model(args: ArgsType):
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
         trust_remote_code=True,
+        max_num_batched_tokens=16384,
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)

@@ -353,6 +353,9 @@ def load_tokens(
             other=0,
         )
     
+    if keys.dtype == tl.uint8:
+        keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
+    
     return keys
 
 @triton.jit
@@ -4873,7 +4876,7 @@ def varlen_hip_attention(
             v=v[seq_start:seq_end].unsqueeze(0),
             args=args,
         )
-        print(seq_start, seq_end, out.shape)
+        # print('varlen', seq_start, seq_end, out.shape)
         outs.append(out.squeeze(0))
     
     return torch.cat(outs, dim=0)
@@ -4881,9 +4884,38 @@ def varlen_hip_attention(
 @nvtx.annotate('paged_varlen_hiop_attention')
 def paged_varlen_hip_attention(
     q: Tensor,
+    softmax_scale: float,
+    seq_lens: List[int],
     args: HiPAttentionArgs,
 ):
-    pass
+    # q = q * softmax_scale
+    
+    outs = []
+    total_length = 0
+    total_page_length = 0
+    for idx_batch, seq_len in enumerate(seq_lens):
+        seq_start = total_length
+        seq_end = seq_start + seq_len
+        
+        page_start = total_page_length
+        page_end = page_start + cdiv_python(seq_len, args.k_cache.shape[1])
+        
+        total_length = seq_len
+        total_page_length = page_end
+        
+        curr_args = args.clone()
+        curr_args.block_table = args.block_table[idx_batch:idx_batch+1]
+        curr_args.cache_seq_lens = args.cache_seq_lens[idx_batch:idx_batch+1]
+        
+        out, _ = paged_hip_attention(
+            q=q[seq_start:seq_end].unsqueeze(0),
+            softmax_scale=softmax_scale,
+            args=curr_args,
+        )
+        # print('varlen', seq_start, seq_end, out.shape)
+        outs.append(out.squeeze(0))
+    
+    return torch.cat(outs, dim=0)
 
 def main():
     debug_only = True
