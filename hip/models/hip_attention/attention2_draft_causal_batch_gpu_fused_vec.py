@@ -2656,7 +2656,7 @@ def masking_iteration_draft(
         # BLOCK_BK = 128 // block_size_k
         # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B)
         
-        BLOCK_BK = args.mask_k // args.block_size_k * G
+        BLOCK_BK = 256 // (args.block_size_k // args.block_stride_k) * G
         
         assert B == BSZ * BH
         grid = (
@@ -4739,34 +4739,34 @@ def hip_attention(
     k: Tensor, 
     v: Tensor,
     
-    config: Optional[HiPAttentionArgs] = None,  
+    args: Optional[HiPAttentionArgs] = None,  
     **kwargs,
 ):
-    if config is None:
-        config = HiPAttentionArgs(**kwargs)
+    if args is None:
+        args = HiPAttentionArgs(**kwargs)
     
     assert q.ndim == 4
     assert k.ndim == 4
     
     indices, ks, ks_count, ks_start_end, key_access_log, key_access_count = hip_masking(
         # TODO(heejun): apply PCA topk
-        q=config.get_q_quant(q),
-        k=config.get_k_quant(k),
-        args=config,
+        q=args.get_q_quant(q),
+        k=args.get_k_quant(k),
+        args=args,
     )
     
     HIP_RANDOM_MASK = os.getenv('HIP_RANDOM_MASK', '0') == '1'
     if HIP_RANDOM_MASK:
         for ib in tqdm.tqdm(range(indices.shape[0])):
             for ibdst in range(indices.shape[1]):
-                assert config.topk_head_group_size == 1
+                assert args.topk_head_group_size == 1
                 K = indices.shape[-1]
-                tsrc = (ibdst + 1) * config.block_size_q - config.sliding_window_size + k.shape[-2] - q.shape[-2]
-                tsrc = tsrc - (tsrc % config.block_size_q)
-                if tsrc > config.mask_k:
-                    rand_ids = torch.arange(config.block_size_k, tsrc, config.block_size_k, device=indices.device)
+                tsrc = (ibdst + 1) * args.block_size_q - args.sliding_window_size + k.shape[-2] - q.shape[-2]
+                tsrc = tsrc - (tsrc % args.block_size_q)
+                if tsrc > args.mask_k:
+                    rand_ids = torch.arange(args.block_size_k, tsrc, args.block_size_k, device=indices.device)
                     rp = torch.randperm(len(rand_ids), device=indices.device)
-                    rand_ids = rand_ids[rp][:K-1] * config.block_size_k
+                    rand_ids = rand_ids[rp][:K-1] * args.block_size_k
                     indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
                     indices[ib, ibdst, 0] = 0
     
@@ -4786,7 +4786,7 @@ def hip_attention(
         ks_count=ks_count, 
         ks_start_end=ks_start_end,
         
-        args=config
+        args=args
     )
     
     return context, HiPAttentionOutputMetadata(
@@ -4853,10 +4853,30 @@ def paged_hip_attention(
 @nvtx.annotate('varlen_hip_attention')
 def varlen_hip_attention(
     q: Tensor,
+    softmax_scale: float,
     k: Tensor,
     v: Tensor,
+    seq_lens: List[int],
+    args: HiPAttentionArgs,
 ):
-    pass
+    q = q * softmax_scale
+    
+    outs = []
+    total_length = 0
+    for seq_len in seq_lens:
+        seq_start = total_length
+        seq_end = seq_start + seq_len
+        total_length += seq_len
+        out, _ = hip_attention(
+            q=q[seq_start:seq_end].unsqueeze(0), 
+            k=k[seq_start:seq_end].unsqueeze(0), 
+            v=v[seq_start:seq_end].unsqueeze(0),
+            args=args,
+        )
+        print(seq_start, seq_end, out.shape)
+        outs.append(out.squeeze(0))
+    
+    return torch.cat(outs, dim=0)
 
 @nvtx.annotate('paged_varlen_hiop_attention')
 def paged_varlen_hip_attention(

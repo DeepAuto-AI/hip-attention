@@ -71,7 +71,8 @@ def generate_stream(
         
         if istep >= args.batch_size:
             if istep == args.batch_size:
-                os.system('clear')
+                if os.getenv('CLEAR_AT_START', '1') == '1':
+                    os.system('clear')
                 print('\n----- Decoding Starts -----\n')
             stream = step_outputs[0]
             token_ids = stream.outputs[-1].token_ids
