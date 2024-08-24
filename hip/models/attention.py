@@ -313,7 +313,7 @@ def custom_attention(
                     block_size_k_group=1,
                     
                     sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
-                    sink_token_size=4,
+                    sink_token_size=16,
                     
                     using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
