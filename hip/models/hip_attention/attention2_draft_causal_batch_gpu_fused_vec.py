@@ -564,7 +564,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).trans(1, 0)
                 
                 old_tsrc = idx_tsrc
-                mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 9999999)) - extend_window_size)
+                mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 9999999)) - extend_window_size)
                 new_tsrc = tl.where(
                     mask_tsrc_window,
                     old_tsrc,
@@ -582,7 +582,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 keys = tl.trans(keys, 1, 0)
                 keys = (keys * mask_keys).to(keys.dtype)
                 
-                old_tdst = pos_tdst
+                old_tdst = (pos_tdst - 1)
                 # new_tdst = old_tdst // extend_group_size
                 new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
                 
@@ -680,7 +680,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     acc = tl.where(
         (
             (acc == 0.0) |
-            (idx_tsrc[None, :] > pos_tdst[:, None]) |
+            (idx_tsrc[None, :] > (pos_tdst - 1)[:, None]) |
             False
         ), 
         -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
@@ -882,6 +882,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             (idx_b // BH) * stride_pos_bsz +\
             idx_tdst_no_proj * stride_pos_tdst,
         mask=mask_tdst,
+        other=0,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
     TSRC = tl.max(pos_tdst)
@@ -2334,7 +2335,8 @@ def masking_iteration_draft_cuda_initialize_score(
         POS +\
             (idx_b // BH) * stride_pos_bsz +\
             idx_tdst_no_proj * stride_pos_tdst,
-        mask=mask_tdst
+        mask=mask_tdst,
+        other=0,
     )
     TSRC = tl.max(pos_tdst)
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
@@ -3061,7 +3063,7 @@ def block_sparse_attention_cuda_step(
         assert SIN is not None
         
         old_tsrc = idx_tsrc
-        mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, pos_tdst, 987654321)) - extend_window_size)
+        mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
         new_tsrc = tl.where(
             mask_tsrc_window,
             old_tsrc,
@@ -3078,7 +3080,7 @@ def block_sparse_attention_cuda_step(
         keys = tl.trans(keys, 1, 0)
         keys = keys * mask_tsrc[None, :]
         
-        old_tdst = pos_tdst
+        old_tdst = (pos_tdst - 1)
         new_tdst = old_tdst // extend_group_size
         
         queries_grouped = adjust_rope(
@@ -3117,14 +3119,14 @@ def block_sparse_attention_cuda_step(
     
     if EXCLUDE_SLIDING_WINDOW:
         qk_mask = (
-            (pos_tdst[:, None] < idx_tsrc[None, :]) |
-            (pos_tdst[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
+            ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
+            ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     else:
         qk_mask = (
-            (pos_tdst[:, None] < idx_tsrc[None, :]) |
-            (pos_tdst[:, None] >= (idx_tsrc + sliding_window_size)[None, :]) |
+            ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
+            ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     
@@ -3275,6 +3277,7 @@ def block_sparse_attention_cuda(
             idx_bsz * stride_pos_bsz +\
             idx_tdst * stride_pos_tdst,
         mask=mask_tdst,
+        other=0,
     )
     
     idx_hid = tl.arange(0, HID)
