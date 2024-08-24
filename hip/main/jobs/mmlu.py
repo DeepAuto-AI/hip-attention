@@ -138,7 +138,7 @@ def exam_mmlu(model, tokenizer: transformers.PreTrainedTokenizer, text):
                 if hasattr(m, 'attention_method'):
                     m.tree_last_dense_queries = -1
         
-        output = model(**inputs).logits
+        output = model(output_logits=True, **inputs).logits
         output = torch.softmax(output, dim=-1)
     
     prob_a = max([output[0, -1, token].item() for token in tokens_a])

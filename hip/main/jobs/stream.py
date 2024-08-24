@@ -52,7 +52,7 @@ def job_stream(args, model, tokenizer, device):
         
         inputs = tokenizer([input_text, ] * args.batch_size, return_tensors='pt').to(device)
         print('input_ids', len(input_text), inputs.input_ids.shape)
-        print(inputs)
+        # print(inputs)
 
         t = time.time()
         elapsed = 0

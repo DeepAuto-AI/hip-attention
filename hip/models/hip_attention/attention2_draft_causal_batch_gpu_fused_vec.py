@@ -24,8 +24,6 @@ import numba
 from dataclasses import dataclass
 from importlib import metadata
 import nvtx
-from torch.utils.dlpack import to_dlpack
-from torch.utils.dlpack import from_dlpack
 import cupy as cp
 import random, os
 import warnings
@@ -35,7 +33,7 @@ import triton.language as tl
 import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Union
-from torch import Tensor, bits16
+from torch import Tensor
 from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
 import numpy as np
 from numpy import ndarray as NdArray
@@ -1693,6 +1691,8 @@ def masking_iteration_draft_python_epilog(
         
         BLOCK_BK = 128
         grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
+        pre_device = torch.get_default_device()
+        torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_epiloge[grid](
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -1705,6 +1705,7 @@ def masking_iteration_draft_python_epilog(
             G,
             BLOCK_BK,
         )
+        torch.set_default_device(pre_device)
         # print(indices[0, -1] // TSRC)
         # print(ks_count[0, -1], ks_start_end[0, -1])
         # print(ks_count.float().mean(1).int()[0])
@@ -2604,6 +2605,8 @@ def masking_iteration_draft(
     if group_size_seed is None:
         grid = (B, BDST, G)
         # print('init grid', grid)
+        pre_device = torch.get_default_device()
+        torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_initialize[grid](
             indices_seed, *(indices_seed.stride() if indices_seed is not None else (0, 0, 0)),
             ks_seed, *(ks_seed.stride() if ks_seed is not None else (0, 0)),
@@ -2629,6 +2632,7 @@ def masking_iteration_draft(
             num_warps=1,
             num_stages=1,
         )
+        torch.set_default_device(pre_device)
     else:
         indices.copy_(indices_seed)
         ks.copy_(ks_seed)
@@ -2670,6 +2674,8 @@ def masking_iteration_draft(
         
         # BUG: autotune ruin the access log
         # grid = lambda META: (triton.cdiv(indices.shape[-1], META['BLOCK_BK']), BDST, B)
+        pre_device = torch.get_default_device()
+        torch.set_default_device(q.device)
         masking_iteration_draft_cuda_initialize_score[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -2699,6 +2705,7 @@ def masking_iteration_draft(
             num_warps=2,
             num_stages=1,
         )
+        torch.set_default_device(pre_device)
         
         # print('-- after initialize')
         # print(scores.shape, key_access_log.shape, key_access_count.shape)
@@ -2760,6 +2767,8 @@ def masking_iteration_draft(
             BSZ
         )
         
+        pre_device = torch.get_default_device()
+        torch.set_default_device(q.device)
         masking_iteration_draft_cuda_fused[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -2821,6 +2830,7 @@ def masking_iteration_draft(
             # num_warps=4,
             # num_stages=2,
         )
+        torch.set_default_device(pre_device)
     else:
         raise NotImplementedError()
         i_iteration = 0
@@ -3107,6 +3117,7 @@ def block_sparse_attention_cuda_step(
     
     if EXCLUDE_SLIDING_WINDOW:
         qk_mask = (
+            (pos_tdst[:, None] < idx_tsrc[None, :]) |
             (pos_tdst[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
@@ -3573,6 +3584,8 @@ def block_sparse_attention(
     assert position_ids.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
+    pre_device = torch.get_default_device()
+    torch.set_default_device(q.device)
     block_sparse_attention_cuda[grid](
         q, *q.stride(),
         k, *args.safe_stride(k, 4),
@@ -3600,6 +3613,7 @@ def block_sparse_attention(
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
     )
+    torch.set_default_device(pre_device)
     
     return context
 
@@ -3795,6 +3809,8 @@ def masking_step_loop(
                                 init_ks = torch.zeros_like(ks)
                                 init_group_sizes = torch.zeros_like(group_sizes)
                                 grid = (N // args.topk_head_group_size, init_group_sizes.shape[1], args.topk_head_group_size)
+                                pre_device = torch.get_default_device()
+                                torch.set_default_device(pos_tdst.device)
                                 masking_iteration_draft_cuda_initialize[grid](
                                     None, *(0, 0, 0),
                                     None, *(0, 0),
@@ -3820,6 +3836,8 @@ def masking_step_loop(
                                     num_warps=1,
                                     num_stages=1,
                                 )
+                                torch.set_default_device(pre_device)
+                                
                                 # init_indices.mul_(block_size_k)
                                 
                                 group_sizes_scaled = torch.maximum(group_sizes.float(), torch.ones_like(group_sizes)) * args.low_res_oversample_rate
@@ -4290,6 +4308,8 @@ def hip_masking(
         
         BLOCK_BK = 128
         grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
+        pre_device = torch.get_default_device()
+        torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_epiloge[grid](
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -4302,6 +4322,7 @@ def hip_masking(
             G,
             BLOCK_BK,
         )
+        torch.set_default_device(pre_device)
         
         ks = ks_count.sum(-1)
         if len(key_access_log_sampled) > 0:
@@ -4869,14 +4890,28 @@ def varlen_hip_attention(
     for seq_len in seq_lens:
         seq_start = total_length
         seq_end = seq_start + seq_len
-        total_length += seq_len
+        total_length = seq_end
+        
+        # torch.cuda.synchronize()
+        
         out, _ = hip_attention(
             q=q[seq_start:seq_end].unsqueeze(0), 
             k=k[seq_start:seq_end].unsqueeze(0), 
             v=v[seq_start:seq_end].unsqueeze(0),
-            args=args,
+            args=args.clone(),
         )
-        # print('varlen', seq_start, seq_end, out.shape)
+        
+        # torch.cuda.synchronize()
+        # from flash_attn import flash_attn_func
+        # out_flash = flash_attn_func(
+        #     q=q[seq_start:seq_end].unsqueeze(0), 
+        #     k=k[seq_start:seq_end].unsqueeze(0), 
+        #     v=v[seq_start:seq_end].unsqueeze(0),
+        #     softmax_scale=1,
+        #     causal=True,
+        # )
+        # print('varlen', seq_start, seq_end, out.shape, F.mse_loss(out, out_flash))
+
         outs.append(out.squeeze(0))
     
     return torch.cat(outs, dim=0)

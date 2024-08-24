@@ -82,7 +82,7 @@ def generate_stream(
             token_ids = stream.outputs[-1].token_ids
             
             if len(token_ids) > 0 and not cleared:
-                if os.getenv('CLEAR_AT_START', '1') == '1':
+                if os.getenv('CLEAR_AT_START', '0') == '1':
                     os.system('clear')
                 print('\n----- Decoding Starts -----\n')
                 cleared = True
@@ -98,8 +98,10 @@ def generate_stream(
                 t_decode += time.time() - t
                 n_decode += 1
                 
-                decoded_tokens += 1 * len(step_outputs)
-                decoded_latency += time.time() - t
+                for step_stream in step_outputs:
+                    if len(step_stream.outputs[-1].token_ids) > 0 and not step_stream.finished:
+                        decoded_tokens += 1
+                        decoded_latency += time.time() - t
             else:
                 # print(stream)
                 text = '[Prefix Prefill]'
@@ -157,16 +159,15 @@ def job_stream_demo(args, model, tokenizer, device):
         outputs = generate_stream(args, model, tokenizer, prompts, sampling_params)
         elapsed = time.time() - t
         
-        # n_generated = 0
-        # for output in outputs:
-        #     generated_text = output.outputs[0].text
-        #     n_tokens = len(tokenizer([generated_text]).input_ids[0])
-        #     n_generated += n_tokens
-        #     if len(outputs) > 1:
-        #         print(generated_text.replace('\n', '\\n')[:300] + ' [...]', n_tokens)
-        #     else:
-        #         print(generated_text, n_tokens)
-        # print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
+        n_generated = 0
+        for output in outputs:
+            generated_text = output.outputs[0].text
+            n_tokens = len(tokenizer([generated_text]).input_ids[0])
+            n_generated += n_tokens
+            if len(outputs) > 1:
+                print(generated_text.replace('\n', '\\n')[:500] + ' [...]', n_tokens)
+            else:
+                print(generated_text, n_tokens)
     except KeyboardInterrupt:
         traceback.print_exc()
         print('Interrupted')
@@ -174,7 +175,7 @@ def job_stream_demo(args, model, tokenizer, device):
     print(f'''
 
 {"="*60}
-[VLLM_ATTENTION_BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] (model={args.model}, #prefill={prefilled_tokens}, #decode={decoded_tokens})
+[BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] ({args.model}, #prefill={prefilled_tokens}, #decode={decoded_tokens})
 End-to-End vLLM Prefill Throughput: {prefilled_tokens / (prefilled_latency / args.batch_size):.2f} tok/sec
 End-to-End vLLM Decoding Throughput: {decoded_tokens / (decoded_latency / args.batch_size):.2f} tok/sec
 {"="*60}''')

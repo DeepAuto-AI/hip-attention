@@ -86,7 +86,7 @@ def load_vllm_model(args: ArgsType):
         dtype='half',
         gpu_memory_utilization=0.9,
         tensor_parallel_size=torch.cuda.device_count(),
-        enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
+        enforce_eager=os.environ.get('ENFORCE_EAGER','0')=='1',
         trust_remote_code=True,
         max_num_batched_tokens=16384,
     )
