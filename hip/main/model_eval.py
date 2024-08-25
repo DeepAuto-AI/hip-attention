@@ -29,6 +29,7 @@ from hip.utils import seed
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
+    from vllm.config import ObservabilityConfig
     
     if int(os.getenv('HIP_K', '512')) != args.k:
         warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
@@ -64,6 +65,7 @@ def load_vllm_model(args: ArgsType):
         "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
         'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
         "vllm_llama3.1_8b_instruct": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "vllm_llama3.1_8b_instruct_awq": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
@@ -88,7 +90,11 @@ def load_vllm_model(args: ArgsType):
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('ENFORCE_EAGER','0')=='1',
         trust_remote_code=True,
-        max_num_batched_tokens=16384,
+        max_num_batched_tokens=32768,
+        # observability_config=ObservabilityConfig(
+        #     collect_model_forward_time=True, 
+        #     collect_model_execute_time=True
+        # )
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)

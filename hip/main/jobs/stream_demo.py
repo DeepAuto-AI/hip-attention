@@ -142,14 +142,15 @@ def job_stream_demo(args, model, tokenizer, device):
     elapsed = 0
     try:
         assert isinstance(model, LLM)
-        prompts = [input_text, ] * args.batch_size
+        prompts = [input_text, ]
         sampling_params = SamplingParams(
+            n=args.batch_size,
             temperature=0.7,
-            top_p=0.95,
-            top_k=1000,
+            top_p=0.9,
+            top_k=100,
             max_tokens=args.max_tokens,
             # max_tokens=16,
-            frequency_penalty=0.2,
+            frequency_penalty=0.0,
             repetition_penalty=1.0,
             ignore_eos=True,
             skip_special_tokens=False,
@@ -176,8 +177,8 @@ def job_stream_demo(args, model, tokenizer, device):
 
 {"="*60}
 [BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] ({args.model}, #prefill={prefilled_tokens}, #decode={decoded_tokens})
-End-to-End vLLM Prefill Throughput: {prefilled_tokens / (prefilled_latency / args.batch_size):.2f} tok/sec
-End-to-End vLLM Decoding Throughput: {decoded_tokens / (decoded_latency / args.batch_size):.2f} tok/sec
+End-to-End vLLM Prefill Throughput: {(prefilled_tokens / args.batch_size) / (prefilled_latency):.2f} tok/sec
+End-to-End vLLM Decoding Throughput: {(decoded_tokens * args.batch_size) / decoded_latency:.2f} tok/sec
 {"="*60}''')
     
     if elapsed == 0:

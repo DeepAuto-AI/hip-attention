@@ -58,8 +58,9 @@ def job_stream(args, model, tokenizer, device):
         elapsed = 0
         try:
             if isinstance(model, LLM):
-                prompts = [input_text, ] * args.batch_size
+                prompts = [input_text, ]
                 sampling_params = SamplingParams(
+                    n=args.batch_size,
                     temperature=0.7,
                     top_p=0.9,
                     top_k=1000,
@@ -76,12 +77,15 @@ def job_stream(args, model, tokenizer, device):
                 elapsed = time.time() - t
                 
                 n_generated = 0
+                output_texts = []
                 for output in outputs:
-                    generated_text = output.outputs[0].text
+                    for item in output.outputs:
+                        output_texts.append(item.text)
+                for generated_text in output_texts:
                     n_tokens = len(tokenizer([generated_text]).input_ids[0])
                     n_generated += n_tokens
-                    if len(outputs) > 1:
-                        print(generated_text.replace('\n', '\\n')[:300] + ' [...]', n_tokens)
+                    if len(output_texts) > 1:
+                        print(generated_text.replace('\n', '\\n')[:200] + ' [...]', n_tokens)
                     else:
                         print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')

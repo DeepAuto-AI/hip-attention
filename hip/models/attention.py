@@ -24,7 +24,7 @@ def custom_attention(
     tree_block_size_k=2,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
-    tree_sampling_method='center',
+    tree_sampling_method='last',
 
     # Latency optimization tweaks
     tree_enable_flash=False, 
