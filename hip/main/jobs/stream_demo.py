@@ -176,7 +176,7 @@ def job_stream_demo(args, model, tokenizer, device):
     print(f'''
 
 {"="*60}
-[BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] ({args.model}, #prefill={prefilled_tokens}, #decode={decoded_tokens})
+[BACKEND={os.getenv("VLLM_ATTENTION_BACKEND", "undefined")}] ({args.model}, #prefill={prefilled_tokens // args.batch_size}, #decode={decoded_tokens * args.batch_size})
 End-to-End vLLM Prefill Throughput: {(prefilled_tokens / args.batch_size) / (prefilled_latency):.2f} tok/sec
 End-to-End vLLM Decoding Throughput: {(decoded_tokens * args.batch_size) / decoded_latency:.2f} tok/sec
 {"="*60}''')
