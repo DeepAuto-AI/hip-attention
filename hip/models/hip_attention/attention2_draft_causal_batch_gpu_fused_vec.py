@@ -4829,7 +4829,9 @@ def hip_attention(
 def paged_hip_attention(
     q: Tensor,
     softmax_scale: float,
-    args: HiPAttentionArgs
+    args: HiPAttentionArgs,
+    previous_mask_metadata: Optional[
+        HiPAttentionOutputMetadata] = None,
 ):
     B, TDST, HEAD, HID = q.shape
     assert args.k_cache.shape[-1] == HID
@@ -4841,18 +4843,26 @@ def paged_hip_attention(
     
     q = q * softmax_scale
     
-    (
-        indices, 
-        ks, 
-        ks_count, 
-        ks_start_end, 
-        key_access_log, 
-        key_access_count
-    ) = hip_masking(
-        q=q,
-        k=None,
-        args=args
-    )
+    if previous_mask_metadata is None:
+        (
+            indices, 
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count
+        ) = hip_masking(
+            q=q,
+            k=None,
+            args=args
+        )
+    else:
+        indices = previous_mask_metadata.indices
+        ks = previous_mask_metadata.ks
+        ks_count = previous_mask_metadata.ks_count
+        ks_start_end = previous_mask_metadata.ks_start_end
+        key_access_log = previous_mask_metadata.key_access_log
+        key_access_count = previous_mask_metadata.key_access_count
     
     position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
         args.cache_seq_lens[:, None] - TDST + 1
