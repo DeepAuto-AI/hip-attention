@@ -3179,7 +3179,7 @@ def get_block_sparse_attention_configs():
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
-    for block_bk in [8, 16, 32]:
+    for block_bk in [16, 32,]:
         for max_nreg in [128, 256, 512]:
             for num_warps in [4]:
                 for num_stages in [2]:

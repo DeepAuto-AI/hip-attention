@@ -161,12 +161,15 @@ def job_stream_demo(args, model, tokenizer, device):
         elapsed = time.time() - t
         
         n_generated = 0
+        generated_texts = []
         for output in outputs:
-            generated_text = output.outputs[0].text
+            for item in output.outputs:
+                generated_texts.append(item.text)
+        for generated_text in generated_texts:
             n_tokens = len(tokenizer([generated_text]).input_ids[0])
             n_generated += n_tokens
-            if len(outputs) > 1:
-                print(generated_text.replace('\n', '\\n')[:500] + ' [...]', n_tokens)
+            if len(generated_texts) > 1:
+                print(generated_text.replace('\n', '\\n')[:200] + ' [...]', n_tokens)
             else:
                 print(generated_text, n_tokens)
     except KeyboardInterrupt:
