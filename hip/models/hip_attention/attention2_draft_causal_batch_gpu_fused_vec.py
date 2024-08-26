@@ -131,15 +131,18 @@ def masking_iteration_draft_cuda_initialize(
                     idx_bdst * stride_ks_seed_bdst,
             ).to(tl.int32)
         
-        ALIGNED_BSRC = 1 << tl.ceil(tl.log2(BSRC.to(tl.float64))).to(tl.int32)
-        indices = tl.minimum((MAX_BSRC * idx_group + (ALIGNED_BSRC / mask_block_k * idx_bk)).to(tl.int32), MAX_BSRC * idx_group + BSRC)
-        group_sizes = tl.minimum(
-            BSRC, 
-            (
-                tl.minimum((ALIGNED_BSRC / mask_block_k * (idx_bk + 1)).to(tl.int32), BSRC) -\
-                tl.minimum((ALIGNED_BSRC / mask_block_k * idx_bk).to(tl.int32), BSRC)
-            )
-        ).to(tl.int32)
+        ALIGNED_BSRC = 1 << tl.floor(tl.log2(BSRC.to(tl.float64))).to(tl.int32)
+        ALIGN_STEP = tl.cdiv(ALIGNED_BSRC, mask_block_k)
+        # ALIGNED_BSRC = BSRC
+        indices = tl.minimum(
+            ((MAX_BSRC * idx_group + (BSRC / mask_block_k * idx_bk)).to(tl.int32) // ALIGN_STEP) * ALIGN_STEP, 
+            (MAX_BSRC * idx_group + BSRC).to(tl.int32)
+        )
+        next_indices = tl.minimum(
+            ((MAX_BSRC * idx_group + (BSRC / mask_block_k * (idx_bk + 1))).to(tl.int32) // ALIGN_STEP) * ALIGN_STEP, 
+            (MAX_BSRC * idx_group + BSRC).to(tl.int32)
+        )
+        group_sizes = tl.maximum(0, tl.minimum(BSRC, next_indices - indices)).to(tl.int32)
         if INDICES_SEED is not None:
             if ks == (mask_block_k * G):
                 indices = tl.load(
@@ -204,7 +207,8 @@ def masking_iteration_draft_cuda_initialize(
                 KS +\
                     idx_b * stride_ks_b +\
                     idx_bdst * stride_ks_bdst,
-                val = mask_block_k
+                val = mask_block_k,
+                # val = tl.sum((group_sizes > 0).to(tl.int32))
             )
 
 @triton.jit
@@ -380,6 +384,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     idx_tdst, mask_tdst, pos_tdst,
     dupped_mask,
     
+    sliding_window_size,
     BH: tl.constexpr,
     G: tl.constexpr, 
     MAX_TSRC, 
@@ -681,7 +686,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     acc = tl.where(
         (
             (acc == 0.0) |
-            (idx_tsrc[None, :] > (pos_tdst - 1)[:, None]) |
+            (idx_tsrc[None, :] > (pos_tdst - sliding_window_size - 1)[:, None]) |
             False
         ), 
         -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
@@ -1038,7 +1043,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 idx_tdst, mask_tdst, pos_tdst,
                 dupped_mask,
                 
-                BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -1157,7 +1162,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             idx_tdst, mask_tdst, pos_tdst,
             mask_to_sample,
             
-            BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -1238,7 +1243,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             idx_tdst, mask_tdst, pos_tdst,
             mask_to_sample,
             
-            BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -2374,7 +2379,7 @@ def masking_iteration_draft_cuda_initialize_score(
         idx_tdst, mask_tdst, pos_tdst,
         mask_bk,
         
-        BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+        sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
         USING_EXTEND,
         extend_window_size,
@@ -2561,7 +2566,7 @@ def masking_iteration_draft(
     else:
         KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(triton.cdiv(MAX_BSRC, args.block_size_k)))
     if args.output_key_access_log:
-        key_access_log = torch.empty(
+        key_access_log = torch.zeros(
             (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
             # fill_value=torch.iinfo(torch.int32).max,
             device=q.device,
@@ -4384,7 +4389,7 @@ def hip_masking(
             plt.tight_layout()
             plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
             print('saved dummy.png')
-        # render_mask()
+        render_mask()
         
         if key_access_log is not None:
             key_access_map = access_log_to_dense(
