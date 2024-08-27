@@ -322,7 +322,7 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'last'),
+                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
                     branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend

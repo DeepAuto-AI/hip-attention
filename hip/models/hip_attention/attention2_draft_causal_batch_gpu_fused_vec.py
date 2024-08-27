@@ -2562,14 +2562,15 @@ def masking_iteration_draft(
         max_group_size = max_group_size_seed
     
     if max_group_size is not None:
-        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(max_group_size))
+        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(max_group_size)) * 2
     else:
-        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(triton.cdiv(MAX_BSRC, args.block_size_k)))
+        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(triton.cdiv(MAX_BSRC, args.block_size_k))) * 2
     if args.output_key_access_log:
-        key_access_log = torch.zeros(
+        key_access_log = torch.full(
             (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
             # fill_value=torch.iinfo(torch.int32).max,
             device=q.device,
+            fill_value=-1,
         )
         key_access_count = torch.zeros(
             (B, BDST, ), 
@@ -3958,14 +3959,19 @@ def access_log_to_dense(
     key_access_log: NdArray,
     key_access_count: NdArray,
     TSRC,
+    KV_HEAD_REPEAT,
 ):
     B, BDST, K = key_access_log.shape
-    out = np.zeros((B, BDST, TSRC), dtype=np.int32)
-    for ib in numba.prange(B):
-        for ibdst in numba.prange(BDST):
-            nk = key_access_count[ib, ibdst]
-            for ik in range(nk):
-                out[ib, ibdst, key_access_log[ib, ibdst, ik]] += 1
+    out = np.zeros((B // KV_HEAD_REPEAT, BDST, TSRC), dtype=np.int32)
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        for ikv in range(KV_HEAD_REPEAT):
+            ib = ibh * KV_HEAD_REPEAT + ikv
+            for ibdst in numba.prange(BDST):
+                nk = key_access_count[ib, ibdst]
+                for ik in range(min(nk, K)):
+                    tsrc = key_access_log[ib, ibdst, ik]
+                    if tsrc < TSRC:
+                        out[ibh, ibdst, tsrc] += 1
     return out
 
 @numba.njit
@@ -4095,13 +4101,14 @@ def perform_lfu(
     
     return loaded_key_mask
 
-@numba.njit(parallel=True)
+@numba.njit(parallel=True, fastmath=True)
 def perform_lru_heuristic(
     key_access_map,
     key_access_log,
     key_access_count,
     lru_budget_log_scale,
     max_lru_budget,
+    KV_HEAD_REPEAT,
     block_size_q = 32,
     block_size_k = 8,
     sliding_window_size = 512,
@@ -4110,93 +4117,97 @@ def perform_lru_heuristic(
     B, BDST, K = key_access_log.shape
     
     loaded_key_mask = np.zeros_like(key_access_map)
-    loaded_key_value = np.zeros((B, max_lru_budget,), dtype=np.int32) - 1
-    loaded_key_first_value = np.zeros((B, max_lru_budget,), dtype=np.int32) - 1
-    loaded_key_first_stamp = np.zeros((B, max_lru_budget,), dtype=np.int32)
-    loaded_key_importance = np.zeros((B, max_lru_budget,), dtype=np.int32)
+    loaded_key_value = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_first_value = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_first_stamp = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32)
+    loaded_key_importance = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32)
     
-    for ib in numba.prange(B): #prange
-        for ibdst in range(1, BDST):
-            b = sliding_window_size
-            s = lru_budget_log_scale
-            lru_budget = round((math.log2((ibdst * block_size_q + b) / b) * b - b) * s + b)
-            
-            last_accessed = key_access_log[:, ibdst-1, :]
-            last_accessed_count = key_access_count[:, ibdst-1]
-            
-            # prefetch keys using scaling
-            if perform_heuristic:
-                if ibdst > (sliding_window_size // block_size_q):
-                    for _icache in range(lru_budget):
-                        icache = lru_budget - _icache - 1
-                        current_pointer = loaded_key_value[ib, icache]
-                        if current_pointer >= 0:
-                            first_ibdst = loaded_key_first_stamp[ib, icache]
-                            first_value = loaded_key_first_value[ib, icache]
-                            first_offset = first_value % block_size_k
-                            new_position = (first_value // block_size_k) / first_ibdst * ibdst
-                            new_position = math.ceil(new_position) * block_size_k + first_offset
-                            
-                            if new_position not in loaded_key_value[ib]:
-                                loaded_key_value[ib, icache] = new_position
-                            else:
-                                loaded_key_value[ib, icache] = current_pointer
-                                if new_position == current_pointer:
-                                    # when keep position
-                                    loaded_key_importance[ib, icache] -= 0
-                                else:
-                                    # when collide
-                                    loaded_key_importance[ib, icache] -= 1
-            # try to add last accessed to LRU cache
-            # loaded_key_importance[ib] -= 1 # decay freq if LFU
-            for ik in range(last_accessed_count[ib]):
-                current_pointer = last_accessed[ib, ik]
-                in_cache = False
-                least_timestamp_val = 999999999
-                least_timestamp_idx = -1
-                for icache in range(lru_budget):
-                    if loaded_key_value[ib, icache] == current_pointer:
-                        loaded_key_importance[ib, icache] = ibdst
-                        # loaded_key_importance[ib, icache] += 3
-                        # if in LRU cache, update life
-                        in_cache = True
-                    else:
-                        if loaded_key_importance[ib, icache] < least_timestamp_val:
-                            least_timestamp_val = loaded_key_importance[ib, icache]
-                            least_timestamp_idx = icache
-                # else, evict victim
+    for ibh in numba.prange(B // KV_HEAD_REPEAT): #prange
+        for ibdst in range(sliding_window_size // block_size_q, BDST):
+            for ikv in range(KV_HEAD_REPEAT):
+                ib = ibh * KV_HEAD_REPEAT + ikv
+                b = sliding_window_size
+                s = lru_budget_log_scale
+                lru_budget = round((math.log2((ibdst * block_size_q + b) / b) * b - b) * s + b)
+                
+                last_accessed = key_access_log[:, ibdst-1, :]
+                last_accessed_count = key_access_count[:, ibdst-1]
+                
+                # prefetch keys using scaling
                 if perform_heuristic:
-                    if not in_cache:
-                        new_position = (current_pointer // block_size_k) / (ibdst - 1) * ibdst
-                        new_position = math.ceil(new_position) * block_size_k + (current_pointer % block_size_k)
-                        if new_position not in loaded_key_value[ib, :]:
-                            loaded_key_value[ib, least_timestamp_idx] = new_position
-                            loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
-                            loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
-                            loaded_key_importance[ib, least_timestamp_idx] = ibdst
+                    if ibdst > (sliding_window_size // block_size_q):
+                        for _icache in range(lru_budget):
+                            icache = lru_budget - _icache - 1
+                            current_pointer = loaded_key_value[ib // KV_HEAD_REPEAT, icache]
+                            if current_pointer >= 0:
+                                first_ibdst = loaded_key_first_stamp[ib // KV_HEAD_REPEAT, icache]
+                                first_value = loaded_key_first_value[ib // KV_HEAD_REPEAT, icache]
+                                first_offset = first_value % block_size_k
+                                new_position = (first_value // block_size_k) / first_ibdst * ibdst
+                                new_position = math.ceil(new_position) * block_size_k + first_offset
+                                
+                                if new_position not in loaded_key_value[ib // KV_HEAD_REPEAT]:
+                                    loaded_key_value[ib // KV_HEAD_REPEAT, icache] = new_position
+                                else:
+                                    loaded_key_value[ib // KV_HEAD_REPEAT, icache] = current_pointer
+                                    if new_position == current_pointer:
+                                        # when keep position
+                                        loaded_key_importance[ib // KV_HEAD_REPEAT, icache] -= 0
+                                    else:
+                                        # when collide
+                                        loaded_key_importance[ib // KV_HEAD_REPEAT, icache] -= 1
+                # try to add last accessed to LRU cache
+                # loaded_key_importance[ib] -= 1 # decay freq if LFU
+                for ik in range(min(last_accessed_count[ib], K)):
+                    current_pointer = last_accessed[ib, ik]
+                    if current_pointer < 0:
+                        continue
+                    in_cache = False
+                    least_timestamp_val = 999999999
+                    least_timestamp_idx = -1
+                    for icache in range(lru_budget):
+                        if loaded_key_value[ib // KV_HEAD_REPEAT, icache] == current_pointer:
+                            loaded_key_importance[ib // KV_HEAD_REPEAT, icache] = ibdst
+                            # loaded_key_importance[ib, icache] += 3
+                            # if in LRU cache, update life
+                            in_cache = True
                         else:
-                            for i in range(len(loaded_key_value[ib, :])):
-                                if loaded_key_value[ib, i] == new_position:
-                                    loaded_key_value[ib, i] = new_position
-                                    loaded_key_first_value[ib, i] = current_pointer
-                                    loaded_key_first_stamp[ib, i] = ibdst - 1
-                                    loaded_key_importance[ib, i] = ibdst
-                            loaded_key_value[ib, least_timestamp_idx] = current_pointer
-                            loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
-                            loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
-                            loaded_key_importance[ib, least_timestamp_idx] = ibdst
-                else:
-                    if not in_cache:
-                        loaded_key_value[ib, least_timestamp_idx] = current_pointer
-                        loaded_key_first_value[ib, least_timestamp_idx] = current_pointer
-                        loaded_key_first_stamp[ib, least_timestamp_idx] = ibdst - 1
-                        loaded_key_importance[ib, least_timestamp_idx] = ibdst
-            # submit to mask for debug, in realworld, time to fetch
-            for icache in range(lru_budget):
-                idx = loaded_key_value[ib, icache]
-                if idx > 0:
-                    loaded_key_mask[ib, ibdst, idx] = 1
-    
+                            if loaded_key_importance[ib // KV_HEAD_REPEAT, icache] < least_timestamp_val:
+                                least_timestamp_val = loaded_key_importance[ib // KV_HEAD_REPEAT, icache]
+                                least_timestamp_idx = icache
+                    # else, evict victim
+                    if perform_heuristic:
+                        if not in_cache:
+                            new_position = (current_pointer // block_size_k) / (ibdst - 1) * ibdst
+                            new_position = math.ceil(new_position) * block_size_k + (current_pointer % block_size_k)
+                            if new_position not in loaded_key_value[ib // KV_HEAD_REPEAT, :]:
+                                loaded_key_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = new_position
+                                loaded_key_first_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = current_pointer
+                                loaded_key_first_stamp[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst - 1
+                                loaded_key_importance[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst
+                            else:
+                                for i in range(len(loaded_key_value[ib // KV_HEAD_REPEAT, :])):
+                                    if loaded_key_value[ib // KV_HEAD_REPEAT, i] == new_position:
+                                        loaded_key_value[ib // KV_HEAD_REPEAT, i] = new_position
+                                        loaded_key_first_value[ib // KV_HEAD_REPEAT, i] = current_pointer
+                                        loaded_key_first_stamp[ib // KV_HEAD_REPEAT, i] = ibdst - 1
+                                        loaded_key_importance[ib // KV_HEAD_REPEAT, i] = ibdst
+                                loaded_key_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = current_pointer
+                                loaded_key_first_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = current_pointer
+                                loaded_key_first_stamp[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst - 1
+                                loaded_key_importance[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst
+                    else:
+                        if not in_cache:
+                            loaded_key_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = current_pointer
+                            loaded_key_first_value[ib // KV_HEAD_REPEAT, least_timestamp_idx] = current_pointer
+                            loaded_key_first_stamp[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst - 1
+                            loaded_key_importance[ib // KV_HEAD_REPEAT, least_timestamp_idx] = ibdst
+                # submit to mask for debug, in realworld, time to fetch
+                for icache in range(lru_budget):
+                    idx = loaded_key_value[ib // KV_HEAD_REPEAT, icache]
+                    if idx >= 0:
+                        loaded_key_mask[ib // KV_HEAD_REPEAT, ibdst, idx] = 1
+        
     return loaded_key_mask
 
 @nvtx.annotate('hip_masking')
@@ -4369,7 +4380,7 @@ def hip_masking(
     if os.getenv('HIP_DEBUG', '0') == '1':
         B, TDST, H, HID = q.shape
         if k is not None:
-            _, TSRC, _, _ = k.shape
+            _, TSRC, H_KV, _ = k.shape
         else:
             TSRC = torch.max(args.cache_seq_lens).item()
         N = B * H
@@ -4389,13 +4400,17 @@ def hip_masking(
             plt.tight_layout()
             plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
             print('saved dummy.png')
-        render_mask()
+        # render_mask()
         
         if key_access_log is not None:
+            KV_HEAD_REPEAT = H // H_KV
+            # KV_HEAD_REPEAT = 1
+            
             key_access_map = access_log_to_dense(
                 key_access_log.cpu().numpy(),
                 key_access_count.cpu().numpy(),
                 TSRC,
+                KV_HEAD_REPEAT,
             )
             key_access_mask = np.clip(key_access_map, 0, 1)
             
@@ -4614,16 +4629,19 @@ def hip_masking(
                 B, BDST, K = key_access_log.shape
                 b = args.sliding_window_size
                 s = lru_budget_log_scale
+                print('performing heuristic', flush=True)
                 loaded_key_mask = perform_lru_heuristic(
                     key_access_map, 
                     key_access_log.cpu().numpy(), 
                     key_access_count.cpu().numpy(),
                     lru_budget_log_scale, 
                     round((math.log2((BDST * args.block_size_q + b) / b) * b - b) * s + b), 
+                    KV_HEAD_REPEAT,
                     args.block_size_q,
                     args.block_size_k,
                     args.sliding_window_size,
                 )
+                
                 # incr_first_iteration(
                 #     loaded_key_mask,
                 #     block_size_q,
@@ -4633,6 +4651,7 @@ def hip_masking(
                 #     sliding_window_size,
                 # )
                 loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+                print('plot stats', flush=True)
                 plot_stats(f'lru_heuristic_{lru_budget_log_scale}', loaded_key_mask)
             render_lru_heuristic(1)
             render_lru_heuristic(2)
@@ -4995,7 +5014,7 @@ def paged_varlen_hip_attention(
 
 def main():
     debug_only = True
-    seq_len = 16384
+    seq_len = 131072
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
@@ -5063,7 +5082,7 @@ def main():
             block_size_k_group=1,
             
             sliding_window_size=512,
-            sink_token_size=32,
+            sink_token_size=16,
             
             using_extend=False,
             rope_cos=cos,
