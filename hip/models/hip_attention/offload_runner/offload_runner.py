@@ -309,7 +309,7 @@ class Runner:
             else:
                 return self.capture_hip_cache.forward(*args, **kwargs)
         else:
-            return self.capture.forward(*args, **kwargs)
+            return self.capture.try_capture_and_forward(*args, **kwargs)
     
     @torch.inference_mode(True)
     def sample(self, logits: torch.Tensor):
@@ -357,19 +357,20 @@ class Runner:
         event_decode_end = torch.cuda.Event(True)
         
         logits = []
-        event_prefill_start.record()
-        
-        ibatch = 0
-        for module in self.model.modules():
-            if isinstance(module, LlamaAttention):
-                module.prompt_batch_index = ibatch
-        prompt_output = self.model(
-            input_ids=input_ids[ibatch:ibatch+1], 
-            position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-            cache_position=prompt_cache_pos, 
-            past_key_values=cache,
-            num_logits_to_keep=1,
-        )
+        for idx_warmup in range(2):
+            if idx_warmup == 1:
+                event_prefill_start.record()
+            ibatch = 0
+            for module in self.model.modules():
+                if isinstance(module, LlamaAttention):
+                    module.prompt_batch_index = ibatch
+            prompt_output = self.model(
+                input_ids=input_ids[ibatch:ibatch+1], 
+                position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
+                cache_position=prompt_cache_pos, 
+                past_key_values=cache,
+                num_logits_to_keep=1,
+            )
         for _ in range(bsz):
             logits.append(prompt_output.logits)
         
