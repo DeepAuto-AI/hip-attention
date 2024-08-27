@@ -275,39 +275,44 @@ class Runner:
         self.capture_hip_cache = CUDACapture(self.model)
         
         self.hip_refresh_interval = 8
+        
+        self.hip_offload = True
     
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
         if self.method == 'hip':
-            if self.capture_hip_refresh.need_capture():
-                for m in self.model.modules():
-                    if isinstance(m, LlamaAttention):
-                        m.hip_cache = None
-                        m.hip_last_cache = None
-                        m.hip_use_cache = False
-                        m.hip_checkout_cache = True
-                self.capture_hip_refresh.capture(*args, **kwargs)
+            if not self.hip_offload:
+                if self.capture_hip_refresh.need_capture():
+                    for m in self.model.modules():
+                        if isinstance(m, LlamaAttention):
+                            m.hip_cache = None
+                            m.hip_last_cache = None
+                            m.hip_use_cache = False
+                            m.hip_checkout_cache = True
+                    self.capture_hip_refresh.capture(*args, **kwargs)
+                    
+                    for m in self.model.modules():
+                        if isinstance(m, LlamaAttention):
+                            assert m.hip_last_cache is not None
+                            m.hip_cache = m.hip_last_cache
+                            m.hip_use_cache = True
+                            m.hip_checkout_cache = False
+                    self.capture_hip_cache.capture(*args, **kwargs)
+                    
+                    for m in self.model.modules():
+                        if isinstance(m, LlamaAttention):
+                            assert m.hip_cache is not None
+                            m.hip_cache = None
+                            m.hip_last_cache = None
+                            m.hip_use_cache = False
+                            m.hip_checkout_cache = False
                 
-                for m in self.model.modules():
-                    if isinstance(m, LlamaAttention):
-                        assert m.hip_last_cache is not None
-                        m.hip_cache = m.hip_last_cache
-                        m.hip_use_cache = True
-                        m.hip_checkout_cache = False
-                self.capture_hip_cache.capture(*args, **kwargs)
-                
-                for m in self.model.modules():
-                    if isinstance(m, LlamaAttention):
-                        assert m.hip_cache is not None
-                        m.hip_cache = None
-                        m.hip_last_cache = None
-                        m.hip_use_cache = False
-                        m.hip_checkout_cache = False
-            
-            if (self.decode_step % self.hip_refresh_interval) == 0:
-                return self.capture_hip_refresh.forward(*args, **kwargs)
+                if (self.decode_step % self.hip_refresh_interval) == 0:
+                    return self.capture_hip_refresh.forward(*args, **kwargs)
+                else:
+                    return self.capture_hip_cache.forward(*args, **kwargs)
             else:
-                return self.capture_hip_cache.forward(*args, **kwargs)
+                raise NotImplementedError()
         else:
             return self.capture.try_capture_and_forward(*args, **kwargs)
     
@@ -318,7 +323,7 @@ class Runner:
         return next_token_id
     
     @torch.inference_mode(True)
-    def generate(self, text, max_tokens=256, item_repeat=24, kv_share=1):
+    def generate(self, text, max_tokens=256, item_repeat=24, kv_share=1, n_prefill_warmup=1):
         input_ids = self.tokenizer([text, ] * item_repeat, return_tensors="pt", padding=True).input_ids.to(self.model.device)
         bsz, context_len = input_ids.shape
         
@@ -357,8 +362,8 @@ class Runner:
         event_decode_end = torch.cuda.Event(True)
         
         logits = []
-        for idx_warmup in range(2):
-            if idx_warmup == 1:
+        for idx_warmup in range(n_prefill_warmup+1):
+            if idx_warmup == n_prefill_warmup:
                 event_prefill_start.record()
             ibatch = 0
             for module in self.model.modules():
