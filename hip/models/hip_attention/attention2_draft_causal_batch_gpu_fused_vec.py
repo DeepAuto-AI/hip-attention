@@ -3667,10 +3667,14 @@ def masking_step_loop(
         )[:, None] + chunk_offset
         idx_tdst = idx_tdst % TDST
         idx_tdst = idx_tdst.reshape(-1)
-        if TSRC is not None:
-            pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
+        if args.position_ids is not None:
+            pos_tdst = args.position_ids\
+                .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
         else:
-            pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
+            if TSRC is not None:
+                pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
+            else:
+                pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(args.num_samples):
@@ -4403,8 +4407,9 @@ def hip_masking(
         # render_mask()
         
         if key_access_log is not None:
-            KV_HEAD_REPEAT = H // H_KV
+            # KV_HEAD_REPEAT = H // H_KV
             # KV_HEAD_REPEAT = 1
+            KV_HEAD_REPEAT = H
             
             key_access_map = access_log_to_dense(
                 key_access_log.cpu().numpy(),
@@ -4676,12 +4681,12 @@ class HiPAttentionArgs:
     
     block_size_q: int = 32
     block_stride_q: int = 2
-    block_size_k: int = 8
-    block_stride_k: int = 4
+    block_size_k: int = 2
+    block_stride_k: int = 1
     block_size_k_group: int = 1
     
-    sliding_window_size: int = 512
-    sink_token_size: int = 32
+    sliding_window_size: int = 256
+    sink_token_size: int = 16
     
     using_extend: bool = False
     rope_cos: Optional[Tensor] = None
@@ -4690,7 +4695,7 @@ class HiPAttentionArgs:
     self_extend_group_size: int = 8
     
     topk_head_group_size: int = 1
-    sample_method: str = 'first'
+    sample_method: str = 'center'
     branch_method: str = 'half'
     
     traverse_from_last_step: bool = False
@@ -4719,6 +4724,8 @@ class HiPAttentionArgs:
     v_cache: Optional[Tensor] = None
     cache_seq_lens: Optional[Tensor] = None
     block_table: Optional[Tensor] = None
+    
+    position_ids: Optional[Tensor] = None
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -4814,20 +4821,41 @@ def hip_attention(
     v: Tensor,
     
     args: Optional[HiPAttentionArgs] = None,  
+    previous_metadata: Optional[HiPAttentionOutputMetadata] = None,
     **kwargs,
-):
+) -> Tuple[Tensor, HiPAttentionOutputMetadata]:
     if args is None:
         args = HiPAttentionArgs(**kwargs)
     
     assert q.ndim == 4
     assert k.ndim == 4
     
-    indices, ks, ks_count, ks_start_end, key_access_log, key_access_count = hip_masking(
-        # TODO(heejun): apply PCA topk
-        q=args.get_q_quant(q),
-        k=args.get_k_quant(k),
-        args=args,
-    )
+    if args.position_ids is None:
+        args.position_ids = (
+            torch.arange(0, q.shape[1], device=q.device) + k.shape[1] - q.shape[1] + 1
+        )[None, :].expand(q.shape[0], -1)
+    
+    if previous_metadata is None:
+        (
+            indices, 
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count
+        ) = hip_masking(
+            # TODO(heejun): apply PCA topk
+            q=args.get_q_quant(q),
+            k=args.get_k_quant(k),
+            args=args,
+        )
+    else:
+        indices = previous_metadata.indices
+        ks = previous_metadata.ks
+        ks_count = previous_metadata.ks_count
+        ks_start_end = previous_metadata.ks_start_end
+        key_access_log = previous_metadata.key_access_log
+        key_access_count = previous_metadata.key_access_count
     
     HIP_RANDOM_MASK = os.getenv('HIP_RANDOM_MASK', '0') == '1'
     if HIP_RANDOM_MASK:
@@ -4844,16 +4872,11 @@ def hip_attention(
                     indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
                     indices[ib, ibdst, 0] = 0
     
-    # return None, None
-    
-    position_ids = (
-        torch.arange(0, q.shape[1], device=q.device) + k.shape[1] - q.shape[1] + 1
-    )[None, :].expand(q.shape[0], -1)
     context = block_sparse_attention(
         q=q, 
         k=k, 
         v=v,
-        position_ids=position_ids,
+        position_ids=args.position_ids,
         
         indices=indices, 
         ks=ks, 
