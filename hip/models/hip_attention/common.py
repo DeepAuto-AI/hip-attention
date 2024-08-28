@@ -4,7 +4,7 @@ def load_checkouts(idx = 24, window = 1, seq_len = 4096, dtype = torch.float16, 
     data_source = 'llama'
     device = 0
     if data_source == 'llama':
-        state = torch.load('./cache/llama/qkvout.pth', map_location='cpu')
+        state = torch.load('./cache/llama/qkvout.pth', map_location='cpu', weights_only=False)
         q = state['q'] / (state['q'].shape[-1] ** 0.5)
         k = state['k']
         v = state['v']
