@@ -110,7 +110,7 @@ def perform_lru_hot_prefetch(
     key_access_log,
     key_access_count,
     block_size_q,
-    sliding_window_size,
+    mask_k,
     lru_budget_log_scale,
     KV_HEAD_REPEAT,
     prefetch_step,
@@ -118,7 +118,7 @@ def perform_lru_hot_prefetch(
     B, BDST, K = key_access_log.shape
     _, _, TSRC = key_access_map.shape
     
-    b = sliding_window_size
+    b = mask_k
     s = lru_budget_log_scale
     max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
@@ -146,7 +146,7 @@ def perform_lru_hot_prefetch(
     
     for ibh in numba.prange(B // KV_HEAD_REPEAT):
         for ibdst in range(1, BDST):
-            b = sliding_window_size
+            b = mask_k
             s = lru_budget_log_scale
             lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             prefetch_budget = math.floor(lru_budget * prefetch_ratio)
@@ -1140,13 +1140,13 @@ def main_exp():
     out = reshape(out, H)
     
     args = HiPAttentionArgs11(
-        mask_k=128,
+        mask_k=512,
         block_size_k=2,
         block_stride_k=1,
         block_size_q=32,
         block_stride_q=2,
-        sliding_window_size=32,
-        sink_token_size=4,
+        sliding_window_size=256,
+        sink_token_size=16,
         output_key_access_log=False,
         output_block_access_log=True,
     )
@@ -1344,7 +1344,7 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
             args.block_size_q,
@@ -1352,7 +1352,7 @@ def main_exp():
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_hot_prefetch_{lru_budget_log_scale}', loaded_key_mask)
     # render_lru_hot(1)
-    render_lru_hot_prefetch(1.5)
+    render_lru_hot_prefetch(1.0)
     render_lru_hot_prefetch(2.0)
     render_lru_hot_prefetch(3.0)
     render_lru_hot_prefetch(4.0)
@@ -1363,14 +1363,14 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_hot_{lru_budget_log_scale}', loaded_key_mask)
     # render_lru_hot(1)
-    render_lru_hot(1.5)
+    render_lru_hot(1.0)
     render_lru_hot(2.0)
     render_lru_hot(3.0)
     render_lru_hot(4.0)
@@ -1381,14 +1381,14 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_{lru_budget_log_scale}', loaded_key_mask)
     # render_lru(1)
-    render_lru(1.5)
+    render_lru(1)
     render_lru(2.0)
     render_lru(3.0)
     render_lru(4.0)
@@ -1402,17 +1402,16 @@ def main_exp():
             scores,
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
             temperature,
         )
         
-        
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_gd_score_{lru_budget_log_scale}', loaded_key_mask)
     # render_lru_hot(1)
-    render_gd_score(1.5)
+    render_gd_score(1)
     render_gd_score(2.0)
     render_gd_score(3.0)
     render_gd_score(4.0)
@@ -1424,14 +1423,13 @@ def main_exp():
             torch.softmax(block_access_score, dim=-1).cpu().numpy(),
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_hot_score_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lru_hot(1)
-    render_lru_hot_score(1.5)
+    render_lru_hot_score(1)
     render_lru_hot_score(2.0)
     render_lru_hot_score(3.0)
     render_lru_hot_score(4.0)
@@ -1443,14 +1441,13 @@ def main_exp():
             block_access_score.cpu().numpy(),
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_score_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lru(1)
-    render_lru_score(1.5)
+    render_lru_score(1)
     render_lru_score(2.0)
     render_lru_score(3.0)
     render_lru_score(4.0)
@@ -1461,25 +1458,22 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
             k,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_{k}_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lru_k(1, 2)
-    render_lru_k(1.5, 2)
+    render_lru_k(1, 2)
     render_lru_k(2.0, 2)
     render_lru_k(3.0, 2)
     render_lru_k(4.0, 2)
-    # render_lru_k(1, 3)
-    render_lru_k(1.5, 3)
+    render_lru_k(1, 3)
     render_lru_k(2.0, 3)
     render_lru_k(3.0, 3)
     render_lru_k(4.0, 3)
-    # render_lru_k(1)
-    render_lru_k(1.5)
+    render_lru_k(1)
     render_lru_k(2.0)
     render_lru_k(3.0)
     render_lru_k(4.0)
@@ -1490,14 +1484,13 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_tie_break_lre_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lru_tie_break_lre(1)
-    render_lru_tie_break_lre(1.5)
+    render_lru_tie_break_lre(1)
     render_lru_tie_break_lre(2.0)
     render_lru_tie_break_lre(3.0)
     render_lru_tie_break_lre(4.0)
@@ -1508,15 +1501,16 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lru_tie_break_lfu_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lru_tie_break_lfu(1)
-    render_lru_tie_break_lfu(1.5)
-    render_lru_tie_break_lfu(2.0)
+    render_lru_tie_break_lfu(1)
+    render_lru_tie_break_lfu(2)
+    render_lru_tie_break_lfu(3)
+    render_lru_tie_break_lfu(4)
     
     def render_lfu_timestep_aware(lru_budget_log_scale=2):
         loaded_key_map = perform_lfu_timestep_aware(
@@ -1524,15 +1518,16 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_map, 0, 1)
         plot_stats(f'lfu_timestep_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lfu_timestep_aware(1)
-    render_lfu_timestep_aware(1.5)
+    render_lfu_timestep_aware(1)
     render_lfu_timestep_aware(2)
+    render_lfu_timestep_aware(3)
+    render_lfu_timestep_aware(4)
     
     def render_lfu_decay(lru_budget_log_scale=2):
         loaded_key_mask = perform_lfu(
@@ -1540,16 +1535,17 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
             True
         )
         loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
         plot_stats(f'lfu_decay_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lfu_decay(1)
-    render_lfu_decay(1.5)
-    render_lfu_decay(2.0)
+    render_lfu_decay(1)
+    render_lfu_decay(2)
+    render_lfu_decay(3)
+    render_lfu_decay(4)
     
     def render_lfu(lru_budget_log_scale=2):
         loaded_key_map = perform_lfu(
@@ -1557,15 +1553,16 @@ def main_exp():
             block_access_log.cpu().numpy(), 
             block_access_count.cpu().numpy(), 
             args.block_size_q,
-            args.sliding_window_size,
+            args.mask_k // args.block_size_k,
             lru_budget_log_scale,
             KV_HEAD_REPEAT,
         )
         loaded_key_mask = np.clip(loaded_key_map, 0, 1)
         plot_stats(f'lfu_{lru_budget_log_scale}', loaded_key_mask)
-    # render_lfu(1)
-    render_lfu(1.5)
+    render_lfu(1)
     render_lfu(2)
+    render_lfu(3)
+    render_lfu(4)
     
     def render_lru_heuristic(lru_budget_log_scale=4):
         B, BDST, K = block_access_log.shape
