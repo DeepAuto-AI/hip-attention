@@ -23,7 +23,7 @@ def access_log_to_dense(
     KV_HEAD_REPEAT,
 ):
     B, BDST, K = key_access_log.shape
-    out = np.zeros((B // KV_HEAD_REPEAT, BDST, TSRC), dtype=np.int32)
+    out_int = np.zeros((B // KV_HEAD_REPEAT, BDST, TSRC), dtype=np.int32)
     for ibh in numba.prange(B // KV_HEAD_REPEAT):
         for ikv in range(KV_HEAD_REPEAT):
             ib = ibh * KV_HEAD_REPEAT + ikv
@@ -32,8 +32,29 @@ def access_log_to_dense(
                 for ik in range(min(nk, K)):
                     tsrc = key_access_log[ib, ibdst, ik]
                     if tsrc < TSRC:
-                        out[ibh, ibdst, tsrc] += 1
-    return out
+                        out_int[ibh, ibdst, tsrc] += 1
+        
+    return out_int
+
+def access_score_log_to_dense(
+    key_access_log: NdArray,
+    key_access_count: NdArray,
+    TSRC,
+    KV_HEAD_REPEAT,
+    key_access_score: NdArray,
+):
+    B, BDST, K = key_access_log.shape
+    out_fp = np.zeros((B // KV_HEAD_REPEAT, BDST, TSRC), dtype=np.float32) - 98765432
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        for ikv in range(KV_HEAD_REPEAT):
+            ib = ibh * KV_HEAD_REPEAT + ikv
+            for ibdst in numba.prange(BDST):
+                nk = key_access_count[ib, ibdst]
+                for ik in range(min(nk, K)):
+                    tsrc = key_access_log[ib, ibdst, ik]
+                    if tsrc < TSRC:
+                        out_fp[ibh, ibdst, tsrc] = key_access_score[ib, ibdst, ik]
+    return out_fp
 
 @numba.njit
 def img_reduce(
@@ -72,6 +93,410 @@ def incr_first_iteration(
                     for ioffset in range(block_stride_k - 1, block_size_k, block_stride_k):
                         mask[ib, ibdst, tsrc + ioffset] += 1
 
+@numba.jit
+def numba_softmax(x, temperature):
+    # x = np.clip(x + temperature, 0, temperature * 2)
+    # return x
+    
+    x = x / temperature
+    m = np.max(x)
+    ex = np.exp(x - m)
+    exsum = np.sum(ex)
+    return ex / exsum
+
+@numba.njit(parallel=True)
+def perform_lru_hot_prefetch(
+    key_access_map,
+    key_access_log,
+    key_access_count,
+    block_size_q,
+    sliding_window_size,
+    lru_budget_log_scale,
+    KV_HEAD_REPEAT,
+    prefetch_step,
+):
+    B, BDST, K = key_access_log.shape
+    _, _, TSRC = key_access_map.shape
+    
+    b = sliding_window_size
+    s = lru_budget_log_scale
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
+    
+    prefetch_ratio = 0.4
+    max_prefetch_budget = math.ceil(max_lru_budget * prefetch_ratio)
+    max_lru_budget = math.ceil(max_lru_budget * (1-prefetch_ratio))
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    
+    # LRU-temperature cache
+    loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_timestamp = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    all_key_temperature = np.zeros((B // KV_HEAD_REPEAT, TSRC,), dtype=np.float32)
+    momentum = 0.7
+    decay_momentum = 0.95
+    
+    # LFU or LRU prefetch cache
+    #   candidate priority is frequency
+    #   prefetch key priority is frequencey
+    prefetch_candidate = np.zeros((B // KV_HEAD_REPEAT, max_prefetch_budget,), dtype=np.int32) - 1
+    prefetch_candidate_try = np.zeros((B // KV_HEAD_REPEAT, max_prefetch_budget, ), dtype=np.int32) + 1
+    prefetch_candidate_priority = np.zeros((B // KV_HEAD_REPEAT, max_prefetch_budget,), dtype=np.float32) - 1
+    prefetch_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    prefetch_key_priority = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        for ibdst in range(1, BDST):
+            b = sliding_window_size
+            s = lru_budget_log_scale
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
+            prefetch_budget = math.floor(lru_budget * prefetch_ratio)
+            lru_budget = math.floor(lru_budget * (1-prefetch_ratio))
+            
+            all_key_temperature[ibh] *= decay_momentum
+            
+            for ikv in range(KV_HEAD_REPEAT):
+                ib = ibh * KV_HEAD_REPEAT + ikv
+                
+                last_accessed = key_access_log[:, ibdst-1, :]
+                last_accessed_count = key_access_count[:, ibdst-1]
+                # try to add last accessed to LRU cache
+                for ik in range(min(K, last_accessed_count[ib])):
+                    current_pointer = last_accessed[ib, ik]
+                    if current_pointer < 0: continue
+                    
+                    in_cache = False
+                    in_candidate = False
+                    least_priority_val = 999999999
+                    victim_idx = -1
+                    for icache in range(lru_budget):
+                        cached_pointer = loaded_key_list[ibh, icache]
+                        if cached_pointer == current_pointer:
+                            loaded_key_timestamp[ibh, icache] = ibdst
+                            all_key_temperature[ibh, current_pointer] = momentum * all_key_temperature[ibh, current_pointer] + (1 - momentum)
+                            in_cache = True
+                            break
+                        else:
+                            temperature = all_key_temperature[ibh, cached_pointer]
+                            if temperature < least_priority_val:
+                                least_priority_val = temperature
+                                victim_idx = icache
+                    
+                    if not in_cache:
+                        for ifetch in range(prefetch_budget):
+                            prefetch_pointer = prefetch_key_list[ibh, ifetch]
+                            if prefetch_pointer == current_pointer:
+                                prefetch_key_priority[ibh, ifetch] = ibdst
+                                in_cache = True
+                                break
+                            candidate_pointer = prefetch_candidate[ibh, ifetch]
+                            if candidate_pointer == current_pointer:
+                                # push candidate prefetch
+                                prefetch_candidate_try[ibh, ifetch] -= 1
+                                prefetch_candidate_priority[ibh, ifetch] = ibdst
+                                in_candidate = True
+                                break
+                    
+                    # need to push cache
+                    if not in_cache:
+                        # update temperature
+                        all_key_temperature[ibh, current_pointer] = momentum * all_key_temperature[ibh, current_pointer] + (1 - momentum)
+                        # add to prefetch candidate
+                    
+                    if (not in_cache) and (not in_candidate):
+                        least_candidate_priority_val = 999999999
+                        candidate_victim_idx = -1
+                        for ifetch in range(prefetch_budget):
+                            priority = prefetch_candidate_priority[ibh, ifetch]
+                            if priority < least_candidate_priority_val:
+                                least_candidate_priority_val = priority
+                                candidate_victim_idx = ifetch
+                        prefetch_candidate[ibh, candidate_victim_idx] = current_pointer
+                        prefetch_candidate_try[ibh, candidate_victim_idx] = 3
+                        prefetch_candidate_priority[ibh, candidate_victim_idx] = ibdst
+                    
+                    # if victim has cooler, then push to cache
+                    if not in_cache and all_key_temperature[ibh, current_pointer] >= all_key_temperature[ibh, loaded_key_list[ibh, victim_idx]]:
+                        loaded_key_list[ibh, victim_idx] = current_pointer
+                        loaded_key_timestamp[ibh, victim_idx] = ibdst
+            
+            # before start step, perform prefetch
+            for ifetch in range(prefetch_budget):
+                if prefetch_key_list[ibh, ifetch] >= 0:
+                    prefetch_key_list[ibh, ifetch] += prefetch_step
+                    if prefetch_key_priority[ibh, ifetch] < ibdst - 16:
+                        prefetch_key_priority[ibh, ifetch] = -1
+                        prefetch_key_list[ibh, ifetch] = -1
+                if prefetch_candidate[ibh, ifetch] >= 0:
+                    prefetch_candidate[ibh, ifetch] += prefetch_step
+            
+            for ifetch in range(prefetch_budget):
+                if prefetch_candidate_try[ibh, ifetch] <= 0:
+                    candidate_pointer = prefetch_candidate[ibh, ifetch]
+                    candidate_priority = prefetch_candidate_priority[ibh, ifetch]
+                    
+                    prefetch_candidate_try[ibh, ifetch] = 1
+                    prefetch_candidate[ibh, ifetch] = -1
+                    prefetch_candidate_priority[ibh, ifetch] = -1
+                    
+                    victim_idx = np.argmin(prefetch_key_priority[ibh, :prefetch_budget])
+                    prefetch_key_priority[ibh, victim_idx] = candidate_priority
+                    prefetch_key_list[ibh, victim_idx] = candidate_pointer
+            
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ibh, icache]
+                if idx >= 0:
+                    loaded_key_mask[ibh, ibdst, idx] = 1
+            for ifetch in range(prefetch_budget):
+                idx = prefetch_key_list[ibh, ifetch]
+                if idx >= 0:
+                    loaded_key_mask[ibh, ibdst, idx] = 1
+    
+    return loaded_key_mask
+
+@numba.njit(parallel=True)
+def perform_gd_score(
+    key_access_map,
+    key_access_log,
+    key_access_score,
+    key_access_count,
+    block_size_q,
+    sliding_window_size,
+    lru_budget_log_scale,
+    KV_HEAD_REPEAT,
+    temperature,
+    minimum_cost = 1000,
+):
+    B, BDST, K = key_access_log.shape
+    _, _, TSRC = key_access_map.shape
+    
+    b = sliding_window_size
+    s = lru_budget_log_scale
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
+    
+    # for output
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_probs_map = np.zeros_like(key_access_map, dtype=np.float32)
+    
+    loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_scores = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.float32) - 987654321
+    loaded_key_h = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.float32)
+    loaded_key_h_init = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.float32)
+    
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        last_min_h = 0
+        for ibdst in range(1, BDST):
+            b = sliding_window_size
+            s = lru_budget_log_scale
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
+            probs = numba_softmax(loaded_key_scores[ibh], temperature)
+            for ikv in range(KV_HEAD_REPEAT):
+                ib = ibh * KV_HEAD_REPEAT + ikv
+                
+                last_accessed = key_access_log[:, ibdst-1, :]
+                last_accessed_count = key_access_count[:, ibdst-1]
+                # try to add last accessed to LRU cache
+                for ik in range(min(K, last_accessed_count[ib])):
+                    current_pointer = last_accessed[ib, ik]
+                    if current_pointer < 0: continue
+                    
+                    in_cache = False
+                    min_h_value = 99999999
+                    victim_idx = -1
+                    for icache in range(lru_budget):
+                        cached_pointer = loaded_key_list[ibh, icache]
+                        if cached_pointer == current_pointer:
+                            loaded_key_h[ibh, icache] = last_min_h + probs[icache] + minimum_cost
+                            in_cache = True
+                        else:
+                            h = loaded_key_h[ibh, icache]
+                            if h < min_h_value:
+                                min_h_value = h
+                                victim_idx = icache
+                    
+                    last_min_h = min_h_value
+                    
+                    # else, evict victim
+                    if not in_cache:
+                        min_h = min_h_value
+                        
+                        # decrease by L
+                        loaded_key_h[ibh, :] -= min_h
+                        
+                        # enqueue to cache
+                        loaded_key_scores[ibh, victim_idx] = key_access_score[ib, ibdst, ik]
+                        probs = numba_softmax(loaded_key_scores[ibh], temperature)
+                        
+                        new_h = min_h_value + probs[victim_idx] + minimum_cost
+                        loaded_key_list[ibh, victim_idx] = current_pointer
+                        loaded_key_h[ibh, victim_idx] = new_h
+                        loaded_key_h_init[ibh, victim_idx] = new_h
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ibh, icache]
+                if idx >= 0:
+                    loaded_key_mask[ibh, ibdst, idx] = 1
+                    loaded_key_probs_map[ibh, ibdst, idx] = probs[icache]
+    
+    return loaded_key_mask, loaded_key_probs_map
+
+@numba.njit(parallel=True)
+def perform_lru_score(
+    key_access_map,
+    key_access_log,
+    key_access_score,
+    key_access_count,
+    block_size_q,
+    sliding_window_size,
+    lru_budget_log_scale,
+    KV_HEAD_REPEAT,
+):
+    B, BDST, K = key_access_log.shape
+    _, _, TSRC = key_access_map.shape
+    
+    b = sliding_window_size
+    s = lru_budget_log_scale
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_score = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.float32) - 987654321
+    
+    momemtum = 0.9
+    
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        for ibdst in range(1, BDST):
+            b = sliding_window_size
+            s = lru_budget_log_scale
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
+            
+            loaded_key_score[ibh] *= momemtum
+            
+            for ikv in range(KV_HEAD_REPEAT):
+                ib = ibh * KV_HEAD_REPEAT + ikv
+                
+                last_accessed = key_access_log[:, ibdst-1, :]
+                last_accessed_count = key_access_count[:, ibdst-1]
+                # try to add last accessed to LRU cache
+                for ik in range(min(K, last_accessed_count[ib])):
+                    current_pointer = last_accessed[ib, ik]
+                    if current_pointer < 0: continue
+                    
+                    in_cache = False
+                    least_timestamp_val = 999999999.0
+                    least_timestamp_idx = -1
+                    for icache in range(lru_budget):
+                        if loaded_key_list[ibh, icache] == current_pointer:
+                            loaded_key_score[ibh, icache] = momemtum * loaded_key_score[ibh, icache] +\
+                                key_access_score[ib, ibdst, ik] * (1 - momemtum)
+                            in_cache = True
+                            break
+                        else:
+                            score = loaded_key_score[ibh, icache]
+                            if score < least_timestamp_val:
+                                least_timestamp_val = score
+                                least_timestamp_idx = icache
+                    # else, evict victim
+                    if not in_cache:
+                        loaded_key_list[ibh, least_timestamp_idx] = current_pointer
+                        loaded_key_score[ibh, least_timestamp_idx] = key_access_score[ib, ibdst, ik]
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ibh, icache]
+                if idx >= 0:
+                    loaded_key_mask[ibh, ibdst, idx] = 1
+    
+    return loaded_key_mask
+
+@numba.njit(parallel=True)
+def perform_lru_hot_score(
+    key_access_map,
+    key_access_log,
+    key_access_score,
+    key_access_count,
+    block_size_q,
+    sliding_window_size,
+    lru_budget_log_scale,
+    KV_HEAD_REPEAT,
+):
+    B, BDST, K = key_access_log.shape
+    _, _, TSRC = key_access_map.shape
+    
+    b = sliding_window_size
+    s = lru_budget_log_scale
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
+    
+    loaded_key_mask = np.zeros_like(key_access_map)
+    loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
+    loaded_key_score = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.float32) - 987654321
+    all_key_cost = np.zeros((B // KV_HEAD_REPEAT, TSRC,), dtype=np.float32)
+    
+    momentum = 0.7
+    decay_momentum = 0.95
+    
+    score_momemtum = 0.8
+    score_decay = 0.95
+    
+    for ibh in numba.prange(B // KV_HEAD_REPEAT):
+        for ibdst in range(1, BDST):
+            b = sliding_window_size
+            s = lru_budget_log_scale
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
+            
+            all_key_cost[ibh] *= decay_momentum
+            loaded_key_score[ibh] *= score_decay
+            
+            for ikv in range(KV_HEAD_REPEAT):
+                ib = ibh * KV_HEAD_REPEAT + ikv
+                
+                last_accessed = key_access_log[:, ibdst-1, :]
+                last_accessed_count = key_access_count[:, ibdst-1]
+                # try to add last accessed to LRU cache
+                for ik in range(min(K, last_accessed_count[ib])):
+                    current_pointer = last_accessed[ib, ik]
+                    if current_pointer < 0: continue
+                    
+                    in_cache = False
+                    least_hot_val = 0
+                    victim_idx = -1
+                    for icache in range(lru_budget):
+                        cached_pointer = loaded_key_list[ibh, icache]
+                        if cached_pointer == current_pointer:
+                            loaded_key_score[ibh, icache] = score_momemtum * loaded_key_score[ibh, icache] +\
+                                key_access_score[ib, ibdst, ik] * (1 - score_momemtum)
+                            all_key_cost[ibh, current_pointer] = momentum * all_key_cost[ibh, current_pointer] + (1 - momentum)
+                            in_cache = True
+                            break
+                        else:
+                            is_victim = False
+                            score = loaded_key_score[ibh, icache]
+                            cost = all_key_cost[ibh, cached_pointer] * 0.01 + score * 0.99
+                            
+                            hot = (1 - cost)
+                            if hot > least_hot_val:
+                                is_victim = True
+                            
+                            if is_victim:
+                                least_hot_val = hot
+                                victim_idx = icache
+                    # else, evict victim
+                    if not in_cache:
+                        all_key_cost[ibh, current_pointer] = momentum * all_key_cost[ibh, current_pointer] + (1 - momentum)
+                    if  (not in_cache) and\
+                        (
+                            all_key_cost[ibh, current_pointer] >=\
+                            all_key_cost[ibh, loaded_key_list[ibh, victim_idx]]
+                        ):
+                        loaded_key_list[ibh, victim_idx] = current_pointer
+                        loaded_key_score[ibh, victim_idx] = key_access_score[ib, ibdst, ik]
+            # submit to mask for debug
+            for icache in range(lru_budget):
+                idx = loaded_key_list[ibh, icache]
+                if idx >= 0:
+                    loaded_key_mask[ibh, ibdst, idx] = 1
+    
+    return loaded_key_mask
+
 @numba.njit(parallel=True)
 def perform_lru_hot(
     key_access_map,
@@ -87,7 +512,7 @@ def perform_lru_hot(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -100,7 +525,7 @@ def perform_lru_hot(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             
             all_key_cost[ibh] *= decay_momentum
             
@@ -125,8 +550,8 @@ def perform_lru_hot(
                             in_cache = True
                             break
                         else:
-                            timestamp = loaded_key_timestamp[ibh, icache]
-                            dist = ibdst - timestamp
+                            # timestamp = loaded_key_timestamp[ibh, icache]
+                            # dist = ibdst - timestamp
                             cost = all_key_cost[ibh, cached_pointer]
                             score = (1 - cost)
                             if score > least_timestamp_val:
@@ -161,7 +586,7 @@ def perform_lru(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -171,7 +596,7 @@ def perform_lru(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             for ikv in range(KV_HEAD_REPEAT):
                 ib = ibh * KV_HEAD_REPEAT + ikv
                 
@@ -222,7 +647,7 @@ def perform_lru_k(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -232,7 +657,7 @@ def perform_lru_k(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             for ikv in range(KV_HEAD_REPEAT):
                 ib = ibh * KV_HEAD_REPEAT + ikv
                 
@@ -284,7 +709,7 @@ def perform_lru_tie_break_lre(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -295,7 +720,7 @@ def perform_lru_tie_break_lre(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             # if ibh == 0:
             #     print(all_key_last_evicted[ibh, 1024:1034])
             for ikv in range(KV_HEAD_REPEAT):
@@ -361,7 +786,7 @@ def perform_lru_tie_break_lfu(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -372,7 +797,7 @@ def perform_lru_tie_break_lfu(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             
             loaded_key_freq[ibh] -= 1
             
@@ -442,7 +867,7 @@ def perform_lfu(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -452,7 +877,7 @@ def perform_lfu(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             for ikv in range(KV_HEAD_REPEAT):
                 ib = ibh * KV_HEAD_REPEAT + ikv
                 
@@ -513,7 +938,7 @@ def perform_lfu_timestep_aware(
     
     b = sliding_window_size
     s = lru_budget_log_scale
-    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+    max_lru_budget = math.ceil(math.log2(TSRC / b + 1) * b * s * KV_HEAD_REPEAT)
     
     loaded_key_mask = np.zeros_like(key_access_map)
     loaded_key_list = np.zeros((B // KV_HEAD_REPEAT, max_lru_budget,), dtype=np.int32) - 1
@@ -524,7 +949,7 @@ def perform_lfu_timestep_aware(
         for ibdst in range(1, BDST):
             b = sliding_window_size
             s = lru_budget_log_scale
-            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT * 2)
+            lru_budget = round(math.log2(ibdst * block_size_q / b + 1) * b * s * KV_HEAD_REPEAT)
             
             loaded_key_freq[ibh, ibdst % window] = 0
             # loaded_key_freq[ibh] = np.clip(loaded_key_freq[ibh] * 0.9, 0, 987654321)
@@ -722,18 +1147,21 @@ def main_exp():
         block_stride_q=2,
         sliding_window_size=32,
         sink_token_size=4,
-        output_key_access_log=True,
+        output_key_access_log=False,
+        output_block_access_log=True,
     )
     _, metadata = hip_attention_11(
         q, k, v,
         args=args
     )
     
-    key_access_log = metadata.key_access_log.cpu()
-    key_access_count = metadata.key_access_count.cpu()
+    block_access_log = metadata.block_access_log.cpu()
+    block_access_score = metadata.block_access_score.float().cpu()
+    block_access_count = metadata.block_access_count.cpu()
+    args.block_size_q = args.block_size_q // args.block_size_k
     
-    TDST = q.shape[1]
-    TSRC = k.shape[1]
+    TDST = q.shape[1] // args.block_size_k
+    TSRC = k.shape[1] // args.block_size_k
     
     KV_HEAD_REPEAT = H // H_KV
     # KV_HEAD_REPEAT = 1
@@ -744,18 +1172,25 @@ def main_exp():
     gc.collect()
     torch.cuda.empty_cache()
     
-    key_access_map = access_log_to_dense(
-        key_access_log.cpu().numpy(),
-        key_access_count.cpu().numpy(),
+    block_access_map = access_log_to_dense(
+        block_access_log.cpu().numpy(),
+        block_access_count.cpu().numpy(),
         TSRC,
         KV_HEAD_REPEAT,
     )
-    key_access_mask = np.clip(key_access_map, 0, 1)
+    # block_access_score_map = access_score_log_to_dense(
+    #     block_access_log.cpu().numpy(),
+    #     block_access_count.cpu().numpy(),
+    #     TSRC,
+    #     KV_HEAD_REPEAT,
+    #     block_access_score.cpu().numpy()
+    # )
+    block_access_mask = np.clip(block_access_map, 0, 1)
     
     def render_recalls():
         recalls = {}
-        B, BDST, TSRC = key_access_mask.shape
-        mask = key_access_mask.reshape(B // KV_HEAD_REPEAT, KV_HEAD_REPEAT, BDST, TSRC)
+        B, BDST, TSRC = block_access_mask.shape
+        mask = block_access_mask.reshape(B // KV_HEAD_REPEAT, KV_HEAD_REPEAT, BDST, TSRC)
         mask = torch.tensor(np.clip(np.sum(mask, axis=1), 0, 1), device=0, dtype=torch.int32)
         for i in tqdm.tqdm(range(args.mask_k // args.block_size_q + 1, BDST), dynamic_ncols=True, desc='recalls', leave=False):
             for j in range(i + 1, BDST):
@@ -791,15 +1226,29 @@ def main_exp():
     
     def render_access_map_fullres():
         # mat = cv2.applyColorMap(key_access_map[0], cv2.COLORMAP_JET)
-        for i in range(key_access_map.shape[0]):
+        for i in range(block_access_map.shape[0]):
             path = f'dummy_access_map_fullres_{i}.png'
-            cv2.imwrite(path, (key_access_map[i] * 255).astype(np.uint8))
+            cv2.imwrite(path, (block_access_map[i] * 255).astype(np.uint8))
             print(f'saved {path}')
     # render_access_map_fullres()
     
+    def render_access_score_map_fullres():
+        t_min = -10
+        t_max = 10
+        t = (
+            (block_access_score_map - t_min) /\
+            (t_max - t_min)
+        )
+        t = np.clip(t, 0, 1)
+        for i in range(t.shape[0]):
+            path = f'dummy_access_score_map_fullres_{i}.png'
+            cv2.imwrite(path, (t[i] * 255).astype(np.uint8))
+            print(f'saved {path}')
+    # render_access_score_map_fullres()
+    
     # plot key access map
     def render_access_map():
-        img = key_access_map[0]
+        img = block_access_map[0]
         img = img_reduce(img, 1, args.block_size_q)
         plt.figure(figsize=(4, 4))
         plt.imshow(img)
@@ -820,19 +1269,19 @@ def main_exp():
         fetched_key_mask = np.clip(fetched_key_mask, 0, 1)
         
         # calc misses
-        missed_key_mask = np.clip(key_access_mask[:, 1:, :] - loaded_key_mask[:, 1:, :], 0, 1)
+        missed_key_mask = np.clip(block_access_mask[:, 1:, :] - loaded_key_mask[:, 1:, :], 0, 1)
         
         cv2.imwrite(f'dummy_{name}_loaded.png', loaded_key_mask[0, 1:, :] * 255)
         cv2.imwrite(f'dummy_{name}_fetched.png', fetched_key_mask[0] * 255)
         cv2.imwrite(f'dummy_{name}_missed.png', missed_key_mask[0] * 255)
-        cv2.imwrite(f'dummy_{name}_accessed.png', key_access_mask[0, 1:, :] * 255)
+        cv2.imwrite(f'dummy_{name}_accessed.png', block_access_mask[0, 1:, :] * 255)
         
         # 0 (black): not loaded
         # 1 (white): loaded but not used
         # 2 (green): cache hit
         # 3 (red): missed
         load_map = cache_map = loaded_key_mask[0, 1:, :]
-        access_map = key_access_map[0, 1:, :]
+        access_map = block_access_map[0, 1:, :]
         cache_map = np.where(load_map * access_map, 2, cache_map)
         cache_map = np.where((1 - load_map) * access_map, 3, cache_map)
         colormap = np.array([
@@ -848,7 +1297,7 @@ def main_exp():
         cv2.imwrite(path, cache_image)
         print('saved', path)
         
-        accessed_key_counts = key_access_mask[:, 1:, :].sum(axis=-1)
+        accessed_key_counts = block_access_mask[:, 1:, :].sum(axis=-1)
         loaded_key_counts = loaded_key_mask[:, 1:, :].sum(axis=-1)
         fetched_key_counts = fetched_key_mask.sum(axis=-1)
         missed_key_counts = missed_key_mask.sum(axis=-1)
@@ -873,27 +1322,46 @@ def main_exp():
         
         est_cache_budget = loaded_key_counts.T[-1].mean()
         oracle_cache_budget = accessed_key_counts.T[-1].mean()
-        print(f'estimated cache size: {est_cache_budget}, oracle cache size: {oracle_cache_budget}, relative size: {est_cache_budget/oracle_cache_budget:.2f}, sparsity: {est_cache_budget/key_access_map.shape[-1]*100:.2f} %')
+        print(f'estimated cache size: {est_cache_budget}, oracle cache size: {oracle_cache_budget}, relative size: {est_cache_budget/oracle_cache_budget:.2f}, sparsity: {est_cache_budget/block_access_map.shape[-1]*100:.2f} %')
         
         fetched_count = fetched_key_counts.T[-1].mean()
         n_layer = 32
         n_kv_head = 8
-        n_kv_hid = 128
+        n_kv_hid = 128 * args.block_size_k
         fetched_mb = fetched_count * n_layer * n_kv_head * n_kv_hid / (1024 * 1024)
         print(f'fetched tokens: {fetched_count:.1f}, {fetched_mb:.4f} MB, took {fetched_mb / 64:.2f} ms (bsz=1) / {fetched_mb / 64 * 32:.2f} ms (bsz=32) in PCIe 4.0')
         
         missed_count = missed_key_counts.T[-1].mean()
         n_layer = 32
         n_kv_head = 8
-        n_kv_hid = 128
+        n_kv_hid = 128 * args.block_size_k
         missed_mb = missed_count * n_layer * n_kv_head * n_kv_hid / (1024 * 1024)
         print(f'missed tokens: {missed_count:.1f}, {missed_mb:.4f} MB, took {missed_mb / 64:.2f} ms (bsz=1) / {missed_mb / 64 * 32:.2f} ms (bsz=32) in PCIe 4.0')
     
+    def render_lru_hot_prefetch(lru_budget_log_scale=2):
+        loaded_key_mask = perform_lru_hot_prefetch(
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
+            args.block_size_q,
+            args.sliding_window_size,
+            lru_budget_log_scale,
+            KV_HEAD_REPEAT,
+            args.block_size_q,
+        )
+        loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+        plot_stats(f'lru_hot_prefetch_{lru_budget_log_scale}', loaded_key_mask)
+    # render_lru_hot(1)
+    render_lru_hot_prefetch(1.5)
+    render_lru_hot_prefetch(2.0)
+    render_lru_hot_prefetch(3.0)
+    render_lru_hot_prefetch(4.0)
+    
     def render_lru_hot(lru_budget_log_scale=2):
         loaded_key_mask = perform_lru_hot(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -909,9 +1377,9 @@ def main_exp():
     
     def render_lru(lru_budget_log_scale=2):
         loaded_key_mask = perform_lru(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -925,11 +1393,73 @@ def main_exp():
     render_lru(3.0)
     render_lru(4.0)
     
+    def render_gd_score(lru_budget_log_scale=2, temperature=10):
+        scores = block_access_score.cpu().numpy()
+        probs = torch.softmax((block_access_score / temperature), dim=-1).cpu().numpy()
+        loaded_key_mask, loaded_key_probs_map = perform_gd_score(
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            scores,
+            block_access_count.cpu().numpy(), 
+            args.block_size_q,
+            args.sliding_window_size,
+            lru_budget_log_scale,
+            KV_HEAD_REPEAT,
+            temperature,
+        )
+        
+        
+        loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+        plot_stats(f'lru_gd_score_{lru_budget_log_scale}', loaded_key_mask)
+    # render_lru_hot(1)
+    render_gd_score(1.5)
+    render_gd_score(2.0)
+    render_gd_score(3.0)
+    render_gd_score(4.0)
+    
+    def render_lru_hot_score(lru_budget_log_scale=2):
+        loaded_key_mask = perform_lru_hot_score(
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            torch.softmax(block_access_score, dim=-1).cpu().numpy(),
+            block_access_count.cpu().numpy(), 
+            args.block_size_q,
+            args.sliding_window_size,
+            lru_budget_log_scale,
+            KV_HEAD_REPEAT,
+        )
+        loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+        plot_stats(f'lru_hot_score_{lru_budget_log_scale}', loaded_key_mask)
+    # render_lru_hot(1)
+    render_lru_hot_score(1.5)
+    render_lru_hot_score(2.0)
+    render_lru_hot_score(3.0)
+    render_lru_hot_score(4.0)
+    
+    def render_lru_score(lru_budget_log_scale=2):
+        loaded_key_mask = perform_lru_score(
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_score.cpu().numpy(),
+            block_access_count.cpu().numpy(), 
+            args.block_size_q,
+            args.sliding_window_size,
+            lru_budget_log_scale,
+            KV_HEAD_REPEAT,
+        )
+        loaded_key_mask = np.clip(loaded_key_mask, 0, 1)
+        plot_stats(f'lru_score_{lru_budget_log_scale}', loaded_key_mask)
+    # render_lru(1)
+    render_lru_score(1.5)
+    render_lru_score(2.0)
+    render_lru_score(3.0)
+    render_lru_score(4.0)
+    
     def render_lru_k(lru_budget_log_scale=2, k=4):
         loaded_key_mask = perform_lru_k(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -956,9 +1486,9 @@ def main_exp():
     
     def render_lru_tie_break_lre(lru_budget_log_scale=2):
         loaded_key_mask = perform_lru_tie_break_lre(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -974,9 +1504,9 @@ def main_exp():
     
     def render_lru_tie_break_lfu(lru_budget_log_scale=2):
         loaded_key_mask = perform_lru_tie_break_lfu(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -990,9 +1520,9 @@ def main_exp():
     
     def render_lfu_timestep_aware(lru_budget_log_scale=2):
         loaded_key_map = perform_lfu_timestep_aware(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -1006,9 +1536,9 @@ def main_exp():
     
     def render_lfu_decay(lru_budget_log_scale=2):
         loaded_key_mask = perform_lfu(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -1023,9 +1553,9 @@ def main_exp():
     
     def render_lfu(lru_budget_log_scale=2):
         loaded_key_map = perform_lfu(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(), 
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(), 
             args.block_size_q,
             args.sliding_window_size,
             lru_budget_log_scale,
@@ -1038,14 +1568,14 @@ def main_exp():
     render_lfu(2)
     
     def render_lru_heuristic(lru_budget_log_scale=4):
-        B, BDST, K = key_access_log.shape
+        B, BDST, K = block_access_log.shape
         b = args.sliding_window_size
         s = lru_budget_log_scale
         print('performing heuristic', lru_budget_log_scale, flush=True)
         loaded_key_mask = perform_lru_heuristic(
-            key_access_map, 
-            key_access_log.cpu().numpy(), 
-            key_access_count.cpu().numpy(),
+            block_access_map, 
+            block_access_log.cpu().numpy(), 
+            block_access_count.cpu().numpy(),
             lru_budget_log_scale, 
             round((math.log2((BDST * args.block_size_q + b) / b) * b - b) * s + b), 
             KV_HEAD_REPEAT,

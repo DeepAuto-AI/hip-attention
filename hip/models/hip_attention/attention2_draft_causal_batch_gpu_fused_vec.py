@@ -370,6 +370,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -378,6 +379,19 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_key_access_count_b,
     stride_key_access_count_bdst, 
     MAX_ACCESS_COUNT,
+    
+    BLOCK_ACCESS_LOG,
+    stride_block_access_log_b,
+    stride_block_access_log_bdst,
+    stride_block_access_log_t,
+    BLOCK_ACCESS_SCORE,
+    stride_block_access_score_b,
+    stride_block_access_score_bdst,
+    stride_block_access_score_t,
+    BLOCK_ACCESS_COUNT,
+    stride_block_access_count_b,
+    stride_block_access_count_bdst,
+    MAX_BLOCK_ACCESS_COUNT,
     
     idx_b, 
     idx_bdst,
@@ -431,6 +445,25 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     NUM_CALIB: tl.constexpr = 32
 ):
+    if BLOCK_ACCESS_LOG is not None:
+        mask_block_access = dupped_mask
+        len_block_access = tl.sum(mask_block_access.to(tl.int32))
+        block_access_location = tl.atomic_add(
+            BLOCK_ACCESS_COUNT +\
+                idx_b * stride_block_access_count_b +\
+                idx_bdst * stride_block_access_count_bdst,
+            val=len_block_access
+        )
+        idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
+        tl.store(
+            BLOCK_ACCESS_LOG +\
+                idx_b * stride_block_access_log_b +\
+                idx_bdst * stride_block_access_log_bdst +\
+                idx_block_access * stride_block_access_log_t,
+            mask=mask_block_access,
+            value=dupped_indices_for_keys,
+        )
+    
     idx_tsrc = (
         (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
         + tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K)[None, :] * BLOCK_STRIDE_K + BLOCK_STRIDE_K - 1
@@ -721,6 +754,21 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         raise Exception()
     scores = tl.where(dupped_mask, scores, float('-inf'))
     
+    if BLOCK_ACCESS_LOG is not None:
+        if BLOCK_ACCESS_SCORE is not None:
+            if REDUCE_METHOD == 'max':
+                checkout_scores = tl.where(dupped_mask, -scores, float('-inf'))
+            elif REDUCE_METHOD == 'min':
+                checkout_scores = scores
+            tl.store(
+                BLOCK_ACCESS_SCORE +\
+                    idx_b * stride_block_access_score_b +\
+                    idx_bdst * stride_block_access_score_bdst +\
+                    idx_block_access * stride_block_access_score_t,
+                mask=mask_block_access,
+                value=checkout_scores,
+            )
+    
     return scores
 
 # @triton.autotune(
@@ -750,6 +798,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     POS, stride_pos_bsz, stride_pos_tdst,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -758,6 +807,19 @@ def masking_iteration_draft_cuda_dup_and_score(
     stride_key_access_count_b,
     stride_key_access_count_bdst,
     MAX_ACCESS_COUNT,
+    
+    BLOCK_ACCESS_LOG,
+    stride_block_access_log_b,
+    stride_block_access_log_bdst,
+    stride_block_access_log_t,
+    BLOCK_ACCESS_SCORE,
+    stride_block_access_score_b,
+    stride_block_access_score_bdst,
+    stride_block_access_score_t,
+    BLOCK_ACCESS_COUNT,
+    stride_block_access_count_b,
+    stride_block_access_count_bdst,
+    MAX_BLOCK_ACCESS_COUNT,
     
     INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
     KS, stride_ks_b, stride_ks_bdst,
@@ -1033,6 +1095,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
+                
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -1041,6 +1104,19 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_key_access_count_b,
                 stride_key_access_count_bdst,
                 MAX_ACCESS_COUNT,
+                
+                BLOCK_ACCESS_LOG,
+                stride_block_access_log_b,
+                stride_block_access_log_bdst,
+                stride_block_access_log_t,
+                BLOCK_ACCESS_SCORE,
+                stride_block_access_score_b,
+                stride_block_access_score_bdst,
+                stride_block_access_score_t,
+                BLOCK_ACCESS_COUNT,
+                stride_block_access_count_b,
+                stride_block_access_count_bdst,
+                MAX_BLOCK_ACCESS_COUNT,
                 
                 idx_b, 
                 idx_bdst,
@@ -1152,6 +1228,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
+            
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1160,6 +1237,19 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_key_access_count_b,
             stride_key_access_count_bdst,
             MAX_ACCESS_COUNT,
+            
+            BLOCK_ACCESS_LOG,
+            stride_block_access_log_b,
+            stride_block_access_log_bdst,
+            stride_block_access_log_t,
+            BLOCK_ACCESS_SCORE,
+            stride_block_access_score_b,
+            stride_block_access_score_bdst,
+            stride_block_access_score_t,
+            BLOCK_ACCESS_COUNT,
+            stride_block_access_count_b,
+            stride_block_access_count_bdst,
+            MAX_BLOCK_ACCESS_COUNT,
             
             idx_b, 
             idx_bdst,
@@ -1233,6 +1323,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
+            
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1241,6 +1332,19 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_key_access_count_b,
             stride_key_access_count_bdst,
             MAX_ACCESS_COUNT,
+            
+            BLOCK_ACCESS_LOG,
+            stride_block_access_log_b,
+            stride_block_access_log_bdst,
+            stride_block_access_log_t,
+            BLOCK_ACCESS_SCORE,
+            stride_block_access_score_b,
+            stride_block_access_score_bdst,
+            stride_block_access_score_t,
+            BLOCK_ACCESS_COUNT,
+            stride_block_access_count_b,
+            stride_block_access_count_bdst,
+            MAX_BLOCK_ACCESS_COUNT,
             
             idx_b, 
             idx_bdst,
@@ -1800,6 +1904,7 @@ def masking_iteration_draft_cuda_fused(
     POS, 
     stride_pos_bsz,
     stride_pos_tdst,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -1808,6 +1913,19 @@ def masking_iteration_draft_cuda_fused(
     stride_key_access_count_b,
     stride_key_access_count_bdst, 
     MAX_ACCESS_COUNT,
+    
+    BLOCK_ACCESS_LOG,
+    stride_block_access_log_b,
+    stride_block_access_log_bdst,
+    stride_block_access_log_t,
+    BLOCK_ACCESS_SCORE,
+    stride_block_access_score_b,
+    stride_block_access_score_bdst,
+    stride_block_access_score_t,
+    BLOCK_ACCESS_COUNT,
+    stride_block_access_count_b,
+    stride_block_access_count_bdst,
+    MAX_BLOCK_ACCESS_COUNT,
     
     INDICES, 
     stride_indices_b, 
@@ -1974,6 +2092,7 @@ def masking_iteration_draft_cuda_fused(
                     POS, stride_pos_bsz, stride_pos_tdst,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
+                    
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
                     stride_key_access_log_bdst, 
@@ -1982,6 +2101,19 @@ def masking_iteration_draft_cuda_fused(
                     stride_key_access_count_b,
                     stride_key_access_count_bdst, 
                     MAX_ACCESS_COUNT,
+                    
+                    BLOCK_ACCESS_LOG,
+                    stride_block_access_log_b,
+                    stride_block_access_log_bdst,
+                    stride_block_access_log_t,
+                    BLOCK_ACCESS_SCORE,
+                    stride_block_access_score_b,
+                    stride_block_access_score_bdst,
+                    stride_block_access_score_t,
+                    BLOCK_ACCESS_COUNT,
+                    stride_block_access_count_b,
+                    stride_block_access_count_bdst,
+                    MAX_BLOCK_ACCESS_COUNT,
                     
                     INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
                     KS, stride_ks_b, stride_ks_bdst,
@@ -2234,6 +2366,7 @@ def masking_iteration_draft_cuda_initialize_score(
     Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
     POS, stride_pos_bsz, stride_pos_tdst,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -2242,6 +2375,19 @@ def masking_iteration_draft_cuda_initialize_score(
     stride_key_access_count_b,
     stride_key_access_count_bdst,
     MAX_ACCESS_COUNT,
+    
+    BLOCK_ACCESS_LOG,
+    stride_block_access_log_b,
+    stride_block_access_log_bdst,
+    stride_block_access_log_t,
+    BLOCK_ACCESS_SCORE,
+    stride_block_access_score_b,
+    stride_block_access_score_bdst,
+    stride_block_access_score_t,
+    BLOCK_ACCESS_COUNT,
+    stride_block_access_count_b,
+    stride_block_access_count_bdst,
+    MAX_BLOCK_ACCESS_COUNT,
     
     INDICES, 
     stride_indices_b, 
@@ -2372,6 +2518,7 @@ def masking_iteration_draft_cuda_initialize_score(
         K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
+        
         KEY_ACCESS_LOG, 
         stride_key_access_log_b, 
         stride_key_access_log_bdst, 
@@ -2380,6 +2527,19 @@ def masking_iteration_draft_cuda_initialize_score(
         stride_key_access_count_b,
         stride_key_access_count_bdst,
         MAX_ACCESS_COUNT,
+        
+        BLOCK_ACCESS_LOG,
+        stride_block_access_log_b,
+        stride_block_access_log_bdst,
+        stride_block_access_log_t,
+        BLOCK_ACCESS_SCORE,
+        stride_block_access_score_b,
+        stride_block_access_score_bdst,
+        stride_block_access_score_t,
+        BLOCK_ACCESS_COUNT,
+        stride_block_access_count_b,
+        stride_block_access_count_bdst,
+        MAX_BLOCK_ACCESS_COUNT,
         
         idx_b,
         idx_bdst,
@@ -2569,9 +2729,10 @@ def masking_iteration_draft(
         max_group_size = max_group_size_seed
     
     if max_group_size is not None:
-        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(max_group_size)) * 2
+        KEY_ACCESS_LEN = args.mask_k * 2 * math.ceil(math.log2(max_group_size) + 1)
     else:
-        KEY_ACCESS_LEN = args.mask_k * math.ceil(math.log2(triton.cdiv(MAX_BSRC, args.block_size_k))) * 2
+        KEY_ACCESS_LEN = args.mask_k * 2 * math.ceil(math.log2(MAX_BSRC) + 1)
+    
     if args.output_key_access_log:
         key_access_log = torch.full(
             (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
@@ -2587,6 +2748,29 @@ def masking_iteration_draft(
     else:
         key_access_log = None
         key_access_count = None
+    
+    BLOCK_ACCESS_LEN = KEY_ACCESS_LEN // (args.block_size_k // args.block_stride_k)
+    if args.output_block_access_log:
+        block_access_log = torch.full(
+            (B, BDST, BLOCK_ACCESS_LEN,), dtype=torch.int32,
+            device=q.device,
+            fill_value=-1,
+        )
+        block_access_score = torch.full(
+            (B, BDST, BLOCK_ACCESS_LEN), 
+            device=q.device,
+            dtype=torch.float16,
+            fill_value=-32000.0,
+        )
+        block_access_count = torch.zeros(
+            (B, BDST,),
+            dtype=torch.long,
+            device=q.device,
+        )
+    else:
+        block_access_log = None
+        block_access_score = None
+        block_access_count = None
     
     assert len(q.stride()) == 5 # BSZ, MAX_TDST, BH, G, HID
     if k is not None:
@@ -2703,9 +2887,15 @@ def masking_iteration_draft(
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
-            key_access_log, *(key_access_log.stride() if key_access_log is not None else (0, 0, 0)),
-            key_access_count, *(key_access_count.stride() if key_access_count is not None else (0, 0)),
+            
+            key_access_log, *args.safe_stride(key_access_log, 3),
+            key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
+            
+            block_access_log, *args.safe_stride(block_access_log, 3),
+            block_access_score, *args.safe_stride(block_access_score, 3),
+            block_access_count, *args.safe_stride(block_access_count, 2),
+            BLOCK_ACCESS_LEN,
             
             indices, *indices.stride(),
             
@@ -2796,9 +2986,15 @@ def masking_iteration_draft(
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
+            
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
+            
+            block_access_log, *args.safe_stride(block_access_log, 3), 
+            block_access_score, *args.safe_stride(block_access_score, 3),
+            block_access_count, *args.safe_stride(block_access_count, 2),
+            BLOCK_ACCESS_LEN,
             
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -2866,9 +3062,15 @@ def masking_iteration_draft(
                 position_ids, *position_ids.stride(),
                 rope_cos, *(rope_cos.stride() if rope_cos is not None else (0, 0)),
                 rope_sin, *(rope_sin.stride() if rope_sin is not None else (0, 0)),
+                
                 key_access_log, *(key_access_log.stride() if key_access_log is not None else (0, 0, 0)),
                 key_access_count, *(key_access_count.stride() if key_access_count is not None else (0, 0)),
                 KEY_ACCESS_LEN,
+                
+                block_access_log, *args.safe_stride(block_access_log, 3),
+                block_access_score, *args.safe_stride(block_access_score, 3),
+                block_access_count, *args.safe_stride(block_access_count, 2),
+                BLOCK_ACCESS_LEN,
                 
                 indices, *indices.stride(),
                 ks, *ks.stride(),
@@ -3024,7 +3226,19 @@ def masking_iteration_draft(
     # print(tu)
     # print(t.shape, tu.shape, c)
     
-    return indices, ks, ks_count, ks_start_end, scores_final, group_sizes, key_access_log, key_access_count
+    return (
+        indices, 
+        ks, 
+        ks_count, 
+        ks_start_end, 
+        scores_final, 
+        group_sizes, 
+        key_access_log, 
+        key_access_count,
+        block_access_log,
+        block_access_score,
+        block_access_count,
+    )
 
 @triton.jit
 def block_sparse_attention_cuda_step(
@@ -3670,6 +3884,9 @@ def masking_step_loop(
     scores_blocks = []
     key_access_log_blocks = []
     key_access_count_blocks = []
+    block_access_log_blocks = []
+    block_access_score_blocks = []
+    block_access_count_blocks = []
     indices_seed = ks_seed = None
     for i_chunk_tdst in range(0, args.chunk_size, args.block_size_q * args.step_size):
         idx_tdst = torch.arange(
@@ -3705,7 +3922,10 @@ def masking_step_loop(
                             scores, 
                             group_sizes, 
                             key_access_log, 
-                            key_access_count
+                            key_access_count,
+                            block_access_log,
+                            block_access_score,
+                            block_access_count,
                         ) = masking_iteration_draft(
                             q, 
                             k, 
@@ -3725,6 +3945,12 @@ def masking_step_loop(
                             key_access_log_blocks.append(key_access_log)
                         if key_access_count is not None:
                             key_access_count_blocks.append(key_access_count)
+                        if block_access_log is not None:
+                            block_access_log_blocks.append(block_access_log)
+                        if block_access_score is not None:
+                            block_access_score_blocks.append(block_access_score)
+                        if block_access_count is not None:
+                            block_access_count_blocks.append(block_access_count)
                     else:
                         assert isinstance(args.low_res_sample_scale, int)
                         low_mask_k = args.mask_k * args.low_res_oversample_rate
@@ -3779,7 +4005,19 @@ def masking_step_loop(
                         
                         with nvtx.annotate('low_res_sample'):
                             # TODO: reduce initial seeds
-                            indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
+                            (
+                                indices, 
+                                ks, 
+                                ks_count, 
+                                ks_start_end, 
+                                scores, 
+                                group_sizes, 
+                                key_access_log, 
+                                key_access_count,
+                                block_access_log,
+                                block_access_score,
+                                block_access_count,
+                            ) = masking_iteration_draft(
                                 q[:, :, :], 
                                 k[:, :, :], 
                                 position_ids=pos_tdst,
@@ -3893,7 +4131,19 @@ def masking_step_loop(
                                     ks,
                                 )
                                 
-                                indices, ks, ks_count, ks_start_end, scores, group_sizes, key_access_log, key_access_count = masking_iteration_draft(
+                                (
+                                    indices, 
+                                    ks, 
+                                    ks_count, 
+                                    ks_start_end, 
+                                    scores, 
+                                    group_sizes, 
+                                    key_access_log, 
+                                    key_access_count,
+                                    block_access_log,
+                                    block_access_score,
+                                    block_access_count,
+                                ) = masking_iteration_draft(
                                     q[:, :, :], 
                                     k[:, :, :], 
                                     position_ids=pos_tdst,
@@ -3947,6 +4197,19 @@ def masking_step_loop(
         key_access_log = torch.cat(key_access_log_blocks, dim=1)
         key_access_count = torch.cat(key_access_count_blocks, dim=1)
     
+    if len(block_access_log_blocks) == 0:
+        block_access_log = None
+        block_access_score = None
+        block_access_count = None
+    elif len(block_access_log_blocks) == 1:
+        block_access_log = block_access_log_blocks[0]
+        block_access_score = block_access_score_blocks[0]
+        block_access_count = block_access_count_blocks[0]
+    else:
+        block_access_log = torch.cat(block_access_log_blocks, dim=1)
+        block_access_score = torch.cat(block_access_score_blocks, dim=1)
+        block_access_count = torch.cat(block_access_count_blocks, dim=1)
+    
     # print(indices.shape)
     # print(ks.shape)
     # print(ks_count.shape)
@@ -3973,7 +4236,18 @@ def masking_step_loop(
         ks_start_end = permute_3d(ks_start_end)
         scores = permute_3d(scores)
     
-    return indices, ks, ks_count, ks_start_end, scores, key_access_log, key_access_count
+    return (
+        indices, 
+        ks, 
+        ks_count, 
+        ks_start_end, 
+        scores, 
+        key_access_log, 
+        key_access_count,
+        block_access_log,
+        block_access_score,
+        block_access_count,
+    )
 
 @nvtx.annotate('hip_masking')
 def hip_masking(
@@ -4029,6 +4303,9 @@ def hip_masking(
     scores_sampled = []
     key_access_log_sampled = []
     key_access_count_sampled = []
+    block_access_log_sampled = []
+    block_access_score_sampled = []
+    block_access_count_sampled = []
     for i_chunk_offset in range(0, args.chunk_size, args.chunk_size // args.num_unions):
         (
             indices, 
@@ -4037,7 +4314,10 @@ def hip_masking(
             ks_start_end, 
             scores, 
             key_access_log, 
-            key_access_count
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
         ) = masking_step_loop(
             q=q,
             k=k,
@@ -4054,6 +4334,12 @@ def hip_masking(
             key_access_log_sampled.append(key_access_log)
         if key_access_count is not None:
             key_access_count_sampled.append(key_access_count)
+        if block_access_log is not None:
+            block_access_log_sampled.append(block_access_log)
+        if block_access_score is not None:
+            block_access_score_sampled.append(block_access_score)
+        if block_access_count is not None:
+            block_access_count_sampled.append(block_access_count)
     
     if len(indices_sampled) > 1:
         ignore_ranage = max(cdiv_python(args.mask_k, args.block_size_q), cdiv_python(args.chunk_size, args.block_size_q * args.num_unions)) * 2
@@ -4124,23 +4410,43 @@ def hip_masking(
         torch.set_default_device(pre_device)
         
         ks = ks_count.sum(-1)
+        
         if len(key_access_log_sampled) > 0:
             key_access_log = torch.cat(key_access_log_sampled, dim=1)
             key_access_count = torch.cat(key_access_count_sampled, dim=1)
         else:
             key_access_log = None
             key_access_count = None
+            
+        if len(block_access_log_sampled) > 0:
+            block_access_log = torch.cat(block_access_log_sampled, dim=1)
+            block_access_score = torch.cat(block_access_score_sampled, dim=1)
+            block_access_count = torch.cat(block_access_count_sampled, dim=1)
+        else:
+            block_access_log = None
+            block_access_score = None
+            block_access_count = None
     else:
         indices = indices_sampled[0]
         ks = ks_sampled[0]
         ks_count = ks_count_sampled[0]
         ks_start_end = ks_start_end_sampled[0]
+        
         if len(key_access_log_sampled) > 0:
             key_access_log = key_access_log_sampled[0]
             key_access_count = key_access_count_sampled[0]
         else:
             key_access_log = None
             key_access_count = None
+        
+        if len(block_access_log_sampled) > 0:
+            block_access_log = block_access_log_sampled[0]
+            block_access_score = block_access_score_sampled[0]
+            block_access_count = block_access_count_sampled[0]
+        else:
+            block_access_log = None
+            block_access_score = None
+            block_access_count = None
     
     if os.getenv('HIP_DEBUG', '0') == '1':
         B, TDST, H, HID = q.shape
@@ -4167,7 +4473,17 @@ def hip_masking(
             print('saved dummy.png')
         # render_mask()
     
-    return indices, ks, ks_count, ks_start_end, key_access_log, key_access_count
+    return (
+        indices, 
+        ks, 
+        ks_count, 
+        ks_start_end, 
+        key_access_log, 
+        key_access_count,
+        block_access_log,
+        block_access_score,
+        block_access_count,
+    )
 
 @dataclass
 class HiPAttentionOutputMetadata:
@@ -4175,8 +4491,13 @@ class HiPAttentionOutputMetadata:
     ks: Tensor
     ks_count: Tensor
     ks_start_end: Tensor
+    
     key_access_log: Optional[Tensor]
     key_access_count: Optional[Tensor]
+    
+    block_access_log: Optional[Tensor]
+    block_access_score: Optional[Tensor]
+    block_access_count: Optional[Tensor]
 
 @dataclass
 class HiPAttentionArgs:
@@ -4217,6 +4538,7 @@ class HiPAttentionArgs:
     low_res_oversample_block_stride_k: int = 1
     
     output_key_access_log: bool = False
+    output_block_access_log: bool = False
     
     q_quant: Optional[Tensor] = None
     k_quant: Optional[Tensor] = None
@@ -4345,7 +4667,10 @@ def hip_attention(
             ks_count, 
             ks_start_end, 
             key_access_log, 
-            key_access_count
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
         ) = hip_masking(
             # TODO(heejun): apply PCA topk
             q=args.get_q_quant(q),
@@ -4359,6 +4684,9 @@ def hip_attention(
         ks_start_end = previous_metadata.ks_start_end
         key_access_log = previous_metadata.key_access_log
         key_access_count = previous_metadata.key_access_count
+        block_access_log = previous_metadata.block_access_log
+        block_access_score = previous_metadata.block_access_score
+        block_access_count = previous_metadata.block_access_count
     
     HIP_RANDOM_MASK = os.getenv('HIP_RANDOM_MASK', '0') == '1'
     if HIP_RANDOM_MASK:
@@ -4394,8 +4722,13 @@ def hip_attention(
         ks=ks,
         ks_count=ks_count,
         ks_start_end=ks_start_end,
+        
         key_access_log=key_access_log,
         key_access_count=key_access_count,
+        
+        block_access_log=block_access_log,
+        block_access_score=block_access_score,
+        block_access_count=block_access_count,
     )
 
 @nvtx.annotate('paged_hip_attention')
@@ -4423,7 +4756,10 @@ def paged_hip_attention(
             ks_count, 
             ks_start_end, 
             key_access_log, 
-            key_access_count
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
         ) = hip_masking(
             q=q,
             k=None,
@@ -4436,6 +4772,9 @@ def paged_hip_attention(
         ks_start_end = previous_mask_metadata.ks_start_end
         key_access_log = previous_mask_metadata.key_access_log
         key_access_count = previous_mask_metadata.key_access_count
+        block_access_log = previous_mask_metadata.block_access_log
+        block_access_score = previous_mask_metadata.block_access_score
+        block_access_count = previous_mask_metadata.block_access_count
     
     position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
         args.cache_seq_lens[:, None] - TDST + 1
@@ -4456,8 +4795,13 @@ def paged_hip_attention(
         ks=ks,
         ks_count=ks_count,
         ks_start_end=ks_start_end,
+        
         key_access_log=key_access_log,
         key_access_count=key_access_count,
+        
+        block_access_log=block_access_log,
+        block_access_score=block_access_score,
+        block_access_count=block_access_count,
     )
 
 @nvtx.annotate('varlen_hip_attention')
