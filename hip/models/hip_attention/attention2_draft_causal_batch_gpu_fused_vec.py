@@ -39,6 +39,10 @@ import numpy as np
 from numpy import ndarray as NdArray
 import math
 from hip.utils.triton_argsort import argsort as tl_argsort
+try:
+    from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache
+except ImportError:
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
 
 def cdiv_python(a, b):
     return math.ceil(float(a) / float(b))
@@ -4512,6 +4516,8 @@ class HiPAttentionArgs:
     sliding_window_size: int = 256
     sink_token_size: int = 16
     
+    num_dense_queries: int = -1
+    
     using_extend: bool = False
     rope_cos: Optional[Tensor] = None
     rope_sin: Optional[Tensor] = None
@@ -4651,6 +4657,32 @@ def hip_attention(
 ) -> Tuple[Tensor, HiPAttentionOutputMetadata]:
     if args is None:
         args = HiPAttentionArgs(**kwargs)
+
+    if args.num_dense_queries > 0:
+        dense_context = flash_attn_func(
+            q=q[:, :args.num_dense_queries], 
+            k=k[:, :args.num_dense_queries], 
+            v=v[:, :args.num_dense_queries], 
+            softmax_scale=1, 
+            causal=True, 
+        )
+        
+        num_sparse_queries = q.shape[1] - args.num_dense_queries
+        if num_sparse_queries > 0:
+            sparse_args = args.clone()
+            sparse_args.num_dense_queries = -1
+            sparse_context, metadata = hip_attention(
+                q[:, -num_sparse_queries:], k, v,
+                previous_metadata=previous_metadata,
+                args=sparse_args,
+            )
+            
+            return (
+                torch.cat([dense_context, sparse_context], dim=1), 
+                metadata
+            )
+        else:
+            return dense_context, None
     
     assert q.ndim == 4
     assert k.ndim == 4
@@ -4746,6 +4778,9 @@ def paged_hip_attention(
     
     assert args.block_table.shape[0] == B
     assert args.cache_seq_lens.shape[0] == B
+    
+    if args.num_dense_queries > 0:
+        raise Exception('paged attention does not support dense queries.')
     
     q = q * softmax_scale
     
