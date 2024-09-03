@@ -4780,7 +4780,7 @@ def paged_hip_attention(
     assert args.cache_seq_lens.shape[0] == B
     
     if args.num_dense_queries > 0:
-        raise Exception('paged attention does not support dense queries.')
+        warnings.warn('paged attention does not support dense queries.')
     
     q = q * softmax_scale
     
