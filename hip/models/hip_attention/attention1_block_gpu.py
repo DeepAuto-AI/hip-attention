@@ -1623,7 +1623,7 @@ def main_latency_benchmark():
     parser.add_argument('--head_size', type=int, default=-1)
     parser.add_argument('--refresh_interval', type=int, default=8)
     parser.add_argument('--not_causal', action='store_true')
-    parser.add_argument('--head_groups', type=int, default=4)
+    parser.add_argument('--head_groups', type=int, default=1)
     args = parser.parse_args()
     
     if args.query_size > 1:
@@ -1725,19 +1725,38 @@ def main_latency_benchmark():
                 )
             elif METHOD == 'hip1.1':
                 assert is_causal
-                _, mask = hip_attention_11(
-                    q,
-                    k,
-                    v,
-                    # attention_mask=hip_attention_mask,
-                    mask_k=args.k,
-                    block_size_q=args.block_size_q,
-                    block_size_k=args.block_size_k,
-                    block_stride_k=max(2, args.block_size_k//2),
-                    q_quant=q_quant,
-                    k_quant=k_quant,
-                    sample_method='center'
-                )
+                if state is None:
+                    _, mask = hip_attention_11(
+                        q,
+                        k,
+                        v,
+                        # attention_mask=hip_attention_mask,
+                        mask_k=args.k,
+                        block_size_q=args.block_size_q,
+                        block_size_k=args.block_size_k,
+                        block_stride_k=max(2, args.block_size_k//2),
+                        q_quant=q_quant,
+                        k_quant=k_quant,
+                        sample_method='center'
+                    )
+                else:
+                    _, mask = hip_attention_11(
+                        q,
+                        k,
+                        v,
+                        # attention_mask=hip_attention_mask,
+                        mask_k=args.k,
+                        block_size_q=args.block_size_q,
+                        block_size_k=args.block_size_k,
+                        block_stride_k=max(2, args.block_size_k//2),
+                        q_quant=q_quant,
+                        k_quant=k_quant,
+                        sample_method='center',
+                        previous_metadata=state,
+                    )
+                if mask is None:
+                    return None
+                return mask
             elif METHOD == 'hip':
                 if state is None:
                     _, mask = hip_attention(

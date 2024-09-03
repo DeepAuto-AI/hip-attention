@@ -137,7 +137,10 @@ def masking_iteration_draft_cuda_initialize(
         
         ALIGNED_BSRC = 1 << tl.floor(tl.log2(BSRC.to(tl.float64))).to(tl.int32)
         ALIGN_STEP = tl.cdiv(ALIGNED_BSRC, mask_block_k)
+        
         # ALIGNED_BSRC = BSRC
+        # ALIGN_STEP = 1
+        
         indices = tl.minimum(
             ((MAX_BSRC * idx_group + (BSRC / mask_block_k * idx_bk)).to(tl.int32) // ALIGN_STEP) * ALIGN_STEP, 
             (MAX_BSRC * idx_group + BSRC).to(tl.int32)
@@ -1642,7 +1645,9 @@ def masking_iteration_draft_cuda_partial_softmax(
     
     SINK_TOKEN_SIZE,
     MASK_BLOCK_K,
-    G: tl.constexpr, BK, MAX_BSRC,
+    G: tl.constexpr, 
+    BK,
+    MAX_BSRC,
     BLOCK_SIZE_K,
     
     BLOCK_SCORE: tl.constexpr,
@@ -4684,10 +4689,12 @@ def hip_attention(
         else:
             return dense_context, None
     
+    
     assert q.ndim == 4
     assert k.ndim == 4
     
     if args.position_ids is None:
+        args = args.clone()
         args.position_ids = (
             torch.arange(0, q.shape[1], device=q.device) + k.shape[1] - q.shape[1] + 1
         )[None, :].expand(q.shape[0], -1)
