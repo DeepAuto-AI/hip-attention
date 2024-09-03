@@ -8,9 +8,9 @@ torch::Tensor tensor_from_pointer(
     const long elem_size,
     const long device_index
 ) {
-    printf("%ld\n", ptr);
-    printf("%ld\n", size);
-    printf("%ld\n", elem_size);
+    // printf("%ld\n", ptr);
+    // printf("%ld\n", size);
+    // printf("%ld\n", elem_size);
 
     auto dtype = torch::kFloat32;
     if (elem_size == 16) {

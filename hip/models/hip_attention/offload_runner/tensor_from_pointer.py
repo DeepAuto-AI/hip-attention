@@ -15,7 +15,7 @@ ops = load(
     ],
 )
 
-def from_pointer(ptr: int, shape: Tuple[int], dtype: torch.dtype, device_index):
+def tensor_from_pointer(ptr: int, shape: Tuple[int], dtype: torch.dtype, device_index):
     if dtype == torch.float16:
         elem_size = 16
     elif dtype == torch.bfloat16:
@@ -45,7 +45,7 @@ if __name__ == '__main__':
     pointer = cupy.cuda.malloc_managed(byte_size)
     print(f'manged alloc {pointer.ptr}')
     
-    ret = from_pointer(pointer.ptr, shape, dtype, 0)
+    ret = tensor_from_pointer(pointer.ptr, shape, dtype, 0)
     print(ret)
     
     from cupy.cuda.memory import MemoryPointer, UnownedMemory

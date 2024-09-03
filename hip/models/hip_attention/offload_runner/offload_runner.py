@@ -1,6 +1,7 @@
 import argparse
 import gc
 import random
+import cuda.cudart
 import torch.distributed
 import tqdm
 from transformers import AutoTokenizer
@@ -12,9 +13,19 @@ from transformers import BitsAndBytesConfig
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear)
 import cupy
 import ctypes
+import cuda
+from hip.models.hip_attention.offload_runner.tensor_from_pointer import tensor_from_pointer
 from math import prod
+import pynvml
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def get_memory_free_MiB(gpu_index):
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
+    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    free = max(mem_info.free, mem_info.total - torch.cuda.memory_reserved(gpu_index))
+    return free // 1024 ** 2
 
 class StaticCache(Cache):
     """
@@ -62,6 +73,17 @@ class StaticCache(Cache):
         share = 1
     ) -> None:
         super().__init__()
+        
+        if isinstance(device, (int, str)):
+            device = torch.device(device)
+        
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        free_memory_mb = get_memory_free_MiB(device.index)
+        
+        print(f'allocatable {free_memory_mb:,} MB')
+        
         self.max_batch_size = max_batch_size
         self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
         # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
@@ -80,35 +102,87 @@ class StaticCache(Cache):
         # Note: There will be significant perf decrease if switching to use 5D tensors instead.
         cache_shape = (max_batch_size, self.max_cache_len, self.num_key_value_heads, self.head_dim)
         self.share = share
+        self.offload_key = True
+        self.offload_value = True
+        total_bytes = 0
         for idx_group in range(config.num_hidden_layers // share):
-            new_layer_key_cache = self.allocate_tensor(cache_shape, self.dtype, device)
-            new_layer_value_cache = self.allocate_tensor(cache_shape, self.dtype, device)
+            new_layer_key_cache = self.allocate_tensor(cache_shape, self.dtype, device, self.cache_backend if (idx_group > -10) and self.offload_key else 'cuda')
+            new_layer_value_cache = self.allocate_tensor(cache_shape, self.dtype, device, self.cache_backend if (idx_group > -10) and self.offload_value else 'cuda')
+            byte_size = 2 * new_layer_key_cache.numel() * new_layer_key_cache.element_size()
+            total_bytes += byte_size
             for idx_share in range(share):
                 self.key_cache.append(new_layer_key_cache)
                 self.value_cache.append(new_layer_value_cache)
+        print(f'allocated {total_bytes/1024/1024:,} MB')
     
     def allocate_tensor(
         self, 
         shape: Tuple[int], 
         dtype: torch.dtype, 
-        device: torch.device
+        device: torch.device,
+        cache_backend: str,
     ):
-        if self.cache_backend == 'cuda':
+        if cache_backend == 'cuda':
             return torch.zeros(shape, dtype=dtype, device=device)
-        elif self.cache_backend == 'uvm':
+        elif cache_backend == 'uvm':
             elem_size = torch.tensor([], dtype=dtype).element_size()
             numel = prod(shape)
+            align = 4096
             byte_size = elem_size * numel
-            pointer = cupy.cuda.malloc_managed(byte_size)
-            print(f'manged alloc {pointer.ptr}')
-            
-            def as_tensor(pointer, shape, torch_type):
-                arr = (pointer._type_ * prod(shape)).from_address(ctypes.addressof(pointer.contents))
-                return torch.frombuffer(arr, dtype=torch_type).view(*shape)
-
-            p = ctypes.cast(pointer.ptr, ctypes.POINTER(ctypes.c_float))
-            y = as_tensor(p, shape, dtype)
+            byte_size = byte_size + byte_size % align
+            r, pointer = cuda.cudart.cudaMallocManaged(byte_size, cuda.cudart.cudaMemAttachGlobal)
+            if isinstance(device, str): device = torch.device(device)
+            t = tensor_from_pointer(pointer, shape, dtype, device.index)
+            self.note_cpu(t)
+            print(f'managed alloc {r} {pointer} {pointer:02X} {byte_size} {byte_size:02X}')
+            return t
         raise NotImplementedError()
+
+    def note_device(self, tensor: torch.Tensor, advise = True):
+        if advise:
+            cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, tensor.device.index)
+            cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, tensor.device.index)
+        cuda.cudart.cudaMemPrefetchAsync(tensor.data_ptr(), tensor.numel() * tensor.element_size(), tensor.device.index, 0)
+    
+    def note_cpu(self, tensor: torch.Tensor):
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, -1)
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, tensor.device.index)
+        # cuda.cudart.cudaMemPrefetchAsync(tensor.data_ptr(), tensor.numel() * tensor.element_size(), -1, 0)
+        
+    def note_decode(self, tensor: torch.Tensor):
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviceSetReadMostly, tensor.device.index)
+    
+    def unnote_decode(self, tensor: torch.Tensor):
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviceUnsetReadMostly, tensor.device.index)
+    
+    def decode_start(self):
+        torch.cuda.synchronize()
+        map(self.note_cpu, self.key_cache)
+        map(self.note_cpu, self.value_cache)
+        map(self.note_decode, self.key_cache)
+        map(self.note_decode, self.value_cache)
+    
+    def decode_end(self):
+        map(self.note_cpu, self.key_cache)
+        map(self.note_cpu, self.value_cache)
+        map(self.unnote_decode, self.key_cache)
+        map(self.unnote_decode, self.value_cache)
+    
+    def prompt_start(self):
+        torch.cuda.synchronize()
+        k = self.key_cache[0]
+        v = self.value_cache[0]
+        self.note_device(k)
+        self.note_device(v)
+        torch.cuda.synchronize()
+        k = self.key_cache[self.share]
+        v = self.value_cache[self.share]
+        self.note_device(k)
+        self.note_device(v)
+    
+    def prompt_end(self):
+        map(self.note_cpu, self.key_cache)
+        map(self.note_cpu, self.value_cache)
 
     def update(
         self,
@@ -135,9 +209,30 @@ class StaticCache(Cache):
         Return:
             A tuple containing the updated key and value states.
         """
+        
         cache_position = cache_kwargs.get("cache_position")
-        # self.key_cache[layer_idx] = self.key_cache[layer_idx].to(device=key_states.device)
-        # self.value_cache[layer_idx] = self.value_cache[layer_idx].to(device=value_states.device)
+        if cache_position is None:
+            raise Exception()
+
+        # evict previous, prefetch next
+        is_prompt = cache_kwargs.get('is_prompt', False)
+        if ((layer_idx % self.share) == 0) and is_prompt:
+            torch.cuda.synchronize()
+            # print(layer_idx)
+            if (layer_idx - self.share) >= 0:
+                k_pre = self.key_cache[layer_idx - self.share]
+                v_pre = self.value_cache[layer_idx - self.share]
+                self.note_cpu(k_pre)
+                self.note_cpu(v_pre)
+                # print('offload previous one')
+            if (layer_idx + self.share) < len(self.key_cache):
+                k_next = self.key_cache[layer_idx + self.share]
+                v_next = self.value_cache[layer_idx + self.share]
+                self.note_device(k_next, is_prompt)
+                self.note_device(v_next, is_prompt)
+                # print('prefetch next one')
+            # print(layer_idx, 'done')
+        
         k_out = self.key_cache[layer_idx]
         v_out = self.value_cache[layer_idx]
         
@@ -145,13 +240,10 @@ class StaticCache(Cache):
             ibatch = cache_kwargs['batch_index']
             k_out = k_out[ibatch:ibatch+1]
             v_out = v_out[ibatch:ibatch+1]
-
-        if cache_position is None:
-            raise Exception()
         
-        if (layer_idx % self.share) == 0:
-            k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
-            v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
+        # if (layer_idx % self.share) == 0:
+        #     k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
+        #     v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
 
         return k_out, v_out
 
@@ -385,6 +477,7 @@ class Runner:
         # compile decode step
         decode_input_ids = torch.zeros((bsz, 1), dtype=torch.long, device=self.model.device)
         decode_cache_pos = torch.zeros((1, ), dtype=torch.long, device=self.model.device)
+        cache.decode_start()
         with torch.autocast('cuda', torch.float16):
             self.decode_forward(
                 input_ids=decode_input_ids, 
@@ -392,9 +485,10 @@ class Runner:
                 cache_position=decode_cache_pos, 
                 past_key_values=cache
             )
-        
+        cache.decode_end()
         cache.reset()
         self.decode_step = 0
+        print('decode compiled')
         
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
         decode_cache_pos.fill_(context_len)
@@ -410,11 +504,14 @@ class Runner:
         logits = []
         for idx_warmup in range(n_prefill_warmup+1):
             if idx_warmup == n_prefill_warmup:
+                print('prefill warmup done')
+                torch.cuda.synchronize()
                 event_prefill_start.record()
             ibatch = 0
             for module in self.model.modules():
                 if isinstance(module, LlamaAttention):
                     module.prompt_batch_index = ibatch
+            cache.prompt_start()
             prompt_output = self.model(
                 input_ids=input_ids[ibatch:ibatch+1], 
                 position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
@@ -422,6 +519,7 @@ class Runner:
                 past_key_values=cache,
                 num_logits_to_keep=1,
             )
+            cache.prompt_end()
         for _ in range(bsz):
             logits.append(prompt_output.logits)
         
@@ -438,6 +536,7 @@ class Runner:
         event_prefill_end.record()
         
         event_decode_start.record()
+        cache.decode_start()
         for _ in tqdm.tqdm(range(max_tokens), dynamic_ncols=True, leave=False, desc='decode'):
             with torch.autocast('cuda', torch.float16):
                 decode_output = self.decode_forward(
@@ -450,9 +549,10 @@ class Runner:
             decoded_tokens.append(next_token)
             decode_input_ids.copy_(next_token, non_blocking=True)
             decode_cache_pos.add_(1)
-            if (self.decode_step % 10) == 0:
+            if (self.decode_step % 1) == 0:
                 torch.cuda.synchronize()
             self.decode_step += 1
+        cache.decode_end()
         event_decode_end.record()
         
         torch.cuda.synchronize()

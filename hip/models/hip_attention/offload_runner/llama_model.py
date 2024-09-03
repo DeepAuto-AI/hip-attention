@@ -528,7 +528,7 @@ class LlamaFlashAttention2(LlamaAttention):
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "is_prompt": query_states.shape[1] > 1}
             if q_len > 1:
                 cache_kwargs['batch_index'] = self.prompt_batch_index
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
