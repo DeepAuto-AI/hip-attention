@@ -1,11 +1,12 @@
 import argparse
+import gc
 import random
 import torch.distributed
 import tqdm
 from transformers import AutoTokenizer
 from hip.models.hip_attention.offload_runner.llama_model import LlamaForCausalLM, LlamaDecoderLayer, LlamaAttention
 import torch, time, os
-from typing import List, Optional, Dict, Union, Any, Tuple
+from typing import List, Literal, Optional, Dict, Union, Any, Tuple
 from transformers.cache_utils import Cache, PretrainedConfig, is_torchdynamo_compiling
 from transformers import BitsAndBytesConfig
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear)
@@ -46,7 +47,16 @@ class StaticCache(Cache):
         ```
     """
 
-    def __init__(self, config: PretrainedConfig, max_batch_size: int, max_cache_len: int, device, dtype=None, share=1) -> None:
+    def __init__(
+        self, 
+        config: PretrainedConfig, 
+        max_batch_size: int, 
+        max_cache_len: int, 
+        device: torch.device,
+        dtype: torch.dtype, 
+        cache_backend: Literal['cuda', 'uvm'] = 'cuda',
+        share = 1
+    ) -> None:
         super().__init__()
         self.max_batch_size = max_batch_size
         self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
@@ -59,6 +69,7 @@ class StaticCache(Cache):
         self.num_key_value_heads = (
             config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         )
+        self.cache_backend = cache_backend
 
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
@@ -66,11 +77,23 @@ class StaticCache(Cache):
         cache_shape = (max_batch_size, self.max_cache_len, self.num_key_value_heads, self.head_dim)
         self.share = share
         for idx_group in range(config.num_hidden_layers // share):
-            new_layer_key_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
-            new_layer_value_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
+            new_layer_key_cache = self.allocate_tensor(cache_shape, self.dtype, device)
+            new_layer_value_cache = self.allocate_tensor(cache_shape, self.dtype, device)
             for idx_share in range(share):
                 self.key_cache.append(new_layer_key_cache)
                 self.value_cache.append(new_layer_value_cache)
+    
+    def allocate_tensor(
+        self, 
+        shape: Tuple[int], 
+        dtype: torch.dtype, 
+        device: torch.device
+    ):
+        if self.cache_backend == 'cuda':
+            return torch.zeros(shape, dtype=dtype, device=device)
+        elif self.cache_backend == 'uvm':
+            pass
+        raise NotImplementedError()
 
     def update(
         self,
@@ -110,12 +133,10 @@ class StaticCache(Cache):
 
         if cache_position is None:
             raise Exception()
-            k_out.copy_(key_states, non_blocking=True)
-            v_out.copy_(value_states, non_blocking=True)
-        else:
-            if (layer_idx % self.share) == 0:
-                k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
-                v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
+        
+        if (layer_idx % self.share) == 0:
+            k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
+            v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
 
         return k_out, v_out
 
@@ -241,7 +262,14 @@ class CUDACapture:
         return self.graph is None
 
 class Runner:
-    def __init__(self, model_id, method):
+    def __init__(
+        self, 
+        model_id: str, 
+        method: str, 
+        cache_backend: Literal['cuda', 'uvm'],
+        kv_share: int,
+        hip_offload: bool,
+    ):
         import vllm.distributed
         import torch.distributed
         
@@ -268,6 +296,7 @@ class Runner:
         self.model = convert_llama_to_vllm(model.half()).eval()
         self.method = method
         self.decode_step = 0
+        self.cache_backend = cache_backend
         
         self.capture = CUDACapture(self.model)
         
@@ -276,7 +305,8 @@ class Runner:
         
         self.hip_refresh_interval = 8
         
-        self.hip_offload = True
+        self.hip_offload = hip_offload
+        self.kv_share = kv_share
     
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
@@ -323,7 +353,7 @@ class Runner:
         return next_token_id
     
     @torch.inference_mode(True)
-    def generate(self, text, max_tokens=256, item_repeat=24, kv_share=1, n_prefill_warmup=1):
+    def generate(self, text, max_tokens=256, item_repeat=24, n_prefill_warmup=1):
         input_ids = self.tokenizer([text, ] * item_repeat, return_tensors="pt", padding=True).input_ids.to(self.model.device)
         bsz, context_len = input_ids.shape
         
@@ -333,7 +363,8 @@ class Runner:
             max_cache_len=context_len + max_tokens, 
             device=self.model.device,
             dtype=torch.float16,
-            share=kv_share,
+            share=self.kv_share,
+            cache_backend=self.cache_backend,
         )
         
         # compile decode step
@@ -422,16 +453,25 @@ class Runner:
             f"{input_ids.shape[-1] / elapsed_prefill:.2f} tok/s {elapsed_prefill:.2f} s  |  "
             f"{gen_out.numel() / elapsed_decode:.2f} tok/s {elapsed_decode:.2f} s"
         )
+        
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         return text_outs
     
 if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser()
         parser.add_argument('--method', default='hip', type=str)
+        parser.add_argument('--cache_backend', default='cuda', type=str)
+        parser.add_argument('--input', default='./samples/32k.md', type=str)
+        parser.add_argument('--batch_size', default=16, type=int)
+        parser.add_argument('--kv_share', default=1, type=int)
         
         args = parser.parse_args()
         
-        with open('./samples/32k.md', 'r') as f:
+        with open(args.input, 'r') as f:
             document = f.read()
         
         sample_input = f'''<|start_header_id|>system<|end_header_id|>
@@ -453,11 +493,13 @@ Hi, can you describe about following document? Here is document,
         results = Runner(
             'meta-llama/Meta-Llama-3.1-8B-Instruct',
             method=args.method,
+            cache_backend=args.cache_backend,
+            kv_share=args.kv_share,
+            hip_offload=False,
         )\
             .generate(
                 sample_input,
-                item_repeat=16,
-                kv_share=1,
+                item_repeat=args.batch_size,
             )
         for result in results[:8]:
             result = result.replace("\n", "\\n")
