@@ -29,7 +29,12 @@ torch::Tensor tensor_from_pointer(
         dtype = torch::kFloat32;
     }
 
-    auto options = torch::TensorOptions().dtype(dtype).device(torch::kCUDA, device_index);
+    auto options = torch::TensorOptions();
+    if (device_index >= 0) {
+        options = torch::TensorOptions().dtype(dtype).device(torch::kCUDA, device_index);
+    } else {
+        options = torch::TensorOptions().dtype(dtype);
+    }
     torch::Tensor tharray = torch::from_blob((void *) ptr, {size, }, options);
 
     return tharray;
