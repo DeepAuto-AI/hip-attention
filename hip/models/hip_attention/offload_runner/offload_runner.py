@@ -10,6 +10,10 @@ from typing import List, Literal, Optional, Dict, Union, Any, Tuple
 from transformers.cache_utils import Cache, PretrainedConfig, is_torchdynamo_compiling
 from transformers import BitsAndBytesConfig
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear)
+import cupy
+import ctypes
+from math import prod
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 class StaticCache(Cache):
@@ -92,7 +96,18 @@ class StaticCache(Cache):
         if self.cache_backend == 'cuda':
             return torch.zeros(shape, dtype=dtype, device=device)
         elif self.cache_backend == 'uvm':
-            pass
+            elem_size = torch.tensor([], dtype=dtype).element_size()
+            numel = prod(shape)
+            byte_size = elem_size * numel
+            pointer = cupy.cuda.malloc_managed(byte_size)
+            print(f'manged alloc {pointer.ptr}')
+            
+            def as_tensor(pointer, shape, torch_type):
+                arr = (pointer._type_ * prod(shape)).from_address(ctypes.addressof(pointer.contents))
+                return torch.frombuffer(arr, dtype=torch_type).view(*shape)
+
+            p = ctypes.cast(pointer.ptr, ctypes.POINTER(ctypes.c_float))
+            y = as_tensor(p, shape, dtype)
         raise NotImplementedError()
 
     def update(
