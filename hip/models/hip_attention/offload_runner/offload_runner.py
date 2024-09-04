@@ -105,12 +105,22 @@ class StaticCache(Cache):
         # Note: There will be significant perf decrease if switching to use 5D tensors instead.
         cache_shape = (max_batch_size, self.max_cache_len, self.num_key_value_heads, self.head_dim)
         self.share = share
-        self.offload_key = True
+        self.offload_key = False
         self.offload_value = True
         total_bytes = 0
         for idx_group in range(config.num_hidden_layers // share):
-            new_layer_key_cache = self.allocate_tensor(cache_shape, self.dtype, device, self.cache_backend if (idx_group > -10) and self.offload_key else 'cuda')
-            new_layer_value_cache = self.allocate_tensor(cache_shape, self.dtype, device, self.cache_backend if (idx_group > -10) and self.offload_value else 'cuda')
+            new_layer_key_cache = self.allocate_tensor(
+                cache_shape, 
+                self.dtype, 
+                device, 
+                self.cache_backend if (idx_group > -10) and self.offload_key else 'cuda'
+            )
+            new_layer_value_cache = self.allocate_tensor(
+                cache_shape, 
+                self.dtype, 
+                device, 
+                self.cache_backend if (idx_group > -10) and self.offload_value else 'cuda'
+            )
             byte_size = 2 * new_layer_key_cache[0].numel() * new_layer_key_cache[0].element_size()
             total_bytes += byte_size
             for idx_share in range(share):
@@ -137,7 +147,7 @@ class StaticCache(Cache):
             if isinstance(device, str): device = torch.device(device)
             t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
             t_cpu = tensor_from_pointer(pointer, shape, dtype, -1)
-            print(f'managed alloc result={r}, ptr=0x{pointer:02X}, bytes={byte_size:3,}, {t_gpu.device} {t_cpu.device}')
+            # print(f'managed alloc result={r}, ptr=0x{pointer:02X}, bytes={byte_size:3,}, {t_gpu.device} {t_cpu.device}')
             self.note_cpu(t_gpu, prefetch=True)
             return t_gpu, t_cpu
         raise NotImplementedError()
@@ -188,22 +198,22 @@ class StaticCache(Cache):
     
     def decode_start(self):
         torch.cuda.synchronize()
-        map(self.note_cpu, self.key_cache)
-        map(self.note_cpu, self.value_cache)
-        map(self.note_decode, self.key_cache)
-        map(self.note_decode, self.value_cache)
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.note_decode, self.key_cache)
+        if self.offload_value: map(self.note_decode, self.value_cache)
     
     def decode_end(self):
-        map(self.note_cpu, self.key_cache)
-        map(self.note_cpu, self.value_cache)
-        map(self.unnote_decode, self.key_cache)
-        map(self.unnote_decode, self.value_cache)
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.unnote_decode, self.key_cache)
+        if self.offload_value: map(self.unnote_decode, self.value_cache)
     
     def prompt_start(self):
-        map(self.note_cpu, self.key_cache)
-        map(self.note_cpu, self.value_cache)
-        map(self.note_prompt, self.key_cache)
-        map(self.note_prompt, self.value_cache)
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.note_prompt, self.key_cache)
+        if self.offload_value: map(self.note_prompt, self.value_cache)
         
         self.prompt_copy_stream = torch.cuda.Stream(self.device)
         self.prompt_copy_threads = []
@@ -215,10 +225,10 @@ class StaticCache(Cache):
         del self.prompt_copy_threads
         del self.prompt_copy_stream
         
-        map(self.note_cpu, self.key_cache)
-        map(self.note_cpu, self.value_cache)
-        map(self.unnote_prompt, self.key_cache)
-        map(self.unnote_prompt, self.value_cache)
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.unnote_prompt, self.key_cache)
+        if self.offload_value: map(self.unnote_prompt, self.value_cache)
 
     def update(
         self,
@@ -254,27 +264,41 @@ class StaticCache(Cache):
         is_prompt = cache_kwargs.get('is_prompt', False)
         
         # prompt = CPU, decode = UVM
-        k_out = self.key_cache[layer_idx][1 if is_prompt else 0]
-        v_out = self.value_cache[layer_idx][1 if is_prompt else 0]
+        if self.cache_backend == 'uvm':
+            if self.offload_key: 
+                k_out = self.key_cache[layer_idx][1 if is_prompt else 0]
+            else:
+                k_out = self.key_cache[layer_idx]
+            if self.offload_value:
+                v_out = self.value_cache[layer_idx][1 if is_prompt else 0]
+            else:
+                v_out = self.value_cache[layer_idx]
+        elif self.cache_backend == 'cuda':
+            k_out = self.key_cache[layer_idx]
+            v_out = self.value_cache[layer_idx]
+        else:
+            raise Exception()
         
-        if 'batch_index' in cache_kwargs:
+        if ('batch_index' in cache_kwargs):
             ibatch = cache_kwargs['batch_index']
             k_out = k_out[ibatch:ibatch+1]
             v_out = v_out[ibatch:ibatch+1]
         
         if (layer_idx % self.share) == 0:
             if is_prompt:
-                assert k_out.device == torch.device('cpu')
+                if self.cache_backend == 'uvm' and self.offload_key:
+                    assert k_out.device == torch.device('cpu')
                 self.prompt_copy_stream.wait_stream(torch.cuda.default_stream(cache_position.device))
                 with torch.cuda.stream(self.prompt_copy_stream):
-                    cache_position_cpu = cache_position.to('cpu', non_blocking=True)
-                    key_states_cpu = key_states.to(k_out.dtype).to('cpu', non_blocking=True)
-                    value_states_cpu = value_states.to(k_out.dtype).to('cpu', non_blocking=True)
+                    cache_position_key = cache_position.to(k_out.device, non_blocking=True)
+                    cache_position_value = cache_position.to(v_out.device, non_blocking=True)
+                    key_states_cpu = key_states.to(k_out.dtype).to(k_out.device, non_blocking=True)
+                    value_states_cpu = value_states.to(k_out.dtype).to(v_out.device, non_blocking=True)
                 @torch.inference_mode(True)
                 def job():
                     self.prompt_copy_stream.synchronize()
-                    k_out.index_copy_(1, cache_position_cpu, key_states_cpu)
-                    v_out.index_copy_(1, cache_position_cpu, value_states_cpu)
+                    k_out.index_copy_(1, cache_position_key, key_states_cpu)
+                    v_out.index_copy_(1, cache_position_value, value_states_cpu)
                 t = threading.Thread(target=job)
                 self.prompt_copy_threads.append(t)
                 t.start()
@@ -627,10 +651,12 @@ if __name__ == '__main__':
         parser.add_argument('--method', default='hip', type=str)
         parser.add_argument('--cache_backend', default='cuda', type=str)
         parser.add_argument('--input', default='./samples/32k.md', type=str)
+        parser.add_argument('--model', default='llama3.1_8b', type=str)
         parser.add_argument('--batch_size', default=16, type=int)
         parser.add_argument('--kv_share', default=1, type=int)
         parser.add_argument('--max_tokens', default=256, type=int)
         parser.add_argument('--k', default=512, type=int)
+        parser.add_argument('--sw', default=256, type=int)
         
         args = parser.parse_args()
         
@@ -654,13 +680,18 @@ Hi, can you describe about following document? Here is document,
 
 '''
         results = Runner(
-            'meta-llama/Meta-Llama-3.1-8B-Instruct',
+            {
+                'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+                'llama2_7b': 'meta-llama/Llama-2-7b-chat-hf',
+                'llama2_13b': 'meta-llama/Llama-2-13b-chat-hf',
+            }[args.model],
             method=args.method,
             cache_backend=args.cache_backend,
             kv_share=args.kv_share,
             hip_offload=False,
             hip_args=HiPAttentionArgs(
                 mask_k=args.k,
+                sliding_window_size=args.sw,
             ),
         )\
             .generate(
