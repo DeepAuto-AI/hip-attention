@@ -4669,7 +4669,7 @@ def hip_attention(
             k=k[:, :args.num_dense_queries], 
             v=v[:, :args.num_dense_queries], 
             softmax_scale=1, 
-            causal=True, 
+            causal=True,
         )
         
         num_sparse_queries = q.shape[1] - args.num_dense_queries
@@ -4789,13 +4789,18 @@ def paged_hip_attention(
     if args.num_dense_queries > 0:
         warnings.warn('paged attention does not support dense queries.')
     
+    if args.k_cache.dtype == torch.float8_e5m2:
+        args.k_cache = args.k_cache.view(torch.uint8)
+    if args.v_cache.dtype == torch.float8_e5m2:
+        args.v_cache = args.v_cache.view(torch.uint8)
+    
     q = q * softmax_scale
     
     if previous_mask_metadata is None:
         (
             indices, 
-            ks, 
-            ks_count, 
+            ks,
+            ks_count,
             ks_start_end, 
             key_access_log, 
             key_access_count,
