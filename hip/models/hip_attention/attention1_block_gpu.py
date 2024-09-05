@@ -1616,6 +1616,7 @@ def main_latency_benchmark():
     parser.add_argument('--method', type=str, default='hip')
     parser.add_argument('--samples', type=int, default=200)
     parser.add_argument('--block_size_q', type=int, default=32)
+    parser.add_argument('--block_stride_q', type=int, default=None)
     parser.add_argument('--block_size_k', type=int, default=1)
     parser.add_argument('--block_stride_k', type=int, default=None)
     parser.add_argument('--k', type=int, default=512)
@@ -1734,6 +1735,7 @@ def main_latency_benchmark():
                         # attention_mask=hip_attention_mask,
                         mask_k=args.k,
                         block_size_q=args.block_size_q,
+                        block_stride_q=args.block_stride_q if args.block_stride_q is not None else 2,
                         block_size_k=args.block_size_k,
                         block_stride_k=args.block_stride_k if args.block_stride_k is not None else max(2, args.block_size_k//2),
                         q_quant=q_quant,
