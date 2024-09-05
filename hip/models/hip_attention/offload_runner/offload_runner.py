@@ -1,15 +1,33 @@
 import argparse
+import gc
 import random
+import cuda.cudart
 import torch.distributed
 import tqdm
 from transformers import AutoTokenizer
 from hip.models.hip_attention.offload_runner.llama_model import LlamaForCausalLM, LlamaDecoderLayer, LlamaAttention
 import torch, time, os
-from typing import List, Optional, Dict, Union, Any, Tuple
+from typing import List, Literal, Optional, Dict, Union, Any, Tuple
 from transformers.cache_utils import Cache, PretrainedConfig, is_torchdynamo_compiling
 from transformers import BitsAndBytesConfig
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear)
+import cupy
+import ctypes
+import cuda
+from hip.models.hip_attention.offload_runner.tensor_from_pointer import tensor_from_pointer
+from math import prod
+import pynvml
+import threading
+from hip import HiPAttentionArgs
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def get_memory_free_MiB(gpu_index):
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
+    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    free = max(mem_info.free, mem_info.total - torch.cuda.memory_reserved(gpu_index))
+    return free // 1024 ** 2
 
 class StaticCache(Cache):
     """
@@ -46,8 +64,29 @@ class StaticCache(Cache):
         ```
     """
 
-    def __init__(self, config: PretrainedConfig, max_batch_size: int, max_cache_len: int, device, dtype=None, share=1) -> None:
+    def __init__(
+        self, 
+        config: PretrainedConfig, 
+        max_batch_size: int, 
+        max_cache_len: int, 
+        device: torch.device,
+        dtype: torch.dtype, 
+        cache_backend: Literal['cuda', 'uvm'] = 'cuda',
+        share = 1
+    ) -> None:
         super().__init__()
+        
+        if isinstance(device, (int, str)):
+            device = torch.device(device)
+        self.device = device
+        
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        free_memory_mb = get_memory_free_MiB(device.index)
+        
+        print(f'allocatable {free_memory_mb:,} MB')
+        
         self.max_batch_size = max_batch_size
         self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
         # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
@@ -59,18 +98,137 @@ class StaticCache(Cache):
         self.num_key_value_heads = (
             config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
         )
+        self.cache_backend = cache_backend
 
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
         # Note: There will be significant perf decrease if switching to use 5D tensors instead.
         cache_shape = (max_batch_size, self.max_cache_len, self.num_key_value_heads, self.head_dim)
         self.share = share
+        self.offload_key = False
+        self.offload_value = True
+        total_bytes = 0
         for idx_group in range(config.num_hidden_layers // share):
-            new_layer_key_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
-            new_layer_value_cache = torch.zeros(cache_shape, dtype=self.dtype, device=device)
+            new_layer_key_cache = self.allocate_tensor(
+                cache_shape, 
+                self.dtype, 
+                device, 
+                self.cache_backend if (idx_group > -10) and self.offload_key else 'cuda'
+            )
+            new_layer_value_cache = self.allocate_tensor(
+                cache_shape, 
+                self.dtype, 
+                device, 
+                self.cache_backend if (idx_group > -10) and self.offload_value else 'cuda'
+            )
+            byte_size = 2 * new_layer_key_cache[0].numel() * new_layer_key_cache[0].element_size()
+            total_bytes += byte_size
             for idx_share in range(share):
                 self.key_cache.append(new_layer_key_cache)
                 self.value_cache.append(new_layer_value_cache)
+        print(f'allocated {total_bytes/1024/1024:,} MB')
+    
+    def allocate_tensor(
+        self, 
+        shape: Tuple[int], 
+        dtype: torch.dtype, 
+        device: torch.device,
+        cache_backend: str,
+    ):
+        if cache_backend == 'cuda':
+            return torch.zeros(shape, dtype=dtype, device=device)
+        elif cache_backend == 'uvm':
+            elem_size = torch.tensor([], dtype=dtype).element_size()
+            numel = prod(shape)
+            align = 4096
+            byte_size = elem_size * numel
+            byte_size = byte_size + byte_size % align
+            r, pointer = cuda.cudart.cudaMallocManaged(byte_size, cuda.cudart.cudaMemAttachGlobal)
+            if isinstance(device, str): device = torch.device(device)
+            t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
+            t_cpu = tensor_from_pointer(pointer, shape, dtype, -1)
+            # print(f'managed alloc result={r}, ptr=0x{pointer:02X}, bytes={byte_size:3,}, {t_gpu.device} {t_cpu.device}')
+            self.note_cpu(t_gpu, prefetch=True)
+            return t_gpu, t_cpu
+        raise NotImplementedError()
+
+    def note_device(self, tensor: Tuple[torch.Tensor, torch.Tensor], advise = True):
+        if advise:
+            cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, tensor.device.index)
+            cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, tensor.device.index)
+        cuda.cudart.cudaMemPrefetchAsync(tensor.data_ptr(), tensor.numel() * tensor.element_size(), tensor.device.index, 0)
+    
+    def note_cpu(self, tensors: Tuple[torch.Tensor, torch.Tensor], prefetch = True):
+        if isinstance(tensors, tuple):
+            tensor, _ = tensors
+        else:
+            tensor = tensors
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, -1)
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, tensor.device.index)
+        if prefetch:
+            cuda.cudart.cudaMemPrefetchAsync(tensor.data_ptr(), tensor.numel() * tensor.element_size(), -1, 0)
+        
+    def note_decode(self, tensors: Tuple[torch.Tensor, torch.Tensor]):
+        if isinstance(tensors, tuple):
+            tensor, _ = tensors
+        else:
+            tensor = tensors
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviceSetReadMostly, tensor.device.index)
+    
+    def unnote_decode(self, tensors: Tuple[torch.Tensor, torch.Tensor]):
+        if isinstance(tensors, tuple):
+            tensor, _ = tensors
+        else:
+            tensor = tensors
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviceUnsetReadMostly, tensor.device.index)
+    
+    def note_prompt(self, tensors: Tuple[torch.Tensor, torch.Tensor]):
+        if isinstance(tensors, tuple):
+            tensor, _ = tensors
+        else:
+            tensor = tensors
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, -1)
+    
+    def unnote_prompt(self, tensors: Tuple[torch.Tensor, torch.Tensor]):
+        if isinstance(tensors, tuple):
+            tensor, _ = tensors
+        else:
+            tensor = tensors
+        cuda.cudart.cudaMemAdvise(tensor.data_ptr(), tensor.numel() * tensor.element_size(), cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy, tensor.device.index)
+    
+    def decode_start(self):
+        torch.cuda.synchronize()
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.note_decode, self.key_cache)
+        if self.offload_value: map(self.note_decode, self.value_cache)
+    
+    def decode_end(self):
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.unnote_decode, self.key_cache)
+        if self.offload_value: map(self.unnote_decode, self.value_cache)
+    
+    def prompt_start(self):
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.note_prompt, self.key_cache)
+        if self.offload_value: map(self.note_prompt, self.value_cache)
+        
+        self.prompt_copy_stream = torch.cuda.Stream(self.device)
+        self.prompt_copy_threads = []
+    
+    def prompt_end(self):
+        self.prompt_copy_stream.synchronize()
+        for thread in self.prompt_copy_threads:
+            thread.join()
+        del self.prompt_copy_threads
+        del self.prompt_copy_stream
+        
+        if self.offload_key: map(self.note_cpu, self.key_cache)
+        if self.offload_value: map(self.note_cpu, self.value_cache)
+        if self.offload_key: map(self.unnote_prompt, self.key_cache)
+        if self.offload_value: map(self.unnote_prompt, self.value_cache)
 
     def update(
         self,
@@ -97,25 +255,59 @@ class StaticCache(Cache):
         Return:
             A tuple containing the updated key and value states.
         """
-        cache_position = cache_kwargs.get("cache_position")
-        # self.key_cache[layer_idx] = self.key_cache[layer_idx].to(device=key_states.device)
-        # self.value_cache[layer_idx] = self.value_cache[layer_idx].to(device=value_states.device)
-        k_out = self.key_cache[layer_idx]
-        v_out = self.value_cache[layer_idx]
         
-        if 'batch_index' in cache_kwargs:
+        cache_position = cache_kwargs.get("cache_position")
+        if cache_position is None:
+            raise Exception()
+
+        # evict previous, prefetch next
+        is_prompt = cache_kwargs.get('is_prompt', False)
+        
+        # prompt = CPU, decode = UVM
+        if self.cache_backend == 'uvm':
+            if self.offload_key: 
+                k_out = self.key_cache[layer_idx][1 if is_prompt else 0]
+            else:
+                k_out = self.key_cache[layer_idx]
+            if self.offload_value:
+                v_out = self.value_cache[layer_idx][1 if is_prompt else 0]
+            else:
+                v_out = self.value_cache[layer_idx]
+        elif self.cache_backend == 'cuda':
+            k_out = self.key_cache[layer_idx]
+            v_out = self.value_cache[layer_idx]
+        else:
+            raise Exception()
+        
+        if ('batch_index' in cache_kwargs):
             ibatch = cache_kwargs['batch_index']
             k_out = k_out[ibatch:ibatch+1]
             v_out = v_out[ibatch:ibatch+1]
-
-        if cache_position is None:
-            raise Exception()
-            k_out.copy_(key_states, non_blocking=True)
-            v_out.copy_(value_states, non_blocking=True)
-        else:
-            if (layer_idx % self.share) == 0:
+        
+        if (layer_idx % self.share) == 0:
+            if is_prompt:
+                if self.cache_backend == 'uvm' and self.offload_key:
+                    assert k_out.device == torch.device('cpu')
+                self.prompt_copy_stream.wait_stream(torch.cuda.default_stream(cache_position.device))
+                with torch.cuda.stream(self.prompt_copy_stream):
+                    cache_position_key = cache_position.to(k_out.device, non_blocking=True)
+                    cache_position_value = cache_position.to(v_out.device, non_blocking=True)
+                    key_states_cpu = key_states.to(k_out.dtype).to(k_out.device, non_blocking=True)
+                    value_states_cpu = value_states.to(k_out.dtype).to(v_out.device, non_blocking=True)
+                @torch.inference_mode(True)
+                def job():
+                    self.prompt_copy_stream.synchronize()
+                    k_out.index_copy_(1, cache_position_key, key_states_cpu)
+                    v_out.index_copy_(1, cache_position_value, value_states_cpu)
+                t = threading.Thread(target=job)
+                self.prompt_copy_threads.append(t)
+                t.start()
+            else:
                 k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
                 v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
+        
+        if is_prompt:
+            return key_states, value_states
 
         return k_out, v_out
 
@@ -134,8 +326,8 @@ class StaticCache(Cache):
         """Resets the cache values while preserving the objects"""
         for layer_idx in range(len(self.key_cache)):
             # In-place ops prevent breaking the static address
-            self.key_cache[layer_idx].zero_()
-            self.value_cache[layer_idx].zero_()
+            self.key_cache[layer_idx][1].zero_()
+            self.value_cache[layer_idx][1].zero_()
 
 def convert_llama_to_vllm(model: LlamaForCausalLM):
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -241,7 +433,15 @@ class CUDACapture:
         return self.graph is None
 
 class Runner:
-    def __init__(self, model_id, method):
+    def __init__(
+        self, 
+        model_id: str, 
+        method: str, 
+        cache_backend: Literal['cuda', 'uvm'],
+        kv_share: int,
+        hip_offload: bool,
+        hip_args: HiPAttentionArgs,
+    ):
         import vllm.distributed
         import torch.distributed
         
@@ -263,11 +463,13 @@ class Runner:
         for module in model.modules():
             if isinstance(module, LlamaAttention):
                 module.attention_method = method
+                module.hip_args = hip_args
         
         self.tokenizer = tokenizer
         self.model = convert_llama_to_vllm(model.half()).eval()
         self.method = method
         self.decode_step = 0
+        self.cache_backend = cache_backend
         
         self.capture = CUDACapture(self.model)
         
@@ -276,7 +478,8 @@ class Runner:
         
         self.hip_refresh_interval = 8
         
-        self.hip_offload = True
+        self.hip_offload = hip_offload
+        self.kv_share = kv_share
     
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
@@ -323,7 +526,7 @@ class Runner:
         return next_token_id
     
     @torch.inference_mode(True)
-    def generate(self, text, max_tokens=256, item_repeat=24, kv_share=1, n_prefill_warmup=1):
+    def generate(self, text, max_tokens=256, item_repeat=24, n_prefill_warmup=1):
         input_ids = self.tokenizer([text, ] * item_repeat, return_tensors="pt", padding=True).input_ids.to(self.model.device)
         bsz, context_len = input_ids.shape
         
@@ -333,12 +536,14 @@ class Runner:
             max_cache_len=context_len + max_tokens, 
             device=self.model.device,
             dtype=torch.float16,
-            share=kv_share,
+            share=self.kv_share,
+            cache_backend=self.cache_backend,
         )
         
         # compile decode step
         decode_input_ids = torch.zeros((bsz, 1), dtype=torch.long, device=self.model.device)
         decode_cache_pos = torch.zeros((1, ), dtype=torch.long, device=self.model.device)
+        cache.decode_start()
         with torch.autocast('cuda', torch.float16):
             self.decode_forward(
                 input_ids=decode_input_ids, 
@@ -346,9 +551,10 @@ class Runner:
                 cache_position=decode_cache_pos, 
                 past_key_values=cache
             )
-        
+        cache.decode_end()
         cache.reset()
         self.decode_step = 0
+        print('decode compiled')
         
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
         decode_cache_pos.fill_(context_len)
@@ -364,11 +570,14 @@ class Runner:
         logits = []
         for idx_warmup in range(n_prefill_warmup+1):
             if idx_warmup == n_prefill_warmup:
+                print('prefill warmup done')
+                torch.cuda.synchronize()
                 event_prefill_start.record()
             ibatch = 0
             for module in self.model.modules():
                 if isinstance(module, LlamaAttention):
                     module.prompt_batch_index = ibatch
+            cache.prompt_start()
             prompt_output = self.model(
                 input_ids=input_ids[ibatch:ibatch+1], 
                 position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
@@ -376,13 +585,14 @@ class Runner:
                 past_key_values=cache,
                 num_logits_to_keep=1,
             )
+            cache.prompt_end()
         for _ in range(bsz):
             logits.append(prompt_output.logits)
         
         for ilayer in range(len(cache.key_cache)):
             for ibatch in range(bsz):
-                cache.key_cache[ilayer][ibatch].copy_(cache.key_cache[ilayer][0], non_blocking=True)
-                cache.value_cache[ilayer][ibatch].copy_(cache.value_cache[ilayer][0], non_blocking=True)
+                cache.key_cache[ilayer][1][ibatch].copy_(cache.key_cache[ilayer][1][0], non_blocking=True)
+                cache.value_cache[ilayer][1][ibatch].copy_(cache.value_cache[ilayer][1][0], non_blocking=True)
         
         logits = torch.cat(logits, dim=0)
         next_token = self.sample(logits)
@@ -391,7 +601,12 @@ class Runner:
         del prompt_output
         event_prefill_end.record()
         
+        event_prefill_end.synchronize()
+        elapsed_prefill = event_prefill_start.elapsed_time(event_prefill_end)
+        print(f'prefill took {elapsed_prefill:.3f} ms')
+        
         event_decode_start.record()
+        cache.decode_start()
         for _ in tqdm.tqdm(range(max_tokens), dynamic_ncols=True, leave=False, desc='decode'):
             with torch.autocast('cuda', torch.float16):
                 decode_output = self.decode_forward(
@@ -404,9 +619,10 @@ class Runner:
             decoded_tokens.append(next_token)
             decode_input_ids.copy_(next_token, non_blocking=True)
             decode_cache_pos.add_(1)
-            if (self.decode_step % 10) == 0:
+            if (self.decode_step % 1) == 0:
                 torch.cuda.synchronize()
             self.decode_step += 1
+        cache.decode_end()
         event_decode_end.record()
         
         torch.cuda.synchronize()
@@ -422,16 +638,29 @@ class Runner:
             f"{input_ids.shape[-1] / elapsed_prefill:.2f} tok/s {elapsed_prefill:.2f} s  |  "
             f"{gen_out.numel() / elapsed_decode:.2f} tok/s {elapsed_decode:.2f} s"
         )
+        
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         return text_outs
     
 if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser()
         parser.add_argument('--method', default='hip', type=str)
+        parser.add_argument('--cache_backend', default='cuda', type=str)
+        parser.add_argument('--input', default='./samples/32k.md', type=str)
+        parser.add_argument('--model', default='llama3.1_8b', type=str)
+        parser.add_argument('--batch_size', default=16, type=int)
+        parser.add_argument('--kv_share', default=1, type=int)
+        parser.add_argument('--max_tokens', default=256, type=int)
+        parser.add_argument('--k', default=512, type=int)
+        parser.add_argument('--sw', default=256, type=int)
         
         args = parser.parse_args()
         
-        with open('./samples/32k.md', 'r') as f:
+        with open(args.input, 'r') as f:
             document = f.read()
         
         sample_input = f'''<|start_header_id|>system<|end_header_id|>
@@ -451,13 +680,24 @@ Hi, can you describe about following document? Here is document,
 
 '''
         results = Runner(
-            'meta-llama/Meta-Llama-3.1-8B-Instruct',
+            {
+                'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+                'llama2_7b': 'meta-llama/Llama-2-7b-chat-hf',
+                'llama2_13b': 'meta-llama/Llama-2-13b-chat-hf',
+            }[args.model],
             method=args.method,
+            cache_backend=args.cache_backend,
+            kv_share=args.kv_share,
+            hip_offload=False,
+            hip_args=HiPAttentionArgs(
+                mask_k=args.k,
+                sliding_window_size=args.sw,
+            ),
         )\
             .generate(
                 sample_input,
-                item_repeat=16,
-                kv_share=1,
+                item_repeat=args.batch_size,
+                max_tokens=args.max_tokens,
             )
         for result in results[:8]:
             result = result.replace("\n", "\\n")

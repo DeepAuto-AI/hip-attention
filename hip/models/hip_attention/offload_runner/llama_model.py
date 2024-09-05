@@ -50,6 +50,8 @@ from transformers.utils import (
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
 
+from flash_attn import flash_attn_func, flash_attn_with_kvcache
+from hip import hip_attention_11, HiPAttentionArgs11
 
 logger = logging.get_logger(__name__)
 
@@ -357,6 +359,7 @@ class LlamaAttention(nn.Module):
         
         self.prompt_batch_index = 0
         
+        self.hip_args = HiPAttentionArgs11()
         self.hip_use_cache = False
         self.hip_checkout_cache = False
         self.hip_last_cache = None
@@ -528,7 +531,7 @@ class LlamaFlashAttention2(LlamaAttention):
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "is_prompt": query_states.shape[1] > 1}
             if q_len > 1:
                 cache_kwargs['batch_index'] = self.prompt_batch_index
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -562,24 +565,21 @@ class LlamaFlashAttention2(LlamaAttention):
             # value_states = value_states.to(target_dtype)
             raise Exception()
         
-        from flash_attn import flash_attn_func, flash_attn_with_kvcache
-        from hip import hip_attention_11, HiPAttentionArgs11
         if self.attention_method == 'hip':
+            args = self.hip_args.clone()
+            args.position_ids = position_ids
+            
             if self.hip_use_cache:
                 assert self.hip_cache is not None
                 attn_output, attn_metadata = hip_attention_11(
                     query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
                     previous_metadata=self.hip_cache,
-                    args=HiPAttentionArgs11(
-                        position_ids=position_ids,
-                    ),
+                    args=args,
                 )
             else:
                 attn_output, attn_metadata = hip_attention_11(
                     query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
-                    args=HiPAttentionArgs11(
-                        position_ids=position_ids,
-                    ),
+                    args=args,
                 )
             
             if self.hip_checkout_cache:
