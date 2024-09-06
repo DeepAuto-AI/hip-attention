@@ -323,6 +323,7 @@ def load_tokens(
     
     mask_keys,
 ):
+    # DEBUG: to load nothing
     # mask_keys = mask_keys & False
     
     if not USING_PAGES:
@@ -511,7 +512,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     acc = tl.zeros((
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
         BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K
-    ), dtype=tl.float32)
+    ), dtype=tl.float16)
     idx_hid = tl.arange(0, HID)
     for i_group in tl.range(0, G):
         queries = tl.load(
@@ -682,11 +683,23 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(tl.float32)
         else:
             if not USING_SPARQ:
+                # 20ms
+                # t = tl.dot(
+                #     queries.to(tl.float16), 
+                #     keys.to(tl.float16),
+                #     out_dtype=tl.float16,
+                # )
+                
+                # 16ms
+                scale = 256 / tl.max(tl.abs(queries))
                 t = tl.dot(
-                    queries.to(tl.float16), 
-                    keys.to(tl.float16),
-                    out_dtype=tl.float16,
-                )
+                    tl.clamp(queries * scale, -127, 127).to(tl.int8), 
+                    tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                    out_dtype=tl.int32,
+                ).to(tl.float32) / (scale * scale)
+                t = t.to(tl.float16)
+                
+                # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
             else:
                 idx_sparq_hid = tl.arange(0, SPARQ_HID)
                 
@@ -4743,6 +4756,8 @@ def hip_attention(
                     rand_ids = rand_ids[rp][:K-1] * args.block_size_k
                     indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
                     indices[ib, ibdst, 0] = 0
+    
+    # return None, None
     
     context = block_sparse_attention(
         q=q, 

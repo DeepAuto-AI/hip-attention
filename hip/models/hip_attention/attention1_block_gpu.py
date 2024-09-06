@@ -1806,7 +1806,7 @@ def main_latency_benchmark():
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         
-        if i < 3:
+        if i < 5:
             s.wait_stream(torch.cuda.current_stream())
             state = sample()
             if args.refresh_interval > 0:
