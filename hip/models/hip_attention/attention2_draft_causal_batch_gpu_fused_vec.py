@@ -690,23 +690,24 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     t = queries.reshape(NUM_QUERIES, HID, 1) * keys.reshape(1, HID, BLOCK_BK * BLOCK_SIZE_K // BLOCK_STRIDE_K * KEY_DUP)
                     t = tl.sum(t, axis=1)
                 else:
-                    # 4090: 20 ms, A100: 19.08ms
-                    t = tl.dot(
-                        queries.to(tl.float16), 
-                        keys.to(tl.float16),
-                        out_dtype=tl.float16,
-                    )
-                    
-                    # 4090: 16 ms, A100: 31.85 ms
-                    # scale = 256 / tl.max(tl.abs(queries))
+                    # BQ=64, BSQ=2
+                    # 4090: 20 ms, A100: 34.81ms
                     # t = tl.dot(
-                    #     tl.clamp(queries * scale, -127, 127).to(tl.int8), 
-                    #     tl.clamp(keys * scale, -127, 127).to(tl.int8),
-                    #     out_dtype=tl.int32,
-                    # ).to(tl.float32) / (scale * scale)
-                    # t = t.to(tl.float16)
+                    #     queries.to(tl.float16), 
+                    #     keys.to(tl.float16),
+                    #     out_dtype=tl.float16,
+                    # )
                     
-                    # 4090: ?? ms, A100: 19 ms
+                    # 4090: 16 ms, A100: 31.97 ms
+                    scale = 256 / tl.max(tl.abs(queries))
+                    t = tl.dot(
+                        tl.clamp(queries * scale, -127, 127).to(tl.int8), 
+                        tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                        out_dtype=tl.int32,
+                    ).to(tl.float32) / (scale * scale)
+                    t = t.to(tl.float16)
+                    
+                    # 4090: 10.13 ms, A100: 19.18704981 ms
                     # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
             else:
                 idx_sparq_hid = tl.arange(0, SPARQ_HID)
@@ -1206,20 +1207,22 @@ def masking_iteration_draft_cuda_dup_and_score(
         assert SAMPLE_METHOD == 'first'
     
     if SCORES_CACHED:
-        cached_scores = tl.load(
-            SCORES_FINAL +\
-                idx_b * stride_scores_final_b+\
-                idx_bdst * stride_scores_final_bdst+\
-                idx_bk * stride_scores_final_bk,
-            mask = mask_bk,
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
-        _, indices_to_sample = dupped_indices_for_keys\
-            .reshape(BLOCK_BK, 2)\
-            .split()
-        _, mask_to_sample = dupped_mask\
-            .reshape(BLOCK_BK, 2)\
-            .split()
+        if SAMPLE_METHOD == 'first':
+            _, indices_to_sample = dupped_indices_for_keys\
+                .reshape(BLOCK_BK, 2)\
+                .split()
+            _, mask_to_sample = dupped_mask\
+                .reshape(BLOCK_BK, 2)\
+                .split()
+        elif SAMPLE_METHOD == 'last':
+            indices_to_sample, _ = dupped_indices_for_keys\
+                .reshape(BLOCK_BK, 2)\
+                .split()
+            mask_to_sample, _ = dupped_mask\
+                .reshape(BLOCK_BK, 2)\
+                .split()
+        else:
+            raise Exception()
         
         # t1 = indices_to_sample.to(tl.uint16).to(tl.uint32)
         # t2 = mask_to_sample.to(tl.int1)
@@ -1339,10 +1342,27 @@ def masking_iteration_draft_cuda_dup_and_score(
         # _, scores_sampled = tl_argsort(mapping, scores_sorted.to(tl.float32).to(tl.int32, bitcast=True), 0, False)
         # scores_sampled = scores_sampled.to(tl.float32, bitcast=True)
         
-        scores = tl.join(
-            cached_scores.to(SCORES.dtype.element_ty), 
-            scores_sampled.to(SCORES.dtype.element_ty)
-        ).reshape(BLOCK_BK * 2)
+        cached_scores = tl.load(
+            SCORES_FINAL +\
+                idx_b * stride_scores_final_b+\
+                idx_bdst * stride_scores_final_bdst+\
+                idx_bk * stride_scores_final_bk,
+            mask = mask_bk,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        if SAMPLE_METHOD == 'first':
+            scores = tl.join(
+                cached_scores.to(SCORES.dtype.element_ty), 
+                scores_sampled.to(SCORES.dtype.element_ty),
+            ).reshape(BLOCK_BK * 2)
+        elif SAMPLE_METHOD == 'last':
+            scores = tl.join(
+                scores_sampled.to(SCORES.dtype.element_ty),
+                cached_scores.to(SCORES.dtype.element_ty), 
+            ).reshape(BLOCK_BK * 2)
+        else:
+            raise Exception()
     else:
         indices_to_sample = dupped_indices_for_keys
         mask_to_sample = dupped_mask
@@ -2961,7 +2981,7 @@ def masking_iteration_draft(
         # print(scores.shape, key_access_log.shape, key_access_count.shape)
         # print('access count', key_access_count[0])
         # print('access log', key_access_log[0, -1, :key_access_count[0, -1].item()].tolist())
-    scores_cached = args.sample_method == 'first'
+    scores_cached = args.sample_method in ['first', 'last']
     # scores_cached = False
     
     BLOCK_BK = 256 // 2 // args.block_size_k
@@ -2989,9 +3009,9 @@ def masking_iteration_draft(
         assert args.score_head_group_size == 1
         
         if not scores_cached:
-            BLOCK_BK = 512 // (args.block_size_k // args.block_stride_k) * G // 4 * G
+            BLOCK_BK = 128 // (args.block_size_k // args.block_stride_k)
         else:
-            BLOCK_BK = 512 // (args.block_size_k // args.block_stride_k) * G // 8 * G
+            BLOCK_BK = 128 // (args.block_size_k // args.block_stride_k) // 2
         # BLOCK_BK = indices.shape[-1]
         # BLOCK_BK = indices.shape[-1] // 4
         
