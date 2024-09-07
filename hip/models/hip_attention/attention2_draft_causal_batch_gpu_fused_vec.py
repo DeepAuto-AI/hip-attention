@@ -683,22 +683,23 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(tl.float32)
         else:
             if not USING_SPARQ:
-                # 20ms
-                # t = tl.dot(
-                #     queries.to(tl.float16), 
-                #     keys.to(tl.float16),
-                #     out_dtype=tl.float16,
-                # )
-                
-                # 16ms
-                scale = 256 / tl.max(tl.abs(queries))
+                # 4090: 20 ms, A100: 19.08ms
                 t = tl.dot(
-                    tl.clamp(queries * scale, -127, 127).to(tl.int8), 
-                    tl.clamp(keys * scale, -127, 127).to(tl.int8),
-                    out_dtype=tl.int32,
-                ).to(tl.float32) / (scale * scale)
-                t = t.to(tl.float16)
+                    queries.to(tl.float16), 
+                    keys.to(tl.float16),
+                    out_dtype=tl.float16,
+                )
                 
+                # 4090: 16 ms, A100: 31.85 ms
+                # scale = 256 / tl.max(tl.abs(queries))
+                # t = tl.dot(
+                #     tl.clamp(queries * scale, -127, 127).to(tl.int8), 
+                #     tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                #     out_dtype=tl.int32,
+                # ).to(tl.float32) / (scale * scale)
+                # t = t.to(tl.float16)
+                
+                # 4090: ?? ms, A100: 19 ms
                 # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
             else:
                 idx_sparq_hid = tl.arange(0, SPARQ_HID)
@@ -948,7 +949,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     idx_b = pid_b
     idx_bdst = pid_bdst
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
     if INDICES_TDST is not None:
@@ -1895,7 +1896,8 @@ def get_masking_iteration_draft_cuda_fused_configs():
         'BLOCK_BK',
         'BLOCK_SIZE_K', 
         'BLOCK_SIZE_Q', 
-        'HID'
+        'HID',
+        'TDST_NEXT_POWER_OF_2',
     ],
     restore_value=[
         'KEY_ACCESS_LOG',
@@ -2058,6 +2060,7 @@ def masking_iteration_draft_cuda_fused(
     BLOCK_SCORE: tl.constexpr,
     GROUP_BDST,
     GROUP_BH,
+    TDST_NEXT_POWER_OF_2,
     
     indices_bk_len: tl.constexpr,
     probs_bk_len: tl.constexpr,
@@ -2503,7 +2506,7 @@ def masking_iteration_draft_cuda_initialize_score(
     if t_group_size <= 1.0:
         return
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
     if INDICES_TDST is not None:
@@ -3067,6 +3070,7 @@ def masking_iteration_draft(
             GROUP_BDST,
             GROUP_BH,
             
+            TDST_NEXT_POWER_OF_2=1, #triton.next_power_of_2(TDST),
             indices_bk_len=indices.shape[-1],
             probs_bk_len=probs.shape[-1],
             
