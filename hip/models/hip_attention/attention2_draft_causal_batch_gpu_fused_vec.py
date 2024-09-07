@@ -643,10 +643,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(queries.dtype)
                 
                 t_calib_old = tl.dot(
-                    queries, keys_calib_old.to(queries.dtype),
+                    queries, 
+                    keys_calib_old.to(queries.dtype),
                 )
                 t_calib_new = tl.dot(
-                    queries_grouped, keys_calib_new.to(queries.dtype),
+                    queries_grouped, 
+                    keys_calib_new.to(queries.dtype),
                 )
                 
                 calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
@@ -683,24 +685,29 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(tl.float32)
         else:
             if not USING_SPARQ:
-                # 4090: 20 ms, A100: 19.08ms
-                t = tl.dot(
-                    queries.to(tl.float16), 
-                    keys.to(tl.float16),
-                    out_dtype=tl.float16,
-                )
-                
-                # 4090: 16 ms, A100: 31.85 ms
-                # scale = 256 / tl.max(tl.abs(queries))
-                # t = tl.dot(
-                #     tl.clamp(queries * scale, -127, 127).to(tl.int8), 
-                #     tl.clamp(keys * scale, -127, 127).to(tl.int8),
-                #     out_dtype=tl.int32,
-                # ).to(tl.float32) / (scale * scale)
-                # t = t.to(tl.float16)
-                
-                # 4090: ?? ms, A100: 19 ms
-                # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
+                NUM_QUERIES: tl.constexpr = tl.constexpr(BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
+                if NUM_QUERIES < 16:
+                    t = queries.reshape(NUM_QUERIES, HID, 1) * keys.reshape(1, HID, BLOCK_BK * BLOCK_SIZE_K // BLOCK_STRIDE_K * KEY_DUP)
+                    t = tl.sum(t, axis=1)
+                else:
+                    # 4090: 20 ms, A100: 19.08ms
+                    t = tl.dot(
+                        queries.to(tl.float16), 
+                        keys.to(tl.float16),
+                        out_dtype=tl.float16,
+                    )
+                    
+                    # 4090: 16 ms, A100: 31.85 ms
+                    # scale = 256 / tl.max(tl.abs(queries))
+                    # t = tl.dot(
+                    #     tl.clamp(queries * scale, -127, 127).to(tl.int8), 
+                    #     tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                    #     out_dtype=tl.int32,
+                    # ).to(tl.float32) / (scale * scale)
+                    # t = t.to(tl.float16)
+                    
+                    # 4090: ?? ms, A100: 19 ms
+                    # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
             else:
                 idx_sparq_hid = tl.arange(0, SPARQ_HID)
                 
@@ -950,6 +957,8 @@ def masking_iteration_draft_cuda_dup_and_score(
     idx_bdst = pid_bdst
     
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.random.randint(idx_b * 131072 * BLOCK_SIZE_Q + idx_bdst * BLOCK_SIZE_Q, tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q)).to(tl.int32) % BLOCK_SIZE_Q
+    # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
     if INDICES_TDST is not None:
@@ -1104,7 +1113,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
-        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
+        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float16) - 32000.0
         for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
             t_dupped_indices_for_keys = tl.where(
                 i_shift < dupped_group_sizes,
@@ -1709,9 +1718,9 @@ def masking_iteration_draft_cuda_partial_softmax(
         mask=mask_bk,
         other=float('-inf'),
         cache_modifier=DEFAULT_CACHE_MODIFIER,
-    ).to(tl.float32)
+    ).to(tl.float16)
     
-    one = tl.zeros((1, ), dtype=tl.float32) + 1
+    one = tl.zeros((1, ), dtype=tl.float16) + 1
     for i_group in range(G):
         mask_softmax = groups == i_group
         scores_masked = tl.where(mask_softmax, scores, float('-inf'))
@@ -1724,7 +1733,7 @@ def masking_iteration_draft_cuda_partial_softmax(
             neg_scores_softmax_sorted = tl.sort(-scores_softmax)
             scores_promote_thresh = -tl.min(neg_scores_softmax_sorted * (tl.arange(0, BLOCK_SCORE) == (MASK_BLOCK_K * 0.5 * one).to(tl.int32)))
             scores_softmax = tl.where(scores_softmax >= scores_promote_thresh, scores_softmax + 1, scores_softmax)
-        scores = tl.where(mask_softmax, scores_softmax, scores)
+        scores = tl.where(mask_softmax, scores_softmax, scores).to(scores.dtype)
     
     scores = tl.where((indices % MAX_BSRC) < tl.cdiv(SINK_TOKEN_SIZE, BLOCK_SIZE_K), 2, scores)
     scores = tl.where(group_sizes == 0, -1, scores)
@@ -2507,6 +2516,7 @@ def masking_iteration_draft_cuda_initialize_score(
         return
     
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
     if INDICES_TDST is not None:
@@ -3369,11 +3379,11 @@ def block_sparse_attention_cuda_step(
         ).to(tl.float32) * 1.44269504
     else:
         qk = tl.dot(
-            queries, 
-            keys,
-            allow_tf32=True,
-            # out_dtype=tl.float16,
-        ).to(tl.float32) * 1.44269504
+            queries.to(tl.float16), 
+            keys.to(tl.float16),
+            # allow_tf32=True,
+            out_dtype=tl.float16,
+        ).to(tl.float16) * 1.44269504
     
     # qk_mask = (
     #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
@@ -3416,10 +3426,10 @@ def block_sparse_attention_cuda_step(
     # -- update m_i and l_i
     alpha = tl.math.exp2(m_i - m_ij)
     # tl.device_print('ff', l_ij)
-    l_i = l_i * alpha + l_ij[:, None]
+    l_i = (l_i * alpha + l_ij[:, None]).to(l_i.dtype)
     
     # -- update output accumulator --
-    acc = acc * alpha
+    acc = acc * alpha.to(acc.dtype)
     
     # values = tl.load(
     #     V +\
@@ -3431,10 +3441,10 @@ def block_sparse_attention_cuda_step(
     # )
     
     # update acc
-    acc += tl.dot(p.to(values.dtype), values).to(tl.float32)
+    acc += tl.dot(p.to(values.dtype), values).to(acc.dtype)
     
     # update m_i and l_i
-    m_i = m_ij
+    m_i = m_ij.to(m_i.dtype)
     
     return acc, l_i, m_i
 
@@ -3536,8 +3546,12 @@ def block_sparse_attention_cuda(
     idx_g = idx_n % G
     
     idx_bdst = pid_bdst
-    idx_tdst = BLOCK_SIZE_Q * idx_bdst + tl.arange(0, BLOCK_SIZE_Q)
-    mask_tdst = idx_tdst < MAX_TDST
+    if BLOCK_SIZE_Q < 16:
+        idx_tdst = BLOCK_SIZE_Q * idx_bdst + tl.arange(0, 16)
+        mask_tdst = (idx_tdst < MAX_TDST) & (tl.arange(0, 16) < BLOCK_SIZE_Q)
+    else:
+        idx_tdst = BLOCK_SIZE_Q * idx_bdst + tl.arange(0, BLOCK_SIZE_Q)
+        mask_tdst = idx_tdst < MAX_TDST
     pos_tdst = tl.load(
         POS +\
             idx_bsz * stride_pos_bsz +\
@@ -3548,9 +3562,14 @@ def block_sparse_attention_cuda(
     
     idx_hid = tl.arange(0, HID)
     
-    acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float32)
-    m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
-    l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
+    if BLOCK_SIZE_Q < 16:
+        acc = tl.zeros((16, HID), dtype=tl.float16)
+        m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
+        l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
+    else:
+        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float16)
+        m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
+        l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
     
     queries = tl.load(
         Q +\

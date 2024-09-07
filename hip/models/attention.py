@@ -21,7 +21,9 @@ def custom_attention(
     # hip parameters
     tree_k=512, 
     tree_block_size_q=32, 
+    tree_block_stride_q=2, 
     tree_block_size_k=2,
+    tree_block_stride_k=1,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
     tree_sampling_method='last',
@@ -306,9 +308,9 @@ def custom_attention(
                     mask_k=tree_k,
                     
                     block_size_q=tree_block_size_q,
-                    block_stride_q=2,
+                    block_stride_q=tree_block_stride_q,
                     block_size_k=tree_block_size_k,
-                    block_stride_k=max(1, tree_block_size_k // 2),
+                    block_stride_k=tree_block_stride_k,
                     # block_stride_k=1,
                     block_size_k_group=1,
                     

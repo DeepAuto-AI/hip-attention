@@ -415,7 +415,9 @@ class LlamaCustomAttention(LlamaAttention):
         self.attention_method = 'none'
         self.tree_k = 512
         self.tree_block_size_q = 32
+        self.tree_block_stride_q = 2
         self.tree_block_size_k = 2
+        self.tree_block_stride_k = 1
         self.tree_using_context_avg = False
         self.tree_dense_queries = 0
         self.tree_last_dense_queries = None
@@ -584,7 +586,10 @@ class LlamaCustomAttention(LlamaAttention):
 
             # hip parameters
             tree_k=mask_k,
-            tree_block_size_q=self.tree_block_size_q, tree_block_size_k=self.tree_block_size_k,
+            tree_block_size_q=self.tree_block_size_q,
+            tree_block_stride_q=self.tree_block_stride_q, 
+            tree_block_size_k=self.tree_block_size_k,
+            tree_block_stride_k=self.tree_block_stride_k, 
             tree_dense_queries=self.tree_dense_queries,
             tree_last_dense_queries=self.tree_last_dense_queries,
             tree_sampling_method=self.tree_sampling_method,
