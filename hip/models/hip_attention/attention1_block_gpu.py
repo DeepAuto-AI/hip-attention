@@ -1601,7 +1601,7 @@ def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tenso
     
     return sink_attention(q, k, v, cos, sin, window_size=window_size)
 
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_11
+from hip.models.hip_attention.attention2_draft_prefetch import hip_attention as hip_attention_11
 
 def main_latency_benchmark():
     global DEBUG

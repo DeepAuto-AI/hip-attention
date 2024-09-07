@@ -5,7 +5,7 @@ from hip.models.hip_attention.attention1_block_gpu \
     import paged_hip_attention as paged_hip_attention_10
 
 # version 1.1
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import hip_attention as hip_attention_11
 from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
     import paged_hip_attention as paged_hip_attention_11
