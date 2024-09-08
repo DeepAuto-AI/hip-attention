@@ -3618,9 +3618,9 @@ def block_sparse_attention_cuda(
                 (idx_g + 1) * stride_ks_start_end_g
         )
         
-        for i_bk in range(range_start, range_end, BLOCK_BK):
+        for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
-            mask_bk = idx_bk < (BK * G)
+            mask_bk = (idx_bk < (BK * G)) & (idx_bk < range_end)
             
             idx_tsrc_start = tl.load(
                 INDICES +\
@@ -3718,6 +3718,8 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
             )
+            tl.debug_barrier()
+        tl.debug_barrier()
     
     if sliding_window_size > 0:
         CURR_TSRC = tl.max(pos_tdst)
@@ -3805,6 +3807,8 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
             )
+            tl.debug_barrier()
+        tl.debug_barrier()
     
     # epilogue
     m_i += tl.math.log2(l_i)
@@ -4322,6 +4326,137 @@ def hip_masking(
     k: Optional[Tensor],
     args: "HiPAttentionArgs",
 ):
+    if args.group_size_q > 1:
+        q_quant = q
+        
+        # TODO args size q handling should be inside of hip_masking
+        n, t, h, d = q_quant.shape
+        n_groups = cdiv_python(t, args.block_size_q * args.group_size_q)
+        
+        to_pad = 0
+        if (n_groups * args.block_size_q * args.group_size_q) != t:
+            to_pad = n_groups * args.block_size_q * args.group_size_q - t
+            q_quant = F.pad(q_quant, pad=(0, 0, 0, 0, to_pad, 0))
+        
+        q_quant = q_quant.view(
+            n, 
+            n_groups, 
+            args.group_size_q, 
+            args.block_size_q, 
+            h, 
+            d,
+        )
+        q_quant = q_quant[:, :, -1, :, :, :]\
+            .reshape(n, n_groups * args.block_size_q, h, d)
+        
+        original_position_ids = args.position_ids
+        assert original_position_ids is not None
+        position_ids = F.pad(original_position_ids.unsqueeze(0), pad=(to_pad, 0)).squeeze(0)
+        position_ids = position_ids\
+            .view(n, n_groups, args.group_size_q, args.block_size_q)\
+            [:, :, -1, :]\
+            .reshape(n, n_groups * args.block_size_q)
+        args = args.clone()
+        args.position_ids = position_ids
+        args.group_size_q = 1
+        
+        (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
+        ) = hip_masking(
+            # TODO(heejun): apply PCA topk
+            q=q_quant,
+            k=k,
+            args=args,
+        )
+        
+        assert args.topk_head_group_size == 1
+        # repeat the mask
+        assert indices.ndim == 3
+        assert ks.ndim == 2, ks.shape
+        assert ks_count.ndim == 3, ks_count.shape
+        assert ks_start_end.ndim == 3, ks_start_end.shape
+        if key_access_log is not None:
+            raise NotImplementedError()
+        if block_access_log is not None:
+            raise NotImplementedError()
+        indices = torch.repeat_interleave(indices, args.group_size_q, 1)
+        # ks = torch.repeat_interleave(ks, args.group_size_q, 1)
+        # ks_count = torch.repeat_interleave(ks_count, args.group_size_q, 1)
+        # ks_start_end = torch.repeat_interleave(ks_start_end, args.group_size_q, 1)
+        
+        indices = torch.repeat_interleave(indices, 2, 2)
+        n, t, d = indices.shape
+        n_groups = t // (args.group_size_q)
+        indices = indices.view(n, n_groups, args.group_size_q, d)
+        indices[:, :, :, 0::2] -= (args.group_size_q - torch.arange(args.group_size_q, device=indices.device) - 1)[None, None, :, None]
+        indices = indices.view(n, t, d)
+        # for i in range(1, args.group_size_q):
+        #     indices[
+        #         :, 
+        #         args.group_size_q-1-i::args.group_size_q, 
+        #         0::2
+        #     ] -= i * args.block_size_q
+        indices = torch.where(indices >= 0, indices, 987654321)
+        indices = torch.sort(indices, dim=-1).values
+        rolled_indices = torch.roll(indices, shifts=1, dims=-1)
+        indices = torch.where(indices != rolled_indices, indices, 987654321)
+        indices = torch.sort(indices, dim=-1).values
+        
+        n_queries = original_position_ids.shape[1]
+        indices = indices[:, -n_queries:].contiguous()
+        ks = (indices < 987654321).to(torch.int32).sum(-1).contiguous()
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=ks.dtype, device=ks.device)
+        ks_start_end[:, :, -1] = ks
+        args.position_ids = original_position_ids
+        
+        if os.getenv('HIP_DEBUG', '0') == '1':
+            B, TDST, H, HID = q.shape
+            if k is not None:
+                _, TSRC, H_KV, _ = k.shape
+            else:
+                TSRC = torch.max(args.cache_seq_lens).item()
+            N = B * H
+            def render_mask():
+                debug_mask = to_dense(
+                    indices.cpu().numpy(),
+                    ks.cpu().numpy(),
+                    None,
+                    cdiv_python(N, args.topk_head_group_size),
+                    TDST, 
+                    TSRC * args.topk_head_group_size, 
+                    args.block_size_q, 
+                    args.block_size_k * args.block_size_k_group,
+                )[0]
+                cv2.imwrite('dummy_prefetch_raw.png', debug_mask * 255)
+                print('saved dummy_prefetch_raw.png')
+                plt.figure(figsize=(4*args.topk_head_group_size, 4))
+                plt.imshow(debug_mask)
+                plt.tight_layout()
+                plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
+                print('saved dummy_prefetch.png')
+            render_mask()
+        
+        return (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
+        )
+    
     assert (k is None and args.k_cache is not None) or (k is not None and args.k_cache is None)
     assert q.ndim == 4
     if k is not None:
@@ -4762,38 +4897,6 @@ def hip_attention(
         )[None, :].expand(q.shape[0], -1)
     
     if previous_metadata is None:
-        q_quant = args.get_q_quant(q)
-        
-        # TODO args size q handling should be inside of hip_masking
-        if args.group_size_q > 1:
-            n, t, h, d = q_quant.shape
-            n_groups = cdiv_python(t, args.block_size_q * args.group_size_q)
-            
-            to_pad = 0
-            if (n_groups * args.block_size_q * args.group_size_q) != t:
-                to_pad = n_groups * args.block_size_q * args.group_size_q - t
-                q_quant = F.pad(q_quant, pad=(0, 0, 0, 0, to_pad, 0))
-            
-            q_quant = q_quant.view(
-                n, 
-                n_groups, 
-                args.group_size_q, 
-                args.block_size_q, 
-                h, 
-                d,
-            )
-            q_quant = q_quant[:, :, -1, :, :, :]\
-                .reshape(n, n_groups * args.block_size_q, h, d)
-            
-            original_position_ids = args.position_ids
-            position_ids = F.pad(original_position_ids.unsqueeze(0), pad=(to_pad, 0)).squeeze(0)
-            position_ids = position_ids\
-                .view(n, n_groups, args.group_size_q, args.block_size_q)\
-                [:, :, -1, :]\
-                .reshape(n, n_groups * args.block_size_q)
-            args = args.clone()
-            args.position_ids = position_ids
-        
         (
             indices,
             ks, 
@@ -4806,79 +4909,10 @@ def hip_attention(
             block_access_count,
         ) = hip_masking(
             # TODO(heejun): apply PCA topk
-            q=q_quant,
+            q=args.get_q_quant(q),
             k=args.get_k_quant(k),
             args=args,
         )
-        
-        if args.group_size_q > 1:
-            assert args.topk_head_group_size == 1
-            # repeat the mask
-            assert indices.ndim == 3
-            assert ks.ndim == 2, ks.shape
-            assert ks_count.ndim == 3, ks_count.shape
-            assert ks_start_end.ndim == 3, ks_start_end.shape
-            if key_access_log is not None:
-                raise NotImplementedError()
-            if block_access_log is not None:
-                raise NotImplementedError()
-            indices = torch.repeat_interleave(indices, args.group_size_q, 1)
-            # ks = torch.repeat_interleave(ks, args.group_size_q, 1)
-            # ks_count = torch.repeat_interleave(ks_count, args.group_size_q, 1)
-            # ks_start_end = torch.repeat_interleave(ks_start_end, args.group_size_q, 1)
-            
-            indices = torch.repeat_interleave(indices, 2, 2)
-            n, t, d = indices.shape
-            n_groups = t // (args.group_size_q)
-            indices = indices.view(n, n_groups, args.group_size_q, d)
-            indices[:, :, :, 0::2] -= (args.group_size_q - torch.arange(args.group_size_q, device=indices.device) - 1)[None, None, :, None]
-            indices = indices.view(n, t, d)
-            # for i in range(1, args.group_size_q):
-            #     indices[
-            #         :, 
-            #         args.group_size_q-1-i::args.group_size_q, 
-            #         0::2
-            #     ] -= i * args.block_size_q
-            indices = torch.where(indices >= 0, indices, 987654321)
-            indices = torch.sort(indices, dim=-1).values
-            rolled_indices = torch.roll(indices, shifts=1, dims=-1)
-            indices = torch.where(indices != rolled_indices, indices, 987654321)
-            indices = torch.sort(indices, dim=-1).values
-            
-            n_queries = original_position_ids.shape[1]
-            indices = indices[:, -n_queries:].contiguous()
-            ks = (indices < 987654321).to(torch.int32).sum(-1).contiguous()
-            ks_count = ks.unsqueeze(-1)
-            ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=ks.dtype, device=ks.device)
-            ks_start_end[:, :, -1] = ks
-            args.position_ids = original_position_ids
-            
-            if os.getenv('HIP_DEBUG', '0') == '1':
-                B, TDST, H, HID = q.shape
-                if k is not None:
-                    _, TSRC, H_KV, _ = k.shape
-                else:
-                    TSRC = torch.max(args.cache_seq_lens).item()
-                N = B * H
-                def render_mask():
-                    debug_mask = to_dense(
-                        indices.cpu().numpy(),
-                        ks.cpu().numpy(),
-                        None,
-                        cdiv_python(N, args.topk_head_group_size),
-                        TDST, 
-                        TSRC * args.topk_head_group_size, 
-                        args.block_size_q, 
-                        args.block_size_k * args.block_size_k_group,
-                    )[0]
-                    cv2.imwrite('dummy_prefetch_raw.png', debug_mask * 255)
-                    print('saved dummy_prefetch_raw.png')
-                    plt.figure(figsize=(4*args.topk_head_group_size, 4))
-                    plt.imshow(debug_mask)
-                    plt.tight_layout()
-                    plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
-                    print('saved dummy_prefetch.png')
-                render_mask()
     else:
         indices = previous_metadata.indices
         ks = previous_metadata.ks
@@ -4958,6 +4992,11 @@ def paged_hip_attention(
         args.k_cache = args.k_cache.view(torch.uint8)
     if args.v_cache.dtype == torch.float8_e5m2:
         args.v_cache = args.v_cache.view(torch.uint8)
+    if args.position_ids is None:
+        args = args.clone()
+        position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
+        args.cache_seq_lens[:, None] - TDST + 1
+        args.position_ids = position_ids
     
     q = q * softmax_scale
     
@@ -4988,13 +5027,11 @@ def paged_hip_attention(
         block_access_score = previous_mask_metadata.block_access_score
         block_access_count = previous_mask_metadata.block_access_count
     
-    position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
-        args.cache_seq_lens[:, None] - TDST + 1
     context = block_sparse_attention(
         q=q,
         k=None,
         v=None,
-        position_ids=position_ids,
+        position_ids=args.position_ids,
         indices=indices,
         ks=ks,
         ks_count=ks_count,
