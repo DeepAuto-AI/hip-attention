@@ -701,8 +701,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     # 4090: 16 ms, A100: 31.97 ms
                     scale = 256 / tl.max(tl.abs(queries))
                     t = tl.dot(
-                        tl.clamp(queries * scale, -127, 127).to(tl.int8), 
-                        tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                        tl.clamp(queries.to(tl.float16) * scale, -127, 127).to(tl.int8), 
+                        tl.clamp(keys.to(tl.float16) * scale, -127, 127).to(tl.int8),
                         out_dtype=tl.int32,
                     ).to(tl.float32) / (scale * scale)
                     t = t.to(tl.float16)
@@ -1909,7 +1909,7 @@ def get_masking_iteration_draft_cuda_fused_configs():
     # for num_warps in [4,]:
         for num_stages in [2,]:
         # for num_stages in [2]:
-            for num_regs in [64, 128, 256]:
+            for num_regs in [64, 128, 256, 512]:
             # for num_regs in [256]:
                 configs.append(triton.Config(
                     {}, 
@@ -1941,7 +1941,9 @@ def get_masking_iteration_draft_cuda_fused_configs():
         'PROBS',
         'TOPK_IDS',
         'T_GROUP_SIZE',
-    ]
+    ],
+    warmup=200,
+    rep=1000,
 )
 @triton.jit
 def masking_iteration_draft_cuda_fused(
@@ -3100,7 +3102,7 @@ def masking_iteration_draft(
             GROUP_BDST,
             GROUP_BH,
             
-            TDST_NEXT_POWER_OF_2=1, #triton.next_power_of_2(TDST),
+            TDST_NEXT_POWER_OF_2=triton.next_power_of_2(TDST),
             indices_bk_len=indices.shape[-1],
             probs_bk_len=probs.shape[-1],
             
@@ -4758,6 +4760,7 @@ class HiPAttentionArgs:
     cache_seq_lens: Optional[Tensor] = None
     block_table: Optional[Tensor] = None
     
+    # BUG(HJ): this nameing is wrong...
     position_ids: Optional[Tensor] = None
     
     def __post_init__(self):
@@ -4771,6 +4774,20 @@ class HiPAttentionArgs:
 
     def clone(self):
         return copy.copy(self)
+
+    def json(self, convert_tensor_to_meta = True):
+        from dataclasses import fields
+        json = {}
+        for field in fields(self):
+            json[field.name] = getattr(self, field.name)
+        
+        if convert_tensor_to_meta:
+            for k, v in json.items():
+                if isinstance(v, Tensor):
+                    v = f'{v.dtype}{list(v.shape)}@{v.device}.{v.data_ptr():02X}'
+                json[k] = v
+        
+        return json
 
     def safe_stride(self, x: Optional[Tensor], ndim: int):
         if x is None:
@@ -4995,12 +5012,13 @@ def paged_hip_attention(
     if args.position_ids is None:
         args = args.clone()
         position_ids = torch.arange(0, TDST, device=q.device)[None, :] +\
-        args.cache_seq_lens[:, None] - TDST + 1
+            args.cache_seq_lens[:, None] - TDST + 1
         args.position_ids = position_ids
     
     q = q * softmax_scale
     
     if previous_mask_metadata is None:
+        # print(q.shape, args.json())
         (
             indices, 
             ks,
