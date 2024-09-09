@@ -75,6 +75,8 @@ class HiPAttentionArgs:
     
     group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
     
+    is_causal: bool = True
+    
     sliding_window_size: int = 256
     sink_token_size: int = 16
     
@@ -246,7 +248,9 @@ def masking_iteration_draft_cuda_initialize(
     # param
     mask_k: int,
     block_size_q: tl.constexpr,
+    block_stride_q: tl.constexpr,
     block_size_k: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
     
     sliding_window_size: int,
     
@@ -261,18 +265,22 @@ def masking_iteration_draft_cuda_initialize(
     mask_tdst = idx_tdst < MAX_TDST
     
     mask_block_k = tl.cdiv(mask_k, block_size_k)
-    pos_tdst = tl.load(
-        POS +\
-            (idx_b * G // HEAD) * stride_pos_n +\
-            idx_tdst * stride_pos_tdst,
-        mask=mask_tdst,
-        other=0,
-    )
+    if IS_CAUSAL:
+        pos_tdst = tl.load(
+            POS +\
+                (idx_b * G // HEAD) * stride_pos_n +\
+                idx_tdst * stride_pos_tdst,
+            mask=mask_tdst,
+            other=0,
+        )
+    else:
+        pos_tdst = tl.full((block_size_q // block_stride_q,), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
     tl.debug_barrier()
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
     BSRC = tl.cdiv(TSRC, block_size_k)
     MAX_BSRC = tl.cdiv(MAX_TSRC, block_size_k)
+    
     
     if TSRC <= mask_k:
         idx_bk = tl.arange(0, BLOCK_MASK_BLOCK_K)
@@ -618,6 +626,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
+    IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -919,15 +928,26 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         acc += t.to(acc.dtype)
         # acc += tl.sum(queries)
         # acc += tl.sum(keys)
-    acc = tl.where(
-        (
-            (acc == 0.0) |
-            (idx_tsrc[None, :] > (pos_tdst - sliding_window_size - 1)[:, None]) |
-            False
-        ), 
-        -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
-        acc
-    )
+    if IS_CAUSAL:
+        acc = tl.where(
+            (
+                (acc == 0.0) |
+                (idx_tsrc[None, :] > (pos_tdst - sliding_window_size - 1)[:, None]) |
+                False
+            ), 
+            -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
+            acc
+        )
+    else:
+        acc = tl.where(
+            (
+                (acc == 0.0) |
+                # (idx_tsrc[None, :] > (pos_tdst - sliding_window_size - 1)[:, None]) |
+                False
+            ), 
+            -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
+            acc
+        )
     scores = tl.reshape(
         acc, (
             BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
@@ -1098,6 +1118,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -1150,14 +1171,17 @@ def masking_iteration_draft_cuda_dup_and_score(
     idx_n = idx_b * G + tl.arange(0, G)
     
     mask_block_k = tl.cdiv(mask_k, BLOCK_SIZE_K)
-    pos_tdst = tl.load(
-        POS +\
-            (idx_b // BH) * stride_pos_bsz +\
-            idx_tdst_no_proj * stride_pos_tdst,
-        mask=mask_tdst,
-        other=0,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
+    if IS_CAUSAL:
+        pos_tdst = tl.load(
+            POS +\
+                (idx_b // BH) * stride_pos_bsz +\
+                idx_tdst_no_proj * stride_pos_tdst,
+            mask=mask_tdst,
+            other=0,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+    else:
+        pos_tdst = tl.full((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, ), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
     BSRC = tl.cdiv(TSRC, BLOCK_SIZE_K)
@@ -1361,6 +1385,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_bsz,
                 
+                IS_CAUSAL,
                 BLOCK_SIZE_Q,
                 BLOCK_STRIDE_Q,
                 BLOCK_SIZE_K,
@@ -1496,6 +1521,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_bsz,
             
+            IS_CAUSAL,
             BLOCK_SIZE_Q,
             BLOCK_STRIDE_Q,
             BLOCK_SIZE_K,
@@ -1608,6 +1634,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_bsz,
             
+            IS_CAUSAL,
             BLOCK_SIZE_Q,
             BLOCK_STRIDE_Q,
             BLOCK_SIZE_K,
@@ -2255,6 +2282,7 @@ def masking_iteration_draft_cuda_fused(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -2419,6 +2447,7 @@ def masking_iteration_draft_cuda_fused(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_bsz,
                     
+                    IS_CAUSAL,
                     BLOCK_SIZE_Q,
                     BLOCK_STRIDE_Q,
                     BLOCK_SIZE_K,
@@ -2677,6 +2706,7 @@ def masking_iteration_draft_cuda_initialize_score(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -2721,13 +2751,16 @@ def masking_iteration_draft_cuda_initialize_score(
             other=MAX_TDST,
         ).to(tl.int64)
     
-    pos_tdst = tl.load(
-        POS +\
-            (idx_b // BH) * stride_pos_bsz +\
-            idx_tdst_no_proj * stride_pos_tdst,
-        mask=mask_tdst,
-        other=0,
-    )
+    if IS_CAUSAL:
+        pos_tdst = tl.load(
+            POS +\
+                (idx_b // BH) * stride_pos_bsz +\
+                idx_tdst_no_proj * stride_pos_tdst,
+            mask=mask_tdst,
+            other=0,
+        )
+    else:
+        pos_tdst = tl.full((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, ), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
     TSRC = tl.maximum(0, TSRC - sliding_window_size)
     BSRC = tl.cdiv(TSRC, BLOCK_SIZE_K)
@@ -2810,6 +2843,7 @@ def masking_iteration_draft_cuda_initialize_score(
         CACHE_SEQ_LENS,
         stride_cache_seq_lens_bsz,
         
+        IS_CAUSAL,
         BLOCK_SIZE_Q,
         BLOCK_STRIDE_Q,
         BLOCK_SIZE_K,
@@ -3058,7 +3092,9 @@ def masking_iteration_draft(
             
             args.mask_k,
             args.block_size_q, 
+            args.block_stride_q,
             args.block_size_k, 
+            args.is_causal,
             
             args.sliding_window_size,
             
@@ -3142,6 +3178,7 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
+            args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
@@ -3267,6 +3304,7 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
+            args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
@@ -4036,6 +4074,8 @@ def block_sparse_attention(
     
     args: "HiPAttentionArgs",
 ):
+    assert args.is_causal, "non causal is not supported yet in sparse attention (masking seems works)"
+    
     if os.getenv('HIP_DEBUG_SA', '0') == '1':
         return block_sparse_attention_pytorch(
             q, k, v, indices, ks, args,
@@ -5029,6 +5069,16 @@ def hip_attention(
 ) -> Tuple[Tensor, HiPAttentionOutputMetadata]:
     if args is None:
         args = HiPAttentionArgs(**kwargs)
+    
+    if not args.is_causal:
+        if args.sliding_window_size > 0:
+            warnings.warn('sliding_window is not supported for bidirectional yet')
+            args = args.clone()
+            args.sliding_window_size = 0
+        if args.sink_token_size > 0:
+            warnings.warn('sink token is not supported for bidirectional yet')
+            args = args.clone()
+            args.sink_token_size = 0
 
     if args.num_dense_queries > 0:
         dense_context = flash_attn_func(
@@ -5374,6 +5424,8 @@ def main():
             block_size_k=2,
             block_stride_k=1,
             block_size_k_group=1,
+            
+            is_causal=True,
             
             sliding_window_size=256,
             sink_token_size=16,
