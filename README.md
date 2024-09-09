@@ -14,7 +14,7 @@ After installation, you can access the `hip` package from any project. `hip` is 
 
 ## TL;DR
 
-**We provide an OpenAI-compatible API server built with vLLM and HiP attention!** The only thing you need to integrate HiP is to replace the line of the flash attention call.
+**We provide an OpenAI-compatible API server built with vLLM and HiP attention!** The only thing you need to integrate HiP is replacing the single line of the flash attention call.
 
 ```python
 - | from flash_attn import flash_attn
