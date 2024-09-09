@@ -6,7 +6,7 @@
 
 # News
 
-- 2024.09.09: Version 1.1 will be released soon. Please refer `ainl-hip-attention2` branch for preview. It will reduce the latency further and improve the accuracy. It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). This release will contain a KV offloading feature, as we discussed in the Appendix, either UVM or a custom cache management algorithm. We are aiming to support future researchers while maintaining practical efficiency for this release. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
+- 2024.09.09: Version 1.1 will be released soon. Please refer `ainl-hip-attention2` branch for preview. It will reduce the latency further and improve the accuracy (and this will fix most of the internal bugs of V1.0!). It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). This release will contain a KV offloading feature, as we discussed in the Appendix, either UVM or a custom cache management algorithm. We are aiming to support future researchers while maintaining practical efficiency for this release. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
 
 # Usage
 
