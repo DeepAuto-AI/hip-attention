@@ -18,7 +18,7 @@ After installation, you can access the `hip` package from any project. `hip` is 
 
 ```python
 - | from flash_attn import flash_attn
-- | context = flash_attn_func(q, k, v, sm_scale=1.0)
+- | context = flash_attn_func(q, k, v, sm_scale=1.0, is_causal=True)
 + | from hip import hip_attention
 + | context, metadata = hip_attention(q, k, v)
 ```
