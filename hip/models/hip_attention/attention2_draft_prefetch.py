@@ -3667,7 +3667,7 @@ def get_block_sparse_attention_configs():
 def perf_model_block_sparse_attention(**kwargs):
     block_bk = kwargs['BLOCK_BK']
     block_k = kwargs['BLOCK_SIZE_K']
-    if ((block_bk * block_k) <= 256) and ((block_bk * block_k) >= 32):
+    if ((block_bk * block_k) <= 512) and ((block_bk * block_k) >= 32):
         return 0
     return 999999999 # run might fails
 
@@ -3681,7 +3681,7 @@ def perf_model_block_sparse_attention(**kwargs):
     ],
     prune_configs_by={
         'perf_model': perf_model_block_sparse_attention,
-        'top_k': 24,
+        'top_k': 36,
     }
 )
 @triton.jit
@@ -4702,6 +4702,8 @@ def hip_masking(
         # args.block_size_k = args.block_size_q
         # indices = (indices // args.block_size_q) * args.block_size_q
         
+        LARGE_INT = 987654321
+        
         assert args.topk_head_group_size == 1
         # repeat the mask
         assert indices.ndim == 3
@@ -4723,21 +4725,15 @@ def hip_masking(
         indices = indices.view(n, n_groups, args.group_size_q, d)
         indices[:, :, :, 0::2] -= (args.group_size_q - torch.arange(args.group_size_q, device=indices.device) - 1)[None, None, :, None] * args.block_size_q
         indices = indices.view(n, t, d)
-        # for i in range(1, args.group_size_q):
-        #     indices[
-        #         :, 
-        #         args.group_size_q-1-i::args.group_size_q, 
-        #         0::2
-        #     ] -= i * args.block_size_q
-        indices = torch.where(indices >= 0, indices, 987654321)
-        indices = torch.sort(indices, dim=-1).values
+        indices = torch.where(indices >= 0, indices, LARGE_INT)
+        indices = torch.sort(indices, dim=-1, stable=False).values
         rolled_indices = torch.roll(indices, shifts=1, dims=-1)
-        indices = torch.where(indices != rolled_indices, indices, 987654321)
-        indices = torch.sort(indices, dim=-1).values
+        indices = torch.where(indices != rolled_indices, indices, LARGE_INT)
+        indices = torch.sort(indices, dim=-1, stable=False).values
         
         n_queries = original_position_ids.shape[1]
         indices = indices[:, -n_queries:].contiguous()
-        ks = (indices < 987654321).to(torch.int32).sum(-1).contiguous()
+        ks = (indices < LARGE_INT).to(torch.int32).sum(-1).contiguous()
         ks_count = ks.unsqueeze(-1)
         ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=ks.dtype, device=ks.device)
         ks_start_end[:, :, -1] = ks
@@ -4764,7 +4760,7 @@ def hip_masking(
                 plt.clf()
                 cv2.imwrite('dummy_prefetch_raw.png', debug_mask * 255)
                 print('saved dummy_prefetch_raw.png')
-                plt.figure(figsize=(4*args.topk_head_group_size, 4))
+                plt.figure(figsize=(4 * args.topk_head_group_size, 4))
                 plt.imshow(debug_mask)
                 plt.tight_layout()
                 plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
