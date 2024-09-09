@@ -4699,8 +4699,8 @@ def hip_masking(
         
         args.group_size_q = original_group_size_q
         
-        args.block_size_k = args.block_size_q
-        indices = (indices // args.block_size_q) * args.block_size_q
+        # args.block_size_k = args.block_size_q
+        # indices = (indices // args.block_size_q) * args.block_size_q
         
         assert args.topk_head_group_size == 1
         # repeat the mask
@@ -5083,9 +5083,9 @@ def hip_attention(
             k=args.get_k_quant(k),
             args=args,
         )
-        if args.group_size_q > 1:
-            assert args.block_size_q >= args.block_size_k
-            args.block_size_k = args.block_size_q
+        # if args.group_size_q > 1:
+        #     assert args.block_size_q >= args.block_size_k
+        #     args.block_size_k = args.block_size_q
     else:
         indices = previous_metadata.indices
         ks = previous_metadata.ks
