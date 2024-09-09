@@ -1,20 +1,27 @@
-# HiP Attention
 ![demo gif](docs/demo.gif)
-> [**Link to Demo Video**](docs/demo.mp4)
 
-> [**Link to Preprint**](https://arxiv.org/abs/2406.09827)
+| [**Demo**](docs/demo.mp4) | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**vLLM Integration**](https://github.com/DeepAuto-AI/vllm) | [**SGlang Integration (Preview)**](https://github.com/DeepAuto-AI/sglang) |
 
-# Usage
+**HiP Attention** reduces the computational cost of quadratic attention, such as Flash Attention, into sub-quadratic `O(T log T)` in a plug-and-play manner while maintaining original performance using hierarchically pruned sparse attention. We are aiming to support future researchers while maintaining practical efficiency with this project.
 
-After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
+## News
 
-[vLLM Implementation](https://github.com/DeepAuto-AI/vllm)
+- 2024.09.09: Version 1.1 will be released soon. Please refer to the `ainl-hip-attention2` branch for a preview. It will reduce the latency further and improve the accuracy (and this will fix most of the internal bugs of v1.0). It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). As discussed in the Appendix, this release will actually have (hopefully) a KV offloading feature, either UVM or a custom cache management algorithm. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
+
+## Usage
+
+After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
 
 ## TL;DR
 
-**We provide OpenAI Compatible API server built with vLLM and HiP attention!**
+**We provide an OpenAI-compatible API server built with vLLM and HiP attention!** The only thing you need to integrate HiP is to replace the line of the flash attention call.
 
-![TLDR](docs/tldr.png)
+```python
+- | from flash_attn import flash_attn
+- | context = flash_attn_func(q, k, v)
++ | from hip import hip_attention
++ | context, metadata = hip_attention(q, k, v)
+```
 
 ## API
 
@@ -90,16 +97,16 @@ output, _ = paged_hip_attention(
 ) # type: Tuple[Tensor[N*H, TDST, HID], ...]
 ```
 
-# How To Install
+## How To Install
 
-## How to clone the repository
+### How to clone the repository
 
 ```bash
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 ```
 
-## Running Docker
+### Running Docker
 
 After building the container, run commands below (change `--gpus` and `--tensor-parallel-size` according to your environment):
 
@@ -121,7 +128,7 @@ docker run --runtime nvidia --rm -it --ipc=host \
         --gpu-memory-utilization 0.50
 ```
 
-## How to build Docker
+### How to build Docker
 
 Run commands below:
 
@@ -132,7 +139,7 @@ cd vllm
 docker build . --build-context hip=../hip-attention --target vllm-openai --tag deepauto/vllm-hip-openai
 ```
 
-## Setup without docker
+### Setup without docker
 
 ```bash
 conda create --name llm python=3.11
@@ -151,7 +158,7 @@ pip install -e ".[no_build_iso]" --no-build-isolation --verbose
 pip install -e ".[vllm,openai]" --no-build-isolation --verbose
 ```
 
-## Running without docker
+### Running without docker
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 VLLM_ATTENTION_BACKEND=HIP_ATTN \
@@ -166,7 +173,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization 0.50
 ```
 
-## vllm + Qwen's Dynamic-NTK
+### vllm + Qwen's Dynamic-NTK
 
 add the following content in Qwen's `config.json`. 
 
@@ -181,11 +188,11 @@ add the following content in Qwen's `config.json`.
 }
 ```
 
-# Experiments Reproduce
+## Experiments Reproduce
 
-With following commands, you can reproduce most of our experiments.
+With the following commands, you can reproduce most of our experiments.
 
-## Streaming Demo
+### Streaming Demo
 ```bash
 #HiP
 CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
@@ -193,18 +200,18 @@ CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 
 #vLLM
 CUDA_VISIBLE_DEVICES=0,1 ATTENTION_BACKEND=vllm python hip/main/model_eval.py --job stream_demo --model vllm_qwen7b --stride 32000 --input samples/32k.md --batch_size 3 --max_tokens 512
 ```
-## Generation Demo
+### Generation Demo
 ```bash
 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 BENCHMARK_RUNNER=1 HIP_DENSE_LAYERS=4 python hip/main/model_eval.py --model vllm_qwen7b --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2 --input samples/32k.md --max_tokens 128 --stride 32000 --batch_size 4
 ```
 
-## Interative Generation Demo
+### Interactive Generation Demo
 ```bash
 # NOTE: this demo use eager mode. this must be much slower than ideal speed due to single batch and JIT compilation.
 python hip/main/model_eval.py --model llama32k --job stream --method hip --k 512 --block_size_q 32 --block_size_k 2
 ```
 
-## Attention Latency Microbenchmarks
+### Attention Latency Microbenchmarks
 ```bash
 python hip/models/hip_attention/attention1_block_gpu.py --method hip --k 512 --block_size_q 32 --block_size_k 2 --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
 
@@ -213,7 +220,7 @@ python hip/models/hip_attention/attention1_block_gpu.py --method none --query_si
 python hip/models/hip_attention/attention1_block_gpu.py --method flash --query_size 32 --dups 16 --batch_size 32 --head_size 40 --hidden_size 128 --samples 200
 ```
 
-## Wikitext2 Perplexity
+### Wikitext2 Perplexity
 ```bash
 # HiP
 python hip/main/model_eval.py --job ppl --method hip --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
@@ -228,7 +235,7 @@ python hip/main/model_eval.py --job ppl --method hyper_attention --overwrite --m
 python hip/main/model_eval.py --job ppl --method none --k 512 --block_size_q 32 --block_size_k 2 --overwrite --model llama32k --stride 8192
 ```
 
-## LongBench
+### LongBench
 ```bash
 # HiP
 HIP_K=512 HIP_DENSE_LAYERS=3 HIP_REFRESH_INTERVAL=8 ATTENTION_BACKEND=hip CUDA_VISIBLE_DEVICES=0 ATTENTION_METHOD=hip python pred.py --method hip --k 512 --model qwen2-7b-chat-32k
@@ -243,7 +250,7 @@ HIP_K=512 ATTENTION_METHOD=streaming_llm CUDA_VISIBLE_DEVICES=0 python pred.py -
 python eval.py --method streaming_llm --k 512 --modl qwen2-7b-chat-32k
 ```
 
-## BookSum
+### BookSum
 ```bash
 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method streaming_llm --k 512 --name exp_name --overwrite
 
@@ -252,12 +259,12 @@ CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HI
 CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=none python hip/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method none --name exp_name --overwrite
 ```
 
-## UVM Benchmark
+### UVM Benchmark
 ```bash
 BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=512 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
 ```
 
-## Nsight-System
+### Nsight-System
 ```bash
 # with su
 MODEL=vllm_luxia21.4b BATCH_SIZE=72 BACKEND=hip HIP_REFRESH_INTERVAL=8 /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 10000 --output report_hip_luxia -t cuda -n true  ./scripts/bench_stream_1.sh
@@ -265,9 +272,9 @@ MODEL=vllm_luxia21.4b BATCH_SIZE=72 BACKEND=hip HIP_REFRESH_INTERVAL=8 /usr/loca
 MODEL=vllm_luxia21.4b BATCH_SIZE=72 BACKEND=vllm HIP_REFRESH_INTERVAL=1 /usr/local/cuda-12.2/bin/nsys profile --gpu-metrics-device all --cuda-graph-trace node --python-backtrace=cuda --gpu-metrics-frequency 10000 --output report_vllm_luxia -t cuda -n true  ./scripts/bench_stream_1.sh
 ```
 
-# Development Notes
+## Development Notes
 
-## 4090 vllm dev
+### Developer Commands (RTX 4090)
 ```bash
 BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=1024 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
 
@@ -294,7 +301,21 @@ python examples/openai_chat_image_client.py --image-file="images/cherry_blossom.
 VLLM_ATTENTION_BACKEND=HIP_ATTN CUDA_VISIBLE_DEVICES=1 python -c "import vllm; x=vllm.LLM('meta-llama/Meta-Llama-3.1-8B', enforce_eager=True, gpu_memory_utilization=0.7, max_model_len=1024).generate('User: hello, world\nAssistant: '); print(x[0].outputs[0].text)"
 ```
 
-## Example training command
+### Example Training Command
 ```bash
 OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 hip/trainer/hip_trainer_hf.py --method hip --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
+```
+
+## Citation
+
+```
+@misc{lee2024_hip_attention,
+      title={HiP Attention: Sparse Sub-Quadratic Attention with Hierarchical Attention Pruning}, 
+      author={Heejun Lee and Geon Park and Youngwan Lee and Jina Kim and Wonyoung Jeong and Myeongjae Jeon and Sung Ju Hwang},
+      year={2024},
+      eprint={2406.09827},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2406.09827}, 
+}
 ```
