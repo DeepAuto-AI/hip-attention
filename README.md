@@ -4,15 +4,19 @@
 
 > [**Link to Preprint**](https://arxiv.org/abs/2406.09827)
 
+# News
+
+- 2024.09.09: Version 1.1 will be released soon. Please refer `ainl-hip-attention2` branch for preview. It will reduce the latency further and improve the accuracy. It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). This release will contain a KV offloading feature, as we discussed in the Appendix, either UVM or a custom cache management algorithm. We are aiming to support future researchers while maintaining practical efficiency for this release. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
+
 # Usage
 
-After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
+After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
 
 [vLLM Implementation](https://github.com/DeepAuto-AI/vllm)
 
 ## TL;DR
 
-**We provide OpenAI Compatible API server built with vLLM and HiP attention!**
+**We provide an OpenAI-compatible API server built with vLLM and HiP attention!**
 
 ![TLDR](docs/tldr.png)
 
@@ -295,4 +299,18 @@ python examples/openai_chat_image_client.py --image-file="images/cherry_blossom.
 ## Example training command
 ```bash
 OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 hip/trainer/hip_trainer_hf.py --method hip --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
+```
+
+# Citation
+
+```
+@misc{lee2024_hip_attention,
+      title={HiP Attention: Sparse Sub-Quadratic Attention with Hierarchical Attention Pruning}, 
+      author={Heejun Lee and Geon Park and Youngwan Lee and Jina Kim and Wonyoung Jeong and Myeongjae Jeon and Sung Ju Hwang},
+      year={2024},
+      eprint={2406.09827},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2406.09827}, 
+}
 ```
