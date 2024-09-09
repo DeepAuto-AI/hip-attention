@@ -3650,10 +3650,10 @@ def get_block_sparse_attention_configs():
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
-    for block_bk in [2, 4]:
+    for block_bk in [2, 4, 8, 16, 32, 64]:
         for max_nreg in [128, 256, 512]:
-            for num_warps in [4]:
-                for num_stages in [2]:
+            for num_warps in [4, 8]:
+                for num_stages in [2, 4]:
                     configs.append(triton.Config(
                         {
                             'BLOCK_BK': block_bk
@@ -3664,13 +3664,25 @@ def get_block_sparse_attention_configs():
                     ))
     return configs
 
+def perf_model_block_sparse_attention(**kwargs):
+    block_bk = kwargs['BLOCK_BK']
+    block_k = kwargs['BLOCK_SIZE_K']
+    if ((block_bk * block_k) <= 256) and ((block_bk * block_k) >= 32):
+        return 0
+    return 999999999 # run might fails
+
 @triton.autotune(
     configs=get_block_sparse_attention_configs(),
     key=[
         'BLOCK_SIZE_K',
         'BLOCK_SIZE_Q',
         'HID',
+        'TDST_NEXT_POWER_OF_2',
     ],
+    prune_configs_by={
+        'perf_model': perf_model_block_sparse_attention,
+        'top_k': 24,
+    }
 )
 @triton.jit
 def block_sparse_attention_cuda(
@@ -3725,9 +3737,13 @@ def block_sparse_attention_cuda(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
+    TDST_NEXT_POWER_OF_2,
+    
     HID: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    
+    # autotuning parameters
     BLOCK_BK: tl.constexpr,
 ):
     pid_bsz = tl.program_id(2)
@@ -3779,7 +3795,7 @@ def block_sparse_attention_cuda(
         # volatile=True,
     )
     
-    if BK > 0:
+    if (BK > 0):
         range_start = tl.load(
             KS_START_END + \
                 idx_b * stride_ks_start_end_b +\
@@ -3795,106 +3811,109 @@ def block_sparse_attention_cuda(
         
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
-            mask_bk = (idx_bk < (BK * G)) & (idx_bk < range_end)
+            mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
             
-            idx_tsrc_start = tl.load(
-                INDICES +\
-                    idx_b * stride_indices_b +\
-                    idx_bdst * stride_indices_bdst +\
-                    idx_bk * stride_indices_bk,
-                mask=mask_bk,
-                # other=(MAX_TSRC + 1) * G,
-            )
-            idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
-            idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
-            idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
-            mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
-            mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
-            mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
-            # mask_tsrc = True
-            # mask_tsrc = idx_tsrc > 0
-            # idx_group = idx_tsrc // MAX_TSRC
-            idx_tsrc = idx_tsrc % MAX_TSRC
-            
-            # idx_n = idx_b * G + idx_group
-            keys = load_tokens(
-                K, 
-                stride_k_bsz, 
-                stride_k_tsrc, 
-                stride_k_head, 
-                stride_k_hid,
+            if i_bk < range_end:
+                idx_tsrc_start = tl.load(
+                    INDICES +\
+                        idx_b * stride_indices_b +\
+                        idx_bdst * stride_indices_bdst +\
+                        idx_bk * stride_indices_bk,
+                    mask=mask_bk,
+                    # other=(MAX_TSRC + 1) * G,
+                )
+                idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
+                idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
+                idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
+                mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
+                mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
+                mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
+                # mask_tsrc = True
+                # mask_tsrc = idx_tsrc > 0
+                # idx_group = idx_tsrc // MAX_TSRC
+                idx_tsrc = idx_tsrc % MAX_TSRC
                 
-                USING_PAGES, 
-                PAGE_SIZE,
-                K_CACHE,
-                stride_k_cache_page,
-                stride_k_cache_offset,
-                stride_k_cache_kv_head,
-                stride_k_cache_hid,
-                BLOCK_TABLE,
-                stride_block_table_bsz,
-                stride_block_table_page,
-                CACHE_SEQ_LENS,
-                stride_cache_seq_lens_b,
+                # idx_n = idx_b * G + idx_group
+                keys = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    idx_hid[:, None],
+                    mask_tsrc[None, :],
+                )
                 
-                idx_bsz,
-                idx_tsrc[None, :],
-                idx_head // KV_HEAD_REPEAT,
-                idx_hid[:, None],
-                mask_tsrc[None, :],
-            )
-            
-            values = load_tokens(
-                V, 
-                stride_v_bsz, 
-                stride_v_tsrc, 
-                stride_v_head, 
-                stride_v_hid,
+                values = load_tokens(
+                    V, 
+                    stride_v_bsz, 
+                    stride_v_tsrc, 
+                    stride_v_head, 
+                    stride_v_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    V_CACHE,
+                    stride_v_cache_page,
+                    stride_v_cache_offset,
+                    stride_v_cache_kv_head,
+                    stride_v_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    idx_bsz,
+                    idx_tsrc[:, None],
+                    idx_head // KV_HEAD_REPEAT,
+                    idx_hid[None, :],
+                    mask_tsrc[:, None],
+                )
                 
-                USING_PAGES, 
-                PAGE_SIZE,
-                V_CACHE,
-                stride_v_cache_page,
-                stride_v_cache_offset,
-                stride_v_cache_kv_head,
-                stride_v_cache_hid,
-                BLOCK_TABLE,
-                stride_block_table_bsz,
-                stride_block_table_page,
-                CACHE_SEQ_LENS,
-                stride_cache_seq_lens_b,
-                
-                idx_bsz,
-                idx_tsrc[:, None],
-                idx_head // KV_HEAD_REPEAT,
-                idx_hid[None, :],
-                mask_tsrc[:, None],
-            )
-            
-            acc, l_i, m_i = block_sparse_attention_cuda_step(
-                queries,
-                keys,
-                values,
-                
-                idx_tsrc, mask_tsrc,
-                idx_tdst, mask_tdst,
-                
-                acc, l_i, m_i,
-                
-                sliding_window_size,
-                True,
-                
-                USING_EXTEND,
-                extend_window_size,
-                extend_group_size,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                
-                pos_tdst,
-                idx_hid, HID, 
-                BLOCK_SIZE_Q, 
-                BLOCK_BK * BLOCK_SIZE_K,
-            )
+                acc, l_i, m_i = block_sparse_attention_cuda_step(
+                    queries,
+                    keys,
+                    values,
+                    
+                    idx_tsrc, mask_tsrc,
+                    idx_tdst, mask_tdst,
+                    
+                    acc, l_i, m_i,
+                    
+                    sliding_window_size,
+                    True,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    
+                    pos_tdst,
+                    idx_hid, HID, 
+                    BLOCK_SIZE_Q, 
+                    BLOCK_BK * BLOCK_SIZE_K,
+                )
+            else:
+                pass
             tl.debug_barrier()
         tl.debug_barrier()
     
@@ -4043,7 +4062,7 @@ def block_sparse_attention(
     G = args.topk_head_group_size
     B = N // G
     assert (B * G) == N
-    BK = cdiv_python(args.mask_k, args.block_size_k)
+    BK = indices.shape[-1] #cdiv_python(args.mask_k, args.block_size_k)
     
     context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
     
@@ -4080,6 +4099,7 @@ def block_sparse_attention(
     grid = (HEAD, BDST, BSZ)
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
+    
     block_sparse_attention_cuda[grid](
         q, *q.stride(),
         k, *args.safe_stride(k, 4),
@@ -4099,9 +4119,11 @@ def block_sparse_attention(
         *args.args_extend(),
         *args.args_paged_kv_cache(),
         
+        triton.next_power_of_2(TDST),
         HID,
         args.block_size_q,
         args.block_size_k,
+        # 2,
         # BLOCK_BK,
         
         # num_warps=4,
@@ -4146,13 +4168,13 @@ def to_dense_cuda(
             mask_tdst = out_tdst < TDST
             out_tsrc = tl.arange(0, BLOCK_SIZE_K) + idx_trsc
             mask_tsrc = out_tsrc < TSRC
-            tl.store(
+            tl.atomic_add(
                 OUT +\
                     idx_n * stride_out_n +\
                     out_tdst[:, None] * stride_out_tdst+\
                     out_tsrc[None, :] * stride_out_tsrc,
                 mask=mask_tdst[:, None] & mask_tsrc[None, :],
-                value=1
+                val=1
             )
         else:
             pass
@@ -5090,7 +5112,8 @@ def hip_attention(
                     indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
                     indices[ib, ibdst, 0] = 0
     
-    # return None, None
+    if os.getenv('HIP_DEBUG_SKIP_SA', '0') == '1':
+        return None, None
     
     context = block_sparse_attention(
         q=q, 
