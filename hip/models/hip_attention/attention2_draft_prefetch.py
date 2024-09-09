@@ -49,6 +49,178 @@ def cdiv_python(a, b):
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
 
+@dataclass
+class HiPAttentionOutputMetadata:
+    indices: Tensor
+    ks: Tensor
+    ks_count: Tensor
+    ks_start_end: Tensor
+    
+    key_access_log: Optional[Tensor]
+    key_access_count: Optional[Tensor]
+    
+    block_access_log: Optional[Tensor]
+    block_access_score: Optional[Tensor]
+    block_access_count: Optional[Tensor]
+
+@dataclass
+class HiPAttentionArgs:
+    mask_k: int = 512
+    
+    block_size_q: int = 32
+    block_stride_q: int = 2
+    block_size_k: int = 2
+    block_stride_k: int = 1
+    block_size_k_group: int = 1
+    
+    group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
+    
+    sliding_window_size: int = 256
+    sink_token_size: int = 16
+    
+    num_dense_queries: int = -1
+    
+    using_extend: bool = False
+    rope_cos: Optional[Tensor] = None
+    rope_sin: Optional[Tensor] = None
+    self_extend_neighboor_window: int = 1024
+    self_extend_group_size: int = 8
+    
+    topk_head_group_size: int = 1
+    sample_method: str = 'center'
+    branch_method: str = 'half'
+    
+    traverse_from_last_step: bool = False
+    step_size: Optional[int] = None
+    num_samples: int = 1
+    chunk_size: Optional[int] = None
+    num_unions: int = 1
+    
+    score_head_group_size: int = 1
+    
+    using_sparq: bool = False
+    sparq_hid: int = 32
+    
+    low_res_sample_scale: int = 1
+    low_res_oversample_rate: int = 1
+    low_res_oversample_block_stride_k: int = 1
+    
+    output_key_access_log: bool = False
+    output_block_access_log: bool = False
+    
+    q_quant: Optional[Tensor] = None
+    k_quant: Optional[Tensor] = None
+    
+    sparq_ind: Optional[Tensor] = None
+    
+    k_cache: Optional[Tensor] = None
+    v_cache: Optional[Tensor] = None
+    cache_seq_lens: Optional[Tensor] = None
+    block_table: Optional[Tensor] = None
+    
+    # BUG(HJ): this nameing is wrong...
+    position_ids: Optional[Tensor] = None
+    
+    def __post_init__(self):
+        if self.rope_cos is not None and self.rope_cos.ndim == 3:
+            self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
+            self.rope_sin = self.rope_sin.view(-1, self.rope_sin.shape[-1])
+        if self.q_quant is not None:
+            assert self.q_quant.ndim == 4
+            assert self.k_quant.ndim == 4
+        self.using_paged_cache = self.k_cache is not None
+
+    def clone(self):
+        return copy.copy(self)
+
+    def json(self, convert_tensor_to_meta = True):
+        from dataclasses import fields
+        json = {}
+        for field in fields(self):
+            json[field.name] = getattr(self, field.name)
+        
+        if convert_tensor_to_meta:
+            for k, v in json.items():
+                if isinstance(v, Tensor):
+                    v = f'{v.dtype}{list(v.shape)}@{v.device}.{v.data_ptr():02X}'
+                json[k] = v
+        
+        return json
+
+    def safe_stride(self, x: Optional[Tensor], ndim: int):
+        if x is None:
+            return tuple([0,] * ndim)
+        else:
+            return x.stride()
+
+    def get_q_quant(self, q: Tensor):
+        return self.q_quant if self.q_quant is not None else q
+
+    def get_k_quant(self, k: Tensor):
+        return self.k_quant if self.k_quant is not None else k
+
+    def args_extend(self):
+        return (
+            self.using_extend,
+            self.self_extend_neighboor_window,
+            self.self_extend_group_size,
+            *self.args_rope_cos(),
+            *self.args_rope_sin(),
+        )
+    
+    def args_rope_cos(self):
+        return self.rope_cos, *self.safe_stride(self.rope_cos, 2),
+    
+    def args_rope_sin(self):
+        return self.rope_sin, *self.safe_stride(self.rope_sin, 2),
+
+    def args_sparq(self):
+        if self.sparq_ind is None:
+            using_sparq = False
+            sparq_hid = 0
+        else:
+            using_sparq = True
+            sparq_hid = self.sparq_ind.shape[-1]
+            assert self.sparq_ind.ndim == 4
+        
+        return (
+            using_sparq,
+            sparq_hid,
+            self.sparq_ind, *self.safe_stride(self.sparq_ind, 4),
+        )
+    
+    def args_bq_bsq_bk_bsk(self):
+        return (
+            self.block_size_q,
+            self.block_stride_q,
+            self.block_size_k,
+            self.block_stride_k,
+        )
+    
+    def args_paged_kv_cache(self):
+        using_page = self.using_paged_cache
+        
+        if using_page:
+            assert self.v_cache is not None
+            assert self.k_cache.ndim == self.v_cache.ndim
+            assert self.k_cache.ndim == 4
+            assert self.block_table is not None
+            assert self.block_table.ndim == 2
+            assert self.cache_seq_lens is not None
+            assert self.cache_seq_lens.ndim == 1
+            page_size = self.k_cache.shape[1]
+        else:
+            page_size = 0
+        
+        return (
+            using_page,
+            page_size,
+            self.k_cache, *self.safe_stride(self.k_cache, 4),
+            self.v_cache, *self.safe_stride(self.v_cache, 4),
+            self.block_table, *self.safe_stride(self.block_table, 2),
+            self.cache_seq_lens, *self.safe_stride(self.cache_seq_lens, 1),
+        )
+
 @triton.jit
 def masking_iteration_draft_cuda_initialize(
     # in
@@ -3477,7 +3649,8 @@ def get_block_sparse_attention_configs():
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
-    for block_bk in [16, 32,]:
+    # for block_bk in [16, 32,]:
+    for block_bk in [2, 4]:
         for max_nreg in [128, 256, 512]:
             for num_warps in [4]:
                 for num_stages in [2]:
@@ -3635,7 +3808,9 @@ def block_sparse_attention_cuda(
             idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
             idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
             idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
-            mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g))
+            mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
+            mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
+            mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
             # mask_tsrc = True
             # mask_tsrc = idx_tsrc > 0
             # idx_group = idx_tsrc // MAX_TSRC
@@ -3842,6 +4017,11 @@ def block_sparse_attention(
     
     args: "HiPAttentionArgs",
 ):
+    if os.getenv('HIP_DEBUG_SA', '0') == '1':
+        return block_sparse_attention_pytorch(
+            q, k, v, indices, ks, args,
+        )
+    
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
         _, TSRC, KV_HEAD, _ = k.shape
@@ -3873,7 +4053,7 @@ def block_sparse_attention(
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
     BLOCK_BK = 64 // args.block_size_k
-    assert BLOCK_BK > 0
+    assert BLOCK_BK > 0, BLOCK_BK
     
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
@@ -3930,6 +4110,121 @@ def block_sparse_attention(
     torch.set_default_device(pre_device)
     
     return context
+
+@triton.jit
+def to_dense_cuda(
+    INDICES,
+    stride_indices_n, stride_indices_bdst, stride_indices_k,
+    KS,
+    stride_ks_n, stride_ks_bdst,
+    
+    OUT,
+    stride_out_n, stride_out_tdst, stride_out_tsrc,
+    
+    N, TDST, TSRC, BK,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    idx_n = tl.program_id(1)
+    idx_bdst = tl.program_id(0)
+    
+    for idx_k in range(0, BK):
+        ks = tl.load(
+            KS +\
+                idx_n * stride_ks_n +\
+                idx_bdst * stride_ks_bdst
+        )
+        if idx_k < ks:
+            idx_trsc = tl.load(
+                INDICES +\
+                    idx_n * stride_indices_n +\
+                    idx_bdst * stride_indices_bdst +\
+                    idx_k * stride_indices_k,
+            )
+            out_tdst = tl.arange(0, BLOCK_SIZE_Q) + idx_bdst * BLOCK_SIZE_Q
+            mask_tdst = out_tdst < TDST
+            out_tsrc = tl.arange(0, BLOCK_SIZE_K) + idx_trsc
+            mask_tsrc = out_tsrc < TSRC
+            tl.store(
+                OUT +\
+                    idx_n * stride_out_n +\
+                    out_tdst[:, None] * stride_out_tdst+\
+                    out_tsrc[None, :] * stride_out_tsrc,
+                mask=mask_tdst[:, None] & mask_tsrc[None, :],
+                value=1
+            )
+        else:
+            pass
+        tl.debug_barrier()
+
+def to_dense_efficient(
+    indices: Tensor, ks: Tensor,
+    N, TDST, TSRC, BLOCK_SIZE_Q, BLOCK_SIZE_K,
+):
+    out = torch.zeros((N, TDST, TSRC), dtype=torch.float32, device=indices.device)
+    
+    _, BDST, BK = indices.shape
+    
+    grid = (BDST, N,)
+    
+    pre_device = torch.get_default_device()
+    torch.set_default_device(indices.device)
+    to_dense_cuda[grid](
+        indices, *indices.stride(),
+        ks, *ks.stride(),
+        
+        out, *out.stride(),
+        N, TDST, TSRC, BK, BLOCK_SIZE_Q, BLOCK_SIZE_K
+    )
+    torch.set_default_device(pre_device)
+    
+    return out
+
+def block_sparse_attention_pytorch(
+    q: Tensor, k: Tensor, v: Tensor,
+    indices: Tensor, ks: Tensor,
+    args: "HiPAttentionArgs",
+):
+    BSZ, TDST, HEAD, HID = q.shape
+    _, TSRC, HEAD_KV, _ = k.shape
+    N, BDST, BK = indices.shape
+    
+    if HEAD_KV != HEAD:
+        k = k.repeat_interleave(repeats=HEAD // HEAD_KV, dim=2)
+        v = v.repeat_interleave(repeats=HEAD // HEAD_KV, dim=2)
+    
+    MAX_SCORE_BUDGET = 4096 * 4096
+    GROUP_TDST = cdiv_python(cdiv_python(MAX_SCORE_BUDGET, TSRC), args.block_size_q) * args.block_size_q
+    GROUP_BDST = GROUP_TDST // args.block_size_q
+    
+    out = torch.zeros_like(q)
+    
+    for i_start_bdst in tqdm.tqdm(range(0, BDST, GROUP_BDST), desc='BSA', dynamic_ncols=True, leave=False, delay=3):
+        i_start_tdst = i_start_bdst * args.block_size_q
+        i_end_tdst = min(TDST, i_start_tdst + GROUP_TDST)
+        
+        mask = to_dense_efficient(
+            indices[:, i_start_bdst:i_start_bdst + GROUP_BDST], 
+            ks[:, i_start_bdst:i_start_bdst + GROUP_BDST], 
+            N, i_end_tdst - i_start_tdst , TSRC,
+            args.block_size_q, args.block_size_k,
+        )
+        mask = mask.bool().view(BSZ, HEAD, -1, TSRC)
+        
+        causal_mask = torch.arange(0, TSRC, device=q.device)[None, :] <= torch.arange(i_start_tdst, i_end_tdst, device=q.device)[:, None]
+        
+        t_q = q[:, i_start_tdst:i_end_tdst]
+        score = torch.matmul(t_q.contiguous().permute(0, 2, 1, 3), k.permute(0, 2, 3, 1))
+        torch.where(mask, score, torch.tensor(-32000.0, device=mask.device), out=score)
+        torch.where(causal_mask, score, torch.tensor(-32000.0, device=mask.device), out=score)
+        probs = torch.softmax(score, dim=-1)
+        del score
+        context = probs @ v.permute(0, 2, 1, 3)
+        context = context.permute(0, 2, 1, 3)
+        out[:, i_start_tdst:i_end_tdst] = context
+    
+    return out
 
 @nvtx.annotate("masking_step_loop")
 def masking_step_loop(
@@ -4360,7 +4655,8 @@ def hip_masking(
             .reshape(n, n_groups * args.block_size_q)
         args = args.clone()
         args.position_ids = position_ids
-        args.group_size_q = 1
+        original_group_size_q = args.group_size_q
+        args.group_size_q = 1 # NOTE(HJ): perform hip masking as usual
         
         (
             indices,
@@ -4378,6 +4674,11 @@ def hip_masking(
             k=k,
             args=args,
         )
+        
+        args.group_size_q = original_group_size_q
+        
+        args.block_size_k = args.block_size_q
+        indices = (indices // args.block_size_q) * args.block_size_q
         
         assert args.topk_head_group_size == 1
         # repeat the mask
@@ -4398,7 +4699,7 @@ def hip_masking(
         n, t, d = indices.shape
         n_groups = t // (args.group_size_q)
         indices = indices.view(n, n_groups, args.group_size_q, d)
-        indices[:, :, :, 0::2] -= (args.group_size_q - torch.arange(args.group_size_q, device=indices.device) - 1)[None, None, :, None]
+        indices[:, :, :, 0::2] -= (args.group_size_q - torch.arange(args.group_size_q, device=indices.device) - 1)[None, None, :, None] * args.block_size_q
         indices = indices.view(n, t, d)
         # for i in range(1, args.group_size_q):
         #     indices[
@@ -4438,13 +4739,14 @@ def hip_masking(
                     args.block_size_q, 
                     args.block_size_k * args.block_size_k_group,
                 )[0]
+                plt.clf()
                 cv2.imwrite('dummy_prefetch_raw.png', debug_mask * 255)
                 print('saved dummy_prefetch_raw.png')
                 plt.figure(figsize=(4*args.topk_head_group_size, 4))
                 plt.imshow(debug_mask)
                 plt.tight_layout()
                 plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
-                print('saved dummy_prefetch.png')
+                print('saved dummy_prefetch.png', indices.shape, debug_mask.shape, original_position_ids.shape)
             render_mask()
         
         return (
@@ -4672,6 +4974,7 @@ def hip_masking(
             )[0]
             if args.group_size_q > 1:
                 debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
+            plt.clf()
             plt.figure(figsize=(4*args.topk_head_group_size, 4))
             plt.imshow(debug_mask)
             plt.tight_layout()
@@ -4690,178 +4993,6 @@ def hip_masking(
         block_access_score,
         block_access_count,
     )
-
-@dataclass
-class HiPAttentionOutputMetadata:
-    indices: Tensor
-    ks: Tensor
-    ks_count: Tensor
-    ks_start_end: Tensor
-    
-    key_access_log: Optional[Tensor]
-    key_access_count: Optional[Tensor]
-    
-    block_access_log: Optional[Tensor]
-    block_access_score: Optional[Tensor]
-    block_access_count: Optional[Tensor]
-
-@dataclass
-class HiPAttentionArgs:
-    mask_k: int = 512
-    
-    block_size_q: int = 32
-    block_stride_q: int = 2
-    block_size_k: int = 2
-    block_stride_k: int = 1
-    block_size_k_group: int = 1
-    
-    group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
-    
-    sliding_window_size: int = 256
-    sink_token_size: int = 16
-    
-    num_dense_queries: int = -1
-    
-    using_extend: bool = False
-    rope_cos: Optional[Tensor] = None
-    rope_sin: Optional[Tensor] = None
-    self_extend_neighboor_window: int = 1024
-    self_extend_group_size: int = 8
-    
-    topk_head_group_size: int = 1
-    sample_method: str = 'center'
-    branch_method: str = 'half'
-    
-    traverse_from_last_step: bool = False
-    step_size: Optional[int] = None
-    num_samples: int = 1
-    chunk_size: Optional[int] = None
-    num_unions: int = 1
-    
-    score_head_group_size: int = 1
-    
-    using_sparq: bool = False
-    sparq_hid: int = 32
-    
-    low_res_sample_scale: int = 1
-    low_res_oversample_rate: int = 1
-    low_res_oversample_block_stride_k: int = 1
-    
-    output_key_access_log: bool = False
-    output_block_access_log: bool = False
-    
-    q_quant: Optional[Tensor] = None
-    k_quant: Optional[Tensor] = None
-    
-    sparq_ind: Optional[Tensor] = None
-    
-    k_cache: Optional[Tensor] = None
-    v_cache: Optional[Tensor] = None
-    cache_seq_lens: Optional[Tensor] = None
-    block_table: Optional[Tensor] = None
-    
-    # BUG(HJ): this nameing is wrong...
-    position_ids: Optional[Tensor] = None
-    
-    def __post_init__(self):
-        if self.rope_cos is not None and self.rope_cos.ndim == 3:
-            self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
-            self.rope_sin = self.rope_sin.view(-1, self.rope_sin.shape[-1])
-        if self.q_quant is not None:
-            assert self.q_quant.ndim == 4
-            assert self.k_quant.ndim == 4
-        self.using_paged_cache = self.k_cache is not None
-
-    def clone(self):
-        return copy.copy(self)
-
-    def json(self, convert_tensor_to_meta = True):
-        from dataclasses import fields
-        json = {}
-        for field in fields(self):
-            json[field.name] = getattr(self, field.name)
-        
-        if convert_tensor_to_meta:
-            for k, v in json.items():
-                if isinstance(v, Tensor):
-                    v = f'{v.dtype}{list(v.shape)}@{v.device}.{v.data_ptr():02X}'
-                json[k] = v
-        
-        return json
-
-    def safe_stride(self, x: Optional[Tensor], ndim: int):
-        if x is None:
-            return tuple([0,] * ndim)
-        else:
-            return x.stride()
-
-    def get_q_quant(self, q: Tensor):
-        return self.q_quant if self.q_quant is not None else q
-
-    def get_k_quant(self, k: Tensor):
-        return self.k_quant if self.k_quant is not None else k
-
-    def args_extend(self):
-        return (
-            self.using_extend,
-            self.self_extend_neighboor_window,
-            self.self_extend_group_size,
-            *self.args_rope_cos(),
-            *self.args_rope_sin(),
-        )
-    
-    def args_rope_cos(self):
-        return self.rope_cos, *self.safe_stride(self.rope_cos, 2),
-    
-    def args_rope_sin(self):
-        return self.rope_sin, *self.safe_stride(self.rope_sin, 2),
-
-    def args_sparq(self):
-        if self.sparq_ind is None:
-            using_sparq = False
-            sparq_hid = 0
-        else:
-            using_sparq = True
-            sparq_hid = self.sparq_ind.shape[-1]
-            assert self.sparq_ind.ndim == 4
-        
-        return (
-            using_sparq,
-            sparq_hid,
-            self.sparq_ind, *self.safe_stride(self.sparq_ind, 4),
-        )
-    
-    def args_bq_bsq_bk_bsk(self):
-        return (
-            self.block_size_q,
-            self.block_stride_q,
-            self.block_size_k,
-            self.block_stride_k,
-        )
-    
-    def args_paged_kv_cache(self):
-        using_page = self.using_paged_cache
-        
-        if using_page:
-            assert self.v_cache is not None
-            assert self.k_cache.ndim == self.v_cache.ndim
-            assert self.k_cache.ndim == 4
-            assert self.block_table is not None
-            assert self.block_table.ndim == 2
-            assert self.cache_seq_lens is not None
-            assert self.cache_seq_lens.ndim == 1
-            page_size = self.k_cache.shape[1]
-        else:
-            page_size = 0
-        
-        return (
-            using_page,
-            page_size,
-            self.k_cache, *self.safe_stride(self.k_cache, 4),
-            self.v_cache, *self.safe_stride(self.v_cache, 4),
-            self.block_table, *self.safe_stride(self.block_table, 2),
-            self.cache_seq_lens, *self.safe_stride(self.cache_seq_lens, 1),
-        )
 
 @nvtx.annotate('hip_attention')
 @torch.inference_mode()
@@ -4930,6 +5061,9 @@ def hip_attention(
             k=args.get_k_quant(k),
             args=args,
         )
+        if args.group_size_q > 1:
+            assert args.block_size_q >= args.block_size_k
+            args.block_size_k = args.block_size_q
     else:
         indices = previous_metadata.indices
         ks = previous_metadata.ks

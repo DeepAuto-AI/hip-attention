@@ -22,6 +22,7 @@ import os
 import warnings
 from typing import List, Literal, Optional, Tuple, Union
 
+import numba
 import numpy as np
 import torch
 import tqdm
@@ -985,13 +986,16 @@ def sparse_attention(
     
     return context
 
-import numba
 @numba.njit(parallel=True)
 def to_dense(
     indices: np.ndarray, 
     ks: np.ndarray, 
-    value: np.ndarray,
-    N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K
+    value: Optional[np.ndarray],
+    N: int, 
+    T_DST: int, 
+    T_SRC: int, 
+    BLOCK_SIZE_Q: int, 
+    BLOCK_SIZE_K: int, 
 ):
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
     out = np.zeros((N, T_DST, T_SRC), dtype=np.float32)
