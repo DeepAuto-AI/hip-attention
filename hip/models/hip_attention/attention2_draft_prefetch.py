@@ -67,7 +67,7 @@ class HiPAttentionOutputMetadata:
 class HiPAttentionArgs:
     mask_k: int = 512
     
-    block_size_q: int = 32
+    block_size_q: int = 64
     block_stride_q: int = 2
     block_size_k: int = 2
     block_stride_k: int = 1
@@ -124,10 +124,12 @@ class HiPAttentionArgs:
     position_ids: Optional[Tensor] = None
     
     offload_cache_kv_heads: Optional[int] = None
-    offload_cache_k_tables: Optional[Tensor] = None
-    offload_cache_k_banks: Optional[Tensor] = None
-    offload_cache_v_tables: Optional[Tensor] = None
-    offload_cache_v_banks: Optional[Tensor] = None
+    offload_cache_mask_k_tables: Optional[Tensor] = None
+    offload_cache_mask_k_banks: Optional[Tensor] = None
+    offload_cache_sa_k_tables: Optional[Tensor] = None
+    offload_cache_sa_k_banks: Optional[Tensor] = None
+    offload_cache_sa_v_tables: Optional[Tensor] = None
+    offload_cache_sa_v_banks: Optional[Tensor] = None
     offload_cache_counters: Optional[Tensor] = None
     
     # NOTE: this will be equivalant BigBird
@@ -233,28 +235,47 @@ class HiPAttentionArgs:
             self.cache_seq_lens, *self.safe_stride(self.cache_seq_lens, 1),
         )
     
-    def args_offload_cache(self):
-        using_offload_cache = self.offload_cache_k_tables is not None
-        if using_offload_cache:
-            assert self.offload_cache_k_tables.ndim == 2
-            assert self.offload_cache_k_banks.ndim == 3
-            assert self.offload_cache_v_tables.ndim == 2
-            assert self.offload_cache_v_banks.ndim == 3
-            assert self.offload_cache_counters.ndim == 2
-            offload_cache_budget = self.offload_cache_k_banks.shape[1]
+    def args_offload_cache(self, is_masking):
+        if is_masking:
+            using_offload_cache = self.offload_cache_mask_k_tables is not None
+            if using_offload_cache:
+                assert self.offload_cache_mask_k_tables.ndim == 2
+                assert self.offload_cache_mask_k_banks.ndim == 4
+                assert self.offload_cache_counters.ndim == 2
+                offload_cache_budget = self.offload_cache_mask_k_banks.shape[1]
+            else:
+                offload_cache_budget = 0
+            
+            return (
+                using_offload_cache,
+                offload_cache_budget,
+                self.offload_cache_kv_heads,
+                self.offload_cache_mask_k_tables, *self.safe_stride(self.offload_cache_mask_k_tables, 2),
+                self.offload_cache_mask_k_banks, *self.safe_stride(self.offload_cache_mask_k_banks, 4),
+                self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
+            )
         else:
-            offload_cache_budget = 0
-        
-        return (
-            using_offload_cache,
-            offload_cache_budget,
-            self.offload_cache_kv_heads,
-            self.offload_cache_k_tables, *self.safe_stride(self.offload_cache_k_tables, 2),
-            self.offload_cache_k_banks, *self.safe_stride(self.offload_cache_k_banks, 3),
-            self.offload_cache_v_tables, *self.safe_stride(self.offload_cache_v_tables, 2),
-            self.offload_cache_v_banks, *self.safe_stride(self.offload_cache_v_banks, 3),
-            self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
-        )
+            using_offload_cache = self.offload_cache_sa_k_tables is not None
+            if using_offload_cache:
+                assert self.offload_cache_sa_k_tables.ndim == 2
+                assert self.offload_cache_sa_k_banks.ndim == 4
+                assert self.offload_cache_sa_v_tables.ndim == 2
+                assert self.offload_cache_sa_v_banks.ndim == 4
+                assert self.offload_cache_counters.ndim == 2
+                offload_cache_budget = self.offload_cache_sa_v_banks.shape[1]
+            else:
+                offload_cache_budget = 0
+            
+            return (
+                using_offload_cache,
+                offload_cache_budget,
+                self.offload_cache_kv_heads,
+                self.offload_cache_sa_k_tables, *self.safe_stride(self.offload_cache_sa_k_tables, 2),
+                self.offload_cache_sa_k_banks, *self.safe_stride(self.offload_cache_sa_k_banks, 4),
+                self.offload_cache_sa_v_tables, *self.safe_stride(self.offload_cache_sa_v_tables, 2),
+                self.offload_cache_sa_v_banks, *self.safe_stride(self.offload_cache_sa_v_banks, 4),
+                self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
+            )
 
 @triton.jit
 def masking_iteration_draft_cuda_initialize(
@@ -533,11 +554,13 @@ def load_tokens(
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_UPDATE: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
     stride_offload_cache_k_tables_n,
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
@@ -550,6 +573,8 @@ def load_tokens(
     idx_hid,
     
     mask_keys,
+    
+    BLOCK_SIZE_K,
 ):
     # DEBUG: to load nothing
     # mask_keys = mask_keys & False
@@ -557,18 +582,35 @@ def load_tokens(
     if not USING_PAGES:
         if USING_OFFLOAD_CACHE:
             original_mask_keys = mask_keys
-            idx_bank_offset = tl.load(
+            idx_cache = (
+                idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
+                    idx_kv_head.to(tl.int64)
+            )
+            idx_bank_page = tl.load(
                 OFFLOAD_CACHE_K_TABLES +\
-                    (
-                        idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
-                            idx_kv_head.to(tl.int64)
-                    ) * stride_offload_cache_k_tables_n +\
-                    idx_tsrc.to(tl.int64) * stride_offload_cache_k_tables_t,
+                    idx_cache * stride_offload_cache_k_tables_n +\
+                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
                 mask=mask_keys,
                 other=65535
             ).to(tl.uint16)
-            mask_bank_hit = (idx_bank_offset != 65536) & (idx_bank_offset < OFFLOAD_CACHE_BUDGET)
+            mask_bank_hit = (idx_bank_page != 65536) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
             mask_keys = mask_keys & (~mask_bank_hit)
+            
+            # num accessed
+            tl.atomic_add(
+                OFFLOAD_CACHE_COUNTERS +\
+                    idx_cache * stride_offload_cache_counters_n +\
+                    0 * stride_offload_cache_counters_k,
+                val=tl.sum(original_mask_keys.to(tl.int64))
+            )
+            
+            # num hits
+            tl.atomic_add(
+                OFFLOAD_CACHE_COUNTERS +\
+                    idx_cache * stride_offload_cache_counters_n +\
+                    1 * stride_offload_cache_counters_k,
+                val=tl.sum(mask_bank_hit.to(tl.int64))
+            )
         
         keys = tl.load(
             K +\
@@ -585,11 +627,9 @@ def load_tokens(
             # load from offload cache
             keys_from_cache = tl.load(
                 OFFLOAD_CACHE_K_BANKS +\
-                    (
-                        idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
-                            idx_kv_head.to(tl.int64)
-                    ) * stride_offload_cache_k_banks_n +\
-                    idx_bank_offset.to(tl.int64) * stride_offload_cache_k_banks_offset +\
+                    idx_cache.to(tl.int64) * stride_offload_cache_k_banks_n +\
+                    idx_bank_page.to(tl.int64) * stride_offload_cache_k_banks_page +\
+                    (idx_tsrc % BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_banks_offset +\
                     idx_hid.to(tl.int64) * stride_offload_cache_k_banks_hid,
                 mask = mask_bank_hit,
                 other = 0,
@@ -718,15 +758,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_V_TABLES,
-    stride_offload_cache_v_tables_n,
-    stride_offload_cache_v_tables_t,
-    OFFLOAD_CACHE_V_BANKS,
-    stride_offload_cache_v_banks_n,
-    stride_offload_cache_v_banks_offset,
-    stride_offload_cache_v_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -860,11 +894,13 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             USING_OFFLOAD_CACHE,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
+            True,
             OFFLOAD_CACHE_K_TABLES,
             stride_offload_cache_k_tables_n,
             stride_offload_cache_k_tables_t,
             OFFLOAD_CACHE_K_BANKS,
             stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
             OFFLOAD_CACHE_COUNTERS,
@@ -876,6 +912,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             idx_kv_head,
             idx_hid[:, None],
             mask_keys,
+            
+            BLOCK_SIZE_K,
         )
         # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
         if keys.dtype == tl.uint8:
@@ -1247,15 +1285,9 @@ def masking_iteration_draft_cuda_dup_and_score(
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_V_TABLES,
-    stride_offload_cache_v_tables_n,
-    stride_offload_cache_v_tables_t,
-    OFFLOAD_CACHE_V_BANKS,
-    stride_offload_cache_v_banks_n,
-    stride_offload_cache_v_banks_offset,
-    stride_offload_cache_v_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -1536,15 +1568,9 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_offload_cache_k_tables_t,
                 OFFLOAD_CACHE_K_BANKS,
                 stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
                 stride_offload_cache_k_banks_offset,
                 stride_offload_cache_k_banks_hid,
-                OFFLOAD_CACHE_V_TABLES,
-                stride_offload_cache_v_tables_n,
-                stride_offload_cache_v_tables_t,
-                OFFLOAD_CACHE_V_BANKS,
-                stride_offload_cache_v_banks_n,
-                stride_offload_cache_v_banks_offset,
-                stride_offload_cache_v_banks_hid,
                 OFFLOAD_CACHE_COUNTERS,
                 stride_offload_cache_counters_n,
                 stride_offload_cache_counters_k,
@@ -1694,15 +1720,9 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_offload_cache_k_tables_t,
             OFFLOAD_CACHE_K_BANKS,
             stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_V_TABLES,
-            stride_offload_cache_v_tables_n,
-            stride_offload_cache_v_tables_t,
-            OFFLOAD_CACHE_V_BANKS,
-            stride_offload_cache_v_banks_n,
-            stride_offload_cache_v_banks_offset,
-            stride_offload_cache_v_banks_hid,
             OFFLOAD_CACHE_COUNTERS,
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
@@ -1829,15 +1849,9 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_offload_cache_k_tables_t,
             OFFLOAD_CACHE_K_BANKS,
             stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_V_TABLES,
-            stride_offload_cache_v_tables_n,
-            stride_offload_cache_v_tables_t,
-            OFFLOAD_CACHE_V_BANKS,
-            stride_offload_cache_v_banks_n,
-            stride_offload_cache_v_banks_offset,
-            stride_offload_cache_v_banks_hid,
             OFFLOAD_CACHE_COUNTERS,
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
@@ -2499,15 +2513,9 @@ def masking_iteration_draft_cuda_fused(
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_V_TABLES,
-    stride_offload_cache_v_tables_n,
-    stride_offload_cache_v_tables_t,
-    OFFLOAD_CACHE_V_BANKS,
-    stride_offload_cache_v_banks_n,
-    stride_offload_cache_v_banks_offset,
-    stride_offload_cache_v_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -2686,15 +2694,9 @@ def masking_iteration_draft_cuda_fused(
                     stride_offload_cache_k_tables_t,
                     OFFLOAD_CACHE_K_BANKS,
                     stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
                     stride_offload_cache_k_banks_offset,
                     stride_offload_cache_k_banks_hid,
-                    OFFLOAD_CACHE_V_TABLES,
-                    stride_offload_cache_v_tables_n,
-                    stride_offload_cache_v_tables_t,
-                    OFFLOAD_CACHE_V_BANKS,
-                    stride_offload_cache_v_banks_n,
-                    stride_offload_cache_v_banks_offset,
-                    stride_offload_cache_v_banks_hid,
                     OFFLOAD_CACHE_COUNTERS,
                     stride_offload_cache_counters_n,
                     stride_offload_cache_counters_k,
@@ -2967,15 +2969,9 @@ def masking_iteration_draft_cuda_initialize_score(
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_V_TABLES,
-    stride_offload_cache_v_tables_n,
-    stride_offload_cache_v_tables_t,
-    OFFLOAD_CACHE_V_BANKS,
-    stride_offload_cache_v_banks_n,
-    stride_offload_cache_v_banks_offset,
-    stride_offload_cache_v_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -3126,15 +3122,9 @@ def masking_iteration_draft_cuda_initialize_score(
         stride_offload_cache_k_tables_t,
         OFFLOAD_CACHE_K_BANKS,
         stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
         stride_offload_cache_k_banks_offset,
         stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_V_TABLES,
-        stride_offload_cache_v_tables_n,
-        stride_offload_cache_v_tables_t,
-        OFFLOAD_CACHE_V_BANKS,
-        stride_offload_cache_v_banks_n,
-        stride_offload_cache_v_banks_offset,
-        stride_offload_cache_v_banks_hid,
         OFFLOAD_CACHE_COUNTERS,
         stride_offload_cache_counters_n,
         stride_offload_cache_counters_k,
@@ -3474,14 +3464,14 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
-            *args.args_offload_cache(),
+            *args.args_offload_cache(is_masking=True),
             args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
             
-            num_warps=2,
-            num_stages=1,
+            num_warps=4,
+            num_stages=2,
         )
         torch.set_default_device(pre_device)
         
@@ -3601,7 +3591,7 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
-            *args.args_offload_cache(),
+            *args.args_offload_cache(is_masking=True),
             args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
@@ -4082,6 +4072,7 @@ def block_sparse_attention_cuda(
     stride_offload_cache_k_tables_t,
     OFFLOAD_CACHE_K_BANKS,
     stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
     OFFLOAD_CACHE_V_TABLES,
@@ -4089,6 +4080,7 @@ def block_sparse_attention_cuda(
     stride_offload_cache_v_tables_t,
     OFFLOAD_CACHE_V_BANKS,
     stride_offload_cache_v_banks_n,
+    stride_offload_cache_v_banks_page,
     stride_offload_cache_v_banks_offset,
     stride_offload_cache_v_banks_hid,
     OFFLOAD_CACHE_COUNTERS,
@@ -4216,11 +4208,13 @@ def block_sparse_attention_cuda(
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
+                    False,
                     OFFLOAD_CACHE_K_TABLES,
                     stride_offload_cache_k_tables_n,
                     stride_offload_cache_k_tables_t,
                     OFFLOAD_CACHE_K_BANKS,
                     stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
                     stride_offload_cache_k_banks_offset,
                     stride_offload_cache_k_banks_hid,
                     OFFLOAD_CACHE_COUNTERS,
@@ -4232,6 +4226,8 @@ def block_sparse_attention_cuda(
                     idx_head // KV_HEAD_REPEAT,
                     idx_hid[:, None],
                     mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
                 )
                 
                 values = load_tokens(
@@ -4258,11 +4254,13 @@ def block_sparse_attention_cuda(
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
+                    False,
                     OFFLOAD_CACHE_V_TABLES,
                     stride_offload_cache_v_tables_n,
                     stride_offload_cache_v_tables_t,
                     OFFLOAD_CACHE_V_BANKS,
                     stride_offload_cache_v_banks_n,
+                    stride_offload_cache_v_banks_page,
                     stride_offload_cache_v_banks_offset,
                     stride_offload_cache_v_banks_hid,
                     OFFLOAD_CACHE_COUNTERS,
@@ -4274,6 +4272,8 @@ def block_sparse_attention_cuda(
                     idx_head // KV_HEAD_REPEAT,
                     idx_hid[None, :],
                     mask_tsrc[:, None],
+                    
+                    BLOCK_SIZE_K,
                 )
                 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -4337,11 +4337,13 @@ def block_sparse_attention_cuda(
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
+                False,
                 OFFLOAD_CACHE_K_TABLES,
                 stride_offload_cache_k_tables_n,
                 stride_offload_cache_k_tables_t,
                 OFFLOAD_CACHE_K_BANKS,
                 stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
                 stride_offload_cache_k_banks_offset,
                 stride_offload_cache_k_banks_hid,
                 OFFLOAD_CACHE_COUNTERS,
@@ -4353,6 +4355,8 @@ def block_sparse_attention_cuda(
                 idx_head // KV_HEAD_REPEAT,
                 idx_hid[:, None],
                 mask_tsrc[None, :],
+                
+                BLOCK_SIZE_K,
             )
             
             values = load_tokens(
@@ -4379,11 +4383,13 @@ def block_sparse_attention_cuda(
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
+                False,
                 OFFLOAD_CACHE_V_TABLES,
                 stride_offload_cache_v_tables_n,
                 stride_offload_cache_v_tables_t,
                 OFFLOAD_CACHE_V_BANKS,
                 stride_offload_cache_v_banks_n,
+                stride_offload_cache_v_banks_page,
                 stride_offload_cache_v_banks_offset,
                 stride_offload_cache_v_banks_hid,
                 OFFLOAD_CACHE_COUNTERS,
@@ -4395,6 +4401,8 @@ def block_sparse_attention_cuda(
                 idx_head // KV_HEAD_REPEAT,
                 idx_hid[None, :],
                 mask_tsrc[:, None],
+                
+                BLOCK_SIZE_K,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -4538,7 +4546,7 @@ def block_sparse_attention(
         
         *args.args_extend(),
         *args.args_paged_kv_cache(),
-        *args.args_offload_cache(),
+        *args.args_offload_cache(is_masking=False),
         
         triton.next_power_of_2(TDST),
         HID,

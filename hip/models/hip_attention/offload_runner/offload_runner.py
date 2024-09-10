@@ -18,7 +18,7 @@ from hip.models.hip_attention.offload_runner.tensor_from_pointer import tensor_f
 from math import prod
 import pynvml
 import threading
-from hip import HiPAttentionArgs
+from hip import HiPAttentionArgs, HiPAttentionOutputMetadata
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -107,38 +107,49 @@ class StaticCache(Cache):
         self.share = share
         self.uvm_offload_key = uvm_offload_key
         self.uvm_offload_value = uvm_offload_value
-        self.cache_budget = 2048
-        self.sparse_attention_budget = 1024
+        self.cache_budget = 2048 // block_size_k
+        self.sparse_attention_budget = 1024 // block_size_k
         self.max_seq_len = max_cache_len
+        self.block_size_k = block_size_k
         
         self.using_offload_cache = use_offload_cache
         if self.using_offload_cache:
             self.num_layers = config.num_hidden_layers
             self.num_caches = self.num_layers * self.max_batch_size * self.num_key_value_heads
             self.num_caches_per_layer = self.max_batch_size * self.num_key_value_heads
-            assert self.cache_budget < 65536 # smaller than uint16
-            self.key_tables = torch.full((self.num_caches, self.max_seq_len), dtype=torch.uint16, device=device, fill_value=65535)
-            self.key_banks = torch.zeros((self.num_caches, self.cache_budget, self.head_dim), dtype=self.dtype, device=device)
-            self.value_tables = torch.full((self.num_caches, self.max_seq_len), dtype=torch.uint16, device=device, fill_value=65535)
-            self.value_banks = torch.zeros((self.num_caches, self.sparse_attention_budget, self.head_dim), dtype=self.dtype, device=device)
-            self.counters = torch.zeros((self.num_caches, 4), dtype=torch.int64, device=device) # [accessed, hit, missed]
+            self.offload_cache_null_pointer = 65535
+            assert self.cache_budget < self.offload_cache_null_pointer # smaller than uint16
+            
+            # this cache is updateable
+            self.masking_key_tables = torch.full((self.num_caches, self.max_seq_len // self.block_size_k), dtype=torch.uint16, device=device, fill_value=self.offload_cache_null_pointer)
+            self.masking_key_banks = torch.zeros((self.num_caches, self.cache_budget, self.block_size_k, self.head_dim), dtype=self.dtype, device=device)
+            
+            # this caches are protected
+            self.sa_key_tables = torch.full((self.num_caches, self.max_seq_len // self.block_size_k), dtype=torch.uint16, device=device, fill_value=self.offload_cache_null_pointer)
+            self.sa_key_banks = torch.zeros((self.num_caches, self.sparse_attention_budget, self.block_size_k, self.head_dim), dtype=self.dtype, device=device)
+            self.sa_value_tables = torch.full((self.num_caches, self.max_seq_len // self.block_size_k), dtype=torch.uint16, device=device, fill_value=self.offload_cache_null_pointer)
+            self.sa_value_banks = torch.zeros((self.num_caches, self.sparse_attention_budget, self.block_size_k, self.head_dim), dtype=self.dtype, device=device)
+            
+            self.counters = torch.zeros((self.num_caches, 2), dtype=torch.int64, device=device) # [accessed, hit]
             print(
                 f'allocated for cache | '
-                f'keys: (bank = {self.key_banks.numel() * self.key_banks.element_size()/1024/1024} MB, table = {self.key_tables.numel() * self.key_tables.element_size() / 1024 / 1024} MB), '
-                f'values: (bank = {self.value_banks.numel() * self.value_banks.element_size()/1024/1024} MB, table = {self.value_tables.numel() * self.value_tables.element_size() / 1024 / 1024} MB)'
+                f'masking keys: (bank = {self.masking_key_banks.numel() * self.masking_key_banks.element_size()/1024/1024} MB, table = {self.masking_key_tables.numel() * self.masking_key_tables.element_size() / 1024 / 1024} MB), '
+                f'SA keys: (bank = {self.sa_key_banks.numel() * self.sa_key_banks.element_size()/1024/1024} MB, table = {self.sa_key_tables.numel() * self.sa_key_tables.element_size() / 1024 / 1024} MB), '
+                f'SA values: (bank = {self.sa_value_banks.numel() * self.sa_value_banks.element_size()/1024/1024} MB, table = {self.sa_value_tables.numel() * self.sa_value_tables.element_size() / 1024 / 1024} MB)'
             )
             
             # dummy initialize
-            if False:
-                hit_ratio = 0.8
-                def dummy_init(tables, banks):
-                    N, NBANK, HID = banks.shape
+            dummy_init_offload_cache = True
+            if dummy_init_offload_cache:
+                def dummy_init(tables, banks, hit_ratio):
+                    N, NBANK, PAGE_SIZE, _ = banks.shape
                     t_tables = (torch.rand_like(tables, dtype=torch.float32) * (NBANK - 1)).to(tables.dtype)
                     mask = torch.rand_like(t_tables, dtype=torch.float32) <= hit_ratio
                     t_tables = torch.where(mask, t_tables.int(), 65535).to(torch.uint16)
                     tables.copy_(t_tables)
-                dummy_init(self.key_tables, self.key_banks)
-                dummy_init(self.value_tables, self.value_banks)
+                dummy_init(self.masking_key_tables, self.masking_key_banks, 0.8)
+                dummy_init(self.sa_key_tables, self.sa_key_banks, 1.0)
+                dummy_init(self.sa_value_tables, self.sa_value_banks, 1.0)
         
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
@@ -164,6 +175,9 @@ class StaticCache(Cache):
                 self.key_cache.append(new_layer_key_cache)
                 self.value_cache.append(new_layer_value_cache)
         print(f'allocated {total_bytes/1024/1024:,} MB')
+        
+        self.prompt_copy_stream = torch.cuda.Stream(self.device)
+        self.prompt_copy_threads: List[threading.Thread] = []
     
     def has_offload_cache(self, layer_idx: int):
         return self.using_offload_cache
@@ -172,15 +186,20 @@ class StaticCache(Cache):
         def get_layer(t: torch.Tensor):
             return t[self.num_caches_per_layer * layer_idx: self.num_caches_per_layer * (layer_idx + 1)]
         
-        key_tables = get_layer(self.key_tables)
-        key_banks = get_layer(self.key_banks)
-        value_tables = get_layer(self.value_tables)
-        value_banks = get_layer(self.value_banks)
+        masking_key_tables = get_layer(self.masking_key_tables)
+        masking_key_banks = get_layer(self.masking_key_banks)
+        
+        sa_key_tables = get_layer(self.sa_key_tables)
+        sa_key_banks = get_layer(self.sa_key_banks)
+        sa_value_tables = get_layer(self.sa_value_tables)
+        sa_value_banks = get_layer(self.sa_value_banks)
+        
         counters = get_layer(self.counters)
         
         return (
-            key_tables, key_banks,
-            value_tables, value_banks,
+            masking_key_tables, masking_key_banks,
+            sa_key_tables, sa_key_banks,
+            sa_value_tables, sa_value_banks,
             counters
         )
     
@@ -271,15 +290,13 @@ class StaticCache(Cache):
         if self.uvm_offload_key: map(self.note_prompt, self.key_cache)
         if self.uvm_offload_value: map(self.note_prompt, self.value_cache)
         
-        self.prompt_copy_stream = torch.cuda.Stream(self.device)
-        self.prompt_copy_threads = []
+        assert len(self.prompt_copy_threads) == 0, "every copy threads should be reaped"
     
     def prompt_end(self):
         self.prompt_copy_stream.synchronize()
         for thread in self.prompt_copy_threads:
             thread.join()
-        del self.prompt_copy_threads
-        del self.prompt_copy_stream
+        self.prompt_copy_threads.clear()
         
         if self.uvm_offload_key: map(self.note_cpu, self.key_cache)
         if self.uvm_offload_value: map(self.note_cpu, self.value_cache)
@@ -355,7 +372,7 @@ class StaticCache(Cache):
                     self.prompt_copy_stream.synchronize()
                     k_out.index_copy_(1, cache_position_key, key_states_cpu)
                     v_out.index_copy_(1, cache_position_value, value_states_cpu)
-                t = threading.Thread(target=job)
+                t = threading.Thread(target=job, daemon=True)
                 self.prompt_copy_threads.append(t)
                 t.start()
             else:
@@ -366,6 +383,31 @@ class StaticCache(Cache):
             return key_states, value_states
 
         return k_out, v_out
+
+    def process_block_access_log(
+        self, 
+        layer_index: int,
+        query_states: torch.Tensor,
+        new_key_state: torch.Tensor,
+        new_value_state: torch.Tensor,
+        metadata: HiPAttentionOutputMetadata,
+    ):
+        BSZ, TDST, HEAD, HID = query_states.shape
+        _, NEW_TSRC, HEAD_KV, _ = new_key_state.shape
+        
+        if new_key_state.shape[1] == 1:
+            # on decoding
+            pass
+        else:
+            (
+                masking_key_tables, masking_key_banks,
+                sa_key_tables, sa_key_banks,
+                sa_value_tables, sa_value_banks,
+                counters
+            ) = self.get_offload_cache(layer_index)
+            
+            tsrc_log = metadata.block_access_log[:, -1, :] * self.block_size_k
+            tsrc_log = tsrc_log.unsqueeze(-1)
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states that were seen by the model."""
@@ -526,6 +568,7 @@ class Runner:
         self.method = method
         self.decode_step = 0
         self.cache_backend = cache_backend
+        self.hip_args = hip_args
         
         self.capture = CUDACapture(self.model)
         
@@ -536,7 +579,7 @@ class Runner:
         
         self.hip_offload = hip_offload
         self.kv_share = kv_share
-        self.kv_offload = hip_offload
+        self.kv_offload_cache = hip_offload
     
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
@@ -623,7 +666,8 @@ class Runner:
             dtype=torch.float16,
             share=self.kv_share,
             cache_backend=self.cache_backend,
-            use_offload_cache=self.kv_offload,
+            use_offload_cache=self.kv_offload_cache,
+            block_size_k=self.hip_args.block_size_k,
         )
         
         # compile decode step
@@ -691,10 +735,11 @@ class Runner:
         elapsed_prefill = event_prefill_start.elapsed_time(event_prefill_end)
         print(f'prefill took {elapsed_prefill:.3f} ms')
         
-        event_decode_start.record()
+        elapsed_decode = 0
         cache.decode_start()
-        for _ in tqdm.tqdm(range(max_tokens), dynamic_ncols=True, leave=False, desc='decode'):
+        for istep in tqdm.tqdm(range(max_tokens), dynamic_ncols=True, leave=False, desc='decode'):
             with torch.autocast('cuda', torch.float16):
+                event_decode_start.record()
                 decode_output = self.decode_forward(
                     input_ids=decode_input_ids, 
                     position_ids=decode_cache_pos.unsqueeze(0).expand(bsz, 1), 
@@ -705,16 +750,24 @@ class Runner:
             decoded_tokens.append(next_token)
             decode_input_ids.copy_(next_token, non_blocking=True)
             decode_cache_pos.add_(1)
-            if (self.decode_step % 1) == 0:
-                torch.cuda.synchronize()
+            event_decode_end.record()
+            event_decode_end.synchronize()
+            
+            elapsed_decode += event_decode_start.elapsed_time(event_decode_end) / 1000
+            
+            if self.kv_offload_cache:
+                counters = cache.counters.sum(0)
+                accessed, hit = counters.cpu().tolist()
+                tqdm.tqdm.write(f'[{istep}] \t hit ratio {hit / accessed * 100:.2f} % \t (accessed = {accessed / 1024 / 1024:.2f} M, hit = {hit / 1024 / 1024:.2f} M)')
+                accessed += 1e-20
+                cache.counters.fill_(0)
+            
             self.decode_step += 1
         cache.decode_end()
-        event_decode_end.record()
         
         torch.cuda.synchronize()
         
         elapsed_prefill = event_prefill_start.elapsed_time(event_prefill_end) / 1000
-        elapsed_decode = event_decode_start.elapsed_time(event_decode_end) / 1000
         
         gen_out = torch.cat(decoded_tokens, dim=-1)
         text_outs = self.tokenizer.batch_decode(gen_out, skip_special_tokens=False)
@@ -740,12 +793,11 @@ if __name__ == '__main__':
         parser.add_argument('--model', default='llama3.1_8b', type=str)
         parser.add_argument('--batch_size', default=16, type=int)
         parser.add_argument('--kv_share', default=1, type=int)
-        parser.add_argument('--max_tokens', default=256, type=int)
+        parser.add_argument('--max_tokens', default=64, type=int)
         parser.add_argument('--k', default=512, type=int)
         parser.add_argument('--sw', default=256, type=int)
         parser.add_argument('--offload', default=False, type=bool)
-        
-        block size k
+        parser.add_argument('--block_size_k', default=2, type=int)
         
         args = parser.parse_args()
         
@@ -782,6 +834,7 @@ Hi, can you describe about following document? Here is document,
             hip_offload=args.offload,
             hip_args=HiPAttentionArgs(
                 mask_k=args.k,
+                block_size_k=args.block_size_k,
                 sliding_window_size=args.sw,
             ),
         )\

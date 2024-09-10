@@ -525,6 +525,9 @@ class LlamaFlashAttention2(LlamaAttention):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
         
+        new_key_states = key_states
+        new_value_states = value_states
+        
         # query_states = query_states.transpose(1, 2)
         # key_states = key_states.transpose(1, 2)
         # value_states = value_states.transpose(1, 2)
@@ -571,14 +574,20 @@ class LlamaFlashAttention2(LlamaAttention):
             
             if hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx):
                 (
-                    offload_cache_key_tables, offload_cache_key_banks,
-                    offload_cache_value_tables, offload_cache_value_banks,
+                    offload_cache_masking_key_tables, offload_cache_masking_key_banks,
+                    offload_cache_sa_key_tables, offload_cache_sa_key_banks,
+                    offload_cache_sa_value_tables, offload_cache_sa_value_banks,
                     offload_cache_counters,
                 ) = past_key_value.get_offload_cache(self.layer_idx)
-                args.offload_cache_k_tables = offload_cache_key_tables
-                args.offload_cache_k_banks = offload_cache_key_banks
-                args.offload_cache_v_tables = offload_cache_value_tables
-                args.offload_cache_v_banks = offload_cache_value_banks
+                
+                args.offload_cache_mask_k_tables = offload_cache_masking_key_tables
+                args.offload_cache_mask_k_banks = offload_cache_masking_key_banks
+                
+                args.offload_cache_sa_k_tables = offload_cache_sa_key_tables
+                args.offload_cache_sa_k_banks = offload_cache_sa_key_banks
+                args.offload_cache_sa_v_tables = offload_cache_sa_value_tables
+                args.offload_cache_sa_v_banks = offload_cache_sa_value_banks
+                
                 args.offload_cache_counters = offload_cache_counters
                 args.offload_cache_kv_heads = key_states.shape[2]
                 args.output_block_access_log = True
@@ -594,6 +603,15 @@ class LlamaFlashAttention2(LlamaAttention):
                 attn_output, attn_metadata = hip_attention_11(
                     query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
                     args=args,
+                )
+            
+            if hasattr(past_key_value, 'process_block_access_log'):
+                past_key_value.process_block_access_log(
+                    self.layer_idx,
+                    query_states,
+                    new_key_states,
+                    new_value_states, 
+                    attn_metadata
                 )
             
             if self.hip_checkout_cache:
