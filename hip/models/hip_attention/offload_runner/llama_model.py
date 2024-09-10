@@ -567,7 +567,21 @@ class LlamaFlashAttention2(LlamaAttention):
         
         if self.attention_method == 'hip':
             args = self.hip_args.clone()
-            args.position_ids = position_ids
+            args.position_ids = position_ids + 1
+            
+            if hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx):
+                (
+                    offload_cache_key_tables, offload_cache_key_banks,
+                    offload_cache_value_tables, offload_cache_value_banks,
+                    offload_cache_counters,
+                ) = past_key_value.get_offload_cache(self.layer_idx)
+                args.offload_cache_k_tables = offload_cache_key_tables
+                args.offload_cache_k_banks = offload_cache_key_banks
+                args.offload_cache_v_tables = offload_cache_value_tables
+                args.offload_cache_v_banks = offload_cache_value_banks
+                args.offload_cache_counters = offload_cache_counters
+                args.offload_cache_kv_heads = key_states.shape[2]
+                args.output_block_access_log = True
             
             if self.hip_use_cache:
                 assert self.hip_cache is not None
