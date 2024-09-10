@@ -424,8 +424,14 @@ class StaticCache(Cache):
         """Resets the cache values while preserving the objects"""
         for layer_idx in range(len(self.key_cache)):
             # In-place ops prevent breaking the static address
-            self.key_cache[layer_idx][1].zero_()
-            self.value_cache[layer_idx][1].zero_()
+            if isinstance(self.key_cache[layer_idx], torch.Tensor):
+                self.key_cache[layer_idx].zero_()
+            else:
+                self.key_cache[layer_idx][1].zero_()
+            if isinstance(self.value_cache[layer_idx], torch.Tensor):
+                self.value_cache[layer_idx].zero_()
+            else:
+                self.value_cache[layer_idx][1].zero_()
 
 def convert_llama_to_vllm(model: LlamaForCausalLM):
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -758,9 +764,9 @@ class Runner:
             if self.kv_offload_cache:
                 counters = cache.counters.sum(0)
                 accessed, hit = counters.cpu().tolist()
-                tqdm.tqdm.write(f'[{istep}] \t hit ratio {hit / accessed * 100:.2f} % \t (accessed = {accessed / 1024 / 1024:.2f} M, hit = {hit / 1024 / 1024:.2f} M)')
                 accessed += 1e-20
                 cache.counters.fill_(0)
+                tqdm.tqdm.write(f'[{istep}] \t hit ratio {hit / accessed * 100:.2f} % \t (accessed = {accessed / 1024 / 1024:.2f} M, hit = {hit / 1024 / 1024:.2f} M)')
             
             self.decode_step += 1
         cache.decode_end()
