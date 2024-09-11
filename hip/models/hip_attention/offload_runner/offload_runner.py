@@ -76,7 +76,10 @@ class StaticCache(Cache):
         use_offload_cache: bool = False,
         uvm_offload_key = True,
         uvm_offload_value = True,
+        kv_group_size = 4,
+        mask_k = 512,
         block_size_k = 2,
+        sliding_window_size = 256,
     ) -> None:
         super().__init__()
         
@@ -104,11 +107,12 @@ class StaticCache(Cache):
         )
         self.cache_backend = cache_backend
 
+        self.sliding_window_size = sliding_window_size
         self.share = share
         self.uvm_offload_key = uvm_offload_key
         self.uvm_offload_value = uvm_offload_value
         self.cache_budget = 8192 // block_size_k
-        self.sparse_attention_budget = 2048 // block_size_k
+        self.sparse_attention_budget = (mask_k * kv_group_size + sliding_window_size) // block_size_k
         self.max_seq_len = max_cache_len
         self.block_size_k = block_size_k
         self.offload_cache_dtype = torch.float16 #float8_e5m2
@@ -489,7 +493,8 @@ class StaticCache(Cache):
                     
                     mask = metadata.indices[:, -1, :].view(NCACHE, -1)
                     mask = torch.where(mask >= 0, torch.clamp_max(mask, LARGE_INT), LARGE_INT).sort(dim=-1).values
-                    mask = torch.where(mask != torch.roll(mask, dims=-1, shifts=1), mask, LARGE_INT).sort(dim=-1).values[:, :BUDGET]
+                    mask = torch.where(mask != torch.roll(mask, dims=-1, shifts=1), mask, LARGE_INT)\
+                        .sort(dim=-1).values[:, :BUDGET - self.sliding_window_size // BLOCK_SIZE_K]
                     
                     self.copy_to_banks(
                         masking_key_tables=tables,
@@ -808,6 +813,7 @@ class Runner:
             cache_backend=self.cache_backend,
             use_offload_cache=self.kv_offload_cache,
             block_size_k=self.hip_args.block_size_k,
+            sliding_window_size=self.hip_args.sliding_window_size,
         )
         
         # compile decode step
