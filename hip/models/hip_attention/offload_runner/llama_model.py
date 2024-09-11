@@ -608,6 +608,7 @@ class LlamaFlashAttention2(LlamaAttention):
             if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
                 past_key_value.process_block_access_log(
                     self.layer_idx,
+                    position_ids,
                     query_states,
                     new_key_states,
                     new_value_states, 
