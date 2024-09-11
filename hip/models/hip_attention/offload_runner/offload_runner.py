@@ -139,7 +139,7 @@ class StaticCache(Cache):
             )
             
             # dummy initialize
-            dummy_init_offload_cache = True
+            dummy_init_offload_cache = False
             if dummy_init_offload_cache:
                 def dummy_init(tables, banks, hit_ratio):
                     N, NBANK, PAGE_SIZE, _ = banks.shape
@@ -406,8 +406,14 @@ class StaticCache(Cache):
                 counters
             ) = self.get_offload_cache(layer_index)
             
+            LARGE_INT = torch.iinfo(metadata.block_access_log.dtype).max
+            
             tsrc_log = metadata.block_access_log[:, -1, :] * self.block_size_k
-            tsrc_log = tsrc_log.unsqueeze(-1)
+            tsrc_log = tsrc_log.view(BSZ, HEAD_KV, HEAD // HEAD_KV * tsrc_log.shape[-1])
+            tsrc_log = torch.where(tsrc_log >= 0, tsrc_log, LARGE_INT)
+            tsrc_log = tsrc_log.sort(dim=-1).values
+            tsrc_log = torch.where(tsrc_log != torch.roll(tsrc_log, shifts=1, dims=-1), tsrc_log, LARGE_INT)
+            tsrc_log = tsrc_log.sort(dim=-1).values
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states that were seen by the model."""

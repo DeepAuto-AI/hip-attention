@@ -2,13 +2,19 @@ import torch
 import tqdm
 from hip import hip_attention_11
 from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import time
+import time, argparse
 
 def main():
-    refresh_interval = 8
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--refresh_interval', default=8, type=int)
+    parser.add_argument('--batch_size', default=64, type=int)
+    parser.add_argument('--sequential_masking', default=False, type=bool)
+    args = parser.add_argument()
+    
     samples = 500
-    batch_size = 32
-    sequential_masking = False
+    refresh_interval = args.refresh_interval
+    batch_size = args.batch_size
+    sequential_masking = args.sequential_masking
     
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
@@ -57,9 +63,8 @@ def main():
             with torch.cuda.stream(sa_stream if not sequential_masking else mask_stream):
                 context, _ = hip_attention_11(q, k, v, previous_metadata=meta)
         
-        torch.cuda.default_stream().wait_stream(mask_stream)
-        torch.cuda.default_stream().wait_stream(sa_stream)
-        torch.cuda.synchronize()
+        sa_stream.wait_stream(mask_stream)
+    sa_stream.synchronize()
     
     t_end = time.time()
     
