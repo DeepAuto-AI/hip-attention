@@ -45,12 +45,6 @@ def load_pretrained_model(model_path, model_base, model_name, use_hip_attn=True,
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
     
-    # ywlee
-    if use_hip_attn:
-        #TODO: change the custom attention name
-        print("hip-ATTENTION is loaded !!")
-        kwargs['attn_implementation'] = kwargs['_attn_implementation'] = 'sdpa'
-
     if 'llava' in model_name.lower():
         # Load LLaVA model
         if 'lora' in model_name.lower() and model_base is None:
@@ -60,18 +54,8 @@ def load_pretrained_model(model_path, model_base, model_name, use_hip_attn=True,
             lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
             print('Loading LLaVA from base model...')
-            # ywlee
             # Load our LlavaLlamaForCausalLM
             model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-            for m in model.modules():
-                if hasattr(m, 'attention_method'):
-                    m.attention_method = os.getenv('ATTENTION_METHOD', 'hip')
-                    m.tree_k = os.getenv('TREE_K', 512)
-                    m.tree_block_size_q = os.getenv('TREE_BLOCK_SIZE_Q', 32)
-                    m.tree_block_size_k = os.getenv('TREE_BLOCK_SIZE_K', 2)
-                    m.tree_dense_layers = []
-                    if m.attention_method == 'hip':
-                        m.tree_dense_layers = [0, 1, 2]
 
             token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
             if model.lm_head.weight.shape[0] != token_num:
@@ -137,6 +121,27 @@ def load_pretrained_model(model_path, model_base, model_name, use_hip_attn=True,
                     low_cpu_mem_usage=True,
                     **kwargs
                 )
+                # ywlee
+                for m in model.modules():
+                    if hasattr(m, 'attention_method'):
+                        m.attention_method = os.getenv('ATTENTION_METHOD', 'hip')
+                        m.tree_k = int(os.getenv('TREE_K', 512))
+                        m.tree_block_size_q = int(os.getenv('TREE_BLOCK_SIZE_Q', 32))
+                        m.tree_block_stride_q = int(os.getenv('TREE_BLOCK_STRIDE_Q', 2))
+                        m.tree_block_size_k = int(os.getenv('TREE_BLOCK_SIZE_K', 2))
+                        m.tree_block_stride_k = int(os.getenv('TREE_BLOCK_STRIDE_K', 1))
+                        m.tree_dense_layers = []
+                        if m.attention_method == 'hip':
+                            # for llava-13b
+                            m.tree_dense_layers = [0, 1, 2, 3]
+                        # parameter check by ywlee
+                        print(f"Attention method: {m.attention_method}")
+                        print(f"Tree K: {m.tree_k}")
+                        print(f"Tree block size Q: {m.tree_block_size_q}")
+                        print(f"Tree block stride Q: {m.tree_block_stride_q}")
+                        print(f"Tree block size K: {m.tree_block_size_k}")
+                        print(f"Tree block stride K: {m.tree_block_stride_k}")
+                        print(f"Tree dense layers: {m.tree_dense_layers}")
     else:
         # Load language model
         if model_base is not None:
