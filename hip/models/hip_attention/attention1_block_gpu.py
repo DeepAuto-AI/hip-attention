@@ -2040,7 +2040,7 @@ def main_debug_max_ks():
         
         start.record()
         graph = None
-        for i in range(n):
+        for i in range(n + 10):
             if graph is None:
                 s = torch.cuda.Stream()
                 s.wait_stream(torch.cuda.current_stream())
@@ -2055,7 +2055,7 @@ def main_debug_max_ks():
             graph.replay()
             end.record()
             
-            if i > 3:
+            if i > 10:
                 torch.cuda.synchronize()
                 elapsed = start.elapsed_time(end)
                 samples.append(elapsed)
