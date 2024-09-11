@@ -9,7 +9,7 @@ def main():
     parser.add_argument('--refresh_interval', default=8, type=int)
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--sequential_masking', default=False, type=bool)
-    args = parser.add_argument()
+    args = parser.parse_args()
     
     samples = 500
     refresh_interval = args.refresh_interval
