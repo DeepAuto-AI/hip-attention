@@ -82,7 +82,7 @@ def copy_to_banks_from_state_cuda(
             bank_loc * stride_bank_page +\
             offset * stride_bank_offset +\
             tl.arange(0, HID) * stride_bank_hid,
-        value=state
+        value=state.to(BANK.dtype.element_ty)
     )
 
 def copy_to_banks_from_state(
@@ -214,7 +214,7 @@ class StaticCache(Cache):
         self.sparse_attention_budget = (mask_k * kv_group_size + sliding_window_size) // block_size_k
         self.max_seq_len = max_cache_len + self.sliding_window_size
         self.block_size_k = block_size_k
-        self.offload_cache_dtype = torch.float16 #float8_e5m2
+        self.offload_cache_dtype = torch.float8_e5m2
         
         self.using_offload_cache = use_offload_cache
         if self.using_offload_cache:
