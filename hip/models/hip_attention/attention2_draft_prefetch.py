@@ -67,7 +67,7 @@ class HiPAttentionOutputMetadata:
 class HiPAttentionArgs:
     mask_k: int = 512
     
-    block_size_q: int = 32
+    block_size_q: int = 64
     block_stride_q: int = 2
     block_size_k: int = 2
     block_stride_k: int = 1
@@ -122,6 +122,18 @@ class HiPAttentionArgs:
     
     # BUG(HJ): this nameing is wrong...
     position_ids: Optional[Tensor] = None
+    
+    offload_cache_kv_heads: Optional[int] = None
+    offload_cache_mask_k_tables: Optional[Tensor] = None
+    offload_cache_mask_k_banks: Optional[Tensor] = None
+    offload_cache_sa_k_tables: Optional[Tensor] = None
+    offload_cache_sa_k_banks: Optional[Tensor] = None
+    offload_cache_sa_v_tables: Optional[Tensor] = None
+    offload_cache_sa_v_banks: Optional[Tensor] = None
+    offload_cache_counters: Optional[Tensor] = None
+    
+    # NOTE: this will be equivalant BigBird
+    randomize_mask: bool = False
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -222,6 +234,48 @@ class HiPAttentionArgs:
             self.block_table, *self.safe_stride(self.block_table, 2),
             self.cache_seq_lens, *self.safe_stride(self.cache_seq_lens, 1),
         )
+    
+    def args_offload_cache(self, is_masking):
+        if is_masking:
+            using_offload_cache = self.offload_cache_mask_k_tables is not None
+            if using_offload_cache:
+                assert self.offload_cache_mask_k_tables.ndim == 2
+                assert self.offload_cache_mask_k_banks.ndim == 4
+                assert self.offload_cache_counters.ndim == 2
+                offload_cache_budget = self.offload_cache_mask_k_banks.shape[1]
+            else:
+                offload_cache_budget = 0
+            
+            return (
+                using_offload_cache,
+                offload_cache_budget,
+                self.offload_cache_kv_heads,
+                self.offload_cache_mask_k_tables, *self.safe_stride(self.offload_cache_mask_k_tables, 2),
+                self.offload_cache_mask_k_banks, *self.safe_stride(self.offload_cache_mask_k_banks, 4),
+                self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
+            )
+        else:
+            using_offload_cache = self.offload_cache_sa_k_tables is not None
+            if using_offload_cache:
+                assert self.offload_cache_sa_k_tables.ndim == 2
+                assert self.offload_cache_sa_k_banks.ndim == 4
+                assert self.offload_cache_sa_v_tables.ndim == 2
+                assert self.offload_cache_sa_v_banks.ndim == 4
+                assert self.offload_cache_counters.ndim == 2
+                offload_cache_budget = self.offload_cache_sa_v_banks.shape[1]
+            else:
+                offload_cache_budget = 0
+            
+            return (
+                using_offload_cache,
+                offload_cache_budget,
+                self.offload_cache_kv_heads,
+                self.offload_cache_sa_k_tables, *self.safe_stride(self.offload_cache_sa_k_tables, 2),
+                self.offload_cache_sa_k_banks, *self.safe_stride(self.offload_cache_sa_k_banks, 4),
+                self.offload_cache_sa_v_tables, *self.safe_stride(self.offload_cache_sa_v_tables, 2),
+                self.offload_cache_sa_v_banks, *self.safe_stride(self.offload_cache_sa_v_banks, 4),
+                self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
+            )
 
 @triton.jit
 def masking_iteration_draft_cuda_initialize(
@@ -496,17 +550,68 @@ def load_tokens(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_UPDATE: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
     idx_bsz,
     idx_tsrc,
     idx_kv_head,
     idx_hid,
     
     mask_keys,
+    
+    BLOCK_SIZE_K,
 ):
     # DEBUG: to load nothing
     # mask_keys = mask_keys & False
     
     if not USING_PAGES:
+        if USING_OFFLOAD_CACHE:
+            original_mask_keys = mask_keys
+            idx_cache = (
+                idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
+                    idx_kv_head.to(tl.int64)
+            )
+            idx_bank_page = tl.load(
+                OFFLOAD_CACHE_K_TABLES +\
+                    idx_cache * stride_offload_cache_k_tables_n +\
+                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
+                mask=mask_keys,
+                other=65535
+            ).to(tl.uint16)
+            mask_bank_hit = (idx_bank_page != 65536) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
+            mask_keys = mask_keys & (~mask_bank_hit)
+            
+            # num accessed
+            tl.atomic_add(
+                OFFLOAD_CACHE_COUNTERS +\
+                    idx_cache * stride_offload_cache_counters_n +\
+                    0 * stride_offload_cache_counters_k,
+                val=tl.sum(original_mask_keys.to(tl.int64))
+            )
+            
+            # num hits
+            tl.atomic_add(
+                OFFLOAD_CACHE_COUNTERS +\
+                    idx_cache * stride_offload_cache_counters_n +\
+                    1 * stride_offload_cache_counters_k,
+                val=tl.sum(mask_bank_hit.to(tl.int64))
+            )
+        
         keys = tl.load(
             K +\
                 idx_bsz.to(tl.int64) * stride_k_bsz +\
@@ -517,7 +622,25 @@ def load_tokens(
             other = 0,
             # cache_modifier='.cs', # TODO: uncomment this
         )
+        
+        if USING_OFFLOAD_CACHE:
+            # load from offload cache
+            keys_from_cache = tl.load(
+                OFFLOAD_CACHE_K_BANKS +\
+                    idx_cache.to(tl.int64) * stride_offload_cache_k_banks_n +\
+                    idx_bank_page.to(tl.int64) * stride_offload_cache_k_banks_page +\
+                    (idx_tsrc % BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_banks_offset +\
+                    idx_hid.to(tl.int64) * stride_offload_cache_k_banks_hid,
+                mask = mask_bank_hit,
+                other = 0,
+                # cache_modifier='.cs', # TODO: uncomment this
+            )
+            # merge keys and loaded cache
+            keys = tl.where(mask_bank_hit, keys_from_cache, keys)
+            # update cache if there is uvm-loaded-keys
     else:
+        tl.static_assert(not USING_OFFLOAD_CACHE)
+        
         seq_len = tl.load(
             CACHE_SEQ_LENS +\
                 idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
@@ -625,6 +748,22 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_block_table_page,
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
     
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
@@ -751,11 +890,30 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_b,
             
+            # offload cache args template
+            USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_BUDGET,
+            OFFLOAD_CACHE_KV_HEAD,
+            True,
+            OFFLOAD_CACHE_K_TABLES,
+            stride_offload_cache_k_tables_n,
+            stride_offload_cache_k_tables_t,
+            OFFLOAD_CACHE_K_BANKS,
+            stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
+            stride_offload_cache_k_banks_offset,
+            stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_COUNTERS,
+            stride_offload_cache_counters_n,
+            stride_offload_cache_counters_k,
+            
             idx_bsz,
             idx_tsrc[None, :],
             idx_kv_head,
             idx_hid[:, None],
             mask_keys,
+            
+            BLOCK_SIZE_K,
         )
         # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
         if keys.dtype == tl.uint8:
@@ -1118,6 +1276,22 @@ def masking_iteration_draft_cuda_dup_and_score(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
@@ -1385,6 +1559,22 @@ def masking_iteration_draft_cuda_dup_and_score(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_bsz,
                 
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
                 IS_CAUSAL,
                 BLOCK_SIZE_Q,
                 BLOCK_STRIDE_Q,
@@ -1521,6 +1711,22 @@ def masking_iteration_draft_cuda_dup_and_score(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_bsz,
             
+            # offload cache args template
+            USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_BUDGET,
+            OFFLOAD_CACHE_KV_HEAD,
+            OFFLOAD_CACHE_K_TABLES,
+            stride_offload_cache_k_tables_n,
+            stride_offload_cache_k_tables_t,
+            OFFLOAD_CACHE_K_BANKS,
+            stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
+            stride_offload_cache_k_banks_offset,
+            stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_COUNTERS,
+            stride_offload_cache_counters_n,
+            stride_offload_cache_counters_k,
+            
             IS_CAUSAL,
             BLOCK_SIZE_Q,
             BLOCK_STRIDE_Q,
@@ -1633,6 +1839,22 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_block_table_page,
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_bsz,
+            
+            # offload cache args template
+            USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_BUDGET,
+            OFFLOAD_CACHE_KV_HEAD,
+            OFFLOAD_CACHE_K_TABLES,
+            stride_offload_cache_k_tables_n,
+            stride_offload_cache_k_tables_t,
+            OFFLOAD_CACHE_K_BANKS,
+            stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
+            stride_offload_cache_k_banks_offset,
+            stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_COUNTERS,
+            stride_offload_cache_counters_n,
+            stride_offload_cache_counters_k,
             
             IS_CAUSAL,
             BLOCK_SIZE_Q,
@@ -2102,7 +2324,7 @@ def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
         return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=256)]
-    warnings.warn('triton autotune will slow down startup!')
+    warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     for num_warps in [2, 4, 8]:
     # for num_warps in [4,]:
@@ -2282,6 +2504,22 @@ def masking_iteration_draft_cuda_fused(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
@@ -2446,6 +2684,22 @@ def masking_iteration_draft_cuda_fused(
                     stride_block_table_page,
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_bsz,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
                     
                     IS_CAUSAL,
                     BLOCK_SIZE_Q,
@@ -2706,6 +2960,22 @@ def masking_iteration_draft_cuda_initialize_score(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_bsz,
     
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
@@ -2842,6 +3112,22 @@ def masking_iteration_draft_cuda_initialize_score(
         stride_block_table_page,
         CACHE_SEQ_LENS,
         stride_cache_seq_lens_bsz,
+        
+        # offload cache args template
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
         
         IS_CAUSAL,
         BLOCK_SIZE_Q,
@@ -3178,13 +3464,14 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
+            *args.args_offload_cache(is_masking=True),
             args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
             BLOCK_BK,
             
-            num_warps=2,
-            num_stages=1,
+            num_warps=4,
+            num_stages=2,
         )
         torch.set_default_device(pre_device)
         
@@ -3304,6 +3591,7 @@ def masking_iteration_draft(
             *args.args_extend(),
             *args.args_sparq(),
             *args.args_paged_kv_cache(),
+            *args.args_offload_cache(is_masking=True),
             args.is_causal,
             *args.args_bq_bsq_bk_bsk(),
             
@@ -3684,7 +3972,7 @@ def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
         return [triton.Config({'BLOCK_BK': 16}, num_warps=4, num_stages=2, maxnreg=256)]
-    warnings.warn('triton autotuning is activated. this should be disabled for faster startup.')
+    warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
@@ -3774,6 +4062,30 @@ def block_sparse_attention_cuda(
     stride_block_table_page,
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_V_TABLES,
+    stride_offload_cache_v_tables_n,
+    stride_offload_cache_v_tables_t,
+    OFFLOAD_CACHE_V_BANKS,
+    stride_offload_cache_v_banks_n,
+    stride_offload_cache_v_banks_page,
+    stride_offload_cache_v_banks_offset,
+    stride_offload_cache_v_banks_hid,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
     
     TDST_NEXT_POWER_OF_2,
     
@@ -3892,11 +4204,30 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
                     idx_bsz,
                     idx_tsrc[None, :],
                     idx_head // KV_HEAD_REPEAT,
                     idx_hid[:, None],
                     mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
                 )
                 
                 values = load_tokens(
@@ -3919,11 +4250,30 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_V_TABLES,
+                    stride_offload_cache_v_tables_n,
+                    stride_offload_cache_v_tables_t,
+                    OFFLOAD_CACHE_V_BANKS,
+                    stride_offload_cache_v_banks_n,
+                    stride_offload_cache_v_banks_page,
+                    stride_offload_cache_v_banks_offset,
+                    stride_offload_cache_v_banks_hid,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
                     idx_bsz,
                     idx_tsrc[:, None],
                     idx_head // KV_HEAD_REPEAT,
                     idx_hid[None, :],
                     mask_tsrc[:, None],
+                    
+                    BLOCK_SIZE_K,
                 )
                 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -3983,11 +4333,30 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                False,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
                 idx_bsz,
                 idx_tsrc[None, :],
                 idx_head // KV_HEAD_REPEAT,
                 idx_hid[:, None],
                 mask_tsrc[None, :],
+                
+                BLOCK_SIZE_K,
             )
             
             values = load_tokens(
@@ -4010,11 +4379,30 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                False,
+                OFFLOAD_CACHE_V_TABLES,
+                stride_offload_cache_v_tables_n,
+                stride_offload_cache_v_tables_t,
+                OFFLOAD_CACHE_V_BANKS,
+                stride_offload_cache_v_banks_n,
+                stride_offload_cache_v_banks_page,
+                stride_offload_cache_v_banks_offset,
+                stride_offload_cache_v_banks_hid,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
                 idx_bsz,
                 idx_tsrc[:, None],
                 idx_head // KV_HEAD_REPEAT,
                 idx_hid[None, :],
                 mask_tsrc[:, None],
+                
+                BLOCK_SIZE_K,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -4158,6 +4546,7 @@ def block_sparse_attention(
         
         *args.args_extend(),
         *args.args_paged_kv_cache(),
+        *args.args_offload_cache(is_masking=False),
         
         triton.next_power_of_2(TDST),
         HID,
@@ -4685,6 +5074,81 @@ def hip_masking(
     k: Optional[Tensor],
     args: "HiPAttentionArgs",
 ):
+    if args.randomize_mask or (os.getenv('HIP_RANDOM_MASK', '0') == '1'):
+        BSZ, TDST, HEAD, HID = q.shape
+        if k is not None:
+            _, _, HEAD_KV, HID = k.shape
+        elif args.k_cache is not None:
+            _, _, HEAD_KV, HID = args.k_cache.shape
+        else:
+            raise Exception()
+        
+        assert args.topk_head_group_size == 1
+        assert args.position_ids is not None
+        
+        N = BSZ * HEAD
+        BDST = cdiv_python(TDST, args.block_size_q)
+        BK = cdiv_python(args.mask_k, args.block_size_k)
+        
+        LARGE_INT = 987654321
+        
+        indices = torch.rand((N, BDST, BK), dtype=torch.float32, device=q.device)
+        
+        seq_lens = args.position_ids[:, min(args.block_stride_q-1, TDST-1)::args.block_size_q]
+        assert seq_lens.shape == (BSZ, BDST)
+        seq_lens = torch.clamp(seq_lens - args.sliding_window_size, 0, LARGE_INT)
+        indices = indices * seq_lens.repeat_interleave(repeats=HEAD, dim=0).unsqueeze(-1)
+        indices = indices.long() // args.block_size_k * args.block_size_k
+        indices[:, :, 0] = 0 # sink block
+        indices = indices.sort(dim=-1).values
+        indices = torch.where(indices != torch.roll(indices, shifts=1, dims=-1), indices, LARGE_INT)
+        indices = indices.sort(dim=-1).values
+        
+        ks = torch.logical_and(indices >= 0, indices < LARGE_INT).int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros((N, BDST, 2), dtype=torch.int64, device=q.device)
+        ks_start_end[:, :, -1] = ks
+        
+        if os.getenv('HIP_DEBUG', '0') == '1':
+            B, TDST, H, HID = q.shape
+            if k is not None:
+                _, TSRC, H_KV, _ = k.shape
+            else:
+                TSRC = torch.max(args.cache_seq_lens).item()
+            N = B * H
+            def render_mask():
+                debug_mask = to_dense(
+                    indices.cpu().numpy(),
+                    ks.cpu().numpy(),
+                    None,
+                    cdiv_python(N, args.topk_head_group_size),
+                    TDST, 
+                    TSRC * args.topk_head_group_size, 
+                    args.block_size_q, 
+                    args.block_size_k * args.block_size_k_group,
+                )[0]
+                if args.group_size_q > 1:
+                    debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
+                plt.clf()
+                plt.figure(figsize=(4*args.topk_head_group_size, 4))
+                plt.imshow(debug_mask)
+                plt.tight_layout()
+                plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
+                print('saved dummy.png')
+            render_mask()
+        
+        return (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            None, 
+            None,
+            None,
+            None,
+            None,
+        )
+    
     if args.group_size_q > 1:
         q_quant = q
         
@@ -5144,21 +5608,6 @@ def hip_attention(
         block_access_score = previous_metadata.block_access_score
         block_access_count = previous_metadata.block_access_count
     
-    HIP_RANDOM_MASK = os.getenv('HIP_RANDOM_MASK', '0') == '1'
-    if HIP_RANDOM_MASK:
-        for ib in tqdm.tqdm(range(indices.shape[0])):
-            for ibdst in range(indices.shape[1]):
-                assert args.topk_head_group_size == 1
-                K = indices.shape[-1]
-                tsrc = (ibdst + 1) * args.block_size_q - args.sliding_window_size + k.shape[-2] - q.shape[-2]
-                tsrc = tsrc - (tsrc % args.block_size_q)
-                if tsrc > args.mask_k:
-                    rand_ids = torch.arange(args.block_size_k, tsrc, args.block_size_k, device=indices.device)
-                    rp = torch.randperm(len(rand_ids), device=indices.device)
-                    rand_ids = rand_ids[rp][:K-1] * args.block_size_k
-                    indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
-                    indices[ib, ibdst, 0] = 0
-    
     metadata = HiPAttentionOutputMetadata(
         indices=indices,
         ks=ks,
@@ -5416,49 +5865,53 @@ def main():
         return hip_attention(
             q, k, v, 
             
-            mask_k=512,
-            
-            block_size_q=32,
-            block_stride_q=2,
-            block_size_k=2,
-            block_stride_k=1,
-            block_size_k_group=1,
-            
-            is_causal=True,
-            
-            sliding_window_size=256,
-            sink_token_size=16,
-            
-            using_extend=False,
-            rope_cos=cos,
-            rope_sin=sin,
-            self_extend_neighboor_window=1024,
-            self_extend_group_size=4,
-            
-            topk_head_group_size=1,
-            sample_method='center',
-            branch_method='half',
-            
-            traverse_from_last_step=False,
-            step_size=None,
-            num_samples=1,
-            chunk_size=None,
-            num_unions=1,
-            
-            score_head_group_size=1,
-            
-            using_sparq=False,
-            sparq_hid=64,
-            
-            low_res_sample_scale=1,
-            low_res_oversample_rate=1,
-            low_res_oversample_block_stride_k=1,
-            
-            q_quant=q_quant,
-            k_quant=k_quant,
-            
-            # NOTE: change this to True to simulate key cache algorithms
-            output_key_access_log=False,
+            args = HiPAttentionArgs(
+                mask_k=512,
+                
+                block_size_q=32,
+                block_stride_q=2,
+                block_size_k=2,
+                block_stride_k=1,
+                block_size_k_group=1,
+                
+                is_causal=True,
+                
+                sliding_window_size=256,
+                sink_token_size=16,
+                
+                using_extend=False,
+                rope_cos=cos,
+                rope_sin=sin,
+                self_extend_neighboor_window=1024,
+                self_extend_group_size=4,
+                
+                topk_head_group_size=1,
+                sample_method='center',
+                branch_method='half',
+                
+                traverse_from_last_step=False,
+                step_size=None,
+                num_samples=1,
+                chunk_size=None,
+                num_unions=1,
+                
+                score_head_group_size=1,
+                
+                using_sparq=False,
+                sparq_hid=64,
+                
+                low_res_sample_scale=1,
+                low_res_oversample_rate=1,
+                low_res_oversample_block_stride_k=1,
+                
+                q_quant=q_quant,
+                k_quant=k_quant,
+                
+                randomize_mask=True,
+                
+                # NOTE: change this to True to simulate key cache algorithms
+                output_key_access_log=False,
+            )
         )
     
     if 'HIP_DEBUG' not in os.environ:
