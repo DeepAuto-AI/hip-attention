@@ -808,7 +808,7 @@ if __name__ == '__main__':
         parser.add_argument('--max_tokens', default=64, type=int)
         parser.add_argument('--k', default=512, type=int)
         parser.add_argument('--sw', default=256, type=int)
-        parser.add_argument('--offload', default=False, type=bool)
+        parser.add_argument('--offload', action=argparse.BooleanOptionalAction)
         parser.add_argument('--block_size_k', default=2, type=int)
         
         args = parser.parse_args()

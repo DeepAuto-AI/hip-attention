@@ -5622,7 +5622,7 @@ def hip_attention(
         block_access_count=block_access_count,
     )
     
-    if os.getenv('HIP_DEBUG_SKIP_SA', '0') == '1':
+    if (os.getenv('HIP_DEBUG_SKIP_SA', '0') == '1') or mask_only:
         return None, metadata
     
     context = block_sparse_attention(
