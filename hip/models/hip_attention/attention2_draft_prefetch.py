@@ -632,11 +632,11 @@ def load_tokens(
                     (idx_tsrc % BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_banks_offset +\
                     idx_hid.to(tl.int64) * stride_offload_cache_k_banks_hid,
                 mask = mask_bank_hit,
-                other = 0,
+                other = 0.0,
                 # cache_modifier='.cs', # TODO: uncomment this
             )
             # merge keys and loaded cache
-            keys = tl.where(mask_bank_hit, keys_from_cache, keys)
+            keys = tl.where(mask_bank_hit, keys_from_cache.to(keys.dtype), keys)
             # update cache if there is uvm-loaded-keys
     else:
         tl.static_assert(not USING_OFFLOAD_CACHE)

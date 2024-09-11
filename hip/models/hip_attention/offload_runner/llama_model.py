@@ -605,13 +605,14 @@ class LlamaFlashAttention2(LlamaAttention):
                     args=args,
                 )
             
-            if hasattr(past_key_value, 'process_block_access_log'):
+            if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
                 past_key_value.process_block_access_log(
                     self.layer_idx,
                     query_states,
                     new_key_states,
                     new_value_states, 
-                    attn_metadata
+                    attn_metadata,
+                    not self.hip_use_cache,
                 )
             
             if self.hip_checkout_cache:
