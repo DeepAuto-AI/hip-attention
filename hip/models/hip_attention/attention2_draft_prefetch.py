@@ -5061,6 +5061,7 @@ def hip_attention(
     
     args: Optional[HiPAttentionArgs] = None,  
     previous_metadata: Optional[HiPAttentionOutputMetadata] = None,
+    mask_only: bool = False,
     **kwargs,
 ) -> Tuple[Tensor, HiPAttentionOutputMetadata]:
     if args is None:
@@ -5158,8 +5159,22 @@ def hip_attention(
                     indices[ib, ibdst, 1:len(rand_ids)+1] = rand_ids
                     indices[ib, ibdst, 0] = 0
     
+    metadata = HiPAttentionOutputMetadata(
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        
+        key_access_log=key_access_log,
+        key_access_count=key_access_count,
+        
+        block_access_log=block_access_log,
+        block_access_score=block_access_score,
+        block_access_count=block_access_count,
+    )
+    
     if os.getenv('HIP_DEBUG_SKIP_SA', '0') == '1':
-        return None, None
+        return None, metadata
     
     context = block_sparse_attention(
         q=q, 
@@ -5175,19 +5190,7 @@ def hip_attention(
         args=args
     )
     
-    return context, HiPAttentionOutputMetadata(
-        indices=indices,
-        ks=ks,
-        ks_count=ks_count,
-        ks_start_end=ks_start_end,
-        
-        key_access_log=key_access_log,
-        key_access_count=key_access_count,
-        
-        block_access_log=block_access_log,
-        block_access_score=block_access_score,
-        block_access_count=block_access_count,
-    )
+    return context, metadata
 
 @nvtx.annotate('paged_hip_attention')
 def paged_hip_attention(
