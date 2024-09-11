@@ -76,6 +76,7 @@ class StaticCache(Cache):
         use_offload_cache: bool = False,
         uvm_offload_key = True,
         uvm_offload_value = True,
+        cache_size = 8192,
         kv_group_size = 4,
         mask_k = 512,
         block_size_k = 2,
@@ -111,7 +112,7 @@ class StaticCache(Cache):
         self.share = share
         self.uvm_offload_key = uvm_offload_key
         self.uvm_offload_value = uvm_offload_value
-        self.cache_budget = 8192 // block_size_k
+        self.cache_budget = cache_size // block_size_k
         self.sparse_attention_budget = (mask_k * kv_group_size + sliding_window_size) // block_size_k
         self.max_seq_len = max_cache_len
         self.block_size_k = block_size_k
@@ -683,6 +684,7 @@ class Runner:
         cache_backend: Literal['cuda', 'uvm'],
         kv_share: int,
         hip_offload: bool,
+        cache_size: int,
         hip_args: HiPAttentionArgs,
     ):
         import vllm.distributed
@@ -725,6 +727,7 @@ class Runner:
         self.hip_offload = hip_offload
         self.kv_share = kv_share
         self.kv_offload_cache = hip_offload
+        self.kv_offload_cache_size = cache_size
     
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
@@ -814,6 +817,7 @@ class Runner:
             use_offload_cache=self.kv_offload_cache,
             block_size_k=self.hip_args.block_size_k,
             sliding_window_size=self.hip_args.sliding_window_size,
+            cache_size=self.kv_offload_cache_size,
         )
         
         # compile decode step
@@ -944,6 +948,7 @@ if __name__ == '__main__':
         parser.add_argument('--max_tokens', default=64, type=int)
         parser.add_argument('--k', default=512, type=int)
         parser.add_argument('--sw', default=256, type=int)
+        parser.add_argument('--cache_size', default=8192, type=int)
         parser.add_argument('--offload', action=argparse.BooleanOptionalAction)
         parser.add_argument('--block_size_k', default=2, type=int)
         
@@ -980,6 +985,7 @@ Hi, can you describe about following document? Here is document,
             cache_backend=args.cache_backend,
             kv_share=args.kv_share,
             hip_offload=args.offload,
+            cache_size=args.cache_size,
             hip_args=HiPAttentionArgs(
                 mask_k=args.k,
                 block_size_k=args.block_size_k,
