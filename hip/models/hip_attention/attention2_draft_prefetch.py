@@ -2033,7 +2033,7 @@ def masking_iteration_draft_python_epilog(
         BLOCK_BK = 128
         grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
         pre_device = torch.get_default_device()
-        torch.set_default_device(indices.device)
+        #torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_epiloge[grid](
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -2046,7 +2046,7 @@ def masking_iteration_draft_python_epilog(
             G,
             BLOCK_BK,
         )
-        torch.set_default_device(pre_device)
+        #torch.set_default_device(pre_device)
         # print(indices[0, -1] // TSRC)
         # print(ks_count[0, -1], ks_start_end[0, -1])
         # print(ks_count.float().mean(1).int()[0])
@@ -2101,8 +2101,8 @@ def get_masking_iteration_draft_cuda_fused_configs():
         'TDST_NEXT_POWER_OF_2',
     ],
     restore_value=[
-        'KEY_ACCESS_LOG',
-        'KEY_ACCESS_COUNT',
+        #'KEY_ACCESS_LOG',
+        #'KEY_ACCESS_COUNT',
         'INDICES',
         'KS',
         'GROUP_SIZE',
@@ -2827,7 +2827,7 @@ def masking_iteration_draft_cuda_initialize_score(
         value=scores,
     )
 
-@nvtx.annotate('masking_iteration_draft')
+#@nvtx.annotate('masking_iteration_draft')
 def masking_iteration_draft( 
     q: Tensor,
     k: Optional[Tensor],
@@ -3043,8 +3043,8 @@ def masking_iteration_draft(
     if group_size_seed is None:
         grid = (B, BDST, G)
         # print('init grid', grid)
-        pre_device = torch.get_default_device()
-        torch.set_default_device(indices.device)
+        #pre_device = torch.get_default_device()
+        #torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_initialize[grid](
             indices_seed, *(indices_seed.stride() if indices_seed is not None else (0, 0, 0)),
             ks_seed, *(ks_seed.stride() if ks_seed is not None else (0, 0)),
@@ -3070,7 +3070,7 @@ def masking_iteration_draft(
             num_warps=1,
             num_stages=1,
         )
-        torch.set_default_device(pre_device)
+        #torch.set_default_device(pre_device)
     else:
         indices.copy_(indices_seed)
         ks.copy_(ks_seed)
@@ -3112,8 +3112,8 @@ def masking_iteration_draft(
         
         # BUG: autotune ruin the access log
         # grid = lambda META: (triton.cdiv(indices.shape[-1], META['BLOCK_BK']), BDST, B)
-        pre_device = torch.get_default_device()
-        torch.set_default_device(q.device)
+        #pre_device = torch.get_default_device()
+        #torch.set_default_device(q.device)
         masking_iteration_draft_cuda_initialize_score[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -3149,7 +3149,7 @@ def masking_iteration_draft(
             num_warps=2,
             num_stages=1,
         )
-        torch.set_default_device(pre_device)
+        #torch.set_default_device(pre_device)
         
         # print('-- after initialize')
         # print(scores.shape, key_access_log.shape, key_access_count.shape)
@@ -3211,8 +3211,8 @@ def masking_iteration_draft(
             BSZ
         )
         
-        pre_device = torch.get_default_device()
-        torch.set_default_device(q.device)
+        #pre_device = torch.get_default_device()
+        #torch.set_default_device(q.device)
         masking_iteration_draft_cuda_fused[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -3281,7 +3281,7 @@ def masking_iteration_draft(
             # num_warps=4,
             # num_stages=2,
         )
-        torch.set_default_device(pre_device)
+        #torch.set_default_device(pre_device)
     else:
         raise NotImplementedError()
         i_iteration = 0
@@ -4097,8 +4097,8 @@ def block_sparse_attention(
     assert position_ids.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
-    pre_device = torch.get_default_device()
-    torch.set_default_device(q.device)
+    #pre_device = torch.get_default_device()
+    #torch.set_default_device(q.device)
     
     block_sparse_attention_cuda[grid](
         q, *q.stride(),
@@ -4129,7 +4129,7 @@ def block_sparse_attention(
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
     )
-    torch.set_default_device(pre_device)
+    #torch.set_default_device(pre_device)
     
     return context
 
@@ -4191,7 +4191,7 @@ def to_dense_efficient(
     grid = (BDST, N,)
     
     pre_device = torch.get_default_device()
-    torch.set_default_device(indices.device)
+    #torch.set_default_device(indices.device)
     to_dense_cuda[grid](
         indices, *indices.stride(),
         ks, *ks.stride(),
@@ -4199,7 +4199,7 @@ def to_dense_efficient(
         out, *out.stride(),
         N, TDST, TSRC, BK, BLOCK_SIZE_Q, BLOCK_SIZE_K
     )
-    torch.set_default_device(pre_device)
+    #torch.set_default_device(pre_device)
     
     return out
 
@@ -4248,7 +4248,7 @@ def block_sparse_attention_pytorch(
     
     return out
 
-@nvtx.annotate("masking_step_loop")
+#@nvtx.annotate("masking_step_loop")
 def masking_step_loop(
     q: Tensor,
     k: Tensor,
@@ -4300,258 +4300,258 @@ def masking_step_loop(
             else:
                 pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
         scores_seed = None
-        with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
-            for idx_sample in range(args.num_samples):
-                with nvtx.annotate(f'masking_iteration_draft(idx_sample={idx_sample})'):
-                    if args.low_res_sample_scale <= 1 and args.low_res_oversample_rate <= 1:
-                        (
-                            indices, 
-                            ks, 
-                            ks_count, 
-                            ks_start_end, 
-                            scores, 
-                            group_sizes, 
-                            key_access_log, 
-                            key_access_count,
-                            block_access_log,
-                            block_access_score,
-                            block_access_count,
-                        ) = masking_iteration_draft(
-                            q, 
-                            k, 
-                            position_ids=pos_tdst,
-                            indices_seed=indices_seed,
-                            ks_seed=ks_seed,
-                            scores_seed=scores_seed,
-                            indices_tdst=idx_tdst,
-                            
-                            args=args,
+        #with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
+        for idx_sample in range(args.num_samples):
+            #with nvtx.annotate(f'masking_iteration_draft(idx_sample={idx_sample})'):
+            if args.low_res_sample_scale <= 1 and args.low_res_oversample_rate <= 1:
+                (
+                    indices,
+                    ks,
+                    ks_count,
+                    ks_start_end,
+                    scores,
+                    group_sizes,
+                    key_access_log,
+                    key_access_count,
+                    block_access_log,
+                    block_access_score,
+                    block_access_count,
+                ) = masking_iteration_draft(
+                    q,
+                    k,
+                    position_ids=pos_tdst,
+                    indices_seed=indices_seed,
+                    ks_seed=ks_seed,
+                    scores_seed=scores_seed,
+                    indices_tdst=idx_tdst,
+
+                    args=args,
+                )
+
+                indices_seed = indices
+                ks_seed = ks
+                scores_seed = scores
+                if key_access_log is not None:
+                    key_access_log_blocks.append(key_access_log)
+                if key_access_count is not None:
+                    key_access_count_blocks.append(key_access_count)
+                if block_access_log is not None:
+                    block_access_log_blocks.append(block_access_log)
+                if block_access_score is not None:
+                    block_access_score_blocks.append(block_access_score)
+                if block_access_count is not None:
+                    block_access_count_blocks.append(block_access_count)
+            else:
+                assert isinstance(args.low_res_sample_scale, int)
+                low_mask_k = args.mask_k * args.low_res_oversample_rate
+                low_block_size_k = args.block_size_k * args.low_res_oversample_rate * args.low_res_sample_scale
+
+                assert args.low_res_sample_scale >= 1
+                assert args.low_res_oversample_rate >= 1
+                assert isinstance(args.low_res_sample_scale, int)
+                assert isinstance(args.low_res_oversample_rate, int)
+
+                # low_res_oversample_rate == group_size
+                # low_res_sample_scale == num block split
+
+                # NOTE: following code is for downsample the seed from last step
+                """
+                # need to be num element low_mask_k // low_block_size_k
+                stride = low_res_oversample_rate * low_res_sample_scale
+                assert stride > 1
+                if indices_seed is not None:
+                    indices_seed = indices_seed[:, :, ::stride]
+                if scores_seed is not None:
+                    scores_seed = scores_seed[:, :, ::stride]
+                
+                if low_res_sample_scale > 1:
+                    if ks_seed is not None:
+                        ks_seed = torch.ceil(ks_seed / low_res_sample_scale).to(torch.int32)
+                
+                if low_res_oversample_rate > 1:
+                    if indices_seed is not None:
+                        scores_seed = None
+                        indices_seed = indices_seed\
+                            .repeat_interleave(low_res_oversample_rate, dim=-1)\
+                            .view(*indices_seed.shape, 2)
+                        indices_seed = indices_seed +\
+                            torch.arange(
+                                0, 
+                                low_res_oversample_rate * low_block_size_k, 
+                                low_block_size_k, 
+                                device=indices_seed.device
+                            )[None, None, None, :]
+                        indices_seed = indices_seed.view(
+                            indices_seed.shape[0],
+                            indices_seed.shape[1],
+                            indices_seed.shape[2] * low_res_oversample_rate
                         )
-                        
-                        indices_seed = indices
-                        ks_seed = ks
-                        scores_seed = scores
-                        if key_access_log is not None:
-                            key_access_log_blocks.append(key_access_log)
-                        if key_access_count is not None:
-                            key_access_count_blocks.append(key_access_count)
-                        if block_access_log is not None:
-                            block_access_log_blocks.append(block_access_log)
-                        if block_access_score is not None:
-                            block_access_score_blocks.append(block_access_score)
-                        if block_access_count is not None:
-                            block_access_count_blocks.append(block_access_count)
-                    else:
-                        assert isinstance(args.low_res_sample_scale, int)
-                        low_mask_k = args.mask_k * args.low_res_oversample_rate
-                        low_block_size_k = args.block_size_k * args.low_res_oversample_rate * args.low_res_sample_scale
-                        
-                        assert args.low_res_sample_scale >= 1
-                        assert args.low_res_oversample_rate >= 1
-                        assert isinstance(args.low_res_sample_scale, int)
-                        assert isinstance(args.low_res_oversample_rate, int)
-                        
-                        # low_res_oversample_rate == group_size
-                        # low_res_sample_scale == num block split
-                        
-                        # NOTE: following code is for downsample the seed from last step
-                        """
-                        # need to be num element low_mask_k // low_block_size_k
-                        stride = low_res_oversample_rate * low_res_sample_scale
-                        assert stride > 1
-                        if indices_seed is not None:
-                            indices_seed = indices_seed[:, :, ::stride]
-                        if scores_seed is not None:
-                            scores_seed = scores_seed[:, :, ::stride]
-                        
-                        if low_res_sample_scale > 1:
-                            if ks_seed is not None:
-                                ks_seed = torch.ceil(ks_seed / low_res_sample_scale).to(torch.int32)
-                        
-                        if low_res_oversample_rate > 1:
-                            if indices_seed is not None:
-                                scores_seed = None
-                                indices_seed = indices_seed\
-                                    .repeat_interleave(low_res_oversample_rate, dim=-1)\
-                                    .view(*indices_seed.shape, 2)
-                                indices_seed = indices_seed +\
-                                    torch.arange(
-                                        0, 
-                                        low_res_oversample_rate * low_block_size_k, 
-                                        low_block_size_k, 
-                                        device=indices_seed.device
-                                    )[None, None, None, :]
-                                indices_seed = indices_seed.view(
-                                    indices_seed.shape[0],
-                                    indices_seed.shape[1],
-                                    indices_seed.shape[2] * low_res_oversample_rate
-                                )
-                        """
-                        
-                        low_res_sample_config = args.clone()
-                        low_res_sample_config.mask_k = low_mask_k
-                        low_res_sample_config.block_size_k = low_block_size_k
-                        low_res_sample_config.block_stride_k = args.low_res_oversample_block_stride_k
-                        
-                        with nvtx.annotate('low_res_sample'):
-                            # TODO: reduce initial seeds
-                            (
-                                indices, 
-                                ks, 
-                                ks_count, 
-                                ks_start_end, 
-                                scores, 
-                                group_sizes, 
-                                key_access_log, 
-                                key_access_count,
-                                block_access_log,
-                                block_access_score,
-                                block_access_count,
-                            ) = masking_iteration_draft(
-                                q[:, :, :], 
-                                k[:, :, :], 
-                                position_ids=pos_tdst,
-                                indices_seed=indices_seed,
-                                ks_seed=ks_seed,
-                                scores_seed=scores_seed,
-                                indices_tdst=idx_tdst,
-                                
-                                args=low_res_sample_config,
-                            )
-                            
-                            indices_seed = indices
-                            ks_seed = ks
-                            scores_seed = scores
-                            
-                            # indices_for_seed = indices
-                            # scores_for_seed = scores
-                            # ks_for_seed = ks
-                            
-                            # NOTE: if we recurrent on low res, then upsampling is ignored for few steps
-                            if args.num_samples > 1 and idx_sample < (args.num_samples - 1):
-                                continue
-                        
-                        with nvtx.annotate('sample_division'):
-                            if args.low_res_sample_scale > 1:
-                                indices = indices[:, :, :, None] +\
-                                    torch.arange(
-                                        0, low_block_size_k, args.block_size_k * args.low_res_oversample_rate, 
-                                        device=indices.device
-                                    )[None, None, None, :]
-                                indices = indices.view(indices.shape[0], indices.shape[1], -1)
-                                ks = ks.mul(args.low_res_sample_scale)
-                                group_sizes = torch.repeat_interleave(
-                                    group_sizes, args.low_res_sample_scale, dim=-1
-                                )
-                                
-                                # NOTE: block is break down, this is not accurate
-                                scores = scores[:, :, :, None]\
-                                    .expand(-1, -1, -1, 2)\
-                                    .contiguous()\
-                                    .view(scores.shape[0], scores.shape[1], -1)
-                                
-                                ks_count, ks_start_end = masking_iteration_draft_python_epilog(
-                                    indices, ks, 
-                                    cdiv_python(args.mask_k, args.block_size_k), 
-                                    TSRC,
-                                    ks.shape[0], 
-                                    ks.shape[1], 
-                                    args.topk_head_group_size
-                                )
-                        
-                        with nvtx.annotate('downsample'):
-                            if args.low_res_oversample_rate > 1:
-                                init_indices = torch.full_like(
-                                    indices, 
-                                    fill_value=(cdiv_python(TSRC, args.block_size_k) + args.block_size_k + args.block_size_q) * args.topk_head_group_size
-                                )
-                                init_ks = torch.zeros_like(ks)
-                                init_group_sizes = torch.zeros_like(group_sizes)
-                                grid = (N // args.topk_head_group_size, init_group_sizes.shape[1], args.topk_head_group_size)
-                                pre_device = torch.get_default_device()
-                                torch.set_default_device(pos_tdst.device)
-                                masking_iteration_draft_cuda_initialize[grid](
-                                    None, *(0, 0, 0),
-                                    None, *(0, 0),
-                                    pos_tdst, *pos_tdst.stride(),
-                                    
-                                    init_indices, *init_indices.stride(),
-                                    init_ks, *init_ks.stride(),
-                                    init_group_sizes, *init_group_sizes.stride(),
-                                    
-                                    None, *(0, 0,),
-                                    
-                                    args.mask_k,
-                                    args.block_size_q, 
-                                    args.block_size_k, 
-                                    
-                                    args.sliding_window_size,
-                                    
-                                    args.topk_head_group_size, len(idx_tdst), TSRC, HEAD,
-                                    
-                                    cdiv_python(args.mask_k, args.block_size_k),
-                                    
-                                    # num_warps=min(max(cdiv_python(BLOCK_MASK_BLOCK_K, 32), 1), 32),
-                                    num_warps=1,
-                                    num_stages=1,
-                                )
-                                torch.set_default_device(pre_device)
-                                
-                                # init_indices.mul_(block_size_k)
-                                
-                                group_sizes_scaled = torch.maximum(group_sizes.float(), torch.ones_like(group_sizes)) * args.low_res_oversample_rate
-                                
-                                # print(init_group_sizes[0, idx_tdst[::32] < 1024, :10])
-                                # print(group_sizes_scaled[0, idx_tdst[::32] < 1024, :10])
-                                
-                                mask_tdst = pos_tdst[::args.block_size_q] < args.mask_k * 2
-                                group_sizes = torch.where(
-                                    mask_tdst[None, :, None],
-                                    init_group_sizes,
-                                    group_sizes_scaled,
-                                )
-                                indices = torch.where(
-                                    mask_tdst[None, :, None],
-                                    init_indices * args.block_size_k,
-                                    indices,
-                                )
-                                ks = torch.where(
-                                    mask_tdst[None, :],
-                                    init_ks,
-                                    ks,
-                                )
-                                
-                                (
-                                    indices, 
-                                    ks, 
-                                    ks_count, 
-                                    ks_start_end, 
-                                    scores, 
-                                    group_sizes, 
-                                    key_access_log, 
-                                    key_access_count,
-                                    block_access_log,
-                                    block_access_score,
-                                    block_access_count,
-                                ) = masking_iteration_draft(
-                                    q[:, :, :], 
-                                    k[:, :, :], 
-                                    position_ids=pos_tdst,
-                                    indices_seed=indices_seed,
-                                    ks_seed=ks_seed,
-                                    scores_seed=None,
-                                    indices_tdst=idx_tdst,
-                                    
-                                    args=args,
-                                )
-                        
-                        # use this indices for cache, if you want to downsample
-                        """
-                        indices_seed = indices
-                        ks_seed = ks
-                        scores_seed = scores
-                        """
-        
+                """
+
+                low_res_sample_config = args.clone()
+                low_res_sample_config.mask_k = low_mask_k
+                low_res_sample_config.block_size_k = low_block_size_k
+                low_res_sample_config.block_stride_k = args.low_res_oversample_block_stride_k
+
+                #with nvtx.annotate('low_res_sample'):
+                # TODO: reduce initial seeds
+                (
+                    indices,
+                    ks,
+                    ks_count,
+                    ks_start_end,
+                    scores,
+                    group_sizes,
+                    key_access_log,
+                    key_access_count,
+                    block_access_log,
+                    block_access_score,
+                    block_access_count,
+                ) = masking_iteration_draft(
+                    q[:, :, :],
+                    k[:, :, :],
+                    position_ids=pos_tdst,
+                    indices_seed=indices_seed,
+                    ks_seed=ks_seed,
+                    scores_seed=scores_seed,
+                    indices_tdst=idx_tdst,
+
+                    args=low_res_sample_config,
+                )
+
+                indices_seed = indices
+                ks_seed = ks
+                scores_seed = scores
+
+                # indices_for_seed = indices
+                # scores_for_seed = scores
+                # ks_for_seed = ks
+
+                # NOTE: if we recurrent on low res, then upsampling is ignored for few steps
+                if args.num_samples > 1 and idx_sample < (args.num_samples - 1):
+                    continue
+
+                #with nvtx.annotate('sample_division'):
+                if args.low_res_sample_scale > 1:
+                    indices = indices[:, :, :, None] +\
+                        torch.arange(
+                            0, low_block_size_k, args.block_size_k * args.low_res_oversample_rate,
+                            device=indices.device
+                        )[None, None, None, :]
+                    indices = indices.view(indices.shape[0], indices.shape[1], -1)
+                    ks = ks.mul(args.low_res_sample_scale)
+                    group_sizes = torch.repeat_interleave(
+                        group_sizes, args.low_res_sample_scale, dim=-1
+                    )
+
+                    # NOTE: block is break down, this is not accurate
+                    scores = scores[:, :, :, None]\
+                        .expand(-1, -1, -1, 2)\
+                        .contiguous()\
+                        .view(scores.shape[0], scores.shape[1], -1)
+
+                    ks_count, ks_start_end = masking_iteration_draft_python_epilog(
+                        indices, ks,
+                        cdiv_python(args.mask_k, args.block_size_k),
+                        TSRC,
+                        ks.shape[0],
+                        ks.shape[1],
+                        args.topk_head_group_size
+                    )
+
+                #with nvtx.annotate('downsample'):
+                if args.low_res_oversample_rate > 1:
+                    init_indices = torch.full_like(
+                        indices,
+                        fill_value=(cdiv_python(TSRC, args.block_size_k) + args.block_size_k + args.block_size_q) * args.topk_head_group_size
+                    )
+                    init_ks = torch.zeros_like(ks)
+                    init_group_sizes = torch.zeros_like(group_sizes)
+                    grid = (N // args.topk_head_group_size, init_group_sizes.shape[1], args.topk_head_group_size)
+                    pre_device = torch.get_default_device()
+                    #torch.set_default_device(pos_tdst.device)
+                    masking_iteration_draft_cuda_initialize[grid](
+                        None, *(0, 0, 0),
+                        None, *(0, 0),
+                        pos_tdst, *pos_tdst.stride(),
+
+                        init_indices, *init_indices.stride(),
+                        init_ks, *init_ks.stride(),
+                        init_group_sizes, *init_group_sizes.stride(),
+
+                        None, *(0, 0,),
+
+                        args.mask_k,
+                        args.block_size_q,
+                        args.block_size_k,
+
+                        args.sliding_window_size,
+
+                        args.topk_head_group_size, len(idx_tdst), TSRC, HEAD,
+
+                        cdiv_python(args.mask_k, args.block_size_k),
+
+                        # num_warps=min(max(cdiv_python(BLOCK_MASK_BLOCK_K, 32), 1), 32),
+                        num_warps=1,
+                        num_stages=1,
+                    )
+                    #torch.set_default_device(pre_device)
+
+                    # init_indices.mul_(block_size_k)
+
+                    group_sizes_scaled = torch.maximum(group_sizes.float(), torch.ones_like(group_sizes)) * args.low_res_oversample_rate
+
+                    # print(init_group_sizes[0, idx_tdst[::32] < 1024, :10])
+                    # print(group_sizes_scaled[0, idx_tdst[::32] < 1024, :10])
+
+                    mask_tdst = pos_tdst[::args.block_size_q] < args.mask_k * 2
+                    group_sizes = torch.where(
+                        mask_tdst[None, :, None],
+                        init_group_sizes,
+                        group_sizes_scaled,
+                    )
+                    indices = torch.where(
+                        mask_tdst[None, :, None],
+                        init_indices * args.block_size_k,
+                        indices,
+                    )
+                    ks = torch.where(
+                        mask_tdst[None, :],
+                        init_ks,
+                        ks,
+                    )
+
+                    (
+                        indices,
+                        ks,
+                        ks_count,
+                        ks_start_end,
+                        scores,
+                        group_sizes,
+                        key_access_log,
+                        key_access_count,
+                        block_access_log,
+                        block_access_score,
+                        block_access_count,
+                    ) = masking_iteration_draft(
+                        q[:, :, :],
+                        k[:, :, :],
+                        position_ids=pos_tdst,
+                        indices_seed=indices_seed,
+                        ks_seed=ks_seed,
+                        scores_seed=None,
+                        indices_tdst=idx_tdst,
+
+                        args=args,
+                    )
+
+                # use this indices for cache, if you want to downsample
+                """
+                indices_seed = indices
+                ks_seed = ks
+                scores_seed = scores
+                """
+
         if not args.traverse_from_last_step:
             indices_seed = ks_seed = None
         # if (chunk_size is not None) and ((((i_chunk_tdst + chunk_offset) // block_size_q + 1) % (chunk_size // block_size_q)) == 0):
@@ -4639,7 +4639,7 @@ def masking_step_loop(
         block_access_count,
     )
 
-@nvtx.annotate('hip_masking')
+#@nvtx.annotate('hip_masking')
 def hip_masking(
     q: Tensor, 
     k: Optional[Tensor],
@@ -4922,7 +4922,7 @@ def hip_masking(
         BLOCK_BK = 128
         grid = (B, BDST, triton.cdiv(indices.shape[-1], BLOCK_BK))
         pre_device = torch.get_default_device()
-        torch.set_default_device(indices.device)
+        #torch.set_default_device(indices.device)
         masking_iteration_draft_cuda_epiloge[grid](
             indices, *indices.stride(),
             ks, *ks.stride(),
@@ -4935,7 +4935,7 @@ def hip_masking(
             G,
             BLOCK_BK,
         )
-        torch.set_default_device(pre_device)
+        #torch.set_default_device(pre_device)
         
         ks = ks_count.sum(-1)
         
@@ -5016,7 +5016,7 @@ def hip_masking(
         block_access_count,
     )
 
-@nvtx.annotate('hip_attention')
+#@nvtx.annotate('hip_attention')
 @torch.inference_mode()
 def hip_attention(
     q: Tensor, 
@@ -5143,7 +5143,7 @@ def hip_attention(
         block_access_count=block_access_count,
     )
 
-@nvtx.annotate('paged_hip_attention')
+#@nvtx.annotate('paged_hip_attention')
 def paged_hip_attention(
     q: Tensor,
     softmax_scale: float,
@@ -5228,7 +5228,7 @@ def paged_hip_attention(
         block_access_count=block_access_count,
     )
 
-@nvtx.annotate('varlen_hip_attention')
+#@nvtx.annotate('varlen_hip_attention')
 def varlen_hip_attention(
     q: Tensor,
     softmax_scale: float,
@@ -5270,7 +5270,7 @@ def varlen_hip_attention(
     
     return torch.cat(outs, dim=0)
 
-@nvtx.annotate('paged_varlen_hiop_attention')
+#@nvtx.annotate('paged_varlen_hiop_attention')
 def paged_varlen_hip_attention(
     q: Tensor,
     softmax_scale: float,

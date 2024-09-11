@@ -10,6 +10,7 @@ from tqdm import tqdm
 from transformers import LogitsProcessor, LogitsProcessorList
 
 from hip.dataset.booksum import BookSumDataset
+from hip.dataset.booksum_long import LongBookSumDataset
 from hip.utils import seed, get_bench
 from torch.utils.data import Subset
 
@@ -51,25 +52,26 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     assert hasattr(model, 'config')
     assert hasattr(model.config, 'max_position_embeddings')
 
-    if not args.disable_prompt:
-        if 'llama13b_32k' in args.model.lower():
-            prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {tokenizer.decode(inputs, skip_special_tokens=True)} [/INST]"
-        else:
-            if PROMPT_FIRST_ONLY:
-                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+    if args.job == 'booksum':
+        if not args.disable_prompt:
+            if 'llama13b_32k' in args.model.lower():
+                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {tokenizer.decode(inputs, skip_special_tokens=True)} [/INST]"
             else:
-                prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
-    else:
-        prompt = tokenizer.decode(inputs, skip_special_tokens=True)
-    if prompt.endswith('</s>'):
-        prompt = prompt[:-4]
+                if PROMPT_FIRST_ONLY:
+                    prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)}"
+                else:
+                    prompt = f"Summarize the following text in about 300 words:\n\n{tokenizer.decode(inputs, skip_special_tokens=True)} The summary of previously given text is following."
+        else:
+            prompt = tokenizer.decode(inputs, skip_special_tokens=True)
+        if prompt.endswith('</s>'):
+            prompt = prompt[:-4]
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors='pt',
-        max_length=model.config.max_position_embeddings - args.max_tokens,
-        truncation=True,
-    )['input_ids'][0]
+        inputs = tokenizer(
+            prompt,
+            return_tensors='pt',
+            max_length=model.config.max_position_embeddings - args.max_tokens,
+            truncation=True,
+        )['input_ids'][0]
 
     seq_len = inputs.shape[-1]
     print(f"seq_len: {seq_len}")
@@ -143,14 +145,23 @@ def generate_samples(args, model, tokenizer, device, out_dir):
     if is_vllm:
         # we do not access to tokenizer.
         tokenizer = None
-    
-    dataset = BookSumDataset(
-        tokenizer=tokenizer,
-        for_eval=True,
-        need_tokenization=not is_vllm,
-    )
-    train_idx, test_idx = train_test_split(list(range(len(dataset))), test_size=0.05)
-    test_dataset = Subset(dataset, test_idx)
+
+    if args.job == 'booksum':
+        dataset = BookSumDataset(
+            tokenizer=tokenizer,
+            for_eval=True,
+            need_tokenization=not is_vllm,
+        )
+        _, test_idx = train_test_split(list(range(len(dataset))), test_size=0.05)
+        test_dataset = Subset(dataset, test_idx)
+    elif args.job == 'long_booksum':
+        test_dataset = LongBookSumDataset(
+            tokenizer=tokenizer,
+            for_eval=True,
+            need_tokenization=not is_vllm,
+        )
+    else:
+        raise Exception(f"{args.job} not supported")
 
     outputs = []
 
@@ -170,27 +181,33 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                 ignore_eos=False,
                 skip_special_tokens=True,
             )
-            
-            if 'qwen' in args.model.lower():
-                # Qwen 1.5
-                prompt = \
-                    f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
-                    f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
-                    f'<|im_start|>assistant\n'
-            elif ('llama32k' in args.model.lower()) and 'instruct' not in args.model.lower():
-                # llama2 7b
-                if PROMPT_FIRST_ONLY:
-                    prompt = f"Summarize the following text in about 300 words:\n\n{inputs}"
+
+            if args.job == 'booksum':
+                if 'qwen' in args.model.lower():
+                    # Qwen 1.5
+                    prompt = \
+                        f'<|im_start|>system\nYou are a helpful assistant<|im_end|>\n'\
+                        f'<|im_start|>user\nSummarize the following text in about 300 words:\n\n{inputs}\n<|im_end|>\n'\
+                        f'<|im_start|>assistant\n'
+                elif ('llama32k' in args.model.lower()) and 'instruct' not in args.model.lower():
+                    # llama2 7b
+                    if PROMPT_FIRST_ONLY:
+                        prompt = f"Summarize the following text in about 300 words:\n\n{inputs}"
+                    else:
+                        prompt = f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
+                elif ('llama32k' in args.model.lower) and ('instruct' in args.model.lower()):
+                    # llama2 7b chat
+                    prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
+                elif 'llama13b_32k' in args.model.lower():
+                    # llama2 13b chat
+                    prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
                 else:
-                    prompt = f'Summarize the following text in about 300 words:\n\n{inputs} The summary of previously given text is following.'
-            elif ('llama32k' in args.model.lower) and ('instruct' in args.model.lower()):
-                # llama2 7b chat
-                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
-            elif 'llama13b_32k' in args.model.lower():
-                # llama2 13b chat
-                prompt = f"[INST] <<SYS>>\nSummarize the following text in about 300 words\n<</SYS>>[INST] {inputs} [/INST]"
+                    raise Exception(args.model)
+            elif args.job == 'long_booksum':
+                prompt = inputs
             else:
-                raise Exception(args.model)
+                raise Exception(f"{args.job} not supported")
+
             vllm_outputs = model.generate(
                 prompt, 
                 sampling_params,
@@ -221,11 +238,9 @@ def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
             ids = tokenizer(content, truncation=True, max_length=256).input_ids
             content = tokenizer.decode(ids, skip_special_tokens=True)
             node.write_text(content)
-    
-    rouge_dir = install_rogue()
 
     from pyrouge import Rouge155
-
+    rouge_dir = install_rogue()
     r = Rouge155(rouge_dir=rouge_dir)
     r.system_dir = out_dir  # "system" is the one we want to measure
     r.model_dir = "saves/llama_eval/booksum/reference"  # "model" is the gold standard (i.e. human summaries)
@@ -242,6 +257,9 @@ def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
 @torch.no_grad()
 def job_booksum(args, model, tokenizer, device):
     seed()
+
+    from pyrouge import Rouge155
+    rouge_dir = install_rogue()
 
     out_dir = pathlib.Path(
         f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"

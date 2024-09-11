@@ -282,7 +282,7 @@ def main():
         job_mmlu(args, model, tokenizer, device)
     elif args.job == 'bench_single_layer':
         job_bench_single_layer(args, model, tokenizer, device)
-    elif args.job == 'booksum':
+    elif args.job in ['booksum', 'long_booksum']:
         job_booksum(args, model, tokenizer, device)
     elif args.job == 'merge_lora':
         job_merge_lora(args, model, tokenizer, device)
