@@ -572,7 +572,9 @@ class LlamaFlashAttention2(LlamaAttention):
             args = self.hip_args.clone()
             args.position_ids = position_ids + 1
             
-            if hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx):
+            perform_offload_cache = hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx)
+            
+            if perform_offload_cache:
                 (
                     offload_cache_masking_key_tables, offload_cache_masking_key_banks,
                     offload_cache_sa_key_tables, offload_cache_sa_key_banks,
@@ -591,30 +593,52 @@ class LlamaFlashAttention2(LlamaAttention):
                 args.offload_cache_counters = offload_cache_counters
                 args.offload_cache_kv_heads = key_states.shape[2]
                 args.output_block_access_log = True
-            
-            if self.hip_use_cache:
-                assert self.hip_cache is not None
-                attn_output, attn_metadata = hip_attention_11(
-                    query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
-                    previous_metadata=self.hip_cache,
-                    args=args,
-                )
+
+                if self.hip_use_cache:
+                    assert self.hip_cache is not None
+                    attn_output, attn_metadata = hip_attention_11(
+                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
+                        previous_metadata=self.hip_cache,
+                        args=args,
+                    )
+                else:
+                    scaled_query_states = query_states / (query_states.shape[-1] ** 0.5)
+                    attn_output, attn_metadata = hip_attention_11(
+                        scaled_query_states, key_states, value_states, 
+                        args=args,
+                        mask_only=True,
+                    )
+                    
+                    if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
+                        past_key_value.process_block_access_log(
+                            self.layer_idx,
+                            position_ids,
+                            query_states,
+                            new_key_states,
+                            new_value_states, 
+                            attn_metadata,
+                            not self.hip_use_cache,
+                        )
+                    
+                    # BUG: this output is slightly different..!?
+                    attn_output, _ = hip_attention_11(
+                        scaled_query_states, key_states, value_states, 
+                        args=args,
+                        previous_metadata=attn_metadata,
+                    )
             else:
-                attn_output, attn_metadata = hip_attention_11(
-                    query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
-                    args=args,
-                )
-            
-            if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
-                past_key_value.process_block_access_log(
-                    self.layer_idx,
-                    position_ids,
-                    query_states,
-                    new_key_states,
-                    new_value_states, 
-                    attn_metadata,
-                    not self.hip_use_cache,
-                )
+                if self.hip_use_cache:
+                    assert self.hip_cache is not None
+                    attn_output, attn_metadata = hip_attention_11(
+                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
+                        previous_metadata=self.hip_cache,
+                        args=args,
+                    )
+                else:
+                    attn_output, attn_metadata = hip_attention_11(
+                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
+                        args=args,
+                    )
             
             if self.hip_checkout_cache:
                 self.hip_last_cache = attn_metadata

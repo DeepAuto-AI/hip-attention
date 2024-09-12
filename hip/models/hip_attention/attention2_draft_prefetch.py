@@ -638,6 +638,7 @@ def load_tokens(
             # merge keys and loaded cache
             keys = tl.where(mask_bank_hit, keys_from_cache.to(keys.dtype), keys)
             # update cache if there is uvm-loaded-keys
+            
     else:
         tl.static_assert(not USING_OFFLOAD_CACHE)
         
@@ -3825,7 +3826,11 @@ def block_sparse_attention_cuda_step(
     SIN, stride_sin_t, stride_sin_hid,
     
     pos_tdst,
-    idx_hid, HID: tl.constexpr, BLOCK_TQ, BLOCK_TK,
+    idx_hid, 
+    IS_CAUSAL: tl.constexpr,
+    HID: tl.constexpr, 
+    BLOCK_TQ, 
+    BLOCK_TK,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -3910,16 +3915,21 @@ def block_sparse_attention_cuda_step(
     #     (~(mask_tdst[:, None] & mask_tsrc[None, :]))
     # )
     
-    if EXCLUDE_SLIDING_WINDOW:
-        qk_mask = (
-            ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
-            ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
-            (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-        )
+    if IS_CAUSAL:
+        if EXCLUDE_SLIDING_WINDOW:
+            qk_mask = (
+                ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
+                ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :]) |
+                (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+            )
+        else:
+            qk_mask = (
+                ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
+                ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :]) |
+                (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+            )
     else:
         qk_mask = (
-            ((pos_tdst - 1)[:, None] < idx_tsrc[None, :]) |
-            ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :]) |
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     
@@ -4089,9 +4099,10 @@ def block_sparse_attention_cuda(
     
     TDST_NEXT_POWER_OF_2,
     
-    HID: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    HID: tl.constexpr,
     
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
@@ -4113,13 +4124,20 @@ def block_sparse_attention_cuda(
     else:
         idx_tdst = BLOCK_SIZE_Q * idx_bdst + tl.arange(0, BLOCK_SIZE_Q)
         mask_tdst = idx_tdst < MAX_TDST
-    pos_tdst = tl.load(
-        POS +\
-            idx_bsz * stride_pos_bsz +\
-            idx_tdst * stride_pos_tdst,
-        mask=mask_tdst,
-        other=0,
-    )
+    if IS_CAUSAL:
+        pos_tdst = tl.load(
+            POS +\
+                idx_bsz * stride_pos_bsz +\
+                idx_tdst * stride_pos_tdst,
+            mask=mask_tdst,
+            other=0,
+        )
+    else:
+        pos_tdst = tl.where(
+            mask_tdst,
+            tl.full((BLOCK_SIZE_Q,), value=MAX_TSRC, dtype=tl.int64),
+            0
+        )
     
     idx_hid = tl.arange(0, HID)
     
@@ -4296,7 +4314,9 @@ def block_sparse_attention_cuda(
                     SIN, stride_sin_t, stride_sin_hid,
                     
                     pos_tdst,
-                    idx_hid, HID, 
+                    idx_hid, 
+                    IS_CAUSAL,
+                    HID, 
                     BLOCK_SIZE_Q, 
                     BLOCK_BK * BLOCK_SIZE_K,
                 )
@@ -4425,7 +4445,9 @@ def block_sparse_attention_cuda(
                 SIN, stride_sin_t, stride_sin_hid,
                 
                 pos_tdst,
-                idx_hid, HID, 
+                idx_hid, 
+                IS_CAUSAL,
+                HID, 
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
             )
@@ -4462,8 +4484,6 @@ def block_sparse_attention(
     
     args: "HiPAttentionArgs",
 ):
-    assert args.is_causal, "non causal is not supported yet in sparse attention (masking seems works)"
-    
     if os.getenv('HIP_DEBUG_SA', '0') == '1':
         return block_sparse_attention_pytorch(
             q, k, v, indices, ks, args,
@@ -4549,9 +4569,11 @@ def block_sparse_attention(
         *args.args_offload_cache(is_masking=False),
         
         triton.next_power_of_2(TDST),
-        HID,
+        
+        args.is_causal,
         args.block_size_q,
         args.block_size_k,
+        HID,
         # 2,
         # BLOCK_BK,
         
@@ -4668,7 +4690,8 @@ def block_sparse_attention_pytorch(
         t_q = q[:, i_start_tdst:i_end_tdst]
         score = torch.matmul(t_q.contiguous().permute(0, 2, 1, 3), k.permute(0, 2, 3, 1))
         torch.where(mask, score, torch.tensor(-32000.0, device=mask.device), out=score)
-        torch.where(causal_mask, score, torch.tensor(-32000.0, device=mask.device), out=score)
+        if args.is_causal:
+            torch.where(causal_mask, score, torch.tensor(-32000.0, device=mask.device), out=score)
         probs = torch.softmax(score, dim=-1)
         del score
         context = probs @ v.permute(0, 2, 1, 3)
@@ -5074,6 +5097,10 @@ def hip_masking(
     k: Optional[Tensor],
     args: "HiPAttentionArgs",
 ):
+    if not args.is_causal:
+        assert args.sliding_window_size == 0, 'if bidirectional, you should disable sliding window'
+        assert args.sink_token_size == 0, 'if bidirectional, you should disable sink tokens'
+    
     if args.randomize_mask or (os.getenv('HIP_RANDOM_MASK', '0') == '1'):
         BSZ, TDST, HEAD, HID = q.shape
         if k is not None:
@@ -5094,7 +5121,7 @@ def hip_masking(
         
         indices = torch.rand((N, BDST, BK), dtype=torch.float32, device=q.device)
         
-        seq_lens = args.position_ids[:, min(args.block_stride_q-1, TDST-1)::args.block_size_q]
+        seq_lens = args.position_ids[:, min(args.block_stride_q-1, TDST-1)::args.block_size_q] + args.block_size_q
         assert seq_lens.shape == (BSZ, BDST)
         seq_lens = torch.clamp(seq_lens - args.sliding_window_size, 0, LARGE_INT)
         indices = indices * seq_lens.repeat_interleave(repeats=HEAD, dim=0).unsqueeze(-1)
@@ -5806,7 +5833,7 @@ def paged_varlen_hip_attention(
 
 def main():
     debug_only = True
-    seq_len = 1024 * 16
+    seq_len = 1024 * 4
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
@@ -5854,6 +5881,13 @@ def main():
     # q_quant = q
     # k_quant = k
     
+    # bidirectional out
+    # bi_probs = torch.softmax(q.permute(0, 2, 1, 3) @ k.repeat(1, 1, 4, 1).permute(0, 2, 3, 1), dim=-1)
+    # plt.imshow(bi_probs[0, 0].cpu().float().numpy() ** 0.2)
+    # plt.savefig('dummy_biprob.png')
+    # out = (bi_probs @ v.repeat(1, 1, 4, 1).permute(0, 2, 1, 3)).permute(0, 2, 1, 3)
+    # print(out.shape)
+    
     # num_queries = 1
     # q = q[:, -num_queries:]
     # q_quant = q_quant[:, -num_queries:]
@@ -5876,8 +5910,8 @@ def main():
                 
                 is_causal=True,
                 
-                sliding_window_size=256,
-                sink_token_size=16,
+                sliding_window_size=0,
+                sink_token_size=0,
                 
                 using_extend=False,
                 rope_cos=cos,
@@ -5907,7 +5941,7 @@ def main():
                 q_quant=q_quant,
                 k_quant=k_quant,
                 
-                randomize_mask=True,
+                randomize_mask=False,
                 
                 # NOTE: change this to True to simulate key cache algorithms
                 output_key_access_log=False,
