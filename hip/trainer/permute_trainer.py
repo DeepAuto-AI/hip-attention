@@ -43,6 +43,8 @@ class Trainer:
         self,
         model: str,
         stride: int,
+        name: str, 
+        lr: float,
     ):
         self.model_id = {
             'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
@@ -50,6 +52,7 @@ class Trainer:
             'llama2_1b': 'princeton-nlp/Sheared-LLaMA-1.3B'
         }[model]
         
+        self.name = name
         self.stride = stride
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_id)
         self.dataset = RedPajamaDataset(self.tokenizer, self.stride)
@@ -77,7 +80,7 @@ class Trainer:
         
         self.optimiezr = torch.optim.AdamW(
             params=[p for p in self.student.parameters() if p.requires_grad],
-            lr=1e-4,
+            lr=lr,
         )
         self.scaler = torch.GradScaler()
 
@@ -151,8 +154,8 @@ class Trainer:
             tqdm.write(f'loss: {loss.item():.6f} {loss_kd_logit.item():.6f} {loss_kd_hidden:.6f} {loss_model.item():.6f}')        
 
     def save(self):
-        os.makedirs('./saves/checkpoint/dev', exist_ok=True)
-        path = './saves/checkpoint/dev/checkpoint.pth'
+        os.makedirs(f'./saves/checkpoint/{self.name}', exist_ok=True)
+        path = f'./saves/checkpoint/{self.name}/checkpoint.pth'
         torch.save({
             'current_step': self.current_step,
             'current_epoch': self.current_epoch,
@@ -181,5 +184,21 @@ class Trainer:
             self.evaluate()
 
 if __name__ == '__main__':
-    tr = Trainer()
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--stride', type=int, default=2048)
+    parser.add_argument('--model', type=str, default='llama2_1b')
+    parser.add_argument('--name', type=str, default='dev')
+    parser.add_argument('--lr', type=float, default=1e-4)
+    args = parser.parse_args()
+    
+    print(args)
+    
+    tr = Trainer(
+        model=args.model,
+        stride=args.stride,
+        name=args.name,
+        lr=args.lr,
+    )
     tr.main()
