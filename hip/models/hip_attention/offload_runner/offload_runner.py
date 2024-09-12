@@ -267,8 +267,22 @@ class StaticCache(Cache):
             
             # this cache is updateable
             # in table, last slot is trash
-            self.masking_key_tables = torch.full((self.num_caches, self.max_seq_len // self.block_size_k + 1), dtype=torch.uint16, device=device, fill_value=self.offload_cache_null_pointer)
-            self.masking_key_banks = torch.zeros((self.num_caches, self.cache_budget, self.block_size_k, self.head_dim), dtype=self.offload_cache_dtype, device=device)
+            self.masking_key_tables = torch.full(
+                (self.num_caches, self.max_seq_len // self.block_size_k + 1), 
+                dtype=torch.uint16, 
+                device=device, 
+                fill_value=self.offload_cache_null_pointer
+            )
+            self.masking_key_banks = torch.zeros(
+                (self.num_caches, self.cache_budget, self.block_size_k, self.head_dim), 
+                dtype=self.offload_cache_dtype, 
+                device=device
+            )
+            self.masking_key_bank_stats = torch.zeros(
+                (self.num_caches, self.cache_budget, 1), 
+                dtype=torch.int32, 
+                device=device
+            ) # Tuple[accessed]
             
             # this caches are protected
             self.sa_key_tables = torch.full((self.num_caches, self.max_seq_len // self.block_size_k + 1), dtype=torch.uint16, device=device, fill_value=self.offload_cache_null_pointer)
@@ -343,6 +357,7 @@ class StaticCache(Cache):
         
         masking_key_tables = get_layer(self.masking_key_tables)
         masking_key_banks = get_layer(self.masking_key_banks)
+        masking_key_bank_stats = get_layer(self.masking_key_bank_stats)
         
         sa_key_tables = get_layer(self.sa_key_tables)
         sa_key_banks = get_layer(self.sa_key_banks)
@@ -352,7 +367,7 @@ class StaticCache(Cache):
         counters = get_layer(self.counters)
         
         return (
-            masking_key_tables, masking_key_banks,
+            masking_key_tables, masking_key_banks, masking_key_bank_stats,
             sa_key_tables, sa_key_banks,
             sa_value_tables, sa_value_banks,
             counters

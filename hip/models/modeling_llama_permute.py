@@ -288,14 +288,14 @@ class PermuteMLP(nn.Module):
         super().__init__()
         assert not bias
         self.in_rank = in_ch
-        self.center_rank = max(in_ch, out_ch)
+        self.center_rank = min(in_ch, out_ch)
         self.out_rank = out_ch
         
         self.in_low_rank = max(self.in_rank, self.center_rank) // 8
         self.out_low_rank = max(self.center_rank, self.out_rank) // 8
         
         self.in_a = nn.Parameter(torch.empty(self.in_low_rank, self.in_rank))
-        self.in_b = nn.Parameter(torch.empty(self.center_rank, self.low_rank))
+        self.in_b = nn.Parameter(torch.empty(self.center_rank, self.in_low_rank))
         
         self.center_p = nn.Parameter(torch.empty((self.center_rank, self.center_rank)))
         self.center_sinkhorn_k = 7
@@ -306,9 +306,11 @@ class PermuteMLP(nn.Module):
         self.init_weight()
         
         self.is_hard = False
+        
+        self.to(weight.device)
     
     def init_weight(self):
-        for p in range(self.parameters()):
+        for p in self.parameters():
             torch.nn.init.kaiming_uniform_(p, a=math.sqrt(5))
     
     def set_sparse_mode(self, is_hard):
@@ -318,7 +320,7 @@ class PermuteMLP(nn.Module):
         x = F.linear(x, self.in_a, None)
         x = F.linear(x, self.in_b, None)
         
-        x = F.linear(x, sinkhorn(self.center_p), None)
+        x = F.linear(x, sinkhorn(self.center_p, self.center_sinkhorn_k), None)
         
         x = F.linear(x, self.out_a, None)
         x = F.linear(x, self.out_b, None)
@@ -742,7 +744,7 @@ class LlamaDecoderLayer(nn.Module):
 
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
-        self.mlp = LlamaMLP(config)
+        self.mlp = LlamaMLP(config, layer_idx)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -1035,6 +1037,9 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
+        
+        if self.gradient_checkpointing and self.training:
+            hidden_states.requires_grad_(True)
 
         for decoder_layer in self.layers:
             if output_hidden_states:
