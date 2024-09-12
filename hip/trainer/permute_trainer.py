@@ -41,6 +41,7 @@ import torch.nn.functional as F
 class Trainer:
     def __init__(self):
         self.model_id = 'meta-llama/Meta-Llama-3.1-8B'
+        self.model_id = 'nvidia/Llama-3.1-Minitron-4B-Width-Base'
         
         self.stride = 1024
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_id)
