@@ -330,9 +330,9 @@ class StaticCache(Cache):
         self.prompt_copy_stream = torch.cuda.Stream(self.device)
         self.prompt_copy_threads: List[threading.Thread] = []
         
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
+        # torch.cuda.synchronize()
+        # gc.collect()
+        # torch.cuda.empty_cache()
     
     def has_offload_cache(self, layer_idx: int):
         return self.using_offload_cache
@@ -989,17 +989,7 @@ class Runner:
         input_ids = input_ids.repeat(item_repeat, 1)
         bsz, context_len = input_ids.shape
         
-        prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
-        for _ in range(n_prefill_warmup):
-            self.model(
-                input_ids=input_ids[0:0+1], 
-                position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-                cache_position=prompt_cache_pos, 
-                past_key_values=None,
-                use_cache=False,
-                num_logits_to_keep=1,
-            )
-        
+        slack_memory = torch.empty((1 * 1024 * 1024 * 1024), dtype=torch.uint8, device=self.model.device)
         cache = StaticCache(
             self.model.config,
             max_batch_size=bsz,
@@ -1013,6 +1003,18 @@ class Runner:
             sliding_window_size=self.hip_args.sliding_window_size,
             cache_size=self.kv_offload_cache_size,
         )
+        
+        prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
+        for _ in range(n_prefill_warmup):
+            with torch.autocast('cuda', torch.float16):
+                self.model(
+                    input_ids=input_ids[0:0+1], 
+                    position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
+                    cache_position=prompt_cache_pos, 
+                    past_key_values=None,
+                    use_cache=False,
+                    num_logits_to_keep=1,
+                )
         
         # compile decode step
         decode_input_ids = torch.zeros((bsz, 1), dtype=torch.long, device=self.model.device)
@@ -1033,6 +1035,7 @@ class Runner:
         decode_cache_pos.fill_(context_len)
         decoded_tokens = []
         
+        del slack_memory
         torch.cuda.synchronize()
         
         event_prefill_start = torch.cuda.Event(True)
@@ -1048,13 +1051,14 @@ class Runner:
             if isinstance(module, LlamaAttention):
                 module.prompt_batch_index = ibatch
         cache.prompt_start()
-        prompt_output = self.model(
-            input_ids=input_ids[ibatch:ibatch+1], 
-            position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-            cache_position=prompt_cache_pos, 
-            past_key_values=cache,
-            num_logits_to_keep=1,
-        )
+        with torch.autocast('cuda', torch.float16):
+            prompt_output = self.model(
+                input_ids=input_ids[ibatch:ibatch+1], 
+                position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
+                cache_position=prompt_cache_pos, 
+                past_key_values=cache,
+                num_logits_to_keep=1,
+            )
         cache.prompt_end()
         
         for _ in range(bsz):
