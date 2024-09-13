@@ -123,7 +123,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                 loss_sum += outputs.loss * prompt_ids.shape[-1]
                                 loss_count += prompt_ids.shape[-1]
                                 tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
-                                for curr_idx in tqdm(range(decode_ids.shape[-1]), dynamic_ncols=True):
+                                
+                                for curr_idx in tqdm(range(decode_ids.shape[-1]-1), dynamic_ncols=True):
                                     curr_token = decode_ids[:, curr_idx:curr_idx+1]
                                     if args.method == 'tova':
                                         position_ids = torch.arange(
@@ -155,19 +156,25 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     loss_sum += loss * curr_token.shape[-1]
                                     loss_count += curr_token.shape[-1]
                                     tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                    
                                 for m in model.modules():
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
+                                final_loss = loss_sum / loss_count
+                                samples.append(final_loss)
+                                pbar_sample.set_description(
+                                    f'ppl: {torch.exp(torch.stack(nlls + [final_loss.cpu()]).mean()).item():.6f}'
+                                )
                             else:
                                 outputs = model(
                                     input_ids,
                                     labels=target_ids,
                                     output_logits=False,
                                 )
-                            samples.append(outputs.loss)
-                            pbar_sample.set_description(
-                                f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
-                            )
+                                samples.append(outputs.loss)
+                                pbar_sample.set_description(
+                                    f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
+                                )
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
