@@ -57,7 +57,6 @@ logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
-
 def _prepare_4d_causal_attention_mask_with_cache_position(
     attention_mask: torch.Tensor,
     sequence_length: int,
@@ -576,14 +575,15 @@ class LlamaFlashAttention2(LlamaAttention):
             
             if perform_offload_cache:
                 (
-                    offload_cache_masking_key_tables, offload_cache_masking_key_banks,
-                    offload_cache_sa_key_tables, offload_cache_sa_key_banks,
-                    offload_cache_sa_value_tables, offload_cache_sa_value_banks,
+                    offload_cache_masking_key_tables, offload_cache_masking_key_banks, offload_cache_masking_bank_stats,
+                    offload_cache_sa_key_tables, offload_cache_sa_key_banks, offload_sa_key_bank_stats,
+                    offload_cache_sa_value_tables, offload_cache_sa_value_banks, offload_sa_key_bank_stats,
                     offload_cache_counters,
                 ) = past_key_value.get_offload_cache(self.layer_idx)
                 
                 args.offload_cache_mask_k_tables = offload_cache_masking_key_tables
                 args.offload_cache_mask_k_banks = offload_cache_masking_key_banks
+                args.offload_cache_mask_k_bank_stats = offload_cache_masking_bank_stats
                 
                 args.offload_cache_sa_k_tables = offload_cache_sa_key_tables
                 args.offload_cache_sa_k_banks = offload_cache_sa_key_banks
