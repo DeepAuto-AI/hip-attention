@@ -131,7 +131,7 @@ def load_pretrained_model(model_path, model_base, model_name, use_hip_attn=True,
                         m.tree_block_size_k = int(os.getenv('TREE_BLOCK_SIZE_K', 2))
                         m.tree_block_stride_k = int(os.getenv('TREE_BLOCK_STRIDE_K', 1))
                         m.tree_dense_layers = []
-                        if m.attention_method == 'hip':
+                        if m.attention_method == 'hip' or m.attention_method == 'hyper_attention':
                             # for llava-13b
                             m.tree_dense_layers = [0, 1, 2, 3]
                         # parameter check by ywlee
