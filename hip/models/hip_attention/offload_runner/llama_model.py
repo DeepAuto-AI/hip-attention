@@ -593,6 +593,7 @@ class LlamaFlashAttention2(LlamaAttention):
                 args.offload_cache_counters = offload_cache_counters
                 args.offload_cache_kv_heads = key_states.shape[2]
                 args.output_block_access_log = True
+                args.output_key_access_log = False
 
                 if self.hip_use_cache:
                     assert self.hip_cache is not None

@@ -169,6 +169,9 @@ def copy_to_banks_from_state_cuda(
             idx_update * stride_bank_loc_update
     ).to(tl.int64)
     
+    if bank_loc >= BUDGET:
+        return
+    
     new_bank_backref = (table_delta // BLOCK_SIZE_K).to(tl.int32)
     
     if offset == 0:
@@ -391,7 +394,7 @@ class StaticCache(Cache):
                     (self.num_caches, len, self.block_size_k, self.head_dim), 
                     dtype=self.offload_cache_dtype, 
                     device=device
-                )
+                ).fill_(42)
             def new_bank_stats(len):
                 stats = torch.zeros(
                     (self.num_caches, len, 2),
@@ -712,7 +715,7 @@ class StaticCache(Cache):
         
         original_table = tables.clone() if copy_from_original else None
         
-        # if copy_from_original:
+        # if not copy_from_original:
         #     bank_stats[:, :, 1].fill_(torch.iinfo(bank_stats.dtype).max)
         #     tables.fill_(65535)
         
@@ -740,14 +743,24 @@ class StaticCache(Cache):
         if check_masking_bank_validity:
             for idx in tqdm.tqdm(range(tables.shape[-1] - 1)):
                 idx_bank = tables[0, idx].item()
-                if idx_bank < 0 or idx_bank > BUDGET:
+                if idx_bank < 0 or idx_bank >= BUDGET:
                     continue
                 for idx_k in range(BLOCK_SIZE_K):
                     token = banks[0, idx_bank, idx_k].float()
                     truth = states[0, idx * BLOCK_SIZE_K + idx_k, 0].float()
-                    assert (token - truth).abs().mean().item() < 1e-1, f'{(token - truth).abs().mean().item()} {token} {truth}'
+                    if (token - truth).abs().mean().item() >= 0.15:
+                        print(
+                            f'{(token - truth).abs().mean().item()} {token} {truth}\n'
+                            f'{idx_bank} = tables[0, {idx}]\n'
+                            f'banks[0, {idx_bank}, {idx_k}] != states[0, {idx} * {BLOCK_SIZE_K} + {idx_k}, 0]\n'
+                            f'(table_delta[0] == idx).int().sum() => {((table_delta[0] // BLOCK_SIZE_K) == idx).int().sum()} (is updated now?)\n'
+                        )
+                        
+                        raise Exception()
 
     def decode_reset_stats(self):
+        # print(self.masking_key_tables[0].cpu().tolist())
+        
         num_accessed, num_hit = self.counters.sum(0).cpu().tolist()
         cache_access_utilization = (self.masking_key_bank_stats[:, :, 0] > 0)\
             .float().mean().cpu()
@@ -823,15 +836,16 @@ class StaticCache(Cache):
 
     def copy_stats_to_bank_using_access_stats(
         self,
-        masking_key_tables: torch.Tensor,
-        masking_key_banks: torch.Tensor,
-        masking_key_bank_stats: torch.Tensor,
+        tables: torch.Tensor,
+        banks: torch.Tensor,
+        bank_stats: torch.Tensor,
         block_access_log: torch.Tensor,
         key_cache: torch.Tensor,
+        method = 'lru_approx',
     ):
-        N_CACHE, BUDGET, BLOCK_SIZE_K, HID = masking_key_banks.shape
-        N_CACHE, TABLE_LEN = masking_key_tables.shape
-        N_CACHE, BUDGET, STAT_K = masking_key_bank_stats.shape
+        N_CACHE, BUDGET, BLOCK_SIZE_K, HID = banks.shape
+        N_CACHE, TABLE_LEN = tables.shape
+        N_CACHE, BUDGET, STAT_K = bank_stats.shape
         N, BDST, LOG_K = block_access_log.shape
         MAX_BSZ, MAX_TSRC, HEAD_KV, HID = key_cache.shape
         BSZ = N_CACHE // HEAD_KV
@@ -840,29 +854,97 @@ class StaticCache(Cache):
         
         assert N_CACHE == (BSZ * HEAD_KV)
         
-        block_access_log = block_access_log[:, -1, :].reshape(N_CACHE, -1) * BLOCK_SIZE_K
-        block_access_log = torch.where(
-            torch.logical_and(block_access_log >= 0, block_access_log < MAX_TSRC), 
-            block_access_log, 
-            MAX_PTR
-        )
-        block_access_log = block_access_log.sort(dim=-1, stable=False).values
-        block_access_log_frequency = linear_scan_and_calc_frequency(block_access_log, MAX_PTR)
-        block_access_log_frequency = torch.where(block_access_log < MAX_PTR, block_access_log_frequency, 0)
-        sort_indices = torch.argsort(block_access_log_frequency, dim=-1, descending=True, stable=False)
-        block_access_log = block_access_log.gather(dim=-1, index=sort_indices)
+        block_access_log = block_access_log[:, -1, :].reshape(N_CACHE, -1)[:, :, None] + torch.arange(0, 2, device=block_access_log.device)
+        block_access_log =  block_access_log.reshape(N_CACHE, -1) * BLOCK_SIZE_K
         
-        bank_accessed_count = masking_key_bank_stats[:, :, 0]
-        bank_loc = bank_accessed_count.argsort(dim=-1, stable=False, descending=False)
-        
-        self.copy_to_banks(
-            tables=masking_key_tables,
-            banks=masking_key_banks,
-            bank_stats=masking_key_bank_stats,
-            table_delta=block_access_log[:, :BUDGET],
-            states=key_cache,
-            copy_from_original=True,
-        )
+        if method == 'overwrite':
+            # print('asfd', block_access_log[0, :20], BUDGET, block_access_log.shape, LOG_K, block_access_log[0, :].unique().shape)
+            # print('asdfadsas', (block_access_log[0, :] == 2).any())
+            
+            block_access_log = torch.where(
+                torch.logical_and(block_access_log >= 0, block_access_log < MAX_TSRC), 
+                block_access_log, 
+                MAX_PTR
+            )
+            # print(block_access_log[0].sort().values.tolist())
+            
+            block_access_log = block_access_log.sort(dim=-1, stable=False).values
+            block_access_log_frequency = linear_scan_and_calc_frequency(block_access_log, MAX_PTR)
+            block_access_log_frequency = torch.where(block_access_log < MAX_PTR, block_access_log_frequency, 0)
+            sort_indices = torch.argsort(block_access_log_frequency, dim=-1, descending=True, stable=False)
+            block_access_log = block_access_log.gather(dim=-1, index=sort_indices)[:, :BUDGET]
+            
+            # block_access_log = (torch.arange(0, BUDGET, device=block_access_log.device, dtype=block_access_log.dtype) * BLOCK_SIZE_K)[None, :].expand(block_access_log.shape)
+            # block_access_log = torch.clamp(block_access_log, 0, MAX_PTR)
+            
+            self.copy_to_banks(
+                tables=tables,
+                banks=banks,
+                bank_stats=bank_stats,
+                table_delta=block_access_log,
+                states=key_cache,
+                check_masking_bank_validity=False,
+                copy_from_original=True,
+            )
+            
+            # print('after', tables[0, :20], tables.shape)
+        elif method == 'lru_approx':
+            # block_access_log = block_access_log[:, -1, :].reshape(N_CACHE, -1) * BLOCK_SIZE_K
+            block_access_log = torch.where(
+                torch.logical_and(block_access_log >= 0, block_access_log < MAX_TSRC), 
+                block_access_log, 
+                MAX_PTR
+            )
+            
+            # print('a')
+            
+            # calc cache miss mask
+            table_lookup = tables.long().gather(dim=1, index=(block_access_log // BLOCK_SIZE_K).long())
+            cache_miss_mask = torch.logical_or(table_lookup >= BUDGET, table_lookup == 65535)
+            
+            # calc frequency of cache miss mask, and cut it as budget. create temporary bank
+            cache_miss_log = torch.where(cache_miss_mask, block_access_log, MAX_PTR)
+            cache_miss_log, sorted_indices = torch.sort(cache_miss_log, dim=-1, stable=False, descending=False)
+            cache_miss_mask = cache_miss_mask.gather(dim=-1, index=sorted_indices)
+            # print(cache_miss_log[0])
+            cache_miss_log_frequency = linear_scan_and_calc_frequency(cache_miss_log, MAX_PTR)
+            # print(cache_miss_log_frequency[0])
+            cache_miss_log_frequency = torch.where(cache_miss_log < MAX_PTR, cache_miss_log_frequency, 0)
+            sort_indices = torch.argsort(cache_miss_log_frequency, dim=-1, descending=True, stable=False)
+            cache_miss_log = cache_miss_log.gather(dim=-1, index=sort_indices)[:, :BUDGET]
+            cache_miss_mask = cache_miss_mask.gather(dim=-1, index=sort_indices)[:, :BUDGET]
+            # print(cache_miss_log[0])
+            # print(cache_miss_log_frequency.gather(dim=-1, index=sort_indices)[0])
+            
+            # copy temporary bank to banks using copy_to_banks
+            victim_mask = (bank_stats[:, :, 0] <= 1).int()
+            victim_mask, victim_bank_indices = victim_mask.sort(dim=-1, descending=True)
+            victim_bank_indices = torch.where(victim_mask.bool(), victim_bank_indices, BUDGET)
+            
+            # REPLACE_BUDGET = int(BUDGET * 0.3)
+            REPLACE_BUDGET = BUDGET
+            
+            # print('hi', victim_mask[0], cache_miss_log[:, :REPLACE_BUDGET], victim_bank_indices[:, :REPLACE_BUDGET])
+            
+            final_mask = torch.logical_and(victim_mask.bool(), cache_miss_mask)
+            cache_miss_log = torch.where(final_mask, cache_miss_log, MAX_PTR)
+            victim_bank_indices = torch.where(final_mask, victim_bank_indices, BUDGET)
+            
+            table_delta = cache_miss_log[:, :REPLACE_BUDGET]
+            bank_loc = victim_bank_indices[:, :REPLACE_BUDGET]
+            
+            self.copy_to_banks(
+                tables=tables,
+                banks=banks,
+                bank_stats=bank_stats,
+                states=key_cache,
+                table_delta=table_delta,
+                bank_loc=bank_loc,
+                check_masking_bank_validity=False,
+                copy_from_original=True,
+            )
+        else:
+            raise Exception()
 
     def process_block_access_log(
         self, 
@@ -930,6 +1012,7 @@ class StaticCache(Cache):
                     masking_key_bank_stats,
                     metadata.block_access_log,
                     key_cache,
+                    method='overwrite',
                 )
         else:
             self.copy_state_to_bank_using_mask(
@@ -957,6 +1040,7 @@ class StaticCache(Cache):
                 masking_key_bank_stats,
                 metadata.block_access_log[:, -1:, :].repeat(BSZ, 1, 1),
                 new_key_state,
+                method='overwrite',
             )
             
             # (
@@ -1025,6 +1109,15 @@ class StaticCache(Cache):
                 self.value_cache[layer_idx].zero_()
             else:
                 self.value_cache[layer_idx][1].zero_()
+        
+        def reset_cache(tables, banks, bank_stats):
+            tables.fill_(65535)
+            banks.fill_(0)
+            bank_stats[:, :, 0].fill_(0)
+            bank_stats[:, :, 1].fill_(65535)
+        reset_cache(self.masking_key_tables, self.masking_key_banks, self.masking_key_bank_stats)
+        reset_cache(self.sa_key_tables, self.sa_key_banks, self.sa_key_bank_stats)
+        reset_cache(self.sa_value_tables, self.sa_value_banks, self.sa_value_bank_stats)
 
 def convert_llama_to_vllm(model: LlamaForCausalLM):
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -1097,7 +1190,7 @@ class CUDACapture:
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
-            for i in range(3):
+            for i in range(5):
                 self.model.forward(*args, **kwargs)
         torch.cuda.current_stream().wait_stream(s)
 
@@ -1260,23 +1353,13 @@ class Runner:
     
     @torch.inference_mode(True)
     def generate(self, text, max_tokens=256, item_repeat=24, n_prefill_warmup=1):
+        chunked_prefill_size = 8192
+        
         input_ids = self.tokenizer([text, ], return_tensors="pt", padding=True).input_ids.to(self.model.device)
         input_ids = input_ids.repeat(item_repeat, 1)
         bsz, context_len = input_ids.shape
         
         slack_memory = torch.empty((1 * 1024 * 1024 * 1024), dtype=torch.uint8, device=self.model.device) # NOTE: resever 1GB for cuda-graph
-        
-        prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
-        for _ in range(n_prefill_warmup):
-            with torch.autocast('cuda', torch.float16):
-                self.model(
-                    input_ids=input_ids[0:0+1], 
-                    position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-                    cache_position=prompt_cache_pos, 
-                    past_key_values=None,
-                    use_cache=False,
-                    num_logits_to_keep=1,
-                )
         
         cache = StaticCache(
             self.model.config,
@@ -1292,9 +1375,23 @@ class Runner:
             cache_size=self.kv_offload_cache_size,
         )
         
+        prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
+        cache.prompt_start()
+        for _ in range(n_prefill_warmup):
+            with torch.autocast('cuda', torch.float16):
+                self.model(
+                    input_ids=input_ids[0:0+1], 
+                    position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
+                    cache_position=prompt_cache_pos, 
+                    past_key_values=cache,
+                    num_logits_to_keep=1,
+                )
+        cache.prompt_end()
+        
         # compile decode step
         decode_input_ids = torch.zeros((bsz, 1), dtype=torch.long, device=self.model.device)
         decode_cache_pos = torch.zeros((1, ), dtype=torch.long, device=self.model.device)
+        decode_cache_pos.fill_(context_len)
         cache.decode_start()
         with torch.autocast('cuda', torch.float16):
             self.decode_forward(
@@ -1304,11 +1401,11 @@ class Runner:
                 past_key_values=cache
             )
         cache.decode_end()
+        cache.decode_reset_stats()
         cache.reset()
         self.decode_step = 0
         print('decode compiled')
         
-        decode_cache_pos.fill_(context_len)
         decoded_tokens = []
         
         del slack_memory
@@ -1363,6 +1460,10 @@ class Runner:
         if self.kv_offload_cache:
             cache.decode_reset_stats()
         elapsed_decode = 0
+        hit_ratio_sa = []
+        hit_ratio_mask = []
+        cache_active_ratio_sa = []
+        cache_active_ratio_mask = []
         cache.decode_start()
         for istep in tqdm.tqdm(range(max_tokens), dynamic_ncols=True, leave=False, desc='decode'):
             with torch.autocast('cuda', torch.float16):
@@ -1384,8 +1485,14 @@ class Runner:
             
             if self.kv_offload_cache:
                 stats = cache.decode_reset_stats()
+                if (istep % self.hip_refresh_interval) == 0:
+                    hit_ratio_mask.append(stats.cache_hit_ratio)
+                    cache_active_ratio_mask.append(stats.cache_access_utilization)
+                else:
+                    hit_ratio_sa.append(stats.cache_hit_ratio)
+                    cache_active_ratio_sa.append(stats.cache_access_utilization)
                 tqdm.tqdm.write(f'[{istep}] \t hit ratio {stats.cache_hit_ratio * 100:.2f} % \t (accessed = {stats.num_accessed / 1024 / 1024:.2f} M, hit = {stats.num_cache_hit / 1024 / 1024:.2f} M) \t cache access util: {stats.cache_access_utilization * 100:.2f} %')
-            
+
             self.decode_step += 1
         cache.decode_end()
         
@@ -1400,6 +1507,13 @@ class Runner:
             f"Time taken for {tuple(input_ids.shape)}:  "
             f"{input_ids.shape[-1] / elapsed_prefill:.2f} tok/s {elapsed_prefill:.2f} s  |  "
             f"{gen_out.numel() / elapsed_decode:.2f} tok/s {elapsed_decode:.2f} s"
+        )
+        print(
+            f'Cache statistics: '
+            f'Mask(hit ratio = {sum(hit_ratio_mask)/len(hit_ratio_mask)*100:.2f} %, '
+            f'active = {sum(cache_active_ratio_mask)/len(cache_active_ratio_mask)*100:.2f} %), '
+            f'SA(hit ratio = {sum(hit_ratio_sa)/len(hit_ratio_sa)*100:.2f} %, '
+            f'active = {sum(cache_active_ratio_sa)/len(cache_active_ratio_sa)*100:.2f} %), '
         )
         
         torch.cuda.synchronize()

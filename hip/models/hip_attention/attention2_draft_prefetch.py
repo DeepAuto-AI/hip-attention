@@ -799,13 +799,15 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     NUM_CALIB: tl.constexpr = 32
 ):
     if BLOCK_ACCESS_LOG is not None:
-        mask_block_access = dupped_mask
+        list_block_access = dupped_indices_for_keys
+        mask_block_access = dupped_mask & (list_block_access < tl.cdiv(MAX_TSRC, BLOCK_SIZE_K))
+        
         len_block_access = tl.sum(mask_block_access.to(tl.int32))
         block_access_location = tl.atomic_add(
             BLOCK_ACCESS_COUNT +\
                 idx_b * stride_block_access_count_b +\
                 idx_bdst * stride_block_access_count_bdst,
-            val=len_block_access
+            val=len_block_access,
         )
         idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
         tl.store(
@@ -814,7 +816,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_bdst * stride_block_access_log_bdst +\
                 idx_block_access * stride_block_access_log_t,
             mask=mask_block_access,
-            value=dupped_indices_for_keys,
+            value=list_block_access,
         )
     
     idx_tsrc = (
@@ -4075,7 +4077,7 @@ def perf_model_block_sparse_attention(**kwargs):
     ],
     prune_configs_by={
         'perf_model': perf_model_block_sparse_attention,
-        'top_k': 36,
+        'top_k': 24,
     }
 )
 @triton.jit
