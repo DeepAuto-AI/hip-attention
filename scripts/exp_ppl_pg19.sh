@@ -15,16 +15,16 @@ echo "--------------------------------------------------------------------------
 
 if [ "$METHOD" == "hip" ]; then
 echo run hip
-python hip/main/model_eval.py --method hip --model llama3.1_8b --stride $seq --dataset pg19 --block_size_q 64 --block_stride_q 2 --block_size_k 2 --block_stride_k 1 --k 512
+python hip/main/model_eval.py --method hip --model llama3.1_8b --stride $seq --dataset pg19 --block_size_q 64 --block_stride_q 2 --block_size_k 2 --block_stride_k 1 --k 512 --overwrite
 elif [ "${METHOD}" == "fa2" ]; then
 echo run fa2
-python hip/main/model_eval.py --method fa2 --model llama3.1_8b --stride $seq --dataset pg19
+python hip/main/model_eval.py --method fa2 --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
 elif [ "${METHOD}" == "streaming_llm" ]; then
 echo run streaming llm
-python hip/main/model_eval.py --method streaming_llm --model llama3.1_8b --stride $seq --dataset pg19
+python hip/main/model_eval.py --method streaming_llm --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
 elif [ "${METHOD}" == "bigbird" ]; then
 echo run bigbird
-HIP_RANDOM_MASK=1 python hip/main/model_eval.py --method hip --model llama3.1_8b --stride $seq --dataset pg19 --block_size_q 64 --block_stride_q 2 --block_size_k 2 --block_stride_k 1 --k 512
+HIP_RANDOM_MASK=1 python hip/main/model_eval.py --method hip --model llama3.1_8b --stride $seq --dataset pg19 --block_size_q 64 --block_stride_q 2 --block_size_k 2 --block_stride_k 1 --k 512 --overwrite
 else
 echo "*******************"
 echo " UNKNOWN METHOD \"${METHOD}\", please set METHOD and MODEL env-var"
