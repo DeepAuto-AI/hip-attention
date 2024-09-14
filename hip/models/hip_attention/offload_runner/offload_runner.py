@@ -1403,7 +1403,7 @@ class Runner:
                 m.hip_prefix_query\
                     .copy_(last_query\
                         .repeat_interleave(
-                            max_batch_size // m.hip_last_query.shape[1], 0
+                            max_batch_size // m.hip_last_query.shape[0], 0
                         )
                     )
     
