@@ -761,20 +761,27 @@ class StaticCache(Cache):
 
     def decode_reset_stats(self):
         # print(self.masking_key_tables[0].cpu().tolist())
-        
-        num_accessed, num_hit = self.counters.sum(0).cpu().tolist()
-        cache_access_utilization = (self.masking_key_bank_stats[:, :, 0] > 0)\
-            .float().mean().cpu()
-        
-        self.counters.fill_(0)
-        self.masking_key_bank_stats[:, :, 0].fill_(0)
-        
-        return DecodeStats(
-            num_accessed=num_accessed,
-            num_cache_hit=num_hit,
-            cache_hit_ratio=num_hit / (num_accessed + 1e-20),
-            cache_access_utilization=cache_access_utilization,
-        )
+        if self.using_offload_cache:
+            num_accessed, num_hit = self.counters.sum(0).cpu().tolist()
+            cache_access_utilization = (self.masking_key_bank_stats[:, :, 0] > 0)\
+                .float().mean().cpu()
+            
+            self.counters.fill_(0)
+            self.masking_key_bank_stats[:, :, 0].fill_(0)
+            
+            return DecodeStats(
+                num_accessed=num_accessed,
+                num_cache_hit=num_hit,
+                cache_hit_ratio=num_hit / (num_accessed + 1e-20),
+                cache_access_utilization=cache_access_utilization,
+            )
+        else:
+            return DecodeStats(
+                num_accessed=0,
+                num_cache_hit=0,
+                cache_hit_ratio=0,
+                cache_access_utilization=0,
+            )
     
     def copy_state_to_bank_using_mask(
         self, 

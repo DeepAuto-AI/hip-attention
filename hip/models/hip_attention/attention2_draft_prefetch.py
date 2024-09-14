@@ -5166,6 +5166,8 @@ def hip_masking(
         assert args.sink_token_size == 0, 'if bidirectional, you should disable sink tokens'
     
     if args.randomize_mask or (os.getenv('HIP_RANDOM_MASK', '0') == '1'):
+        warnings.warn('BigBird simulated with HiP kernel')
+        
         BSZ, TDST, HEAD, HID = q.shape
         if k is not None:
             _, _, HEAD_KV, HID = k.shape
