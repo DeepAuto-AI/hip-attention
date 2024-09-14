@@ -5188,7 +5188,11 @@ def hip_masking(
         indices = torch.rand((N, BDST, BK), dtype=torch.float32, device=q.device)
         
         seq_lens = args.position_ids[:, min(args.block_stride_q-1, TDST-1)::args.block_size_q] + args.block_size_q
-        assert seq_lens.shape == (BSZ, BDST), f'{seq_lens.shape} == ({BSZ}, {BDST})'
+        
+        if (args.position_ids.shape[-1] % args.block_size_q) < (args.block_stride_q - 1):
+            seq_lens = torch.cat([seq_lens, args.position_ids[:, -1:] + args.block_size_q], dim=1)
+        
+        assert seq_lens.shape == (BSZ, BDST), f'{seq_lens.shape} == ({BSZ}, {BDST}), {args.position_ids}, {args.block_size_q}'
         seq_lens = torch.clamp(seq_lens - args.sliding_window_size, 0, LARGE_INT)
         indices = indices * seq_lens.repeat_interleave(repeats=HEAD, dim=0).unsqueeze(-1)
         indices = indices.long() // args.block_size_k * args.block_size_k
