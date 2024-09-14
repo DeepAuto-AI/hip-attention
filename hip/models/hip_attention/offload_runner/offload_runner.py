@@ -470,7 +470,8 @@ class StaticCache(Cache):
             for _ in range(share):
                 self.key_cache.append(new_layer_key_cache)
                 self.value_cache.append(new_layer_value_cache)
-        print(f'allocated {total_bytes / 1024 / 1024:,} MB {cache_shape}')
+        total_mb = total_bytes / 1024 / 1024
+        print(f'allocated {total_mb:,} MB {cache_shape}. compression ratio: {total_mb / free_memory_mb:.3f}')
         
         self.prompt_copy_stream = torch.cuda.Stream(self.device)
         self.prompt_copy_threads: List[threading.Thread] = []
@@ -854,7 +855,7 @@ class StaticCache(Cache):
         
         assert N_CACHE == (BSZ * HEAD_KV)
         
-        block_access_log = block_access_log[:, -1, :].reshape(N_CACHE, -1)[:, :, None] + torch.arange(0, 2, device=block_access_log.device)
+        block_access_log = block_access_log[:, -1, :].reshape(N_CACHE, -1)[:, :, None]# + torch.arange(0, 2, device=block_access_log.device)
         block_access_log =  block_access_log.reshape(N_CACHE, -1) * BLOCK_SIZE_K
         
         if method == 'overwrite':
@@ -1012,7 +1013,7 @@ class StaticCache(Cache):
                     masking_key_bank_stats,
                     metadata.block_access_log,
                     key_cache,
-                    method='overwrite',
+                    method='lru_approx',
                 )
         else:
             self.copy_state_to_bank_using_mask(
@@ -1231,10 +1232,14 @@ class Runner:
         kv_share: int,
         using_offload_cache: bool,
         cache_size: int,
+        refresh_interval: int,
+        prefix_query: bool,
         hip_args: HiPAttentionArgs,
     ):
         import vllm.distributed
         import torch.distributed
+        
+        assert refresh_interval > 0
         
         if not torch.distributed.is_initialized():
             os.environ['MASTER_PORT'] = str(random.randint(32000, 33000))
@@ -1255,12 +1260,14 @@ class Runner:
             if isinstance(module, LlamaAttention):
                 module.attention_method = method
                 module.hip_args = hip_args
+                module.hip_prefix_query_length = refresh_interval - 1
         
         self.tokenizer = tokenizer
         self.model = convert_llama_to_vllm(model.half()).eval()
         self.method = method
         self.decode_step = 0
         self.cache_backend = cache_backend
+        self.prefix_query = prefix_query
         self.hip_args = hip_args
         
         self.capture = CUDACapture(self.model)
@@ -1268,12 +1275,15 @@ class Runner:
         self.capture_hip_refresh = CUDACapture(self.model)
         self.capture_hip_cache = CUDACapture(self.model)
         
-        self.hip_refresh_interval = 8
+        self.hip_refresh_interval = refresh_interval
         
         self.using_offload_cache = using_offload_cache
         self.kv_share = kv_share
         self.kv_offload_cache = using_offload_cache
         self.kv_offload_cache_size = cache_size
+        
+        self.refresh_step_prefix_query = dict()
+        self.cache_step_last_query = dict()
         
         torch.cuda.synchronize()
         gc.collect()
@@ -1282,14 +1292,19 @@ class Runner:
     @torch.inference_mode(True)
     def decode_forward(self, *args, **kwargs):
         if self.method == 'hip':
-            if not self.using_offload_cache:
+            if (not self.using_offload_cache) or True:
                 if self.capture_hip_refresh.need_capture():
                     for m in self.model.modules():
                         if isinstance(m, LlamaAttention):
+                            assert m.hip_prefix_query is not None
+                            
+                            self.refresh_step_prefix_query[m] = m.hip_prefix_query
+                            
                             m.hip_cache = None
                             m.hip_last_cache = None
                             m.hip_use_cache = False
                             m.hip_checkout_cache = True
+                            m.using_prefix_query = True
                     self.capture_hip_refresh.capture(*args, **kwargs)
                     
                     for m in self.model.modules():
@@ -1298,20 +1313,35 @@ class Runner:
                             m.hip_cache = m.hip_last_cache
                             m.hip_use_cache = True
                             m.hip_checkout_cache = False
+                            m.using_prefix_query = False
                     self.capture_hip_cache.capture(*args, **kwargs)
                     
                     for m in self.model.modules():
                         if isinstance(m, LlamaAttention):
                             assert m.hip_cache is not None
+                            
+                            self.cache_step_last_query[m] = m.hip_last_query
+                            
                             m.hip_cache = None
                             m.hip_last_cache = None
                             m.hip_use_cache = False
                             m.hip_checkout_cache = False
+                            m.using_prefix_query = False
                 
                 if (self.decode_step % self.hip_refresh_interval) == 0:
                     return self.capture_hip_refresh.forward(*args, **kwargs)
                 else:
-                    return self.capture_hip_cache.forward(*args, **kwargs)
+                    output = self.capture_hip_cache.forward(*args, **kwargs)
+                    
+                    for m in self.model.modules():
+                        if isinstance(m, LlamaAttention):
+                            prefix = self.refresh_step_prefix_query[m]
+                            query = self.cache_step_last_query[m]
+                            offset = (self.decode_step % self.hip_refresh_interval) - 1
+                            prefix[:, offset:offset+1].copy_(query, non_blocking=True)
+                            # print('a')
+                    
+                    return output
             else:
                 if self.capture_hip_refresh.need_capture():
                     for m in self.model.modules():
@@ -1352,6 +1382,32 @@ class Runner:
         return next_token_id
     
     @torch.inference_mode(True)
+    def reset_prefix(self):
+        for m in self.model.modules():
+            if isinstance(m, LlamaAttention):
+                if m.hip_prefix_query is not None:
+                    m.hip_prefix_query.fill_(0)
+    
+    @torch.inference_mode(True)
+    def push_last_query_to_prefix(self, max_batch_size):
+        for m in self.model.modules():
+            if isinstance(m, LlamaAttention):
+                last_query = m.hip_last_query
+                if m.hip_prefix_query is None:
+                    m.hip_prefix_query = torch.zeros((
+                        max_batch_size, 
+                        m.hip_prefix_query_length, 
+                        last_query.shape[2], 
+                        last_query.shape[3]
+                    ), dtype=last_query.dtype, device=last_query.device)
+                m.hip_prefix_query\
+                    .copy_(last_query\
+                        .repeat_interleave(
+                            max_batch_size // m.hip_last_query.shape[1], 0
+                        )
+                    )
+    
+    @torch.inference_mode(True)
     def generate(self, text, max_tokens=256, item_repeat=24, n_prefill_warmup=1):
         chunked_prefill_size = 8192
         
@@ -1376,6 +1432,7 @@ class Runner:
         )
         
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
+        self.reset_prefix()
         cache.prompt_start()
         for _ in range(n_prefill_warmup):
             with torch.autocast('cuda', torch.float16):
@@ -1387,6 +1444,7 @@ class Runner:
                     num_logits_to_keep=1,
                 )
         cache.prompt_end()
+        self.push_last_query_to_prefix(item_repeat)
         
         # compile decode step
         decode_input_ids = torch.zeros((bsz, 1), dtype=torch.long, device=self.model.device)
@@ -1423,6 +1481,7 @@ class Runner:
         for module in self.model.modules():
             if isinstance(module, LlamaAttention):
                 module.prompt_batch_index = ibatch
+        self.reset_prefix()
         cache.prompt_start()
         with torch.autocast('cuda', torch.float16):
             prompt_output = self.model(
@@ -1433,6 +1492,7 @@ class Runner:
                 num_logits_to_keep=1,
             )
         cache.prompt_end()
+        self.push_last_query_to_prefix(item_repeat)
         
         for _ in range(bsz):
             logits.append(prompt_output.logits)
@@ -1491,7 +1551,19 @@ class Runner:
                 else:
                     hit_ratio_sa.append(stats.cache_hit_ratio)
                     cache_active_ratio_sa.append(stats.cache_access_utilization)
-                tqdm.tqdm.write(f'[{istep}] \t hit ratio {stats.cache_hit_ratio * 100:.2f} % \t (accessed = {stats.num_accessed / 1024 / 1024:.2f} M, hit = {stats.num_cache_hit / 1024 / 1024:.2f} M) \t cache access util: {stats.cache_access_utilization * 100:.2f} %')
+                if stats.num_accessed > (100 * 1024 * 1024):
+                    unit = 'G'
+                    unit_scale = 1024 ** 3
+                else:
+                    unit = 'M'
+                    unit_scale = 1024 ** 2
+                tqdm.tqdm.write(
+                    f'[{istep}] \t '
+                    f'hit ratio {stats.cache_hit_ratio * 100:.2f} % \t '
+                    f'(accessed = {stats.num_accessed / unit_scale:.2f} {unit}, '
+                    f'hit = {stats.num_cache_hit / unit_scale:.2f} {unit}) \t '
+                    f'cache access util: {stats.cache_access_utilization * 100:.2f} %'
+                )
 
             self.decode_step += 1
         cache.decode_end()
@@ -1512,8 +1584,8 @@ class Runner:
             f'Cache statistics: '
             f'Mask(hit ratio = {sum(hit_ratio_mask)/len(hit_ratio_mask)*100:.2f} %, '
             f'active = {sum(cache_active_ratio_mask)/len(cache_active_ratio_mask)*100:.2f} %), '
-            f'SA(hit ratio = {sum(hit_ratio_sa)/len(hit_ratio_sa)*100:.2f} %, '
-            f'active = {sum(cache_active_ratio_sa)/len(cache_active_ratio_sa)*100:.2f} %), '
+            f'SA(hit ratio = {sum(hit_ratio_sa)/(len(hit_ratio_sa) + 1e-20)*100:.2f} %, '
+            f'active = {sum(cache_active_ratio_sa)/(len(cache_active_ratio_sa) + 1e-20)*100:.2f} %), '
         )
         
         torch.cuda.synchronize()
@@ -1537,6 +1609,7 @@ if __name__ == '__main__':
         parser.add_argument('--cache_size', default=8192, type=int)
         parser.add_argument('--offload-cache', action=argparse.BooleanOptionalAction)
         parser.add_argument('--block_size_k', default=2, type=int)
+        parser.add_argument('--refresh_interval', default=8, type=int)
         
         args = parser.parse_args()
         
@@ -1572,6 +1645,8 @@ Hi, can you describe about following document? Here is document,
             kv_share=args.kv_share,
             using_offload_cache=args.offload_cache,
             cache_size=args.cache_size,
+            refresh_interval=args.refresh_interval,
+            prefix_query=True,
             hip_args=HiPAttentionArgs(
                 mask_k=args.k,
                 block_size_k=args.block_size_k,

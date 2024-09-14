@@ -363,6 +363,12 @@ class LlamaAttention(nn.Module):
         self.hip_checkout_cache = False
         self.hip_last_cache = None
         self.hip_cache = None
+        
+        self.hip_checkout_query: bool = True
+        self.hip_last_query: Optional[torch.Tensor] = None
+        self.using_prefix_query = True
+        self.hip_prefix_query_length = 7
+        self.hip_prefix_query: Optional[torch.Tensor] = None
 
     def forward(
         self,
@@ -569,6 +575,22 @@ class LlamaFlashAttention2(LlamaAttention):
         
         if self.attention_method == 'hip':
             args = self.hip_args.clone()
+            
+            query_length = query_states.shape[1]
+            if self.hip_checkout_query:
+                self.hip_last_query = query_states[:, -self.hip_prefix_query_length:].clone()
+            if  (self.using_prefix_query and\
+                (self.hip_prefix_query is not None) and\
+                (self.hip_prefix_query_length > 0) and\
+                (query_length == 1)
+            ):
+                prefix_len = self.hip_prefix_query.shape[1]
+                query_states = torch.cat([self.hip_prefix_query, query_states], dim=1)
+                position_ids = torch.cat([
+                    position_ids - (prefix_len - 1 - torch.arange(0, prefix_len, device=position_ids.device))[None, :], 
+                    position_ids
+                ], dim=1)
+            
             args.position_ids = position_ids + 1
             
             perform_offload_cache = hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx)
@@ -595,15 +617,16 @@ class LlamaFlashAttention2(LlamaAttention):
                 args.output_block_access_log = True
                 args.output_key_access_log = False
 
+                scaled_query_states = query_states / (query_states.shape[-1] ** 0.5)
+                
                 if self.hip_use_cache:
                     assert self.hip_cache is not None
                     attn_output, attn_metadata = hip_attention_11(
-                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
+                        scaled_query_states, key_states, value_states, 
                         previous_metadata=self.hip_cache,
                         args=args,
                     )
                 else:
-                    scaled_query_states = query_states / (query_states.shape[-1] ** 0.5)
                     attn_output, attn_metadata = hip_attention_11(
                         scaled_query_states, key_states, value_states, 
                         args=args,
@@ -640,6 +663,8 @@ class LlamaFlashAttention2(LlamaAttention):
                         query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
                         args=args,
                     )
+            
+            attn_output = attn_output[:, -query_length:].clone()
             
             if self.hip_checkout_cache:
                 self.hip_last_cache = attn_metadata
