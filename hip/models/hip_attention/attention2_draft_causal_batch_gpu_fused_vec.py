@@ -692,20 +692,20 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 else:
                     # BQ=64, BSQ=2
                     # 4090: 20 ms, A100: 34.81ms
-                    t = tl.dot(
-                        queries.to(tl.float16), 
-                        keys.to(tl.float16),
-                        out_dtype=tl.float16,
-                    )
+                    # t = tl.dot(
+                    #     queries.to(tl.float16), 
+                    #     keys.to(tl.float16),
+                    #     out_dtype=tl.float16,
+                    # )
                     
                     # 4090: 16 ms, A100: 31.97 ms
-                    # scale = 256 / tl.max(tl.abs(queries))
-                    # t = tl.dot(
-                    #     tl.clamp(queries * scale, -127, 127).to(tl.int8), 
-                    #     tl.clamp(keys * scale, -127, 127).to(tl.int8),
-                    #     out_dtype=tl.int32,
-                    # ).to(tl.float32) / (scale * scale)
-                    # t = t.to(tl.float16)
+                    scale = 256 / tl.max(tl.abs(queries))
+                    t = tl.dot(
+                        tl.clamp(queries * scale, -127, 127).to(tl.int8), 
+                        tl.clamp(keys * scale, -127, 127).to(tl.int8),
+                        out_dtype=tl.int32,
+                    ).to(tl.float32) / (scale * scale)
+                    t = t.to(tl.float16)
                     
                     # 4090: 10.13 ms, A100: 19.18704981 ms
                     # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
