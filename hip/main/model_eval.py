@@ -90,7 +90,8 @@ def load_vllm_model(args: ArgsType):
         tensor_parallel_size=torch.cuda.device_count(),
         enforce_eager=os.environ.get('ENFORCE_EAGER','0')=='1',
         trust_remote_code=True,
-        max_num_batched_tokens=32768,
+        max_num_batched_tokens=131072,
+        enable_chunked_prefill=False,
         # observability_config=ObservabilityConfig(
         #     collect_model_forward_time=True, 
         #     collect_model_execute_time=True

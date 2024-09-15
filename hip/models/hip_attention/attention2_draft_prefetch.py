@@ -75,6 +75,12 @@ class HiPAttentionArgs:
     
     group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
     
+    add_approx_k_window: bool = False
+    approx_k: int = 32
+    approx_k_window: int = 8
+    
+    add_snap_kv: bool = True
+    
     is_causal: bool = True
     
     sliding_window_size: int = 256
@@ -3823,11 +3829,70 @@ def masking_iteration_draft(
     
     indices.mul_(args.block_size_k)
     
-    # NOTE: before this sort, indices are sorted by imporatnce of each block
-    indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
-    
-    scores_final = scores_final\
-        .gather(index=indices_sort_mapping, dim=-1)
+    print(args.add_snap_kv, type(q), type(k))
+    if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
+        observation_window = args.block_size_q
+        snap_kv_k = 256
+        snap_kv_kernel_size = 15
+        
+        obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:]
+        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
+        if HEAD != KV_HEAD:
+            obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
+        snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
+        snap_vote = snap_attn_weights.mean(dim=1,).mean(dim=1, keepdim=True)
+        snap_pool_vote = F.max_pool1d(snap_vote, kernel_size=snap_kv_kernel_size, stride=1, padding=snap_kv_kernel_size//2)
+        snap_indices = snap_pool_vote.topk(snap_kv_k, dim=-1).indices
+        snap_indices = snap_indices // args.block_size_k * args.block_size_k
+        
+        # union
+        indices = torch.cat([
+            indices, 
+            snap_indices\
+                .view(BSZ, 1, snap_kv_k)\
+                .repeat_interleave(HEAD, dim=0)\
+                .expand(BSZ*HEAD, BDST, snap_kv_k)
+        ], dim=-1).sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, MAX_TSRC * G)
+        indices = indices.sort(dim=-1).values
+        
+        ks = unique_mask.int().sum(-1)
+        
+        print('hi')
+        
+        scores_final = None
+    elif args.add_approx_k_window:
+        approx_k = cdiv_python(args.approx_k, args.block_size_k)
+        approx_k_window = cdiv_python(args.approx_k_window, args.block_size_k)
+        _, selected_indices = torch.topk(scores_final, dim=-1, k=approx_k)
+        approx_top_k_indices = indices.gather(dim=-1, index=selected_indices)
+        approx_top_k_indices = approx_top_k_indices[:, :, :, None] +\
+            (torch.arange(0, approx_k_window, device=indices.device) - approx_k_window // 2)
+        approx_top_k_indices = approx_top_k_indices.view(indices.shape[0], indices.shape[1], -1)
+        approx_top_k_indices = approx_top_k_indices.clamp_min_(0)
+        indices = torch.cat([indices, approx_top_k_indices], dim=-1)
+        
+        # union
+        indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, MAX_TSRC * G)
+        indices = indices.sort(dim=-1).values
+        
+        ks = unique_mask.int().sum(-1)
+        
+        # NOTE: before this sort, indices are sorted by imporatnce of each block
+        # indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
+        
+        scores_final = None
+        # scores_final = scores_final\
+        #     .gather(index=indices_sort_mapping, dim=-1)
+    else:
+        # NOTE: before this sort, indices are sorted by imporatnce of each block
+        indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
+        
+        scores_final = scores_final\
+            .gather(index=indices_sort_mapping, dim=-1)
     
     # scores_final = None
     
@@ -5341,7 +5406,10 @@ def hip_masking(
         args.position_ids = original_position_ids
         
         if os.getenv('HIP_DEBUG', '0') == '1':
+            max_query = 131072
+            
             B, TDST, H, HID = q.shape
+            TDST = min(max_query, TDST)
             if k is not None:
                 _, TSRC, H_KV, _ = k.shape
             else:
@@ -5349,8 +5417,8 @@ def hip_masking(
             N = B * H
             def render_mask():
                 debug_mask = to_dense(
-                    indices.cpu().numpy(),
-                    ks.cpu().numpy(),
+                    indices[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                    ks[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
                     None,
                     cdiv_python(N, args.topk_head_group_size),
                     TDST, 
@@ -5364,7 +5432,7 @@ def hip_masking(
                 plt.figure(figsize=(4 * args.topk_head_group_size, 4))
                 plt.imshow(debug_mask)
                 plt.tight_layout()
-                plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
+                plt.savefig('dummy_prefetch.png', dpi=192, bbox_inches='tight')
                 print('saved dummy_prefetch.png', indices.shape, debug_mask.shape, original_position_ids.shape)
             render_mask()
         
@@ -5573,8 +5641,10 @@ def hip_masking(
             block_access_score = None
             block_access_count = None
     
-    if os.getenv('HIP_DEBUG', '0') == '1':
+    if (os.getenv('HIP_DEBUG', '0') == '1') and (not torch.cuda.is_current_stream_capturing()):
+        max_query = 1024
         B, TDST, H, HID = q.shape
+        TDST = min(TDST, max_query)
         if k is not None:
             _, TSRC, H_KV, _ = k.shape
         else:
@@ -5582,8 +5652,8 @@ def hip_masking(
         N = B * H
         def render_mask():
             debug_mask = to_dense(
-                indices.cpu().numpy(),
-                ks.cpu().numpy(),
+                indices[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                ks[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
                 None,
                 cdiv_python(N, args.topk_head_group_size),
                 TDST, 
@@ -5593,12 +5663,16 @@ def hip_masking(
             )[0]
             if args.group_size_q > 1:
                 debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
-            plt.clf()
-            plt.figure(figsize=(4*args.topk_head_group_size, 4))
-            plt.imshow(debug_mask)
-            plt.tight_layout()
-            plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
-            print('saved dummy.png')
+            
+            cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
+            print('saved dummy_raw.png')
+            
+            # plt.clf()
+            # plt.figure(figsize=(4*args.topk_head_group_size, 4))
+            # plt.imshow(debug_mask)
+            # plt.tight_layout()
+            # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
+            # print('saved dummy.png')
         render_mask()
     
     return (
@@ -5946,10 +6020,10 @@ def main():
     k = reshape(k, HEAD_KV)
     v = reshape(v, HEAD_KV)
     out = reshape(out, HEAD)
-    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-    # q_quant = q
-    # k_quant = k
+    # q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+    # k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+    q_quant = q
+    k_quant = k
     
     # bidirectional out
     # bi_probs = torch.softmax(q.permute(0, 2, 1, 3) @ k.repeat(1, 1, 4, 1).permute(0, 2, 3, 1), dim=-1)
@@ -5970,7 +6044,7 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=512,
+                mask_k=128,
                 
                 block_size_q=32,
                 block_stride_q=2,
@@ -5980,8 +6054,8 @@ def main():
                 
                 is_causal=True,
                 
-                sliding_window_size=0,
-                sink_token_size=0,
+                sliding_window_size=256,
+                sink_token_size=16,
                 
                 using_extend=False,
                 rope_cos=cos,
