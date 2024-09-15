@@ -614,7 +614,24 @@ def sink_attention(
     num_sink: int = 4,
     window_size: int = 512,
     BENCHMARK: bool = False,
-):  
+):
+    chunk_tdst = 16384
+    if q.shape[1] > chunk_tdst:
+        contexts = []
+        for i_start_tdst in range(0, q.shape[1]):
+            i_end_tdst = min(i_start_tdst + chunk_tdst, q.shape[1])
+            contexts.append(sink_attention(
+                q=q[:, i_start_tdst:i_end_tdst],
+                k=k[:, :i_end_tdst],
+                v=v[:, :i_end_tdst],
+                cos=cos,
+                sin=sin,
+                num_sink=num_sink,
+                window_size=window_size,
+                BENCHMARK=BENCHMARK
+            ))
+        return torch.cat(contexts, dim=1)
+    
     if BENCHMARK:
         event_scores_start = torch.cuda.Event(enable_timing=True)
         event_scores_end = torch.cuda.Event(enable_timing=True)
