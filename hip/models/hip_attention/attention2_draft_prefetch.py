@@ -75,11 +75,13 @@ class HiPAttentionArgs:
     
     group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
     
-    add_approx_k_window: bool = False
+    add_approx_k_window: bool = os.getenv('HIP_USING_APPROX_K', '0') == '1'
     approx_k: int = 32
     approx_k_window: int = 8
     
-    add_snap_kv: bool = True
+    add_snap_kv: bool = os.getenv('HIP_USING_SNAP_KV', '0') == '1'
+    snap_kv_k: int = 256
+    snap_kv_kernel_size: int = 15
     
     is_causal: bool = True
     
@@ -3832,8 +3834,8 @@ def masking_iteration_draft(
     print(args.add_snap_kv, type(q), type(k))
     if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
         observation_window = args.block_size_q
-        snap_kv_k = 256
-        snap_kv_kernel_size = 15
+        snap_kv_k = args.snap_kv_k
+        snap_kv_kernel_size = args.snap_kv_kernel_size
         
         obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:]
         obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
