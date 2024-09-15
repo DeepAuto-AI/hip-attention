@@ -573,6 +573,7 @@ class LlamaFlashAttention2(LlamaAttention):
             args.position_ids = position_ids + 1
             
             if hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx):
+                past_key_value: "offload_runner.StaticCache"
                 (
                     offload_cache_masking_key_tables, offload_cache_masking_key_banks,
                     offload_cache_sa_key_tables, offload_cache_sa_key_banks,
