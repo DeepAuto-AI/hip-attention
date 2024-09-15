@@ -3831,7 +3831,6 @@ def masking_iteration_draft(
     
     indices.mul_(args.block_size_k)
     
-    print(args.add_snap_kv, type(q), type(k))
     if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
         observation_window = args.block_size_q
         snap_kv_k = args.snap_kv_k
@@ -3860,8 +3859,6 @@ def masking_iteration_draft(
         indices = indices.sort(dim=-1).values
         
         ks = unique_mask.int().sum(-1)
-        
-        print('hi')
         
         scores_final = None
     elif args.add_approx_k_window:
