@@ -615,7 +615,7 @@ def sink_attention(
     window_size: int = 512,
     BENCHMARK: bool = False,
 ):
-    chunk_tdst = 16384
+    chunk_tdst = 8192
     if q.shape[1] > chunk_tdst:
         contexts = []
         for i_start_tdst in range(0, q.shape[1]):
