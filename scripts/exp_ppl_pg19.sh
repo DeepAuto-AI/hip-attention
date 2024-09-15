@@ -22,6 +22,9 @@ python hip/main/model_eval.py --method fa2 --model llama3.1_8b --stride $seq --d
 elif [ "${METHOD}" == "streaming_llm" ]; then
 echo run streaming llm
 python hip/main/model_eval.py --method streaming_llm --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
+elif [ "${METHOD}" == "hyper_attention" ]; then
+echo run hyper attention
+python hip/main/model_eval.py --method hyper_attention --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
 elif [ "${METHOD}" == "bigbird" ]; then
 echo run bigbird
 HIP_RANDOM_MASK=1 python hip/main/model_eval.py --method hip --model llama3.1_8b --stride $seq --dataset pg19 --block_size_q 64 --block_stride_q 2 --block_size_k 2 --block_stride_k 1 --k 512 --overwrite
