@@ -88,8 +88,8 @@ class HiPAttentionArgs:
     
     is_causal: bool = True
     
-    sliding_window_size: int = 256
-    sink_token_size: int = 16
+    sliding_window_size: int = int(os.getenv('HIP_SW', '256'))
+    sink_token_size: int = int(os.getenv('HIP_NSINK', '16'))
     
     num_dense_queries: int = -1
     
@@ -4205,7 +4205,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': 8}, num_warps=4, num_stages=2, maxnreg=256)]
+        return [triton.Config({'BLOCK_BK': 4}, num_warps=4, num_stages=2, maxnreg=256)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:

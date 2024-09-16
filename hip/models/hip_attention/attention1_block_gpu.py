@@ -1694,8 +1694,10 @@ def main_latency_benchmark():
     cos = cos.cuda()
     sin = sin.cuda()
     if METHOD in ['hip1.1']:
-        q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
-        k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
+        # q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
+        # k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
+        q_quant = q
+        k_quant = k
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
