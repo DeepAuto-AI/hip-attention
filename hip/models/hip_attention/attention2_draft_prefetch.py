@@ -81,6 +81,7 @@ class HiPAttentionArgs:
     
     add_snap_kv: bool = os.getenv('HIP_USING_SNAP_KV', '0') == '1'
     snap_kv_k: int = 256
+    # snap_kv_page_size: int = 8
     snap_kv_kernel_size: int = 15
     
     is_causal: bool = True
@@ -4105,7 +4106,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': 16}, num_warps=4, num_stages=2, maxnreg=256)]
+        return [triton.Config({'BLOCK_BK': 8}, num_warps=4, num_stages=2, maxnreg=256)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
