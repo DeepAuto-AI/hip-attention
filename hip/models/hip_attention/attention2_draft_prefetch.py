@@ -5774,10 +5774,10 @@ def hip_masking(
             # print('saved dummy.png')
         
         # render_mask()
-        if TDST > 128000:
+        if TDST > 64000:
             render_mask()
-        # else:
-        #     print(TDST)
+        else:
+            print(TDST)
     
     return (
         indices, 
