@@ -80,9 +80,11 @@ class HiPAttentionArgs:
     approx_k_window: int = 8
     
     add_snap_kv: bool = os.getenv('HIP_USING_SNAP_KV', '0') == '1'
-    snap_kv_k: int = int(os.getenv('HIP_SNAP_KV_K', '256'))
+    snap_kv_vert_k: int = int(os.getenv('HIP_SNAP_KV_VERT_K', '32'))
+    snap_kv_diag_k: int = int(os.getenv('HIP_SNAP_KV_DIAG_K', '256'))
     # snap_kv_page_size: int = 8
-    snap_kv_kernel_size: int = 15
+    snap_kv_obs_window: int = 256
+    snap_kv_kernel_size: int = 31
     
     is_causal: bool = True
     
@@ -2394,6 +2396,79 @@ def get_masking_iteration_draft_cuda_fused_configs():
                 ))
     return configs
 
+@triton.jit
+def sum_all_diagonal_cuda(
+    SCORES,
+    stride_scores_n, stride_scores_tdst, stride_scores_tsrc,
+    OUT,
+    stride_out_n, stride_out_tdst, stride_out_tsrc,
+    
+    TDST, TSRC, GROUP_TSRC,
+    
+    BLOCK_TDST: tl.constexpr,
+):
+    idx_n = tl.program_id(2).to(tl.int64)
+    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_bsrc = tl.program_id(0).to(tl.int64)
+    
+    for i_gsrc in range(GROUP_TSRC):
+        idx_tsrc_end = idx_bsrc * GROUP_TSRC + i_gsrc
+        idx_tdst_end = tl.minimum(TDST - 1, idx_bdst * BLOCK_TDST)
+        idx_out = idx_tsrc_end + TDST - 1 - idx_tdst_end
+        mask_out = (idx_out >= 0) & (idx_out < TSRC) & (idx_tsrc_end < TSRC)
+        
+        idx_tdst = tl.arange(0, BLOCK_TDST) + idx_bdst * BLOCK_TDST
+        mask_tdst = idx_tdst < BLOCK_TDST
+        
+        idx_tsrc = idx_tsrc_end - (BLOCK_TDST - 1) + tl.arange(0, BLOCK_TDST)
+        mask_tsrc = (idx_tsrc >= 0) & (idx_tsrc < TSRC) & mask_tdst
+        
+        scores = tl.load(
+            SCORES +\
+                idx_n * stride_scores_n +\
+                idx_tdst * stride_scores_tdst +\
+                idx_tsrc * stride_scores_tsrc,
+            mask=mask_tdst & mask_tsrc & mask_out,
+            other=0
+        )
+        score = tl.sum(scores)
+
+        tl.atomic_add(
+            OUT +\
+                idx_n * stride_out_n +\
+                0 * stride_out_tdst +\
+                idx_out * stride_out_tsrc,
+            val=score,
+            mask=mask_out,
+        )
+
+def sum_all_diagonal(scores: Tensor):
+    N, TDST, TSRC = scores.shape
+    reduced_score = torch.zeros(
+        (N, 1, TSRC),
+        dtype=torch.float32,
+        device=scores.device,
+    )
+    
+    GROUP_TSRC = cdiv_python(TSRC, 2048)
+    BLOCK_TDST = 128
+    grid = (
+        triton.cdiv(TSRC, GROUP_TSRC),
+        triton.cdiv(TDST, BLOCK_TDST), 
+        N, 
+    )
+    d = torch.get_default_device()
+    torch.set_default_device(scores.device)
+    sum_all_diagonal_cuda[grid](
+        scores, *scores.stride(),
+        reduced_score, *reduced_score.stride(),
+        TDST, TSRC, GROUP_TSRC,
+        BLOCK_TDST,
+    )
+    torch.set_default_device(d)
+    
+    return reduced_score.to(scores.dtype)
+
 @triton.autotune(
     configs=get_masking_iteration_draft_cuda_fused_configs(),
     key=[
@@ -3833,32 +3908,57 @@ def masking_iteration_draft(
     indices.mul_(args.block_size_k)
     
     if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
-        observation_window = args.block_size_q
-        snap_kv_k = args.snap_kv_k
+        observation_window = args.snap_kv_obs_window
+        snap_kv_k = args.snap_kv_vert_k
         snap_kv_kernel_size = args.snap_kv_kernel_size
+        diag_kv_k = args.snap_kv_diag_k
+        diag_kv_kernel_size = args.snap_kv_kernel_size
         
+        # TODO: fuse this
         obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:]
         obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
         if HEAD != KV_HEAD:
             obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
         snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
-        snap_vote = snap_attn_weights.mean(dim=1,).mean(dim=1, keepdim=True)
-        snap_pool_vote = F.max_pool1d(snap_vote, kernel_size=snap_kv_kernel_size, stride=1, padding=snap_kv_kernel_size//2)
-        snap_indices = snap_pool_vote.topk(snap_kv_k, dim=-1).indices
-        snap_indices = snap_indices // args.block_size_k * args.block_size_k
+        snap_attn_weights = snap_attn_weights.mean(dim=1)
+        # TODO: fuse this
         
-        # union
+        snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
+        snap_pool_vote = F.max_pool1d(snap_vote, kernel_size=snap_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        snap_indices = snap_pool_vote.topk(snap_kv_k // args.block_size_k, dim=-1, sorted=False).indices
+        snap_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        snap_indices = snap_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        
+        diag_vote = sum_all_diagonal(snap_attn_weights)
+        diag_pool_vote = F.max_pool1d(diag_vote, kernel_size=diag_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        diag_indices = diag_pool_vote.topk(diag_kv_k // args.block_size_k, dim=-1, sorted=False).indices
+        diag_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        diag_indices = diag_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        diag_indices = diag_indices -\
+            torch.flip(
+                torch.arange(
+                    0, BDST * args.block_size_q, args.block_size_q, 
+                    device=indices.device
+                ), dims=(0,)
+            )[None, :, None]
+        torch.clamp_min(diag_indices, 0, out=diag_indices)
+        
+        # concat and union and update ks
+        print(indices.shape, snap_indices.shape, diag_indices.shape)
         indices = torch.cat([
             indices, 
-            snap_indices\
-                .view(BSZ, 1, snap_kv_k)\
-                .repeat_interleave(HEAD, dim=0)\
-                .expand(BSZ*HEAD, BDST, snap_kv_k)
+            snap_indices,
+            diag_indices,
         ], dim=-1).sort(dim=-1).values
         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
         indices = torch.where(unique_mask, indices, MAX_TSRC * G)
         indices = indices.sort(dim=-1).values
-        
         ks = unique_mask.int().sum(-1)
         
         scores_final = None
@@ -6046,7 +6146,7 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=4096,
+                mask_k=512,
                 
                 block_size_q=32,
                 block_stride_q=1,
@@ -6054,15 +6154,18 @@ def main():
                 block_stride_k=4,
                 block_size_k_group=1,
                 
-                group_size_q=2,
+                group_size_q=1,
                 
                 add_snap_kv=True,
-                snap_kv_k=512,
+                snap_kv_vert_k=512,
+                snap_kv_diag_k=2048,
+                snap_kv_kernel_size=63,
+                snap_kv_obs_window=256,
                 
                 is_causal=True,
                 
                 sliding_window_size=2048,
-                sink_token_size=1024,
+                sink_token_size=16,
                 
                 using_extend=False,
                 rope_cos=cos,

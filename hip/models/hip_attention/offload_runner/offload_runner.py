@@ -336,6 +336,10 @@ class StaticCache(Cache):
         mask_k = 512,
         block_size_k = 2,
         sliding_window_size = 256,
+        simulate_hit_ratio = True,
+        simulated_mask_hit_ratio = 0.8,
+        simulated_sa_hit_ratio = 0.99,
+        offload_cache_policy_decode = 'overwrite',
     ) -> None:
         super().__init__()
         
@@ -372,6 +376,8 @@ class StaticCache(Cache):
         self.block_size_k = block_size_k
         self.offload_cache_dtype = torch.float8_e5m2
         
+        self.offload_cache_policy_decode = offload_cache_policy_decode
+        self.simulate_cache_hit_ratio = simulate_hit_ratio
         self.using_offload_cache = use_offload_cache
         if self.using_offload_cache:
             self.num_layers = config.num_hidden_layers
@@ -430,7 +436,7 @@ class StaticCache(Cache):
             )
             
             # dummy initialize
-            dummy_init_offload_cache = False
+            dummy_init_offload_cache = simulate_hit_ratio
             if dummy_init_offload_cache:
                 def dummy_init(tables, banks, hit_ratio):
                     N, NBANK, PAGE_SIZE, _ = banks.shape
@@ -438,9 +444,9 @@ class StaticCache(Cache):
                     mask = torch.rand_like(t_tables, dtype=torch.float32) <= hit_ratio
                     t_tables = torch.where(mask, t_tables.int(), 65535).to(torch.uint16)
                     tables.copy_(t_tables)
-                dummy_init(self.masking_key_tables, self.masking_key_banks, 0.8)
-                dummy_init(self.sa_key_tables, self.sa_key_banks, 0.98)
-                dummy_init(self.sa_value_tables, self.sa_value_banks, 0.98)
+                dummy_init(self.masking_key_tables, self.masking_key_banks, simulated_mask_hit_ratio)
+                dummy_init(self.sa_key_tables, self.sa_key_banks, simulated_sa_hit_ratio)
+                dummy_init(self.sa_value_tables, self.sa_value_banks, simulated_sa_hit_ratio)
         
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
@@ -964,6 +970,8 @@ class StaticCache(Cache):
         metadata: HiPAttentionOutputMetadata,
         mask_updated: bool,
     ):
+        if self.simulate_cache_hit_ratio: return
+        
         # NOTE: this is temporary
         query_states = query_states.expand(self.max_batch_size, -1, -1, -1)
         new_key_state = new_key_state.expand(self.max_batch_size, -1, -1, -1)
@@ -1020,7 +1028,7 @@ class StaticCache(Cache):
                     masking_key_bank_stats,
                     metadata.block_access_log,
                     key_cache,
-                    method='lru_approx',
+                    method=self.offload_cache_policy_decode,
                 )
         else:
             self.copy_state_to_bank_using_mask(
@@ -1118,14 +1126,16 @@ class StaticCache(Cache):
             else:
                 self.value_cache[layer_idx][1].zero_()
         
-        def reset_cache(tables, banks, bank_stats):
-            tables.fill_(65535)
-            banks.fill_(0)
-            bank_stats[:, :, 0].fill_(0)
-            bank_stats[:, :, 1].fill_(65535)
-        reset_cache(self.masking_key_tables, self.masking_key_banks, self.masking_key_bank_stats)
-        reset_cache(self.sa_key_tables, self.sa_key_banks, self.sa_key_bank_stats)
-        reset_cache(self.sa_value_tables, self.sa_value_banks, self.sa_value_bank_stats)
+        if not self.simulate_cache_hit_ratio:
+            if self.using_offload_cache:
+                def reset_cache(tables, banks, bank_stats):
+                    tables.fill_(65535)
+                    banks.fill_(0)
+                    bank_stats[:, :, 0].fill_(0)
+                    bank_stats[:, :, 1].fill_(65535)
+                reset_cache(self.masking_key_tables, self.masking_key_banks, self.masking_key_bank_stats)
+                reset_cache(self.sa_key_tables, self.sa_key_banks, self.sa_key_bank_stats)
+                reset_cache(self.sa_value_tables, self.sa_value_banks, self.sa_value_bank_stats)
 
 def convert_llama_to_vllm(model: LlamaForCausalLM):
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -1390,32 +1400,43 @@ class Runner:
     
     @torch.inference_mode(True)
     def reset_prefix(self):
-        for m in self.model.modules():
-            if isinstance(m, LlamaAttention):
-                if m.hip_prefix_query is not None:
-                    m.hip_prefix_query.fill_(0)
+        if self.method == 'hip':
+            for m in self.model.modules():
+                if isinstance(m, LlamaAttention):
+                    if m.hip_prefix_query is not None:
+                        m.hip_prefix_query.fill_(0)
     
     @torch.inference_mode(True)
     def push_last_query_to_prefix(self, max_batch_size):
-        for m in self.model.modules():
-            if isinstance(m, LlamaAttention):
-                last_query = m.hip_last_query
-                if m.hip_prefix_query is None:
-                    m.hip_prefix_query = torch.zeros((
-                        max_batch_size, 
-                        m.hip_prefix_query_length, 
-                        last_query.shape[2], 
-                        last_query.shape[3]
-                    ), dtype=last_query.dtype, device=last_query.device)
-                m.hip_prefix_query\
-                    .copy_(last_query\
-                        .repeat_interleave(
-                            max_batch_size // m.hip_last_query.shape[0], 0
+        if self.method == 'hip':
+            for m in self.model.modules():
+                if isinstance(m, LlamaAttention):
+                    last_query = m.hip_last_query
+                    if m.hip_prefix_query is None:
+                        m.hip_prefix_query = torch.zeros((
+                            max_batch_size, 
+                            m.hip_prefix_query_length, 
+                            last_query.shape[2], 
+                            last_query.shape[3]
+                        ), dtype=last_query.dtype, device=last_query.device)
+                    m.hip_prefix_query\
+                        .copy_(last_query\
+                            .repeat_interleave(
+                                max_batch_size // m.hip_last_query.shape[0], 0
+                            )
                         )
-                    )
     
     @torch.inference_mode(True)
-    def generate(self, text, max_tokens=256, item_repeat=24, n_prefill_warmup=1):
+    def generate(
+        self, 
+        text, 
+        max_tokens=256, 
+        item_repeat=24, 
+        n_prefill_warmup=1, 
+        simulate_hit_ratio=False, 
+        simulated_mask_hit_ratio=0.8, 
+        simulated_sa_hit_ratio=0.99
+    ):
         chunked_prefill_size = 8192
         
         input_ids = self.tokenizer([text, ], return_tensors="pt", padding=True).input_ids.to(self.model.device)
@@ -1436,6 +1457,9 @@ class Runner:
             block_size_k=self.hip_args.block_size_k,
             sliding_window_size=self.hip_args.sliding_window_size,
             cache_size=self.kv_offload_cache_size,
+            simulate_hit_ratio=simulate_hit_ratio,
+            simulated_mask_hit_ratio=simulated_mask_hit_ratio,
+            simulated_sa_hit_ratio=simulated_sa_hit_ratio,
         )
         
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
@@ -1589,8 +1613,8 @@ class Runner:
         )
         print(
             f'Cache statistics: '
-            f'Mask(hit ratio = {sum(hit_ratio_mask)/len(hit_ratio_mask)*100:.2f} %, '
-            f'active = {sum(cache_active_ratio_mask)/len(cache_active_ratio_mask)*100:.2f} %), '
+            f'Mask(hit ratio = {sum(hit_ratio_mask)/(len(hit_ratio_mask) + 1e-20)*100:.2f} %, '
+            f'active = {sum(cache_active_ratio_mask)/(len(cache_active_ratio_mask) + 1e-20)*100:.2f} %), '
             f'SA(hit ratio = {sum(hit_ratio_sa)/(len(hit_ratio_sa) + 1e-20)*100:.2f} %, '
             f'active = {sum(cache_active_ratio_sa)/(len(cache_active_ratio_sa) + 1e-20)*100:.2f} %), '
         )
@@ -1600,7 +1624,24 @@ class Runner:
         torch.cuda.empty_cache()
         
         return text_outs
-    
+
+TEMPLATE = '''<|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Hi, can you describe about following document? Here is document, 
+
+```
+{document}
+```
+
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+'''
+
 if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser()
@@ -1617,6 +1658,9 @@ if __name__ == '__main__':
         parser.add_argument('--offload-cache', action=argparse.BooleanOptionalAction)
         parser.add_argument('--block_size_k', default=2, type=int)
         parser.add_argument('--refresh_interval', default=8, type=int)
+        parser.add_argument('--simulate-hit-ratio', action=argparse.BooleanOptionalAction)
+        parser.add_argument('--simulated_mask_hit_ratio', default=0.8, type=float)
+        parser.add_argument('--simulated_sa_hit_ratio', default=0.99, type=float)
         
         args = parser.parse_args()
         
@@ -1625,22 +1669,7 @@ if __name__ == '__main__':
         with open(args.input, 'r') as f:
             document = f.read()
         
-        sample_input = f'''<|start_header_id|>system<|end_header_id|>
-
-Cutting Knowledge Date: December 2023
-Today Date: 26 Jul 2024
-
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-Hi, can you describe about following document? Here is document, 
-
-```
-{document}
-```
-
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-'''
+        sample_input = TEMPLATE.format(document=document)
         results = Runner(
             {
                 'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
@@ -1665,6 +1694,9 @@ Hi, can you describe about following document? Here is document,
                 sample_input,
                 item_repeat=args.batch_size,
                 max_tokens=args.max_tokens,
+                simulate_hit_ratio=args.simulate_hit_ratio,
+                simulated_mask_hit_ratio=args.simulated_mask_hit_ratio,
+                simulated_sa_hit_ratio=args.simulated_sa_hit_ratio,
             )
         print('-' * 20, 'example', '-' * 20)
         print(results[-1])
