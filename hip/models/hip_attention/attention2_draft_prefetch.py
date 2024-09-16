@@ -5673,7 +5673,8 @@ def hip_masking(
             # plt.tight_layout()
             # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
             # print('saved dummy.png')
-        render_mask()
+        if random.random() < 0.01:
+            render_mask()
     
     return (
         indices, 
