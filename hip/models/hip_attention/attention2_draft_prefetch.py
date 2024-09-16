@@ -3950,7 +3950,6 @@ def masking_iteration_draft(
         torch.clamp_min(diag_indices, 0, out=diag_indices)
         
         # concat and union and update ks
-        print(indices.shape, snap_indices.shape, diag_indices.shape)
         indices = torch.cat([
             indices, 
             snap_indices,
