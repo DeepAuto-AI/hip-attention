@@ -80,7 +80,7 @@ class HiPAttentionArgs:
     approx_k_window: int = 8
     
     add_snap_kv: bool = os.getenv('HIP_USING_SNAP_KV', '0') == '1'
-    snap_kv_k: int = 256
+    snap_kv_k: int = int(os.getenv('HIP_SNAP_KV_K', '256'))
     # snap_kv_page_size: int = 8
     snap_kv_kernel_size: int = 15
     
