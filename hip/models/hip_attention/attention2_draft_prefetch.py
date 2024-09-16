@@ -84,7 +84,7 @@ class HiPAttentionArgs:
     snap_kv_diag_k: int = int(os.getenv('HIP_SNAP_KV_DIAG_K', '256'))
     # snap_kv_page_size: int = 8
     snap_kv_obs_window: int = 256
-    snap_kv_kernel_size: int = 31
+    snap_kv_kernel_size: int = 15
     
     is_causal: bool = True
     
@@ -5387,7 +5387,7 @@ def hip_masking(
                     TSRC * args.topk_head_group_size, 
                     args.block_size_q, 
                     args.block_size_k * args.block_size_k_group,
-                )[0]
+                )[1]
                 if args.group_size_q > 1:
                     debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
                 plt.clf()
@@ -5772,9 +5772,10 @@ def hip_masking(
             # plt.tight_layout()
             # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
             # print('saved dummy.png')
-        render_mask()
-        # if random.random() < 0.01:
-        #     render_mask()
+        
+        # render_mask()
+        if (random.random() < 0.01) and (TDST > 128000):
+            render_mask()
     
     return (
         indices, 
@@ -6145,10 +6146,10 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=512,
+                mask_k=4096,
                 
-                block_size_q=32,
-                block_stride_q=1,
+                block_size_q=64,
+                block_stride_q=2,
                 block_size_k=8,
                 block_stride_k=4,
                 block_size_k_group=1,
@@ -6159,7 +6160,7 @@ def main():
                 snap_kv_vert_k=512,
                 snap_kv_diag_k=2048,
                 snap_kv_kernel_size=63,
-                snap_kv_obs_window=256,
+                snap_kv_obs_window=512,
                 
                 is_causal=True,
                 
