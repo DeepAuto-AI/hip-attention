@@ -5406,7 +5406,7 @@ def hip_masking(
         args.position_ids = original_position_ids
         
         if os.getenv('HIP_DEBUG', '0') == '1':
-            max_query = 131072
+            max_query = 2048
             
             B, TDST, H, HID = q.shape
             TDST = min(max_query, TDST)
@@ -5665,7 +5665,7 @@ def hip_masking(
                 debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
             
             cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
-            print('saved dummy_raw.png')
+            print('saved dummy_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
             
             # plt.clf()
             # plt.figure(figsize=(4*args.topk_head_group_size, 4))
@@ -5673,8 +5673,9 @@ def hip_masking(
             # plt.tight_layout()
             # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
             # print('saved dummy.png')
-        if random.random() < 0.01:
-            render_mask()
+        render_mask()
+        # if random.random() < 0.01:
+        #     render_mask()
     
     return (
         indices, 
@@ -5978,7 +5979,7 @@ def paged_varlen_hip_attention(
 
 def main():
     debug_only = True
-    seq_len = 1024 * 4
+    seq_len = 1024 * 128
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
@@ -6045,18 +6046,23 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=128,
+                mask_k=4096,
                 
                 block_size_q=32,
-                block_stride_q=2,
-                block_size_k=2,
-                block_stride_k=1,
+                block_stride_q=1,
+                block_size_k=8,
+                block_stride_k=4,
                 block_size_k_group=1,
+                
+                group_size_q=2,
+                
+                add_snap_kv=True,
+                snap_kv_k=512,
                 
                 is_causal=True,
                 
-                sliding_window_size=256,
-                sink_token_size=16,
+                sliding_window_size=2048,
+                sink_token_size=1024,
                 
                 using_extend=False,
                 rope_cos=cos,
