@@ -5787,7 +5787,7 @@ def hip_masking(
         
         # indices = indices.sort(dim=-1).values
         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-        indices = torch.where(unique_mask, indices, k.shape[1] * args.topk_head_group_size)
+        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
         indices = indices.sort(dim=-1).values
         ks = unique_mask.int().sum(-1)
         ks_count = ks.unsqueeze(-1)
