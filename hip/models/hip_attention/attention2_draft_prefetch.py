@@ -6245,7 +6245,7 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=1024,
+                mask_k=2048,
                 
                 block_size_q=64,
                 block_stride_q=2,
@@ -6262,8 +6262,8 @@ def main():
                 
                 is_causal=True,
                 
-                sliding_window_size=2048,
-                sink_token_size=64,
+                sliding_window_size=1024,
+                sink_token_size=16,
                 
                 using_extend=False,
                 rope_cos=cos,
