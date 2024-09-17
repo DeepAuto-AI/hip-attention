@@ -84,7 +84,7 @@ class HiPAttentionArgs:
     snap_kv_vert_k: int = int(os.getenv('HIP_SNAP_KV_VERT_K', '32'))
     snap_kv_diag_k: int = int(os.getenv('HIP_SNAP_KV_DIAG_K', '256'))
     # snap_kv_page_size: int = 8
-    snap_kv_obs_window: int = 256
+    snap_kv_obs_window: int = 128
     snap_kv_kernel_size: int = 15
     
     is_causal: bool = True
@@ -3925,30 +3925,36 @@ def masking_iteration_draft(
         # TODO: fuse this
         
         snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
+        snap_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
+        snap_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
         snap_kv_kernel_size = max(snap_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        snap_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
         snap_pool_vote = F.max_pool1d(
             snap_vote, 
             kernel_size=snap_kv_kernel_size, 
-            stride=max(args.block_size_k, args.block_size_k_after_masking), 
+            stride=snap_pool_stride, 
             padding=snap_kv_kernel_size//2
         )
-        snap_indices = snap_pool_vote.topk(snap_kv_k // args.block_size_k, dim=-1, sorted=False).indices
-        snap_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
+        snap_indices.mul_(snap_pool_stride)
         snap_indices = snap_indices\
             .view(BSZ, 1, -1)\
             .repeat_interleave(HEAD, dim=0)\
             .expand(BSZ*HEAD, BDST, -1)
         
         diag_vote = sum_all_diagonal(snap_attn_weights)
+        diag_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
+        diag_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
         diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        diag_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
         diag_pool_vote = F.max_pool1d(
             diag_vote, 
             kernel_size=diag_kv_kernel_size, 
-            stride=max(args.block_size_k, args.block_size_k_after_masking), 
+            stride=diag_pool_stride, 
             padding=diag_kv_kernel_size//2
         )
-        diag_indices = diag_pool_vote.topk(diag_kv_k // args.block_size_k, dim=-1, sorted=False).indices
-        diag_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
+        diag_indices.mul_(diag_pool_stride)
         diag_indices = diag_indices\
             .view(BSZ, 1, -1)\
             .repeat_interleave(HEAD, dim=0)\
@@ -5818,7 +5824,7 @@ def hip_masking(
     )
 
 def hip_masking_handle_block_size_k_after_mask(
-    args, indices, ks, ks_count, ks_start_end
+    args: HiPAttentionArgs, indices: Tensor, ks: Tensor, ks_count: Tensor, ks_start_end: Tensor
 ):
     if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
         warnings.warn(f'block size k after masking {args.block_size_k_after_masking}')
@@ -5834,6 +5840,7 @@ def hip_masking_handle_block_size_k_after_mask(
         
         args = args.clone()
         args.block_size_k = args.block_size_k_after_masking
+        args.block_size_k_after_masking = -1
     
     return (
         args, indices, ks, ks_count, ks_start_end
@@ -5928,6 +5935,45 @@ def hip_attention(
         block_access_log = previous_metadata.block_access_log
         block_access_score = previous_metadata.block_access_score
         block_access_count = previous_metadata.block_access_count
+    
+    if (os.getenv('HIP_DEBUG', '0') == '1') and (not torch.cuda.is_current_stream_capturing()):
+        max_query = 1024
+        B, TDST, H, HID = q.shape
+        TDST = min(TDST, max_query)
+        if k is not None:
+            _, TSRC, H_KV, _ = k.shape
+        else:
+            TSRC = torch.max(args.cache_seq_lens).item()
+        N = B * H
+        def render_mask():
+            debug_mask = to_dense(
+                indices[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                ks[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                None,
+                cdiv_python(N, args.topk_head_group_size),
+                TDST, 
+                TSRC * args.topk_head_group_size, 
+                args.block_size_q, 
+                args.block_size_k * args.block_size_k_group,
+            )[0]
+            if args.group_size_q > 1:
+                debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
+            
+            cv2.imwrite('dummy_final_raw.png', debug_mask.astype(np.uint8) * 255)
+            print('saved dummy_final_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
+            
+            # plt.clf()
+            # plt.figure(figsize=(4*args.topk_head_group_size, 4))
+            # plt.imshow(debug_mask)
+            # plt.tight_layout()
+            # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
+            # print('saved dummy.png')
+        
+        # render_mask()
+        if q.shape[1] > 64000:
+            render_mask()
+        else:
+            print(q.shape[1])
     
     metadata = HiPAttentionOutputMetadata(
         indices=indices,
@@ -6203,21 +6249,21 @@ def main():
                 
                 block_size_q=64,
                 block_stride_q=2,
-                block_size_k=1,
+                block_size_k=2,
                 block_stride_k=1,
                 block_size_k_group=1,
                 block_size_k_after_masking=64,
                 
                 group_size_q=1,
                 
-                add_snap_kv=False,
-                snap_kv_vert_k=256,
-                snap_kv_diag_k=256,
+                add_snap_kv=True,
+                snap_kv_vert_k=1024,
+                snap_kv_diag_k=1024,
                 
                 is_causal=True,
                 
                 sliding_window_size=2048,
-                sink_token_size=256,
+                sink_token_size=64,
                 
                 using_extend=False,
                 rope_cos=cos,
