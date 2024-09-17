@@ -707,13 +707,16 @@ def load_tokens(
 
 @triton.jit
 def masking_iteration_draft_cuda_dup_and_score_calc_score(
-    dupped_indices_for_keys,
+    idx_key_blocks,
     KEY_DUP: tl.constexpr,
     
     Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    
+    VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+    DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
@@ -740,11 +743,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     idx_b, 
     idx_bdst,
     idx_tdst, mask_tdst, pos_tdst,
-    dupped_mask,
+    mask_key_blocks,
     
     sliding_window_size,
     BH: tl.constexpr,
     G: tl.constexpr, 
+    MAX_TDST,
     MAX_TSRC, 
     HID: tl.constexpr,
     KV_HEAD_REPEAT: tl.constexpr,
@@ -811,8 +815,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     NUM_CALIB: tl.constexpr = 32
 ):
     if BLOCK_ACCESS_LOG is not None:
-        list_block_access = dupped_indices_for_keys
-        mask_block_access = dupped_mask & (list_block_access < tl.cdiv(MAX_TSRC, BLOCK_SIZE_K))
+        list_block_access = idx_key_blocks
+        mask_block_access = mask_key_blocks & (list_block_access < tl.cdiv(MAX_TSRC, BLOCK_SIZE_K))
         
         len_block_access = tl.sum(mask_block_access.to(tl.int32))
         block_access_location = tl.atomic_add(
@@ -832,7 +836,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         )
     
     idx_tsrc = (
-        (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
+        (idx_key_blocks * BLOCK_SIZE_K)[:, None]\
         + tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K)[None, :] * BLOCK_STRIDE_K + BLOCK_STRIDE_K - 1
     )
     idx_tsrc = tl.ravel(idx_tsrc)
@@ -844,7 +848,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     if KEY_ACCESS_LOG is not None:
         mask_access = tl.ravel(tl.broadcast_to(
-            dupped_mask[:, None], 
+            mask_key_blocks[:, None], 
             BLOCK_BK * KEY_DUP, BLOCK_SIZE_K // BLOCK_STRIDE_K
         ))
         len_access = tl.sum(mask_access.to(tl.int32))
@@ -890,7 +894,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
         if G == 1:
             mask_keys = tl.broadcast_to(
-                dupped_mask[:, None],
+                mask_key_blocks[:, None],
                 BLOCK_BK * KEY_DUP, 
                 BLOCK_SIZE_K // BLOCK_STRIDE_K
             )
@@ -898,7 +902,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             mask_keys = mask_keys & (idx_tsrc_grouped < MAX_TSRC)
         else:
             mask_keys = (
-                dupped_mask[:, None] &\
+                mask_key_blocks[:, None] &\
                 (idx_group == i_group).reshape(
                     BLOCK_BK * KEY_DUP, 
                     BLOCK_SIZE_K // BLOCK_STRIDE_K
@@ -907,6 +911,30 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             mask_keys = tl.ravel(mask_keys)[None, :]
         idx_head = idx_bh.to(tl.int64) * G + idx_group[None, :].to(tl.int64)
         idx_kv_head = idx_head // KV_HEAD_REPEAT
+        
+        if VERTICAL_MASK is not None:
+            # NOTE: !!!!!!!!!!!! idx n should be calculated properly infuture
+            vertial_mask = tl.load(
+                VERTICAL_MASK +\
+                    idx_b * stride_vertical_mask_n +\
+                    idx_tsrc[None, :] * stride_vertical_mask_tsrc,
+                mask=mask_keys,
+                other=1,
+            ).to(tl.int1)
+            mask_keys = mask_keys & vertial_mask
+        
+        if DIAGONAL_MASK is not None:
+            idx_tsrc_diag = idx_tsrc - (MAX_TDST - 1 - tl.max(idx_tdst))
+            mask_tsrc_diag = (idx_tsrc_diag >= 0) & (idx_tsrc_diag < MAX_TSRC)
+            diagonal_mask = tl.load(
+                DIAGONAL_MASK +\
+                    idx_b * stride_diagonal_mask_n +\
+                    idx_tsrc_diag[None, :] * stride_diagonal_mask_tsrc,
+                mask=mask_keys & mask_tsrc_diag,
+                other=1,
+            ).to(tl.int1)
+            mask_keys = mask_keys & diagonal_mask
+        
         keys = load_tokens(
             K, 
             stride_k_bsz, 
@@ -1174,12 +1202,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         )
     else:
         raise Exception()
-    scores = tl.where(dupped_mask, scores, float('-inf'))
+    scores = tl.where(mask_key_blocks, scores, float('-inf'))
     
     if BLOCK_ACCESS_LOG is not None:
         if BLOCK_ACCESS_SCORE is not None:
             if REDUCE_METHOD == 'max':
-                checkout_scores = tl.where(dupped_mask, -scores, float('-inf'))
+                checkout_scores = tl.where(mask_key_blocks, -scores, float('-inf'))
             elif REDUCE_METHOD == 'min':
                 checkout_scores = scores
             tl.store(
@@ -1220,6 +1248,9 @@ def masking_iteration_draft_cuda_dup_and_score(
     POS, stride_pos_bsz, stride_pos_tdst,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    
+    VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+    DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
@@ -1544,6 +1575,9 @@ def masking_iteration_draft_cuda_dup_and_score(
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
                 
+                VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+                
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -1571,7 +1605,13 @@ def masking_iteration_draft_cuda_dup_and_score(
                 idx_tdst, mask_tdst, pos_tdst,
                 dupped_mask,
                 
-                sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                sliding_window_size, 
+                BH, 
+                G,
+                MAX_TDST, 
+                MAX_TSRC, 
+                HID, 
+                KV_HEAD_REPEAT,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -1700,6 +1740,9 @@ def masking_iteration_draft_cuda_dup_and_score(
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             
+            VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+            DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+            
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1727,7 +1770,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             idx_tdst, mask_tdst, pos_tdst,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -1833,6 +1876,9 @@ def masking_iteration_draft_cuda_dup_and_score(
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             
+            VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+            DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+            
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1860,7 +1906,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             idx_tdst, mask_tdst, pos_tdst,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -2513,6 +2559,13 @@ def masking_iteration_draft_cuda_fused(
     stride_pos_bsz,
     stride_pos_tdst,
     
+    VERTICAL_MASK, 
+    stride_vertical_mask_n, 
+    stride_vertical_mask_tsrc,
+    DIAGONAL_MASK, 
+    stride_diagonal_mask_n, 
+    stride_diagonal_mask_tsrc,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -2722,6 +2775,9 @@ def masking_iteration_draft_cuda_fused(
                     POS, stride_pos_bsz, stride_pos_tdst,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
+                    
+                    VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                    DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                     
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
@@ -3018,6 +3074,9 @@ def masking_iteration_draft_cuda_initialize_score(
     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
     POS, stride_pos_bsz, stride_pos_tdst,
     
+    VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+    DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+    
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -3195,6 +3254,9 @@ def masking_iteration_draft_cuda_initialize_score(
         COS, stride_cos_t, stride_cos_hid,
         SIN, stride_sin_t, stride_sin_hid,
         
+        VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+        DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+        
         KEY_ACCESS_LOG, 
         stride_key_access_log_b, 
         stride_key_access_log_bdst, 
@@ -3222,7 +3284,7 @@ def masking_iteration_draft_cuda_initialize_score(
         idx_tdst, mask_tdst, pos_tdst,
         mask_bk,
         
-        sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+        sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
         USING_EXTEND,
         extend_window_size,
@@ -3500,6 +3562,90 @@ def masking_iteration_draft(
     ]
     assert position_ids.ndim == 2, position_ids.shape
     
+    vertical_attention_mask = None
+    diagonal_attention_mask = None
+    adding_snap_kv = args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)) and (q.shape[1] > 1)
+    if adding_snap_kv:
+        observation_window = args.snap_kv_obs_window
+        snap_kv_k = args.snap_kv_vert_k
+        snap_kv_kernel_size = args.snap_kv_kernel_size
+        diag_kv_k = args.snap_kv_diag_k
+        diag_kv_kernel_size = args.snap_kv_kernel_size
+        
+        # TODO: fuse this
+        obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:] # NOTE: merge topk-group dim
+        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
+        if HEAD != KV_HEAD:
+            obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
+        snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
+        snap_attn_weights = snap_attn_weights.mean(dim=1)
+        # TODO: fuse this
+        
+        snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
+        snap_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
+        snap_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
+        snap_kv_kernel_size = max(snap_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        snap_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
+        snap_pool_vote = F.max_pool1d(
+            snap_vote, 
+            kernel_size=snap_kv_kernel_size, 
+            stride=snap_pool_stride, 
+            padding=snap_kv_kernel_size//2
+        )
+        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
+        snap_indices.mul_(snap_pool_stride)
+        snap_indices = snap_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        
+        diag_vote = sum_all_diagonal(snap_attn_weights)
+        diag_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
+        diag_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
+        diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        diag_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
+        diag_pool_vote = F.max_pool1d(
+            diag_vote, 
+            kernel_size=diag_kv_kernel_size, 
+            stride=diag_pool_stride, 
+            padding=diag_kv_kernel_size//2
+        )
+        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
+        diag_indices.mul_(diag_pool_stride)
+        diag_indices = diag_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        diag_indices = diag_indices -\
+            torch.flip(
+                torch.arange(
+                    0, BDST * args.block_size_q, args.block_size_q, 
+                    device=indices.device
+                ), dims=(0,)
+            )[None, :, None]
+        torch.clamp_min(diag_indices, 0, out=diag_indices)
+        
+        assert vertical_attention_mask is None
+        vertical_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
+        vertical_attention_mask.scatter_(
+            dim=1, 
+            index=(
+                snap_indices[:, -1, :, None] +\
+                torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
+            ).view(BSZ * HEAD, -1), 
+            value=0
+        )
+        
+        diagonal_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
+        diagonal_attention_mask.scatter_(
+            dim=1, 
+            index=(
+                diag_indices[:, -1, :, None] +\
+                torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
+            ).view(BSZ * HEAD, -1),
+            value=0
+        )
+    
     # launch kernels
     # print('init in', indices[0, -1, :10])
     # if indices_seed is not None:
@@ -3586,6 +3732,9 @@ def masking_iteration_draft(
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
+            
+            vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
+            diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
@@ -3687,6 +3836,9 @@ def masking_iteration_draft(
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
+            
+            vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
+            diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
@@ -3908,66 +4060,7 @@ def masking_iteration_draft(
     
     indices.mul_(args.block_size_k)
     
-    if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
-        observation_window = args.snap_kv_obs_window
-        snap_kv_k = args.snap_kv_vert_k
-        snap_kv_kernel_size = args.snap_kv_kernel_size
-        diag_kv_k = args.snap_kv_diag_k
-        diag_kv_kernel_size = args.snap_kv_kernel_size
-        
-        # TODO: fuse this
-        obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:]
-        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
-        if HEAD != KV_HEAD:
-            obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
-        snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
-        snap_attn_weights = snap_attn_weights.mean(dim=1)
-        # TODO: fuse this
-        
-        snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
-        snap_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
-        snap_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
-        snap_kv_kernel_size = max(snap_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
-        snap_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
-        snap_pool_vote = F.max_pool1d(
-            snap_vote, 
-            kernel_size=snap_kv_kernel_size, 
-            stride=snap_pool_stride, 
-            padding=snap_kv_kernel_size//2
-        )
-        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
-        snap_indices.mul_(snap_pool_stride)
-        snap_indices = snap_indices\
-            .view(BSZ, 1, -1)\
-            .repeat_interleave(HEAD, dim=0)\
-            .expand(BSZ*HEAD, BDST, -1)
-        
-        diag_vote = sum_all_diagonal(snap_attn_weights)
-        diag_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
-        diag_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
-        diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
-        diag_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
-        diag_pool_vote = F.max_pool1d(
-            diag_vote, 
-            kernel_size=diag_kv_kernel_size, 
-            stride=diag_pool_stride, 
-            padding=diag_kv_kernel_size//2
-        )
-        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
-        diag_indices.mul_(diag_pool_stride)
-        diag_indices = diag_indices\
-            .view(BSZ, 1, -1)\
-            .repeat_interleave(HEAD, dim=0)\
-            .expand(BSZ*HEAD, BDST, -1)
-        diag_indices = diag_indices -\
-            torch.flip(
-                torch.arange(
-                    0, BDST * args.block_size_q, args.block_size_q, 
-                    device=indices.device
-                ), dims=(0,)
-            )[None, :, None]
-        torch.clamp_min(diag_indices, 0, out=diag_indices)
-        
+    if adding_snap_kv:
         # concat and union and update ks
         indices = torch.cat([
             indices, 
@@ -4445,131 +4538,135 @@ def block_sparse_attention_cuda(
                 # idx_group = idx_tsrc // MAX_TSRC
                 idx_tsrc = idx_tsrc % MAX_TSRC
                 
-                # idx_n = idx_b * G + idx_group
-                keys = load_tokens(
-                    K, 
-                    stride_k_bsz, 
-                    stride_k_tsrc, 
-                    stride_k_head, 
-                    stride_k_hid,
-                    
-                    USING_PAGES, 
-                    PAGE_SIZE,
-                    K_CACHE,
-                    stride_k_cache_page,
-                    stride_k_cache_offset,
-                    stride_k_cache_kv_head,
-                    stride_k_cache_hid,
-                    BLOCK_TABLE,
-                    stride_block_table_bsz,
-                    stride_block_table_page,
-                    CACHE_SEQ_LENS,
-                    stride_cache_seq_lens_b,
-                    
-                    # offload cache args template
-                    USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
-                    False,
-                    OFFLOAD_CACHE_K_TABLES,
-                    stride_offload_cache_k_tables_n,
-                    stride_offload_cache_k_tables_t,
-                    OFFLOAD_CACHE_K_BANKS,
-                    stride_offload_cache_k_banks_n,
-                    stride_offload_cache_k_banks_page,
-                    stride_offload_cache_k_banks_offset,
-                    stride_offload_cache_k_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
-                    
-                    idx_bsz,
-                    idx_tsrc[None, :],
-                    idx_head // KV_HEAD_REPEAT,
-                    idx_hid[:, None],
-                    mask_tsrc[None, :],
-                    
-                    BLOCK_SIZE_K,
-                )
+                min_tsrc = tl.min(idx_tsrc)
                 
-                values = load_tokens(
-                    V, 
-                    stride_v_bsz, 
-                    stride_v_tsrc, 
-                    stride_v_head, 
-                    stride_v_hid,
-                    
-                    USING_PAGES, 
-                    PAGE_SIZE,
-                    V_CACHE,
-                    stride_v_cache_page,
-                    stride_v_cache_offset,
-                    stride_v_cache_kv_head,
-                    stride_v_cache_hid,
-                    BLOCK_TABLE,
-                    stride_block_table_bsz,
-                    stride_block_table_page,
-                    CACHE_SEQ_LENS,
-                    stride_cache_seq_lens_b,
-                    
-                    # offload cache args template
-                    USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
-                    False,
-                    OFFLOAD_CACHE_V_TABLES,
-                    stride_offload_cache_v_tables_n,
-                    stride_offload_cache_v_tables_t,
-                    OFFLOAD_CACHE_V_BANKS,
-                    stride_offload_cache_v_banks_n,
-                    stride_offload_cache_v_banks_page,
-                    stride_offload_cache_v_banks_offset,
-                    stride_offload_cache_v_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
-                    
-                    idx_bsz,
-                    idx_tsrc[:, None],
-                    idx_head // KV_HEAD_REPEAT,
-                    idx_hid[None, :],
-                    mask_tsrc[:, None],
-                    
-                    BLOCK_SIZE_K,
-                )
+                if min_tsrc <= tl.min(idx_tdst):
                 
-                acc, l_i, m_i = block_sparse_attention_cuda_step(
-                    queries,
-                    keys,
-                    values,
+                    # idx_n = idx_b * G + idx_group
+                    keys = load_tokens(
+                        K, 
+                        stride_k_bsz, 
+                        stride_k_tsrc, 
+                        stride_k_head, 
+                        stride_k_hid,
+                        
+                        USING_PAGES, 
+                        PAGE_SIZE,
+                        K_CACHE,
+                        stride_k_cache_page,
+                        stride_k_cache_offset,
+                        stride_k_cache_kv_head,
+                        stride_k_cache_hid,
+                        BLOCK_TABLE,
+                        stride_block_table_bsz,
+                        stride_block_table_page,
+                        CACHE_SEQ_LENS,
+                        stride_cache_seq_lens_b,
+                        
+                        # offload cache args template
+                        USING_OFFLOAD_CACHE,
+                        OFFLOAD_CACHE_BUDGET,
+                        OFFLOAD_CACHE_KV_HEAD,
+                        False,
+                        OFFLOAD_CACHE_K_TABLES,
+                        stride_offload_cache_k_tables_n,
+                        stride_offload_cache_k_tables_t,
+                        OFFLOAD_CACHE_K_BANKS,
+                        stride_offload_cache_k_banks_n,
+                        stride_offload_cache_k_banks_page,
+                        stride_offload_cache_k_banks_offset,
+                        stride_offload_cache_k_banks_hid,
+                        None, 0, 0, 0,
+                        OFFLOAD_CACHE_COUNTERS,
+                        stride_offload_cache_counters_n,
+                        stride_offload_cache_counters_k,
+                        
+                        idx_bsz,
+                        idx_tsrc[None, :],
+                        idx_head // KV_HEAD_REPEAT,
+                        idx_hid[:, None],
+                        mask_tsrc[None, :],
+                        
+                        BLOCK_SIZE_K,
+                    )
                     
-                    idx_tsrc, mask_tsrc,
-                    idx_tdst, mask_tdst,
+                    values = load_tokens(
+                        V, 
+                        stride_v_bsz, 
+                        stride_v_tsrc, 
+                        stride_v_head, 
+                        stride_v_hid,
+                        
+                        USING_PAGES, 
+                        PAGE_SIZE,
+                        V_CACHE,
+                        stride_v_cache_page,
+                        stride_v_cache_offset,
+                        stride_v_cache_kv_head,
+                        stride_v_cache_hid,
+                        BLOCK_TABLE,
+                        stride_block_table_bsz,
+                        stride_block_table_page,
+                        CACHE_SEQ_LENS,
+                        stride_cache_seq_lens_b,
+                        
+                        # offload cache args template
+                        USING_OFFLOAD_CACHE,
+                        OFFLOAD_CACHE_BUDGET,
+                        OFFLOAD_CACHE_KV_HEAD,
+                        False,
+                        OFFLOAD_CACHE_V_TABLES,
+                        stride_offload_cache_v_tables_n,
+                        stride_offload_cache_v_tables_t,
+                        OFFLOAD_CACHE_V_BANKS,
+                        stride_offload_cache_v_banks_n,
+                        stride_offload_cache_v_banks_page,
+                        stride_offload_cache_v_banks_offset,
+                        stride_offload_cache_v_banks_hid,
+                        None, 0, 0, 0,
+                        OFFLOAD_CACHE_COUNTERS,
+                        stride_offload_cache_counters_n,
+                        stride_offload_cache_counters_k,
+                        
+                        idx_bsz,
+                        idx_tsrc[:, None],
+                        idx_head // KV_HEAD_REPEAT,
+                        idx_hid[None, :],
+                        mask_tsrc[:, None],
+                        
+                        BLOCK_SIZE_K,
+                    )
                     
-                    acc, l_i, m_i,
-                    
-                    sliding_window_size,
-                    True,
-                    
-                    USING_EXTEND,
-                    extend_window_size,
-                    extend_group_size,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    
-                    pos_tdst,
-                    idx_hid, 
-                    IS_CAUSAL,
-                    HID, 
-                    BLOCK_SIZE_Q, 
-                    BLOCK_BK * BLOCK_SIZE_K,
-                )
+                    acc, l_i, m_i = block_sparse_attention_cuda_step(
+                        queries,
+                        keys,
+                        values,
+                        
+                        idx_tsrc, mask_tsrc,
+                        idx_tdst, mask_tdst,
+                        
+                        acc, l_i, m_i,
+                        
+                        sliding_window_size,
+                        True,
+                        
+                        USING_EXTEND,
+                        extend_window_size,
+                        extend_group_size,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        
+                        pos_tdst,
+                        idx_hid, 
+                        IS_CAUSAL,
+                        HID, 
+                        BLOCK_SIZE_Q, 
+                        BLOCK_BK * BLOCK_SIZE_K,
+                    )
+                else:
+                    pass
             else:
                 pass
-            tl.debug_barrier()
-        tl.debug_barrier()
     
     if (sliding_window_size > 0):
         CURR_TSRC = tl.max(pos_tdst)
@@ -4699,8 +4796,6 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
             )
-            tl.debug_barrier()
-        tl.debug_barrier()
     
     # epilogue
     m_i += tl.math.log2(l_i)
