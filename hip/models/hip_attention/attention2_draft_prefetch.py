@@ -4538,133 +4538,132 @@ def block_sparse_attention_cuda(
                 # idx_group = idx_tsrc // MAX_TSRC
                 idx_tsrc = idx_tsrc % MAX_TSRC
                 
-                min_tsrc = tl.min(idx_tsrc)
+                # min_tsrc = tl.min(idx_tsrc)
                 
-                if min_tsrc <= tl.min(idx_tdst):
+                # if min_tsrc <= tl.max(idx_tdst):
+                # idx_n = idx_b * G + idx_group
+                keys = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    idx_hid[:, None],
+                    mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
+                )
                 
-                    # idx_n = idx_b * G + idx_group
-                    keys = load_tokens(
-                        K, 
-                        stride_k_bsz, 
-                        stride_k_tsrc, 
-                        stride_k_head, 
-                        stride_k_hid,
-                        
-                        USING_PAGES, 
-                        PAGE_SIZE,
-                        K_CACHE,
-                        stride_k_cache_page,
-                        stride_k_cache_offset,
-                        stride_k_cache_kv_head,
-                        stride_k_cache_hid,
-                        BLOCK_TABLE,
-                        stride_block_table_bsz,
-                        stride_block_table_page,
-                        CACHE_SEQ_LENS,
-                        stride_cache_seq_lens_b,
-                        
-                        # offload cache args template
-                        USING_OFFLOAD_CACHE,
-                        OFFLOAD_CACHE_BUDGET,
-                        OFFLOAD_CACHE_KV_HEAD,
-                        False,
-                        OFFLOAD_CACHE_K_TABLES,
-                        stride_offload_cache_k_tables_n,
-                        stride_offload_cache_k_tables_t,
-                        OFFLOAD_CACHE_K_BANKS,
-                        stride_offload_cache_k_banks_n,
-                        stride_offload_cache_k_banks_page,
-                        stride_offload_cache_k_banks_offset,
-                        stride_offload_cache_k_banks_hid,
-                        None, 0, 0, 0,
-                        OFFLOAD_CACHE_COUNTERS,
-                        stride_offload_cache_counters_n,
-                        stride_offload_cache_counters_k,
-                        
-                        idx_bsz,
-                        idx_tsrc[None, :],
-                        idx_head // KV_HEAD_REPEAT,
-                        idx_hid[:, None],
-                        mask_tsrc[None, :],
-                        
-                        BLOCK_SIZE_K,
-                    )
+                values = load_tokens(
+                    V, 
+                    stride_v_bsz, 
+                    stride_v_tsrc, 
+                    stride_v_head, 
+                    stride_v_hid,
                     
-                    values = load_tokens(
-                        V, 
-                        stride_v_bsz, 
-                        stride_v_tsrc, 
-                        stride_v_head, 
-                        stride_v_hid,
-                        
-                        USING_PAGES, 
-                        PAGE_SIZE,
-                        V_CACHE,
-                        stride_v_cache_page,
-                        stride_v_cache_offset,
-                        stride_v_cache_kv_head,
-                        stride_v_cache_hid,
-                        BLOCK_TABLE,
-                        stride_block_table_bsz,
-                        stride_block_table_page,
-                        CACHE_SEQ_LENS,
-                        stride_cache_seq_lens_b,
-                        
-                        # offload cache args template
-                        USING_OFFLOAD_CACHE,
-                        OFFLOAD_CACHE_BUDGET,
-                        OFFLOAD_CACHE_KV_HEAD,
-                        False,
-                        OFFLOAD_CACHE_V_TABLES,
-                        stride_offload_cache_v_tables_n,
-                        stride_offload_cache_v_tables_t,
-                        OFFLOAD_CACHE_V_BANKS,
-                        stride_offload_cache_v_banks_n,
-                        stride_offload_cache_v_banks_page,
-                        stride_offload_cache_v_banks_offset,
-                        stride_offload_cache_v_banks_hid,
-                        None, 0, 0, 0,
-                        OFFLOAD_CACHE_COUNTERS,
-                        stride_offload_cache_counters_n,
-                        stride_offload_cache_counters_k,
-                        
-                        idx_bsz,
-                        idx_tsrc[:, None],
-                        idx_head // KV_HEAD_REPEAT,
-                        idx_hid[None, :],
-                        mask_tsrc[:, None],
-                        
-                        BLOCK_SIZE_K,
-                    )
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    V_CACHE,
+                    stride_v_cache_page,
+                    stride_v_cache_offset,
+                    stride_v_cache_kv_head,
+                    stride_v_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
                     
-                    acc, l_i, m_i = block_sparse_attention_cuda_step(
-                        queries,
-                        keys,
-                        values,
-                        
-                        idx_tsrc, mask_tsrc,
-                        idx_tdst, mask_tdst,
-                        
-                        acc, l_i, m_i,
-                        
-                        sliding_window_size,
-                        True,
-                        
-                        USING_EXTEND,
-                        extend_window_size,
-                        extend_group_size,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        
-                        pos_tdst,
-                        idx_hid, 
-                        IS_CAUSAL,
-                        HID, 
-                        BLOCK_SIZE_Q, 
-                        BLOCK_BK * BLOCK_SIZE_K,
-                    )
-                else:
-                    pass
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_V_TABLES,
+                    stride_offload_cache_v_tables_n,
+                    stride_offload_cache_v_tables_t,
+                    OFFLOAD_CACHE_V_BANKS,
+                    stride_offload_cache_v_banks_n,
+                    stride_offload_cache_v_banks_page,
+                    stride_offload_cache_v_banks_offset,
+                    stride_offload_cache_v_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[:, None],
+                    idx_head // KV_HEAD_REPEAT,
+                    idx_hid[None, :],
+                    mask_tsrc[:, None],
+                    
+                    BLOCK_SIZE_K,
+                )
+                
+                acc, l_i, m_i = block_sparse_attention_cuda_step(
+                    queries,
+                    keys,
+                    values,
+                    
+                    idx_tsrc, mask_tsrc,
+                    idx_tdst, mask_tdst,
+                    
+                    acc, l_i, m_i,
+                    
+                    sliding_window_size,
+                    True,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    
+                    pos_tdst,
+                    idx_hid, 
+                    IS_CAUSAL,
+                    HID, 
+                    BLOCK_SIZE_Q, 
+                    BLOCK_BK * BLOCK_SIZE_K,
+                )
+                # else:
+                #     pass
             else:
                 pass
     
