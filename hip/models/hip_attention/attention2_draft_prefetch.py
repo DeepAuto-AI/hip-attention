@@ -72,6 +72,7 @@ class HiPAttentionArgs:
     block_size_k: int = 2
     block_stride_k: int = 1
     block_size_k_group: int = 1
+    block_size_k_after_masking: int = int(os.getenv('HIP_BK_AFTER_MASK', '-1'))
     
     group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
     
@@ -4205,7 +4206,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': 4}, num_warps=4, num_stages=2, maxnreg=256)]
+        return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=512)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
@@ -4227,6 +4228,7 @@ def get_block_sparse_attention_configs():
 def perf_model_block_sparse_attention(**kwargs):
     block_bk = kwargs['BLOCK_BK']
     block_k = kwargs['BLOCK_SIZE_K']
+    assert block_k <= 64, 'this will not good idea'
     if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
         return 0
     return 999999999 # run might fails
@@ -4747,8 +4749,8 @@ def block_sparse_attention(
     #     BLOCK_BK = 128 // block_size_k
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
-    BLOCK_BK = 64 // args.block_size_k
-    assert BLOCK_BK > 0, BLOCK_BK
+    # BLOCK_BK = 64 // args.block_size_k
+    # assert BLOCK_BK > 0, BLOCK_BK
     
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
@@ -5455,6 +5457,7 @@ def hip_masking(
             block_access_log,
             block_access_score,
             block_access_count,
+            args,
         ) = hip_masking(
             # TODO(heejun): apply PCA topk
             q=q_quant,
@@ -5779,6 +5782,20 @@ def hip_masking(
         else:
             print(q.shape[1])
     
+    if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
+        indices = indices // args.block_size_k_after_masking * args.block_size_k_after_masking
+        
+        # indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, k.shape[1] * args.topk_head_group_size)
+        indices = indices.sort(dim=-1).values
+        ks = unique_mask.int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end[:, :, -1] = ks
+        
+        args = args.clone()
+        args.block_size_k = args.block_size_k_after_masking
+    
     return (
         indices, 
         ks, 
@@ -5789,6 +5806,7 @@ def hip_masking(
         block_access_log,
         block_access_score,
         block_access_count,
+        args,
     )
 
 @nvtx.annotate('hip_attention')
@@ -5863,15 +5881,13 @@ def hip_attention(
             block_access_log,
             block_access_score,
             block_access_count,
+            args,
         ) = hip_masking(
             # TODO(heejun): apply PCA topk
             q=args.get_q_quant(q),
             k=args.get_k_quant(k),
             args=args,
         )
-        # if args.group_size_q > 1:
-        #     assert args.block_size_q >= args.block_size_k
-        #     args.block_size_k = args.block_size_q
     else:
         indices = previous_metadata.indices
         ks = previous_metadata.ks
@@ -5959,6 +5975,7 @@ def paged_hip_attention(
             block_access_log,
             block_access_score,
             block_access_count,
+            args,
         ) = hip_masking(
             q=q,
             k=None,
@@ -6148,26 +6165,25 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=4096,
+                mask_k=2048,
                 
                 block_size_q=64,
                 block_stride_q=2,
-                block_size_k=8,
-                block_stride_k=4,
+                block_size_k=2,
+                block_stride_k=1,
                 block_size_k_group=1,
+                block_size_k_after_masking=64,
                 
                 group_size_q=1,
                 
                 add_snap_kv=True,
-                snap_kv_vert_k=512,
+                snap_kv_vert_k=1024,
                 snap_kv_diag_k=2048,
-                snap_kv_kernel_size=63,
-                snap_kv_obs_window=512,
                 
                 is_causal=True,
                 
                 sliding_window_size=2048,
-                sink_token_size=16,
+                sink_token_size=256,
                 
                 using_extend=False,
                 rope_cos=cos,

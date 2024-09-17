@@ -1617,7 +1617,7 @@ def main_latency_benchmark():
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--dups', type=int, default=2)
     parser.add_argument('--query_size', type=int, default=1)
-    parser.add_argument('--method', type=str, default='hip')
+    parser.add_argument('--method', type=str, default='hip1.1')
     parser.add_argument('--samples', type=int, default=200)
     parser.add_argument('--block_size_q', type=int, default=32)
     parser.add_argument('--block_stride_q', type=int, default=None)
@@ -1766,7 +1766,7 @@ def main_latency_benchmark():
                 if mask is None:
                     return None
                 return mask
-            elif METHOD == 'hip':
+            elif METHOD == 'hip1.0':
                 if state is None:
                     _, mask = hip_attention(
                         q,
@@ -1807,7 +1807,7 @@ def main_latency_benchmark():
     graph = None
     graph_stateful = None
     samples = []
-    for i in tqdm.tqdm(range(n_samples)):
+    for i in tqdm.tqdm(range(n_samples), dynamic_ncols=True):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
