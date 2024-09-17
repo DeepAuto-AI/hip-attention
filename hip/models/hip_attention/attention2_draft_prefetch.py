@@ -6166,14 +6166,14 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=2048,
+                mask_k=512,
                 
                 block_size_q=64,
                 block_stride_q=2,
                 block_size_k=2,
                 block_stride_k=1,
                 block_size_k_group=1,
-                block_size_k_after_masking=64,
+                block_size_k_after_masking=-1,
                 
                 group_size_q=1,
                 
