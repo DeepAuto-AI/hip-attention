@@ -5783,6 +5783,7 @@ def hip_masking(
             print(q.shape[1])
     
     if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
+        warnings.warn(f'block size k after masking {args.block_size_k_after_masking}')
         indices = indices // args.block_size_k_after_masking * args.block_size_k_after_masking
         
         # indices = indices.sort(dim=-1).values
