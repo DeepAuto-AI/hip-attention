@@ -3625,26 +3625,26 @@ def masking_iteration_draft(
             )[None, :, None]
         torch.clamp_min(diag_indices, 0, out=diag_indices)
         
-        assert vertical_attention_mask is None
-        vertical_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
-        vertical_attention_mask.scatter_(
-            dim=1, 
-            index=(
-                snap_indices[:, -1, :, None] +\
-                torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
-            ).view(BSZ * HEAD, -1), 
-            value=0
-        )
+        # assert vertical_attention_mask is None
+        # vertical_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
+        # vertical_attention_mask.scatter_(
+        #     dim=1, 
+        #     index=(
+        #         snap_indices[:, -1, :, None] +\
+        #         torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
+        #     ).view(BSZ * HEAD, -1), 
+        #     value=0
+        # )
         
-        diagonal_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
-        diagonal_attention_mask.scatter_(
-            dim=1, 
-            index=(
-                diag_indices[:, -1, :, None] +\
-                torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
-            ).view(BSZ * HEAD, -1),
-            value=0
-        )
+        # diagonal_attention_mask = torch.ones((BSZ * HEAD, MAX_TSRC), device=q.device, dtype=torch.bool)
+        # diagonal_attention_mask.scatter_(
+        #     dim=1, 
+        #     index=(
+        #         diag_indices[:, -1, :, None] +\
+        #         torch.arange(0, max(args.block_size_k, args.block_size_k_after_masking), device=q.device)[None, None, :]
+        #     ).view(BSZ * HEAD, -1),
+        #     value=0
+        # )
     
     # launch kernels
     # print('init in', indices[0, -1, :10])
