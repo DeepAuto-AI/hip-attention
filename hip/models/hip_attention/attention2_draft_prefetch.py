@@ -5782,6 +5782,26 @@ def hip_masking(
         else:
             print(q.shape[1])
     
+    (
+        indices, ks, ks_count, ks_start_end, args
+    ) = hip_masking_handle_block_size_k_after_mask()
+    
+    return (
+        indices, 
+        ks, 
+        ks_count, 
+        ks_start_end, 
+        key_access_log, 
+        key_access_count,
+        block_access_log,
+        block_access_score,
+        block_access_count,
+        args,
+    )
+
+def hip_masking_handle_block_size_k_after_mask(
+    args, indices, ks, ks_count, ks_start_end
+):
     if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
         warnings.warn(f'block size k after masking {args.block_size_k_after_masking}')
         indices = indices // args.block_size_k_after_masking * args.block_size_k_after_masking
@@ -5798,16 +5818,7 @@ def hip_masking(
         args.block_size_k = args.block_size_k_after_masking
     
     return (
-        indices, 
-        ks, 
-        ks_count, 
-        ks_start_end, 
-        key_access_log, 
-        key_access_count,
-        block_access_log,
-        block_access_score,
-        block_access_count,
-        args,
+        indices, ks, ks_count, ks_start_end, args
     )
 
 @nvtx.annotate('hip_attention')
@@ -5992,6 +6003,10 @@ def paged_hip_attention(
         block_access_log = previous_mask_metadata.block_access_log
         block_access_score = previous_mask_metadata.block_access_score
         block_access_count = previous_mask_metadata.block_access_count
+        
+        if args.block_size_k_after_masking:
+            args = args.clone()
+            args.block_size_k = args.block_size_k_after_masking
     
     context = block_sparse_attention(
         q=q,
