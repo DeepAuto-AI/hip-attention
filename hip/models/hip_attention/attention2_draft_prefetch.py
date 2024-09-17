@@ -3483,7 +3483,7 @@ def masking_iteration_draft(
     if indices_seed is not None:
         assert len(indices_seed.stride()) == 3
         assert len(ks_seed.stride()) == 2
-        assert indices_seed.shape == indices.shape
+        assert indices_seed.shape == indices.shape, f'{indices_seed.shape} == {indices.shape}'
         assert ks_seed.shape == ks.shape
         indices_seed = indices_seed // args.block_size_k
     if args.rope_cos is not None:
@@ -3925,7 +3925,13 @@ def masking_iteration_draft(
         # TODO: fuse this
         
         snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
-        snap_pool_vote = F.max_pool1d(snap_vote, kernel_size=snap_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        snap_kv_kernel_size = max(snap_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        snap_pool_vote = F.max_pool1d(
+            snap_vote, 
+            kernel_size=snap_kv_kernel_size, 
+            stride=max(args.block_size_k, args.block_size_k_after_masking), 
+            padding=snap_kv_kernel_size//2
+        )
         snap_indices = snap_pool_vote.topk(snap_kv_k // args.block_size_k, dim=-1, sorted=False).indices
         snap_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
         snap_indices = snap_indices\
@@ -3934,7 +3940,13 @@ def masking_iteration_draft(
             .expand(BSZ*HEAD, BDST, -1)
         
         diag_vote = sum_all_diagonal(snap_attn_weights)
-        diag_pool_vote = F.max_pool1d(diag_vote, kernel_size=diag_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
+        diag_pool_vote = F.max_pool1d(
+            diag_vote, 
+            kernel_size=diag_kv_kernel_size, 
+            stride=max(args.block_size_k, args.block_size_k_after_masking), 
+            padding=diag_kv_kernel_size//2
+        )
         diag_indices = diag_pool_vote.topk(diag_kv_k // args.block_size_k, dim=-1, sorted=False).indices
         diag_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
         diag_indices = diag_indices\
@@ -5127,11 +5139,12 @@ def masking_step_loop(
                                 )
                                 
                                 # NOTE: block is break down, this is not accurate
-                                scores = scores[:, :, :, None]\
-                                    .expand(-1, -1, -1, 2)\
-                                    .contiguous()\
-                                    .view(scores.shape[0], scores.shape[1], -1)
-                                
+                                if scores is not None:
+                                    scores = scores[:, :, :, None]\
+                                        .expand(-1, -1, -1, 2)\
+                                        .contiguous()\
+                                        .view(scores.shape[0], scores.shape[1], -1)
+                                    
                                 ks_count, ks_start_end = masking_iteration_draft_python_epilog(
                                     indices, ks, 
                                     cdiv_python(args.mask_k, args.block_size_k), 
@@ -5165,7 +5178,9 @@ def masking_step_loop(
                                     
                                     args.mask_k,
                                     args.block_size_q, 
+                                    args.block_stride_q,
                                     args.block_size_k, 
+                                    args.is_causal,
                                     
                                     args.sliding_window_size,
                                     
@@ -5186,19 +5201,20 @@ def masking_step_loop(
                                 # print(init_group_sizes[0, idx_tdst[::32] < 1024, :10])
                                 # print(group_sizes_scaled[0, idx_tdst[::32] < 1024, :10])
                                 
-                                mask_tdst = pos_tdst[::args.block_size_q] < args.mask_k * 2
+                                mask_tdst = pos_tdst[:, ::args.block_size_q] < args.mask_k * 2
+                                print(mask_tdst.shape, init_group_sizes.shape, group_sizes_scaled.shape)
                                 group_sizes = torch.where(
-                                    mask_tdst[None, :, None],
+                                    mask_tdst[:, :, None],
                                     init_group_sizes,
                                     group_sizes_scaled,
                                 )
                                 indices = torch.where(
-                                    mask_tdst[None, :, None],
+                                    mask_tdst[:, :, None],
                                     init_indices * args.block_size_k,
                                     indices,
                                 )
                                 ks = torch.where(
-                                    mask_tdst[None, :],
+                                    mask_tdst[:, :],
                                     init_ks,
                                     ks,
                                 )
@@ -6183,20 +6199,20 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=512,
+                mask_k=1024,
                 
                 block_size_q=64,
                 block_stride_q=2,
-                block_size_k=2,
+                block_size_k=1,
                 block_stride_k=1,
                 block_size_k_group=1,
-                block_size_k_after_masking=-1,
+                block_size_k_after_masking=64,
                 
                 group_size_q=1,
                 
-                add_snap_kv=True,
-                snap_kv_vert_k=1024,
-                snap_kv_diag_k=2048,
+                add_snap_kv=False,
+                snap_kv_vert_k=256,
+                snap_kv_diag_k=256,
                 
                 is_causal=True,
                 
@@ -6226,7 +6242,7 @@ def main():
                 
                 low_res_sample_scale=1,
                 low_res_oversample_rate=1,
-                low_res_oversample_block_stride_k=1,
+                low_res_oversample_block_stride_k=4,
                 
                 q_quant=q_quant,
                 k_quant=k_quant,
