@@ -5783,8 +5783,10 @@ def hip_masking(
             print(q.shape[1])
     
     (
-        indices, ks, ks_count, ks_start_end, args
-    ) = hip_masking_handle_block_size_k_after_mask()
+        args, indices, ks, ks_count, ks_start_end
+    ) = hip_masking_handle_block_size_k_after_mask(
+        args, indices, ks, ks_count, ks_start_end
+    )
     
     return (
         indices, 
@@ -5818,7 +5820,7 @@ def hip_masking_handle_block_size_k_after_mask(
         args.block_size_k = args.block_size_k_after_masking
     
     return (
-        indices, ks, ks_count, ks_start_end, args
+        args, indices, ks, ks_count, ks_start_end
     )
 
 @nvtx.annotate('hip_attention')
