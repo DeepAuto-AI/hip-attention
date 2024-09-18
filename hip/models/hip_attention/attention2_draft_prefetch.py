@@ -3594,7 +3594,10 @@ def masking_iteration_draft(
             stride=snap_pool_stride, 
             padding=snap_kv_kernel_size//2
         )
-        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices.to(torch.int32)
+        snap_indices = snap_pool_vote.topk(min(
+            snap_pool_vote.shape[-1],
+            snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k)
+        ), dim=-1, sorted=False).indices.to(torch.int32)
         snap_indices.mul_(snap_pool_stride)
         snap_indices = snap_indices\
             .view(BSZ, 1, -1)\
@@ -3612,7 +3615,10 @@ def masking_iteration_draft(
             stride=diag_pool_stride, 
             padding=diag_kv_kernel_size//2
         )
-        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k, args.block_size_q), dim=-1, sorted=False).indices.to(torch.int32)
+        diag_indices = diag_pool_vote.topk(min(
+            diag_pool_vote.shape[-1],
+            diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k, args.block_size_q)
+        ), dim=-1, sorted=False).indices.to(torch.int32)
         # BUG: what is happend here? why i have to sub 2?
         diag_indices.sub_(2).mul_(diag_pool_stride)# - (diag_kv_kernel_size // diag_pool_stride * diag_pool_stride)
         diag_indices = (
