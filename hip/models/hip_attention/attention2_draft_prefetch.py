@@ -4894,8 +4894,6 @@ def block_sparse_attention(
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
     
-    print(args.block_size_k)
-    
     block_sparse_attention_cuda[grid](
         q, *args.safe_stride(q, 4),
         k, *args.safe_stride(k, 4),
