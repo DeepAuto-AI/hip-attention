@@ -6168,9 +6168,10 @@ def paged_hip_attention(
         block_access_score = previous_mask_metadata.block_access_score
         block_access_count = previous_mask_metadata.block_access_count
         
-        if args.block_size_k_after_masking:
+        if (args.block_size_k_after_masking > 0):
             args = args.clone()
             args.block_size_k = args.block_size_k_after_masking
+            args.block_size_k_after_masking = -1
     
     context = block_sparse_attention(
         q=q,
