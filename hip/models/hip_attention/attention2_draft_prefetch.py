@@ -3594,7 +3594,7 @@ def masking_iteration_draft(
             stride=snap_pool_stride, 
             padding=snap_kv_kernel_size//2
         )
-        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
+        snap_indices = snap_pool_vote.topk(snap_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices.to(torch.int32)
         snap_indices.mul_(snap_pool_stride)
         snap_indices = snap_indices\
             .view(BSZ, 1, -1)\
@@ -3604,16 +3604,20 @@ def masking_iteration_draft(
         diag_vote = sum_all_diagonal(snap_attn_weights)
         diag_vote[:, :, :args.sink_token_size].fill_(torch.finfo(snap_vote.dtype).min)
         diag_vote[:, :, -args.sliding_window_size-observation_window:].fill_(torch.finfo(snap_vote.dtype).min)
-        diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * args.block_size_k_after_masking)
-        diag_pool_stride = max(args.block_size_k, args.block_size_k_after_masking)
+        diag_pool_stride = max(args.block_size_k, args.block_size_k_after_masking, args.block_size_q)
+        diag_kv_kernel_size = max(diag_kv_kernel_size, 1 + 2 * diag_pool_stride)
         diag_pool_vote = F.max_pool1d(
             diag_vote, 
             kernel_size=diag_kv_kernel_size, 
             stride=diag_pool_stride, 
             padding=diag_kv_kernel_size//2
         )
-        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k), dim=-1, sorted=False).indices
-        diag_indices.mul_(diag_pool_stride)
+        diag_indices = diag_pool_vote.topk(diag_kv_k // max(args.block_size_k_after_masking, args.block_size_k, args.block_size_q), dim=-1, sorted=False).indices.to(torch.int32)
+        # BUG: what is happend here? why i have to sub 2?
+        diag_indices.sub_(2).mul_(diag_pool_stride)# - (diag_kv_kernel_size // diag_pool_stride * diag_pool_stride)
+        diag_indices = (
+            diag_indices[:, :, :, None].to(torch.int32) + (torch.arange(0, args.block_size_q, max(args.block_size_k_after_masking, args.block_size_k), device=indices.device) - (args.block_size_q // 2)).to(torch.int32)[None, None, None, :]
+        ).view(diag_indices.shape[0], -1)
         diag_indices = diag_indices\
             .view(BSZ, 1, -1)\
             .repeat_interleave(HEAD, dim=0)\
@@ -3622,10 +3626,10 @@ def masking_iteration_draft(
             torch.flip(
                 torch.arange(
                     0, BDST * args.block_size_q, args.block_size_q, 
-                    device=indices.device
+                    device=indices.device, dtype=diag_indices.dtype,
                 ), dims=(0,)
             )[None, :, None]
-        torch.clamp_min(diag_indices, 0, out=diag_indices)
+        diag_indices.clamp_min_(0)
         
         if os.getenv('HIP_SNAP_KV_NO_OVERLAP', '0') == '1':
             assert vertical_attention_mask is None
@@ -4066,15 +4070,27 @@ def masking_iteration_draft(
     
     if adding_snap_kv:
         # concat and union and update ks
-        indices = torch.cat([
-            indices, 
-            snap_indices,
-            diag_indices,
-        ], dim=-1).sort(dim=-1).values
-        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-        indices = torch.where(unique_mask, indices, MAX_TSRC * G)
-        indices = indices.sort(dim=-1).values
-        ks = unique_mask.int().sum(-1)
+        # this peak memory too much
+        chunk_size = cdiv_python(2048 * 4096, indices.shape[1])
+        indices_out = torch.empty((indices.shape[0], indices.shape[1], indices.shape[2] + snap_indices.shape[2] + diag_indices.shape[2]), dtype=torch.int32, device=indices.device)
+        ks_out = torch.empty_like(ks)
+        for i in range(0, indices.shape[1], chunk_size):
+            i_start = i 
+            i_end = min(i_start + chunk_size, indices.shape[1])
+            t_indices = torch.cat([
+                indices[:, i_start:i_end],
+                snap_indices[:, i_start:i_end],
+                diag_indices[:, i_start:i_end],
+            ], dim=-1).sort(dim=-1).values
+            t_unique_mask = torch.roll(t_indices, shifts=1, dims=-1) != t_indices
+            t_indices = torch.where(t_unique_mask, t_indices, MAX_TSRC * G)
+            t_indices = t_indices.sort(dim=-1).values
+            t_ks = t_unique_mask.int().sum(-1)
+            indices_out[:, i_start:i_end].copy_(t_indices, non_blocking=True)
+            ks_out[:, i_start:i_end].copy_(t_ks, non_blocking=True)
+        indices = indices_out
+        ks = ks_out
+        # print('indices shape', indices.shape)
         
         scores_final = None
     elif args.add_approx_k_window:
@@ -4927,6 +4943,13 @@ def block_sparse_attention(
         # num_stages=2 if not using_extend else 1,
     )
     torch.set_default_device(pre_device)
+    
+    if (os.getenv('HIP_CUMSUM', '0') == '1') and isinstance(v, Tensor) and q.shape[1] > 1:
+        v_cumsum = v.cumsum(dim=1) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None, None]
+        a = torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None]
+        b = ks.repeat_interleave(args.block_size_q, 1)[:, :v.shape[1]].view(BSZ, HEAD, -1).permute(0, 2, 1) * args.block_size_k
+        scaler = ((a - b) / a).clamp_min(0)[:, :, :, None].pow(2) * 0.05
+        context = context * (1 - scaler) + v_cumsum.repeat_interleave(HEAD // KV_HEAD, dim=2) * scaler
     
     return context
 
@@ -5899,16 +5922,28 @@ def hip_masking(
             # print('saved dummy.png')
         
         # render_mask()
-        if q.shape[1] > 64000:
-            render_mask()
-        else:
-            print(q.shape[1])
+        render_mask()
+        # if q.shape[1] > 64000:
+        # else:
+        #     print(q.shape[1])
     
-    (
-        args, indices, ks, ks_count, ks_start_end
-    ) = hip_masking_handle_block_size_k_after_mask(
-        args, indices, ks, ks_count, ks_start_end
-    )
+    if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
+        warnings.warn(f'block size k after masking {args.block_size_k_after_masking}')
+        indices = indices // args.block_size_k_after_masking * args.block_size_k_after_masking
+        
+        # indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+        indices = indices.sort(dim=-1).values
+        # active_mask = unique_mask
+        active_mask = indices < position_ids[:, :, None]
+        ks = active_mask.int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end[:, :, -1] = ks
+        
+        args = args.clone()
+        args.block_size_k = args.block_size_k_after_masking
+        args.block_size_k_after_masking = -1
     
     return (
         indices, 
@@ -5921,29 +5956,6 @@ def hip_masking(
         block_access_score,
         block_access_count,
         args,
-    )
-
-def hip_masking_handle_block_size_k_after_mask(
-    args: HiPAttentionArgs, indices: Tensor, ks: Tensor, ks_count: Tensor, ks_start_end: Tensor
-):
-    if (args.block_size_k_after_masking > 0) and (args.block_size_k_after_masking != args.block_size_k):
-        warnings.warn(f'block size k after masking {args.block_size_k_after_masking}')
-        indices = indices // args.block_size_k_after_masking * args.block_size_k_after_masking
-        
-        # indices = indices.sort(dim=-1).values
-        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-        indices = indices.sort(dim=-1).values
-        ks = unique_mask.int().sum(-1)
-        ks_count = ks.unsqueeze(-1)
-        ks_start_end[:, :, -1] = ks
-        
-        args = args.clone()
-        args.block_size_k = args.block_size_k_after_masking
-        args.block_size_k_after_masking = -1
-    
-    return (
-        args, indices, ks, ks_count, ks_start_end
     )
 
 @nvtx.annotate('hip_attention')
@@ -6070,10 +6082,10 @@ def hip_attention(
             # print('saved dummy.png')
         
         # render_mask()
-        if q.shape[1] > 64000:
-            render_mask()
-        else:
-            print(q.shape[1])
+        render_mask()
+        # if q.shape[1] > 64000:
+        # else:
+        #     print(q.shape[1])
     
     metadata = HiPAttentionOutputMetadata(
         indices=indices,
@@ -6353,13 +6365,13 @@ def main():
                 block_size_k=2,
                 block_stride_k=1,
                 block_size_k_group=1,
-                block_size_k_after_masking=64,
+                block_size_k_after_masking=-1,
                 
                 group_size_q=1,
                 
                 add_snap_kv=True,
-                snap_kv_vert_k=1024,
-                snap_kv_diag_k=1024,
+                snap_kv_vert_k=2048,
+                snap_kv_diag_k=2048,
                 
                 is_causal=True,
                 
