@@ -4071,8 +4071,9 @@ def masking_iteration_draft(
     if adding_snap_kv:
         # concat and union and update ks
         # this peak memory too much
-        chunk_size = cdiv_python(2048 * 4096, indices.shape[1])
         indices_out = torch.empty((indices.shape[0], indices.shape[1], indices.shape[2] + snap_indices.shape[2] + diag_indices.shape[2]), dtype=torch.int32, device=indices.device)
+        chunk_count = cdiv_python(indices_out.shape[1] * indices_out.shape[2], 2048 * 4096)
+        chunk_size = cdiv_python(indices.shape[1], chunk_count)
         ks_out = torch.empty_like(ks)
         for i in range(0, indices.shape[1], chunk_size):
             i_start = i 

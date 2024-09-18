@@ -36,7 +36,7 @@ def job_passkey(args, model, tokenizer, device):
             for item in outputs:
                 output.append(item.outputs[0].text)
         else:
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast('cuda', torch.float16):
                 output = model.generate(
                     input_ids, 
                     max_new_tokens=7,
