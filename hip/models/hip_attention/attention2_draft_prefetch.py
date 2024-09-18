@@ -2428,7 +2428,7 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=256)]
+        return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=512)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     for num_warps in [2, 4, 8]:
@@ -4321,7 +4321,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=512)]
+        return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=256)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
@@ -5530,6 +5530,7 @@ def hip_masking(
             None,
             None,
             None,
+            args,
         )
     
     if args.group_size_q > 1:
@@ -5668,6 +5669,7 @@ def hip_masking(
             block_access_log,
             block_access_score,
             block_access_count,
+            args,
         )
     
     assert (k is None and args.k_cache is not None) or (k is not None and args.k_cache is None)
