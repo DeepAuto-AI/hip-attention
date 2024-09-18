@@ -3576,7 +3576,7 @@ def masking_iteration_draft(
         
         # TODO: fuse this
         obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:] # NOTE: merge topk-group dim
-        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
+        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :]
         if HEAD != KV_HEAD:
             obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
         snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
