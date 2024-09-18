@@ -178,7 +178,9 @@ class HiPAttentionArgs:
         if x is None:
             return tuple([0,] * ndim)
         else:
-            return x.stride()
+            stride = x.stride()
+            assert len(stride) == ndim
+            return stride
 
     def get_q_quant(self, q: Tensor):
         return self.q_quant if self.q_quant is not None else q
@@ -4892,17 +4894,19 @@ def block_sparse_attention(
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
     
+    print(args.block_size_k)
+    
     block_sparse_attention_cuda[grid](
-        q, *q.stride(),
+        q, *args.safe_stride(q, 4),
         k, *args.safe_stride(k, 4),
         v, *args.safe_stride(v, 4),
-        position_ids, *position_ids.stride(),
+        position_ids, *args.safe_stride(position_ids, 2),
         
         indices, *args.safe_stride(indices, 3),
         
         ks_start_end, *args.safe_stride(ks_start_end, 3),
         
-        context, *context.stride(),
+        context, *args.safe_stride(context, 4),
         
         HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT,
         
