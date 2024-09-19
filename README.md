@@ -8,7 +8,7 @@
 
 After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
 
-[vLLM Implementation](https://github.com/DeepAuto-AI/vllm)
+[vLLM Implementation]({VLLM URL})
 
 ## TL;DR
 
@@ -95,7 +95,7 @@ output, _ = paged_hip_attention(
 ## How to clone the repository
 
 ```bash
-git clone git@github.com:DeepAuto-AI/hip-attention.git
+git clone {REPO URL}
 cd hip-attention
 ```
 
@@ -112,7 +112,7 @@ docker run --runtime nvidia --rm -it --ipc=host \
     -e 'HIP_K=512' \
     -e 'HIP_REFRESH_INTERVAL=8' \
     -e 'HIP_DENSE_LAYERS=4' \
-    deepauto/vllm-hip-openai:latest \
+    hip/vllm-hip-openai:latest \
         --port 8001 \
         --model Qwen/Qwen2-1.5B-Instruct \
         --tensor-parallel-size 1 \
@@ -127,9 +127,9 @@ Run commands below:
 
 ```bash
 cd ../
-git clone git@github.com:DeepAuto-AI/vllm.git
+git clone {REPO URL}
 cd vllm
-docker build . --build-context hip=../hip-attention --target vllm-openai --tag deepauto/vllm-hip-openai
+docker build . --build-context hip=../hip-attention --target vllm-openai --tag hip/vllm-hip-openai
 ```
 
 ## Setup without docker

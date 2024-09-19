@@ -132,7 +132,7 @@ class HiPAttentionArgs:
     cache_seq_lens: Optional[Tensor] = None
     block_table: Optional[Tensor] = None
     
-    # BUG(HJ): this nameing is wrong...
+    # BUG(-): this nameing is wrong...
     position_ids: Optional[Tensor] = None
     
     offload_cache_kv_heads: Optional[int] = None
@@ -2429,7 +2429,8 @@ def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
         return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=512)]
-    warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
+    if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
+        warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     for num_warps in [2, 4, 8]:
     # for num_warps in [4,]:
@@ -4345,7 +4346,8 @@ def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
         return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=256)]
-    warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
+    if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
+        warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
@@ -5596,7 +5598,7 @@ def hip_masking(
         args = args.clone()
         args.position_ids = position_ids
         original_group_size_q = args.group_size_q
-        args.group_size_q = 1 # NOTE(HJ): perform hip masking as usual
+        args.group_size_q = 1 # NOTE(-): perform hip masking as usual
         
         (
             indices,
@@ -5610,7 +5612,7 @@ def hip_masking(
             block_access_count,
             args,
         ) = hip_masking(
-            # TODO(heejun): apply PCA topk
+            # TODO(-): apply PCA topk
             q=q_quant,
             k=k,
             args=args,
@@ -5943,7 +5945,7 @@ def hip_masking(
         indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
         indices = indices.sort(dim=-1).values
         # active_mask = unique_mask
-        active_mask = indices < (args.position_ids[:, ::args.block_size_q, None] + args.block_size_q)
+        active_mask = indices < (args.position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
         ks = active_mask.int().sum(-1)
         ks_count = ks.unsqueeze(-1)
         ks_start_end[:, :, -1] = ks
@@ -6039,7 +6041,7 @@ def hip_attention(
             block_access_count,
             args,
         ) = hip_masking(
-            # TODO(heejun): apply PCA topk
+            # TODO(-): apply PCA topk
             q=args.get_q_quant(q),
             k=args.get_k_quant(k),
             args=args,

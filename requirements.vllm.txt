@@ -1,2 +1,1 @@
 # Please update vllm version to the latest commit hash.
-vllm @ git+https://github.com/DeepAuto-AI/vllm@0eea5173e6283a8bdef0782b948d4c965d95fd83
