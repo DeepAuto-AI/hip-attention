@@ -102,6 +102,32 @@ function hip_AV {
     echo ==================================================
 }
 
+function hip_AV_custom {
+    echo ==================================================
+    echo HiP + AV k = $1 V = $2 D = $3 T = $4
+
+    export HIP_USING_SNAP_KV=1 
+    export HIP_SNAP_KV_VERT_K=$2
+    export HIP_SNAP_KV_DIAG_K=$3
+    export HIP_SNAP_KV_NO_OVERLAP=0
+    export HIP_BK_AFTER_MASK=16
+    export GROUP_SIZE_Q=1
+    export HIP_NSINK=128
+    export HIP_SW=$1
+
+    bench "hip1.1" "hip1.1" $1 $4
+    echo ==================================================
+}
+
+function hyper {
+    echo ==================================================
+    echo HyperAttention $1
+
+    bench "hyper" "hyper" $1 $2
+
+    echo ==================================================
+}
+
 function bench_ruler {
     AV 1024 128
     AV 2048 128
@@ -138,7 +164,41 @@ function bench_longbench {
     fa 32
 }
 
+function bench_passkey {
+    bigbird 1024 128
+    bigbird 2048 128
+
+    AV 1024 128
+
+    hip 512 128
+    hip 1024 128
+    hip_AV 512 128
+
+    hip_AV_custom 256 1024 256 128
+    hip_AV_custom 256 256 1024 128
+
+    fa 128
+}
+
+function bench_ppl {
+
+for seq_len in 8 16 32 64 128
+do
+
+hip 512 $seq_len
+bigbird 512 $seq_len
+SLLM 512 $seq_len
+hyper 512 $seq_len
+fa $seq_len
+
+done
+
+}
+
 # =============================================================================
 
 # bench_ruler
-bench_longbench
+# bench_longbench
+# bench_passkey
+
+bench_ppl
