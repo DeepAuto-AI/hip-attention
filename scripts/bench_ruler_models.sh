@@ -36,6 +36,22 @@ function fa {
     echo ==================================================
 }
 
+function Aonly {
+    echo ==================================================
+    echo Aonly $1
+
+    export HIP_USING_SNAP_KV=0
+    export HIP_SNAP_KV_NO_OVERLAP=0
+    export HIP_BK_AFTER_MASK=-1
+    export GROUP_SIZE_Q=1
+    export HIP_NSINK=16
+    export HIP_SW=$1
+
+    bench "hip1.1" "hip1.1" 16 $2
+
+    echo ==================================================
+}
+
 function AV {
     echo ==================================================
     echo AV $1
@@ -152,53 +168,61 @@ function bench_ruler {
 function bench_longbench {
     SLLM 512 32
 
+    Aonly 1024 32
+
+    AV 1024 32
+    AV 2048 32
+
     bigbird 512 32
     bigbird 1024 32
 
-    AV 1024 32
-
     hip 512 32
     hip 1024 32
+
     hip_AV 512 32
+    hip_AV_custom 256 256 1024 32
+    hip_AV_custom 256 1024 256 32
 
     fa 32
 }
 
 function bench_passkey {
+    Aonly 1024 128
+    Aonly 2048 128
+    Aonly 4096 128
+    AV 1024 128
+
     bigbird 1024 128
     bigbird 2048 128
-
-    AV 1024 128
 
     hip 512 128
     hip 1024 128
     hip_AV 512 128
-
-    hip_AV_custom 256 1024 256 128
     hip_AV_custom 256 256 1024 128
+    hip_AV_custom 256 1024 256 128
 
     fa 128
 }
 
 function bench_ppl {
 
-for seq_len in 8 16 32 64 128
-do
+    for seq_len in 8 16 32 64 128
+    do
 
-hip 512 $seq_len
-bigbird 512 $seq_len
-SLLM 512 $seq_len
-hyper 512 $seq_len
-fa $seq_len
+        hip 512 $seq_len
+        bigbird 512 $seq_len
+        SLLM 512 $seq_len
+        hyper 512 $seq_len
+        fa $seq_len
 
-done
+    done
 
 }
 
 # =============================================================================
 
-# bench_ruler
-# bench_longbench
 # bench_passkey
-
-bench_ppl
+# bench_ruler
+bench_longbench
+# bench_ppl
+# Aonly 4096 128

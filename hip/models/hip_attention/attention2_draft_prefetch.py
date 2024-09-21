@@ -148,6 +148,9 @@ class HiPAttentionArgs:
     # NOTE: this will be equivalant BigBird
     randomize_mask: bool = False
     
+    # NOTE: for testing
+    decode_style_masking: bool = os.getenv('HIP_DECODE_STYLE_PPL', '0') == '1'
+    
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
             self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
@@ -5551,6 +5554,53 @@ def hip_masking(
                 plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
                 print('saved dummy.png')
             render_mask()
+        
+        return (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            None, 
+            None,
+            None,
+            None,
+            None,
+            args,
+        )
+    
+    if args.decode_style_masking:
+        args = args.clone()
+        shift = args.block_size_q
+        args.sliding_window_size += shift
+        args.decode_style_masking = False
+        
+        (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
+            args,
+        ) = hip_masking(
+            # TODO(-): apply PCA topk
+            q=q,
+            k=k,
+            args=args,
+        )
+        
+        args = args.clone()
+        args.sliding_window_size -= shift
+        
+        indices = torch.roll(indices, shifts=-1, dims=1)
+        indices[:, -1, :] = indices[:, -2, :]
+        ks = torch.roll(ks, shifts=-1, dims=1)
+        ks[:, -1] = ks[:, -2]
+        ks_count[:, :, 0] = ks
+        ks_start_end[:, :, 1] = ks
         
         return (
             indices,
