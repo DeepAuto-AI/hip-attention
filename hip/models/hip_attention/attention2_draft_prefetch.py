@@ -5568,7 +5568,7 @@ def hip_masking(
             args,
         )
     
-    if args.decode_style_masking:
+    if args.decode_style_masking and (q.shape[1] > 1):
         args = args.clone()
         shift = args.block_size_q
         args.sliding_window_size += shift
