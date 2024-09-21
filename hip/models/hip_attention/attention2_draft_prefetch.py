@@ -2271,7 +2271,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         mask_softmax = groups == i_group
         scores_masked = tl.where(mask_softmax, scores, float('-inf'))
         if G == 1:
-            scores_softmax = tl.sigmoid(scores_masked)
+            scores_softmax = tl.sigmoid(scores_masked.to(tl.float32)).to(scores_masked.dtype)
         else:
             count = tl.max(mask_softmax.to(tl.int32)).to(tl.float32)
             t = count / (BK * G)
