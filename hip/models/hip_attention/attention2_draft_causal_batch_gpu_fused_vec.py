@@ -4769,7 +4769,7 @@ def hip_attention(
             block_access_score,
             block_access_count,
         ) = hip_masking(
-            # TODO(heejun): apply PCA topk
+            # TODO(-): apply PCA topk
             q=args.get_q_quant(q),
             k=args.get_k_quant(k),
             args=args,

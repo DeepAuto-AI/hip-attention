@@ -1600,6 +1600,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     is_mem = torch.arange(0, seqlen_k, device=q.device) % block_size == (block_size - 1)
     return fused_landmark_attention(q, k, v, is_mem, block_size=block_size)
 
+@torch.inference_mode(True)
 def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tensor, window_size: int):
     from hip.models.sink_attention.sink_attention import sink_attention
     
@@ -1617,7 +1618,7 @@ def main_latency_benchmark():
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--dups', type=int, default=2)
     parser.add_argument('--query_size', type=int, default=1)
-    parser.add_argument('--method', type=str, default='hip')
+    parser.add_argument('--method', type=str, default='hip1.1')
     parser.add_argument('--samples', type=int, default=200)
     parser.add_argument('--block_size_q', type=int, default=32)
     parser.add_argument('--block_stride_q', type=int, default=None)
@@ -1687,6 +1688,9 @@ def main_latency_benchmark():
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
+    elif METHOD in ['streaming', 'hyper']:
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // k.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // v.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
     
     q = q.cuda()
     k = k.cuda()
@@ -1694,8 +1698,10 @@ def main_latency_benchmark():
     cos = cos.cuda()
     sin = sin.cuda()
     if METHOD in ['hip1.1']:
-        q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
-        k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
+        # q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
+        # k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
+        q_quant = q
+        k_quant = k
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
@@ -1764,7 +1770,7 @@ def main_latency_benchmark():
                 if mask is None:
                     return None
                 return mask
-            elif METHOD == 'hip':
+            elif METHOD == 'hip1.0':
                 if state is None:
                     _, mask = hip_attention(
                         q,
@@ -1805,7 +1811,7 @@ def main_latency_benchmark():
     graph = None
     graph_stateful = None
     samples = []
-    for i in tqdm.tqdm(range(n_samples)):
+    for i in tqdm.tqdm(range(n_samples), dynamic_ncols=True):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()

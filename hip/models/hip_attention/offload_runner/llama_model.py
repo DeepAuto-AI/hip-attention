@@ -57,7 +57,6 @@ logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
 
-
 def _prepare_4d_causal_attention_mask_with_cache_position(
     attention_mask: torch.Tensor,
     sequence_length: int,
@@ -365,6 +364,12 @@ class LlamaAttention(nn.Module):
         self.hip_last_cache = None
         self.hip_cache = None
 
+        self.hip_checkout_query: bool = True
+        self.hip_last_query: Optional[torch.Tensor] = None
+        self.using_prefix_query = True
+        self.hip_prefix_query_length = 7
+        self.hip_prefix_query: Optional[torch.Tensor] = None
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -570,20 +575,38 @@ class LlamaFlashAttention2(LlamaAttention):
         
         if self.attention_method == 'hip':
             args = self.hip_args.clone()
+
+            query_length = query_states.shape[1]
+            if self.hip_checkout_query:
+                self.hip_last_query = query_states[:, -self.hip_prefix_query_length:].clone()
+            if  (self.using_prefix_query and\
+                (self.hip_prefix_query is not None) and\
+                (self.hip_prefix_query_length > 0) and\
+                (query_length == 1)
+            ):
+                prefix_len = self.hip_prefix_query.shape[1]
+                query_states = torch.cat([self.hip_prefix_query, query_states], dim=1)
+                position_ids = torch.cat([
+                    position_ids - (prefix_len - 1 - torch.arange(0, prefix_len, device=position_ids.device))[None, :],
+                    position_ids
+                ], dim=1)
+
             args.position_ids = position_ids + 1
             
-            if hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx):
-                past_key_value: "offload_runner.StaticCache"
+            perform_offload_cache = hasattr(past_key_value, 'has_offload_cache') and past_key_value.has_offload_cache(self.layer_idx)
+
+            if perform_offload_cache:
                 (
-                    offload_cache_masking_key_tables, offload_cache_masking_key_banks,
-                    offload_cache_sa_key_tables, offload_cache_sa_key_banks,
-                    offload_cache_sa_value_tables, offload_cache_sa_value_banks,
+                    offload_cache_masking_key_tables, offload_cache_masking_key_banks, offload_cache_masking_bank_stats,
+                    offload_cache_sa_key_tables, offload_cache_sa_key_banks, offload_sa_key_bank_stats,
+                    offload_cache_sa_value_tables, offload_cache_sa_value_banks, offload_sa_key_bank_stats,
                     offload_cache_counters,
                 ) = past_key_value.get_offload_cache(self.layer_idx)
                 
                 args.offload_cache_mask_k_tables = offload_cache_masking_key_tables
                 args.offload_cache_mask_k_banks = offload_cache_masking_key_banks
-                
+                args.offload_cache_mask_k_bank_stats = offload_cache_masking_bank_stats
+
                 args.offload_cache_sa_k_tables = offload_cache_sa_key_tables
                 args.offload_cache_sa_k_banks = offload_cache_sa_key_banks
                 args.offload_cache_sa_v_tables = offload_cache_sa_value_tables
@@ -592,31 +615,57 @@ class LlamaFlashAttention2(LlamaAttention):
                 args.offload_cache_counters = offload_cache_counters
                 args.offload_cache_kv_heads = key_states.shape[2]
                 args.output_block_access_log = True
-            
-            if self.hip_use_cache:
-                assert self.hip_cache is not None
-                attn_output, attn_metadata = hip_attention_11(
-                    query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
-                    previous_metadata=self.hip_cache,
-                    args=args,
-                )
+                args.output_key_access_log = False
+
+                scaled_query_states = query_states / (query_states.shape[-1] ** 0.5)
+
+                if self.hip_use_cache:
+                    assert self.hip_cache is not None
+                    attn_output, attn_metadata = hip_attention_11(
+                        scaled_query_states, key_states, value_states,
+                        previous_metadata=self.hip_cache,
+                        args=args,
+                    )
+                else:
+                    attn_output, attn_metadata = hip_attention_11(
+                        scaled_query_states, key_states, value_states,
+                        args=args,
+                        mask_only=True,
+                    )
+
+                    if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
+                        past_key_value.process_block_access_log(
+                            self.layer_idx,
+                            position_ids,
+                            query_states,
+                            new_key_states,
+                            new_value_states,
+                            attn_metadata,
+                            not self.hip_use_cache,
+                        )
+
+                    # BUG: this output is slightly different..!?
+                    attn_output, _ = hip_attention_11(
+                        scaled_query_states, key_states, value_states,
+                        args=args,
+                        previous_metadata=attn_metadata,
+                    )
             else:
-                attn_output, attn_metadata = hip_attention_11(
-                    query_states / (query_states.shape[-1] ** 0.5), key_states, value_states, 
-                    args=args,
-                )
+                if self.hip_use_cache:
+                    assert self.hip_cache is not None
+                    attn_output, attn_metadata = hip_attention_11(
+                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states,
+                        previous_metadata=self.hip_cache,
+                        args=args,
+                    )
+                else:
+                    attn_output, attn_metadata = hip_attention_11(
+                        query_states / (query_states.shape[-1] ** 0.5), key_states, value_states,
+                        args=args,
+                    )
             
-            if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
-                past_key_value.process_block_access_log(
-                    self.layer_idx,
-                    position_ids,
-                    query_states,
-                    new_key_states,
-                    new_value_states, 
-                    attn_metadata,
-                    not self.hip_use_cache,
-                )
-            
+            attn_output = attn_output[:, -query_length:].clone()
+
             if self.hip_checkout_cache:
                 self.hip_last_cache = attn_metadata
         else:

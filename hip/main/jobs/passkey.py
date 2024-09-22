@@ -5,6 +5,7 @@ from tqdm import tqdm
 import json
 import numpy as np
 from hip.dataset.passkey import Passkey
+from vllm import LLM, SamplingParams
 
 def get_numbers(s):
     lst = [c for c in s if c.isdigit()]
@@ -20,20 +21,35 @@ def job_passkey(args, model, tokenizer, device):
         input_ids = input_ids.cuda()
         target_ids = target_ids.cuda()
         
-        with torch.no_grad():
-            output = model.generate(
-                input_ids, 
-                max_new_tokens=7,
-                min_new_tokens=7,
-                do_sample=False, 
-                num_beams=1,
-                attention_mask=None,
-                pad_token_id=tokenizer.eos_token_id,
+        if isinstance(model, LLM):
+            prompts = tokenizer.batch_decode(input_ids)
+            sampling_params = SamplingParams(
+                n=1,
+                temperature=1.0,
+                top_p=1.0,
+                top_k=1,
+                max_tokens=10,
             )
-            output = output[:, input_ids.shape[1]:]
+            
+            outputs = model.generate(prompts, sampling_params, use_tqdm=False)
+            output = []
+            for item in outputs:
+                output.append(item.outputs[0].text)
+        else:
+            with torch.no_grad(), torch.autocast('cuda', torch.float16):
+                output = model.generate(
+                    input_ids, 
+                    max_new_tokens=7,
+                    min_new_tokens=7,
+                    do_sample=False, 
+                    num_beams=1,
+                    attention_mask=None,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+                output = output[:, input_ids.shape[1]:]
     
         truth = tokenizer.batch_decode(target_ids)
-        est = [get_numbers(s.strip())[:5] for s in tokenizer.batch_decode(output)]
+        est = [get_numbers(s.strip())[:5] for s in (output if isinstance(output[0], str) else tokenizer.batch_decode(output))]
         
         t = tokenizer.batch_decode(input_ids)[0] # type: str
         e = truth[0] # type: str
@@ -52,4 +68,4 @@ def job_passkey(args, model, tokenizer, device):
                 acc_count += 1
         accuracy[accuracy_key] = (acc_sum, acc_count)
         
-        tqdm.write(f"current accuracy { {k: f'{v[0] / v[1]*100:.2f}' for k, v in accuracy.items()} } | {truth[0]}, {est[0]}")
+        tqdm.write(f"current accuracy { {k: f'{v[0] / (v[1] + 1e-20)*100:.2f}' for k, v in accuracy.items()} } | {truth[0]}, {est[0]}")
