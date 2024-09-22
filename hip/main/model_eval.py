@@ -84,7 +84,7 @@ def load_vllm_model(args: ArgsType):
         max_seq_len_to_capture=seq_len,
         max_model_len=seq_len,
         swap_space=0,
-        kv_cache_dtype=os.getenv('KV_CACHE_DTYPE', 'fp8_e5m2'),
+        #kv_cache_dtype=os.getenv('KV_CACHE_DTYPE', 'fp8_e5m2'),
         dtype='half',
         gpu_memory_utilization=0.9,
         tensor_parallel_size=torch.cuda.device_count(),
@@ -270,7 +270,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'long_booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey']
     
     model, tokenizer, device = load_model(args)
 
