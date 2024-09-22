@@ -145,22 +145,13 @@ function hyper {
 }
 
 function bench_ruler {
-    AV 1024 128
-    AV 2048 128
-    AV 4096 128
-
-    bigbird 512 128
-    bigbird 1024 128
-    bigbird 2048 128
     bigbird 4096 128
-
-    hip 512 128
-    hip 1024 128
+    
+    AV 4096 128
+    
     hip 2048 128
-    hip 4096 128
-
-    hip_AV 1024 128
-    hip_AV 2048 128
+    
+    hip_AV_custom 2048 2048 1024 128
 
     fa 128
 }
@@ -222,7 +213,7 @@ function bench_ppl {
 # =============================================================================
 
 # bench_passkey
-# bench_ruler
-bench_longbench
+bench_ruler
+# bench_longbench
 # bench_ppl
 # Aonly 4096 128
