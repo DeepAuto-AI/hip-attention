@@ -145,15 +145,16 @@ function hyper {
 }
 
 function bench_ruler {
-    bigbird 4096 128
+    # bigbird 4096 128
     
     AV 4096 128
+    Aonly 2048 128
     
-    hip 2048 128
+    # hip 2048 128
     
-    hip_AV_custom 2048 2048 1024 128
+    # hip_AV_custom 2048 2048 1024 128
 
-    fa 128
+    # fa 128
 }
 
 function bench_longbench {
