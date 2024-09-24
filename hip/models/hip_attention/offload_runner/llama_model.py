@@ -356,6 +356,7 @@ class LlamaAttention(nn.Module):
         # TODO (joao): remove in v4.45 (RoPE is computed in the model, not in the decoder layers)
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
         
+        self.attention_method = 'fa2'
         self.prompt_batch_index = 0
         
         self.hip_args = HiPAttentionArgs11()

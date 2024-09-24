@@ -32,7 +32,7 @@ import triton
 import triton.language as tl
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
+from typing import Literal, Optional, Tuple, List, Dict, Union
 from torch import Tensor
 from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
 import numpy as np
@@ -135,6 +135,7 @@ class HiPAttentionArgs:
     # BUG(-): this nameing is wrong...
     position_ids: Optional[Tensor] = None
     
+    offload_cache_method: Optional[Literal['single_level', 'bloom']] = 'single_level'
     offload_cache_kv_heads: Optional[int] = None
     offload_cache_mask_k_tables: Optional[Tensor] = None
     offload_cache_mask_k_banks: Optional[Tensor] = None
@@ -264,8 +265,11 @@ class HiPAttentionArgs:
             else:
                 offload_cache_budget = 0
             
+            # print(self.offload_cache_method)
+            
             return (
                 using_offload_cache,
+                self.offload_cache_method,
                 offload_cache_budget,
                 self.offload_cache_kv_heads,
                 self.offload_cache_mask_k_tables, *self.safe_stride(self.offload_cache_mask_k_tables, 2),
@@ -282,11 +286,15 @@ class HiPAttentionArgs:
                 assert self.offload_cache_sa_v_banks.ndim == 4
                 assert self.offload_cache_counters.ndim == 2
                 offload_cache_budget = self.offload_cache_sa_v_banks.shape[1]
+                assert self.offload_cache_sa_k_banks.shape[1] == offload_cache_budget
             else:
                 offload_cache_budget = 0
             
+            # print(self.offload_cache_method)
+            
             return (
                 using_offload_cache,
+                self.offload_cache_method,
                 offload_cache_budget,
                 self.offload_cache_kv_heads,
                 self.offload_cache_sa_k_tables, *self.safe_stride(self.offload_cache_sa_k_tables, 2),
@@ -548,6 +556,67 @@ def adjust_rope(
     return tokens
 
 @triton.jit
+def hash_table_lookup_or_fail(
+    TABLES, stride_tables_n, stride_tables_k,
+    idx_n, idx_tsrc: tl.tensor, mask_tsrc: tl.tensor,
+    
+    TABLE_LEN,
+):
+    TABLE_CURRENT = TABLES + idx_n * stride_tables_n
+    
+    
+    idx_hash_slot = idx_tsrc % TABLE_LEN
+    
+    # idx_hash_slot = idx_tsrc.to(tl.uint64)
+    # idx_hash_slot ^= idx_hash_slot >> 8
+    # # idx_hash_slot *= 0xff51afd7ed558ccd
+    # # idx_hash_slot = idx_hash_slot >> 33
+    # # idx_hash_slot *= 0xc4ceb9fe1a85ec53
+    # # idx_hash_slot ^= idx_hash_slot >> 33    
+    # idx_hash_slot = idx_hash_slot.to(tl.int64) % TABLE_LEN
+    
+    offset_probe = tl.zeros_like(idx_tsrc).to(tl.int64) # type: tl.tensor
+    found_slot = tl.zeros_like(idx_tsrc).to(tl.int64) - 1
+    
+    offset_probe = tl.where(mask_tsrc, offset_probe, TABLE_LEN)
+    
+    if offset_probe.numel == 1:
+        minimum_offset_prob = offset_probe
+    else:
+        minimum_offset_prob = tl.min(offset_probe)
+        
+    max_try = TABLE_LEN + 1
+    
+    while (minimum_offset_prob < TABLE_LEN) & (max_try > 0):
+        max_try -= 1
+        
+        probing_target = ((idx_hash_slot + offset_probe) % TABLE_LEN)
+        mask_probing = (found_slot == -1) & (offset_probe < TABLE_LEN) & mask_tsrc
+        slots = tl.load(
+            TABLE_CURRENT +\
+                probing_target * stride_tables_k,
+            mask=mask_probing,
+            other=65535, # mimic full
+        )
+        
+        # mask_empty_hit = (found_slot == -1) & ((slots == 65535) | (slots == 0xFFFFFFFFFFFFFFFF))
+        # found_slot = tl.where(mask_empty_hit, probing_target, found_slot)
+        # offset_probe = tl.where(mask_empty_hit, TABLE_LEN, offset_probe)
+        
+        mask_current_hit = (found_slot == -1) & ((slots.to(tl.uint64) >> 16) == (idx_tsrc.to(tl.uint64)))
+        found_slot = tl.where(mask_current_hit, probing_target, found_slot)
+        offset_probe = tl.where(mask_current_hit, TABLE_LEN, offset_probe)
+        
+        offset_probe = tl.where(found_slot == -1, offset_probe + 1, offset_probe)
+        
+        if offset_probe.numel == 1:
+            minimum_offset_prob = offset_probe
+        else:
+            minimum_offset_prob = tl.min(offset_probe)
+    
+    return found_slot
+
+@triton.jit
 def load_tokens(
     K, 
     stride_k_bsz,
@@ -571,6 +640,7 @@ def load_tokens(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_UPDATE: tl.constexpr,
@@ -602,6 +672,8 @@ def load_tokens(
     # DEBUG: to load nothing
     # mask_keys = mask_keys & False
     
+    # tl.static_print(OFFLOAD_CACHE_METHOD)
+    
     if not USING_PAGES:
         if USING_OFFLOAD_CACHE:
             original_mask_keys = mask_keys
@@ -609,14 +681,46 @@ def load_tokens(
                 idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
                     idx_kv_head.to(tl.int64)
             ).to(tl.int64)
-            idx_bank_page = tl.load(
-                OFFLOAD_CACHE_K_TABLES +\
-                    idx_cache * stride_offload_cache_k_tables_n +\
-                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
-                mask=mask_keys,
-                other=65535
-            ).to(tl.uint16)
-            mask_bank_hit = (idx_bank_page != 65536) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
+            
+            if OFFLOAD_CACHE_METHOD == 'single_level':
+                idx_bank_page = tl.load(
+                    OFFLOAD_CACHE_K_TABLES +\
+                        idx_cache * stride_offload_cache_k_tables_n +\
+                        (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
+                    mask=mask_keys,
+                    other=65535
+                ).to(tl.uint16)
+            elif OFFLOAD_CACHE_METHOD == 'bloom':
+                TABLE_LEN = OFFLOAD_CACHE_BUDGET * 1
+                idx_table_entry = hash_table_lookup_or_fail(
+                    OFFLOAD_CACHE_K_TABLES, 
+                    stride_offload_cache_k_tables_n, 
+                    stride_offload_cache_k_tables_t,
+                    idx_cache, 
+                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64),
+                    mask_keys,
+                    TABLE_LEN,
+                )
+                # idx_table_entry = idx_table_entry * 0 - 1
+                mask_table_entry = mask_keys & (idx_table_entry >= 0) & (idx_table_entry < TABLE_LEN)
+                tl.static_assert(OFFLOAD_CACHE_K_TABLES.dtype.element_ty != tl.uint16)
+                idx_bank_page = tl.load(
+                    OFFLOAD_CACHE_K_TABLES +\
+                        idx_cache *  stride_offload_cache_k_tables_n +\
+                        idx_table_entry * stride_offload_cache_k_tables_t,
+                    mask=mask_table_entry,
+                    other=65535
+                )
+                idx_entry_tsrc = idx_bank_page >> 16
+                idx_bank_page = idx_bank_page & 0xFFFF
+                idx_bank_page = idx_bank_page.to(tl.int64)
+                idx_bank_page = tl.where(idx_entry_tsrc == (idx_tsrc // BLOCK_SIZE_K), idx_bank_page, 65535)
+                # if (tl.program_id(0) == 0) and (tl.program_id(1) == 0):
+                #     tl.device_print('a', idx_entry_tsrc)
+            else:
+                tl.static_assert(False, f"Not supported {OFFLOAD_CACHE_METHOD}")
+            
+            mask_bank_hit = (idx_bank_page != 65535) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
             mask_keys = mask_keys & (~mask_bank_hit)
             
             # load from offload cache
@@ -791,6 +895,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -962,6 +1067,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD, 
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             True,
@@ -1355,6 +1461,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -1651,6 +1758,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 OFFLOAD_CACHE_K_TABLES,
@@ -1810,6 +1918,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -1946,6 +2055,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -2695,6 +2805,7 @@ def masking_iteration_draft_cuda_fused(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -2883,6 +2994,7 @@ def masking_iteration_draft_cuda_fused(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     OFFLOAD_CACHE_K_TABLES,
@@ -3165,6 +3277,7 @@ def masking_iteration_draft_cuda_initialize_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -3325,6 +3438,7 @@ def masking_iteration_draft_cuda_initialize_score(
         
         # offload cache args template
         USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
         OFFLOAD_CACHE_BUDGET,
         OFFLOAD_CACHE_KV_HEAD,
         OFFLOAD_CACHE_K_TABLES,
@@ -4444,6 +4558,7 @@ def block_sparse_attention_cuda(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -4596,6 +4711,7 @@ def block_sparse_attention_cuda(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     False,
@@ -4643,6 +4759,7 @@ def block_sparse_attention_cuda(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     False,
@@ -4729,6 +4846,7 @@ def block_sparse_attention_cuda(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 False,
@@ -4776,6 +4894,7 @@ def block_sparse_attention_cuda(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 False,

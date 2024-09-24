@@ -10,7 +10,7 @@ class ArgsType:
     stride: int = -1
     lora_r: int = 32
     checkpoint: Optional[str] = None
-    count: int = 100
+    count: int = -1
     block_size_q: int = 32
     block_size_k: int = 2
     batch_size: int = 1
