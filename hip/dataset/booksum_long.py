@@ -29,8 +29,7 @@ class LongBookSumDataset(Dataset):
 
             def tokenize(item):
                 chapter = item['chapter']
-                prompt = (f"Summarize the following text in about 300 words:\n\n{chapter}"
-                          f"\n\nThe summary of the previously given text is the following:\n")
+                prompt = f"Summarize the following text in about 1000 words:\n\n{chapter}"
                 prompt_ids = [tokenizer.bos_token_id] + tokenizer(
                     prompt,
                     add_special_tokens=False,
@@ -90,11 +89,14 @@ if __name__ == '__main__':
     tokenizer = transformers.AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3.1-8B')
     print(tokenizer.is_fast)
     dataset = LongBookSumDataset(tokenizer, for_eval=True, split="validation+test", need_tokenization=False)
-    prompt, output = dataset[0]
-    print("Prompt: ", len(prompt), "Output: ", len(output))
-    print("'''" + prompt + "'''")
-    print("="*80 + "\n\n\n")
-    print("'''" + output + "'''")
+    sum = 0
+    for prompt, output in dataset:
+        print("Prompt: ", len(prompt), "Output: ", len(output), len(output.split()))
+        sum += len(output.split())
+    print("Average number of words: ", sum / len(dataset))
+    #print("'''" + prompt + "'''")
+    #print("="*80 + "\n\n\n")
+    #print("'''" + output + "'''")
     #print("'''" + tokenizer.decode(prompt, skip_special_tokens=False) + "'''")
     #print("="*80 + "\n\n\n")
     #print("'''" + tokenizer.decode(output, skip_special_tokens=False) + "'''")

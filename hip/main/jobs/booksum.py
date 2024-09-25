@@ -35,7 +35,9 @@ class StopAfterStringIsGenerated(LogitsProcessor):
             scores[ends_with_answer] = forced_eos
         return scores
 
+
 PROMPT_FIRST_ONLY = os.getenv('PROMPT_FIRST_ONLY', '1') == '1'
+
 
 def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     PROMPT_ALWAYS_FLASH = os.environ.get('PROMPT_ALWAYS_FLASH', '0') == '1'
@@ -115,6 +117,7 @@ def generate_summary(args, model, tokenizer, device, idx, item, out_dir):
     
     return output
 
+
 def install_rogue():
     logger = logging.getLogger()
 
@@ -139,14 +142,14 @@ def install_rogue():
 
     return ROUGE_HOME
 
+
 def generate_samples(args, model, tokenizer, device, out_dir):
     from vllm import LLM, SamplingParams
     is_vllm = isinstance(model, LLM)
-    if is_vllm:
-        # we do not access to tokenizer.
-        tokenizer = None
-
     if args.job == 'booksum':
+        if is_vllm:
+            # we do not access to tokenizer.
+            tokenizer = None
         dataset = BookSumDataset(
             tokenizer=tokenizer,
             for_eval=True,
@@ -165,6 +168,7 @@ def generate_samples(args, model, tokenizer, device, out_dir):
 
     outputs = []
 
+    print("MAX TOKENS =", args.max_tokens)
     for idx, item in enumerate(tqdm(test_dataset, dynamic_ncols=True, leave=True, desc="booksum")):
         inputs, completion = item
         
@@ -204,12 +208,16 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                 else:
                     raise Exception(args.model)
             elif args.job == 'long_booksum':
-                prompt = inputs
+                prompt = tokenizer.apply_chat_template([
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": inputs},
+                ], tokenize=False, add_generation_prompt=True)
+                prompt += "The summary of the previously given text, in about 1000 words, is the following:\n"
             else:
                 raise Exception(f"{args.job} not supported")
 
             vllm_outputs = model.generate(
-                prompt, 
+                prompt,
                 sampling_params,
                 use_tqdm=False,
             )
@@ -219,25 +227,66 @@ def generate_samples(args, model, tokenizer, device, out_dir):
         
         output_summary = output.replace('\n', '\\n')[:200]
         tqdm.write(f"[{idx:<7}] Summary: {output_summary}[...]")
-        with open(out_dir / f"out_{idx}.txt", 'w') as f:
+        with open(out_dir / f"out_{idx}.txt", 'w', encoding='utf8', errors='ignore') as f:
             f.write(output)
         outputs.append(output)
 
-        with open(f"saves/llama_eval/booksum/reference/ref_{idx}.txt", 'w') as f:
+        with open(f"saves/llama_eval/booksum/reference/ref_{idx}.txt", 'w', encoding='utf8', errors='ignore') as f:
             if isinstance(completion, str):
                 f.write(completion)
             else:
                 f.write(tokenizer.decode(completion, skip_special_tokens=True))
 
-MAX_NEW_TOKENS = 256
 
 def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
     for node in out_dir.glob('*'):
         if node.is_file():
-            content = node.read_text()
+            content = node.read_text(encoding='utf8', errors='ignore')
             ids = tokenizer(content, truncation=True, max_length=256).input_ids
             content = tokenizer.decode(ids, skip_special_tokens=True)
-            node.write_text(content)
+            node.write_text(content, encoding='utf8', errors='ignore')
+
+    from pyrouge import Rouge155
+    rouge_dir = install_rogue()
+    r = Rouge155(rouge_dir=rouge_dir)
+    r.log.handlers[0].setLevel(logging.ERROR)
+    r.system_dir = out_dir  # "system" is the one we want to measure
+    r.model_dir = "saves/llama_eval/booksum/reference"  # "model" is the gold standard (i.e. human summaries)
+    r.system_filename_pattern = r'out_(\d+)\.txt'
+    r.model_filename_pattern = r'ref_#ID#\.txt'
+
+    output = r.convert_and_evaluate()
+    print("R: Recall, P: Precision, F: F1 score")
+    print(output)
+    output_dict = r.output_to_dict(output)
+    with open(out_dir / "rouge_scores.json", 'w') as f:
+        json.dump(output_dict, f, indent=2)
+    with open(out_dir / "rouge_scores.txt", 'w') as f:
+        f.write(output)
+
+
+@torch.no_grad()
+def job_booksum(args, model, tokenizer, device):
+    seed()
+
+    from pyrouge import Rouge155
+    rouge_dir = install_rogue()
+
+    out_dir = pathlib.Path(
+        f"saves/llama_eval/booksum/{args.name}_{args.model.replace('/', '_')}_{args.method}_bq{args.block_size_q}"
+        f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_ns{args.no_sample}"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
+    
+    generate_samples(args, model, tokenizer, device, out_dir)
+    evaluate_rouge(args, model, tokenizer, device, out_dir)
+    print(args)
+
+
+if __name__ == '__main__':
+    out_dir = pathlib.Path("saves/llama_eval/booksum/longbs_llama31_dense_vllm_llama3.1_8b_instruct_streaming_llm_bq32_bk2_k512_gl256_nsFalse")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     from pyrouge import Rouge155
     rouge_dir = install_rogue()
@@ -253,21 +302,3 @@ def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
     output_dict = r.output_to_dict(output)
     with open(out_dir / "rouge_scores.json", 'w') as f:
         json.dump(output_dict, f, indent=2)
-
-@torch.no_grad()
-def job_booksum(args, model, tokenizer, device):
-    seed()
-
-    from pyrouge import Rouge155
-    rouge_dir = install_rogue()
-
-    out_dir = pathlib.Path(
-        f"saves/llama_eval/booksum/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}"
-        f"_bk{args.block_size_k}_k{args.k}_gl{args.max_tokens}_ns{args.no_sample}"
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pathlib.Path("saves/llama_eval/booksum/reference").mkdir(parents=True, exist_ok=True)
-    
-    generate_samples(args, model, tokenizer, device, out_dir)
-    evaluate_rouge(args, model, tokenizer, device, out_dir)
-    print(args)

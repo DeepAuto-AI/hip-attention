@@ -24,6 +24,7 @@ def eval_args(
 ) -> ArgsType:
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default=default_model)
+    parser.add_argument('--tokenizer-id', type=str, default=None)
     parser.add_argument('--job', type=str, default=default_job)
     parser.add_argument('--method', type=str, default='none')
     parser.add_argument('--stride', type=int, default=-1)

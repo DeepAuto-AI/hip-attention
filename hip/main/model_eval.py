@@ -80,6 +80,7 @@ def load_vllm_model(args: ArgsType):
     # seq_len = 10600
     model = LLM(
         model_id,
+        tokenizer=args.tokenizer_id,
         max_num_seqs=args.batch_size,
         max_seq_len_to_capture=seq_len,
         max_model_len=seq_len,
@@ -92,13 +93,17 @@ def load_vllm_model(args: ArgsType):
         trust_remote_code=True,
         max_num_batched_tokens=seq_len,
         enable_chunked_prefill=False,
+        enable_prefix_caching=False,
         # observability_config=ObservabilityConfig(
         #     collect_model_forward_time=True, 
         #     collect_model_execute_time=True
         # )
     )
-    
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+
+    tokenizer_id = args.tokenizer_id
+    if tokenizer_id is None:
+        tokenizer_id = model_id
+    tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_id)
     
     if tokenizer.bos_token_id is None:
         tokenizer.bos_token = tokenizer.eos_token
