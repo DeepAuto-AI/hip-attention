@@ -226,7 +226,7 @@ def generate_samples(args, model, tokenizer, device, out_dir):
             output = generate_summary(args, model, tokenizer, device, idx, item, out_dir)
         
         output_summary = output.replace('\n', '\\n')[:200]
-        tqdm.write(f"[{idx:<7}] Summary: {output_summary}[...]")
+        tqdm.write(f"[{idx:<7}] Summary: {output_summary}[...] {len(output)}")
         with open(out_dir / f"out_{idx}.txt", 'w', encoding='utf8', errors='ignore') as f:
             f.write(output)
         outputs.append(output)
@@ -239,13 +239,6 @@ def generate_samples(args, model, tokenizer, device, out_dir):
 
 
 def evaluate_rouge(args, model, tokenizer, device, out_dir: pathlib.Path):
-    for node in out_dir.glob('*'):
-        if node.is_file():
-            content = node.read_text(encoding='utf8', errors='ignore')
-            ids = tokenizer(content, truncation=True, max_length=256).input_ids
-            content = tokenizer.decode(ids, skip_special_tokens=True)
-            node.write_text(content, encoding='utf8', errors='ignore')
-
     from pyrouge import Rouge155
     rouge_dir = install_rogue()
     r = Rouge155(rouge_dir=rouge_dir)
