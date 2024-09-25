@@ -2013,6 +2013,7 @@ if __name__ == '__main__':
         parser.add_argument('--simulated_mask_hit_ratio', default=0.8, type=float)
         parser.add_argument('--simulated_sa_hit_ratio', default=0.99, type=float)
         parser.add_argument('--offload_cache_method', default='single_level', type=str)
+        parser.add_argument('--sample_method', default='last', type=str)
         
         args = parser.parse_args()
         
@@ -2040,7 +2041,7 @@ if __name__ == '__main__':
                 block_size_k=args.block_size_k,
                 block_stride_k=1,
                 sliding_window_size=args.sw,
-                sample_method='last',
+                sample_method=args.sample_method,
                 offload_cache_method=args.offload_cache_method,
             ),
             offload_cache_method=args.offload_cache_method,
