@@ -715,6 +715,10 @@ class StaticCache(Cache):
         # torch.cuda.synchronize()
         # gc.collect()
         # torch.cuda.empty_cache()
+        
+        self.last_prefill_chunk = False
+        self.prefill_seq_len = 0
+        self.using_chunked_prefill = False
     
     def has_offload_cache(self, layer_idx: int):
         return self.using_offload_cache
@@ -880,11 +884,11 @@ class StaticCache(Cache):
         # prompt = CPU, decode = UVM
         if self.cache_backend == 'uvm':
             if self.uvm_offload_key: 
-                k_out = self.key_cache[layer_idx][1 if is_prompt else 0]
+                k_out = self.key_cache[layer_idx][1 if (is_prompt and (not self.using_chunked_prefill)) else 0]
             else:
                 k_out = self.key_cache[layer_idx]
             if self.uvm_offload_value:
-                v_out = self.value_cache[layer_idx][1 if is_prompt else 0]
+                v_out = self.value_cache[layer_idx][1 if (is_prompt and (not self.using_chunked_prefill)) else 0]
             else:
                 v_out = self.value_cache[layer_idx]
         elif self.cache_backend == 'cuda':
@@ -899,7 +903,7 @@ class StaticCache(Cache):
             v_out = v_out[ibatch:ibatch+1]
         
         if (layer_idx % self.share) == 0:
-            if is_prompt:
+            if is_prompt and (not self.using_chunked_prefill):
                 if self.cache_backend == 'uvm' and self.uvm_offload_key:
                     assert k_out.device == torch.device('cpu')
                 self.prompt_copy_stream.wait_stream(torch.cuda.default_stream(cache_position.device))
@@ -920,7 +924,7 @@ class StaticCache(Cache):
                 k_out.index_copy_(1, cache_position, key_states.to(k_out.dtype))
                 v_out.index_copy_(1, cache_position, value_states.to(k_out.dtype))
         
-        if is_prompt:
+        if is_prompt and (not self.using_chunked_prefill):
             return key_states, value_states
 
         return k_out, v_out
@@ -1090,6 +1094,7 @@ class StaticCache(Cache):
         metadata: HiPAttentionOutputMetadata,
         position_ids: torch.Tensor,
         REPEAT_BATCH: int = 1,
+        copy_from_original = True,
     ):
         NCACHE, _ = tables.shape
         NCACHE, BUDGET, BLOCK_SIZE_K, HID = banks.shape
@@ -1138,7 +1143,7 @@ class StaticCache(Cache):
             bank_stats=bank_stats,
             table_delta=mask,
             states=states,
-            copy_from_original=True,
+            copy_from_original=copy_from_original,
         )
 
     def copy_stats_to_bank_using_access_stats(
@@ -1149,6 +1154,7 @@ class StaticCache(Cache):
         block_access_log: torch.Tensor,
         key_cache: torch.Tensor,
         method = 'lru_approx',
+        copy_from_original = True,
     ):
         N_CACHE, BUDGET, BLOCK_SIZE_K, HID = banks.shape
         N_CACHE, _ = tables.shape
@@ -1192,7 +1198,7 @@ class StaticCache(Cache):
                 table_delta=block_access_log,
                 states=key_cache,
                 check_masking_bank_validity=False,
-                copy_from_original=True,
+                copy_from_original=copy_from_original,
             )
             
             # print('after', tables[0, :20], tables.shape)
@@ -1279,6 +1285,16 @@ class StaticCache(Cache):
         BSZ, TDST, HEAD, HID = query_states.shape
         _, NEW_TSRC, HEAD_KV, _ = new_key_state.shape
         
+        if self.uvm_offload_key:
+            key_cache = self.key_cache[layer_index][0]
+        else:
+            key_cache = self.key_cache[layer_index]
+        
+        if self.uvm_offload_value:
+            value_cache = self.value_cache[layer_index][0]
+        else:
+            value_cache = self.value_cache[layer_index]
+        
         on_demand_sa_cache_update = True
         
         (
@@ -1292,16 +1308,6 @@ class StaticCache(Cache):
             # on decoding
             if mask_updated and on_demand_sa_cache_update:
                 # print('update SA kv cache')
-                if self.uvm_offload_key:
-                    key_cache = self.key_cache[layer_index][0]
-                else:
-                    key_cache = self.key_cache[layer_index]
-                
-                if self.uvm_offload_value:
-                    value_cache = self.value_cache[layer_index][0]
-                else:
-                    value_cache = self.value_cache[layer_index]
-                
                 _, MAX_TSRC, HEAD_KV, _ = key_cache.shape
                 
                 self.copy_state_to_bank_using_mask(
@@ -1330,33 +1336,49 @@ class StaticCache(Cache):
                     method=self.offload_cache_policy_decode if self.offload_cache_method == 'single_level' else 'overwrite',
                 )
         else:
-            self.copy_state_to_bank_using_mask(
-                sa_key_tables, 
-                sa_key_banks, 
-                sa_key_bank_stats,
-                new_key_state,
-                metadata, 
-                position_ids[:, -1:].repeat(BSZ, 1),
-                REPEAT_BATCH=BSZ,
-            )
-            self.copy_state_to_bank_using_mask(
-                sa_value_tables, 
-                sa_value_banks, 
-                sa_value_bank_stats,
-                new_value_state,
-                metadata, 
-                position_ids[:, -1:].repeat(BSZ, 1),
-                REPEAT_BATCH=BSZ,
-            )
-            
-            self.copy_stats_to_bank_using_access_stats(
-                masking_key_tables,
-                masking_key_banks,
-                masking_key_bank_stats,
-                metadata.block_access_log[:, -1:, :].repeat(BSZ, 1, 1),
-                new_key_state,
-                method='overwrite',
-            )
+            # return
+            if self.last_prefill_chunk or (not self.using_chunked_prefill):
+                if self.using_chunked_prefill:
+                    torch.cuda.current_stream().wait_stream(self.prompt_copy_stream)
+                    for t in self.prompt_copy_threads:
+                        t.join()
+                    self.prompt_copy_threads.clear()
+                else:
+                    key_cache = new_key_state
+                    value_cache = new_value_state
+                
+                self.copy_state_to_bank_using_mask(
+                    sa_key_tables, 
+                    sa_key_banks, 
+                    sa_key_bank_stats,
+                    key_cache[:, :self.prefill_seq_len],
+                    metadata, 
+                    position_ids[:, -1:].repeat(BSZ, 1),
+                    REPEAT_BATCH=BSZ,
+                    copy_from_original=False,
+                )
+                self.copy_state_to_bank_using_mask(
+                    sa_value_tables, 
+                    sa_value_banks, 
+                    sa_value_bank_stats,
+                    value_cache[:, :self.prefill_seq_len],
+                    metadata, 
+                    position_ids[:, -1:].repeat(BSZ, 1),
+                    REPEAT_BATCH=BSZ,
+                    copy_from_original=False,
+                )
+                
+                # print(metadata.block_access_log[:, -1:, :])
+                
+                self.copy_stats_to_bank_using_access_stats(
+                    masking_key_tables,
+                    masking_key_banks,
+                    masking_key_bank_stats,
+                    metadata.block_access_log[:, -1:, :].repeat(BSZ, 1, 1),
+                    key_cache[:, :self.prefill_seq_len],
+                    method='overwrite',
+                    copy_from_original=False,
+                )
             
             # (
             #     masking_key_tables, masking_key_banks, masking_key_bank_stats,
@@ -1740,7 +1762,7 @@ class Runner:
         simulated_mask_hit_ratio=0.8, 
         simulated_sa_hit_ratio=0.99
     ):
-        chunked_prefill_size = 8192
+        chunked_prefill_size = 999999999999 # not working properlly..
         
         input_ids = self.tokenizer([text, ], return_tensors="pt", padding=True).input_ids.to(self.model.device)
         input_ids = input_ids.repeat(item_repeat, 1)
@@ -1757,6 +1779,7 @@ class Runner:
             share=self.kv_share,
             cache_backend=self.cache_backend,
             use_offload_cache=self.kv_offload_cache,
+            mask_k=self.hip_args.mask_k,
             block_size_k=self.hip_args.block_size_k,
             sliding_window_size=self.hip_args.sliding_window_size,
             cache_size=self.kv_offload_cache_size,
@@ -1767,17 +1790,26 @@ class Runner:
         )
         
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
+        ibatch = 0
         self.reset_prefix()
         cache.prompt_start()
         for _ in range(n_prefill_warmup):
             with torch.autocast('cuda', torch.float16):
-                self.model(
-                    input_ids=input_ids[0:0+1], 
-                    position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-                    cache_position=prompt_cache_pos, 
-                    past_key_values=cache,
-                    num_logits_to_keep=1,
-                )
+                for i_tsrc_start in tqdm.tqdm(range(0, input_ids.shape[1], chunked_prefill_size), desc='chunked prefill'):
+                    i_tsrc_end = i_tsrc_start + chunked_prefill_size
+                    cache.using_chunked_prefill = chunked_prefill_size < input_ids.shape[1]
+                    if i_tsrc_end >= input_ids.shape[1]:
+                        cache.last_prefill_chunk = True
+                        cache.prefill_seq_len = input_ids.shape[1]
+                        i_tsrc_end = min(input_ids.shape[1], i_tsrc_end)
+                    self.model(
+                        input_ids=input_ids[ibatch:ibatch+1, i_tsrc_start:i_tsrc_end], 
+                        position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1)[:, i_tsrc_start:i_tsrc_end], 
+                        cache_position=prompt_cache_pos[i_tsrc_start:i_tsrc_end], 
+                        past_key_values=cache,
+                        num_logits_to_keep=1,
+                    )
+                    cache.last_prefill_chunk = False
         cache.prompt_end()
         self.push_last_query_to_prefix(item_repeat)
         
@@ -1819,13 +1851,28 @@ class Runner:
         self.reset_prefix()
         cache.prompt_start()
         with torch.autocast('cuda', torch.float16):
-            prompt_output = self.model(
-                input_ids=input_ids[ibatch:ibatch+1], 
-                position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
-                cache_position=prompt_cache_pos, 
-                past_key_values=cache,
-                num_logits_to_keep=1,
-            )
+            for i_tsrc_start in tqdm.tqdm(range(0, input_ids.shape[1], chunked_prefill_size), desc='chunked prefill'):
+                i_tsrc_end = i_tsrc_start + chunked_prefill_size
+                cache.using_chunked_prefill = chunked_prefill_size < input_ids.shape[1]
+                if i_tsrc_end >= input_ids.shape[1]:
+                    cache.last_prefill_chunk = True
+                    cache.prefill_seq_len = input_ids.shape[1]
+                    i_tsrc_end = min(input_ids.shape[1], i_tsrc_end)
+                prompt_output = self.model(
+                    input_ids=input_ids[ibatch:ibatch+1, i_tsrc_start:i_tsrc_end], 
+                    position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1)[:, i_tsrc_start:i_tsrc_end], 
+                    cache_position=prompt_cache_pos[i_tsrc_start:i_tsrc_end], 
+                    past_key_values=cache,
+                    num_logits_to_keep=1,
+                )
+                cache.last_prefill_chunk = False
+            # prompt_output = self.model(
+            #     input_ids=input_ids[ibatch:ibatch+1], 
+            #     position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1), 
+            #     cache_position=prompt_cache_pos, 
+            #     past_key_values=cache,
+            #     num_logits_to_keep=1,
+            # )
         cache.prompt_end()
         self.push_last_query_to_prefix(item_repeat)
         
