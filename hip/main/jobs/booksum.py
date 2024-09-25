@@ -213,6 +213,11 @@ def generate_samples(args, model, tokenizer, device, out_dir):
                     {"role": "user", "content": inputs},
                 ], tokenize=False, add_generation_prompt=True)
                 prompt += "The summary of the previously given text, in about 1000 words, is the following:\n"
+                if args.truncate_size >= 0:
+                    tokens = tokenizer(prompt, add_special_tokens=False,)['input_ids']
+                    start = len(tokens) // 2 - args.truncate_size // 2
+                    end = start + args.truncate_size
+                    prompt = tokenizer.decode(tokens[start:end], skip_special_tokens=True)
             else:
                 raise Exception(f"{args.job} not supported")
 

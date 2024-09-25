@@ -5517,7 +5517,8 @@ def hip_masking(
         seq_lens = torch.clamp(seq_lens - args.sliding_window_size, 0, LARGE_INT)
         indices = indices * seq_lens.repeat_interleave(repeats=HEAD, dim=0).unsqueeze(-1)
         indices = indices.long() // args.block_size_k * args.block_size_k
-        indices[:, :, 0] = 0 # sink block
+        n_sink_blocks = args.sink_token_size // args.block_size_k
+        indices[:, :, :n_sink_blocks] = torch.arange(n_sink_blocks, device=indices.device) * args.block_size_k  # sink block
         indices = indices.sort(dim=-1).values
         indices = torch.where(indices != torch.roll(indices, shifts=1, dims=-1), indices, LARGE_INT)
         indices = indices.sort(dim=-1).values

@@ -35,7 +35,7 @@ fi
 if [ -z "${SKIP_AVD}" ]; then
   echo "AVD Baseline"
   echo "DIVISOR: ${DIVISOR}"
-  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((2048 / DIVISOR)) HIP_NSINK=16 HIP_K=16 \
+  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((4096 / DIVISOR)) HIP_NSINK=16 HIP_K=16 \
   HIP_USING_SNAP_KV=1 HIP_SNAP_KV_VERT_K=$((4096 / DIVISOR)) HIP_SNAP_KV_DIAG_K=$((4096 / DIVISOR)) HIP_BK_AFTER_MASK=-1 HIP_RANDOM_MASK=0 \
   python hip/main/model_eval.py --job long_booksum --model "${MODEL_NAME}" --stride 131072 --max_tokens "${MAX_TOKENS}" --method hip --name "longbs_llama31_avd${SUFFIX}" --overwrite
 fi
@@ -43,7 +43,7 @@ fi
 if [ -z "${SKIP_HIP_PNP}" ]; then
   echo "HIP P&P"
   echo "DIVISOR: ${DIVISOR}"
-  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=128 HIP_K=$((2048 / DIVISOR)) \
+  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=16 HIP_K=$((2048 / DIVISOR)) \
   HIP_USING_SNAP_KV=0 HIP_BK_AFTER_MASK=8 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=0 \
   python hip/main/model_eval.py --job long_booksum --model "${MODEL_NAME}" --stride 131072 --max_tokens "${MAX_TOKENS}" --method hip --name "longbs_llama31_hip_pnp${SUFFIX}" --overwrite
 fi
@@ -52,7 +52,7 @@ if [ -z "${SKIP_HIP_SNAPKV}" ]; then
   echo "HIP + SNAPKV P&P"
   echo "DIVISOR: ${DIVISOR}"
   SA_BLOCK_BK=2 \
-  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=128 HIP_K=$((2048 / DIVISOR)) HIP_USING_SNAP_KV=1 \
+  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=16 HIP_K=$((2048 / DIVISOR)) HIP_USING_SNAP_KV=1 \
   HIP_SNAP_KV_VERT_K=$((2048 / DIVISOR)) HIP_SNAP_KV_DIAG_K=$((1024 / DIVISOR)) HIP_BK_AFTER_MASK=16 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=0 \
   python hip/main/model_eval.py --job long_booksum --model "${MODEL_NAME}" --stride 131072 --max_tokens "${MAX_TOKENS}" --method hip --name "longbs_llama31_hip_snapkv_pnp${SUFFIX}" --overwrite
 fi
@@ -60,7 +60,15 @@ fi
 if [ -z "${SKIP_HIP_FT}" ]; then
   echo "HIP Fine-Tuned"
   echo "DIVISOR: ${DIVISOR}"
-  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=128 HIP_K=$((2048 / DIVISOR)) \
+  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=16 HIP_K=$((2048 / DIVISOR)) \
   HIP_USING_SNAP_KV=0 HIP_BK_AFTER_MASK=8 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=0 \
   python hip/main/model_eval.py --job long_booksum --model "vllm_${FT_CKPT_PATH}" --tokenizer-id "${TOKENIZER_ID}" --stride 131072 --max_tokens "${MAX_TOKENS}" --method hip --name "longbs_llama31_hip_ft${SUFFIX}" --overwrite
+fi
+
+if [ -z "${SKIP_BIGBIRD_8K}" ]; then
+  echo "BigBird-TRUNC8K"
+  echo "DIVISOR: ${DIVISOR}"
+  VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=$((1024 / DIVISOR)) HIP_NSINK=16 HIP_K=$((4096 / DIVISOR)) \
+  HIP_USING_SNAP_KV=0 HIP_BK_AFTER_MASK=-1 HIP_RANDOM_MASK=1 \
+  python hip/main/model_eval.py --job long_booksum --model "${MODEL_NAME}" --stride 131072 --max_tokens "${MAX_TOKENS}" --truncate-size 8192 --method hip --name "longbs_llama31_bigbird_trunc8k${SUFFIX}" --overwrite
 fi
