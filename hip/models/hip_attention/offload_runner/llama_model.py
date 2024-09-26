@@ -20,6 +20,7 @@
 import math
 from typing import List, Optional, Tuple, Union
 
+import tqdm
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -51,7 +52,7 @@ from transformers.utils import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from flash_attn import flash_attn_func, flash_attn_with_kvcache
-from hip import hip_attention_11, HiPAttentionArgs11
+from hip import hip_attention_11, HiPAttentionArgs11, HiPAttentionOutputMetadata11
 
 logger = logging.get_logger(__name__)
 
@@ -307,7 +308,12 @@ class LlamaMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+            chunk_size = 8192
+            down_proj_out = torch.empty_like(x)
+            for i in range(0, x.shape[1], chunk_size):
+                down_proj = self.down_proj(self.act_fn(self.gate_proj(x[:, i:i+chunk_size])) * self.up_proj(x[:, i:i+chunk_size]))
+                down_proj_out[:, i:i+chunk_size].copy_(down_proj, non_blocking=True)
+            down_proj = down_proj_out
 
         return down_proj
 
@@ -497,6 +503,8 @@ class LlamaFlashAttention2(LlamaAttention):
         #         "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
         #         "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
         #     )
+        # print('b', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_max_memory_allocated()
 
         output_attentions = False
 
@@ -543,7 +551,9 @@ class LlamaFlashAttention2(LlamaAttention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "is_prompt": query_states.shape[1] > 1}
             if q_len > 1:
                 cache_kwargs['batch_index'] = self.prompt_batch_index
+            # print('c', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            # print('d', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
 
         dropout_rate = self.attention_dropout if self.training else 0.0
 
@@ -617,9 +627,11 @@ class LlamaFlashAttention2(LlamaAttention):
                 args.offload_cache_kv_heads = key_states.shape[2]
                 args.output_block_access_log = True
                 args.output_key_access_log = False
+                args.access_log_num_blocks_to_keep = 1
 
                 scaled_query_states = query_states / (query_states.shape[-1] ** 0.5)
                 
+                # print('e', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
                 if self.hip_use_cache:
                     assert self.hip_cache is not None
                     attn_output, attn_metadata = hip_attention_11(
@@ -634,6 +646,7 @@ class LlamaFlashAttention2(LlamaAttention):
                         mask_only=True,
                     )
                     
+                    # print('e1', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
                     if hasattr(past_key_value, 'process_block_access_log') and past_key_value.has_offload_cache(self.layer_idx):
                         past_key_value.process_block_access_log(
                             self.layer_idx,
@@ -644,6 +657,7 @@ class LlamaFlashAttention2(LlamaAttention):
                             attn_metadata,
                             not self.hip_use_cache,
                         )
+                    # print('e2', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
                     
                     # BUG: this output is slightly different..!?
                     attn_output, _ = hip_attention_11(
@@ -651,6 +665,7 @@ class LlamaFlashAttention2(LlamaAttention):
                         args=args,
                         previous_metadata=attn_metadata,
                     )
+                # print('f', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
             else:
                 if self.hip_use_cache:
                     assert self.hip_cache is not None
@@ -668,7 +683,17 @@ class LlamaFlashAttention2(LlamaAttention):
             attn_output = attn_output[:, -query_length:].clone()
             
             if self.hip_checkout_cache:
-                self.hip_last_cache = attn_metadata
+                self.hip_last_cache = HiPAttentionOutputMetadata11(
+                    indices=attn_metadata.indices[:, -1:].clone(),
+                    ks=attn_metadata.ks[:, -1:].clone(),
+                    ks_count=attn_metadata.ks_count[:, -1:].clone(),
+                    ks_start_end=attn_metadata.ks_start_end[:, -1:].clone(),
+                    key_access_log=None,
+                    key_access_count=None,
+                    block_access_log=attn_metadata.block_access_log.clone(),
+                    block_access_score=attn_metadata.block_access_score.clone(),
+                    block_access_count=attn_metadata.block_access_count.clone(),
+                )
         else:
             if q_len == 1:
                 cu_seqlens_k = torch.arange(0, query_states.shape[0], device=query_states.device, dtype=torch.int32)
@@ -694,6 +719,10 @@ class LlamaFlashAttention2(LlamaAttention):
 
         if not output_attentions:
             attn_weights = None
+        
+        # print('attention processed', torch.cuda.memory_allocated() / 1024 / 1024, torch.cuda.max_memory_allocated() / 1024 / 1024, self.layer_idx)
+        # torch.cuda.reset_peak_memory_stats()
+        # input()
 
         return attn_output, attn_weights, past_key_value
 
@@ -794,7 +823,7 @@ class LlamaSdpaAttention(LlamaAttention):
 
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, None, past_key_value
+        return attn_output, None, past_key_valueㄹ
 
 
 LLAMA_ATTENTION_CLASSES = {
@@ -849,6 +878,9 @@ class LlamaDecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
+        # print('layer_in', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_peak_memory_stats()
+        
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -865,13 +897,28 @@ class LlamaDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-        hidden_states = residual + hidden_states
+        if self.training:
+            hidden_states = residual + hidden_states
+        else:
+            hidden_states.add_(residual)
+        
+        # print('layer_self_attn', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_peak_memory_stats()
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        # print('layer_post_layernorm', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_peak_memory_stats()
+        
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        # print('layer_mlp', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_peak_memory_stats()
+        
+        if self.training:
+            hidden_states = residual + hidden_states
+        else:
+            hidden_states.add_(residual)
 
         outputs = (hidden_states,)
 
@@ -880,6 +927,9 @@ class LlamaDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+        
+        # print('layer_final', torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+        # torch.cuda.reset_peak_memory_stats()
 
         return outputs
 
@@ -1105,7 +1155,7 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for decoder_layer in tqdm.tqdm(self.layers, delay=5, desc='decode layer', dynamic_ncols=True):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 

@@ -22,6 +22,8 @@ from hip import HiPAttentionArgs, HiPAttentionOutputMetadata
 import triton
 import triton.language as tl
 
+torch.set_num_threads(os.cpu_count())
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def get_memory_free_MiB(torch_gpu_index):
@@ -683,7 +685,7 @@ class StaticCache(Cache):
         # Note: There will be significant perf decrease if switching to use 5D tensors instead.
         cache_shape = (max_batch_size, self.max_cache_len, self.num_key_value_heads, self.head_dim)
         total_bytes = 0
-        for idx_group in range(config.num_hidden_layers // share):
+        for idx_group in tqdm.tqdm(range(config.num_hidden_layers // share), dynamic_ncols=True, desc='allocate KV cache'):
             new_layer_key_cache = self.allocate_tensor(
                 cache_shape, 
                 self.dtype, 
@@ -711,6 +713,7 @@ class StaticCache(Cache):
         
         self.prompt_copy_stream = torch.cuda.Stream(self.device)
         self.prompt_copy_threads: List[threading.Thread] = []
+        self.max_num_prompt_copy_threads = 1
         
         # torch.cuda.synchronize()
         # gc.collect()
@@ -756,7 +759,9 @@ class StaticCache(Cache):
         cache_backend: str,
     ):
         if cache_backend == 'cuda':
-            return torch.zeros(shape, dtype=dtype, device=device)
+            t = torch.zeros(shape, dtype=dtype, device=device)
+            # print('allocated cuda', (t.numel() * t.element_size()) / 1024 / 1024)
+            return t
         elif cache_backend == 'uvm':
             elem_size = torch.tensor([], dtype=dtype).element_size()
             numel = prod(shape)
@@ -768,7 +773,9 @@ class StaticCache(Cache):
             t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
             t_cpu = tensor_from_pointer(pointer, shape, dtype, -1)
             # print(f'managed alloc result={r}, ptr=0x{pointer:02X}, bytes={byte_size:3,}, {t_gpu.device} {t_cpu.device}')
-            self.note_cpu(t_gpu, prefetch=True)
+            self.note_cpu(t_gpu, prefetch=False)
+            t_cpu.fill_(0)
+            # print('allocated managed', byte_size / 1024 / 1024)
             return t_gpu, t_cpu
         raise NotImplementedError()
 
@@ -906,17 +913,35 @@ class StaticCache(Cache):
             if is_prompt and (not self.using_chunked_prefill):
                 if self.cache_backend == 'uvm' and self.uvm_offload_key:
                     assert k_out.device == torch.device('cpu')
+                t = time.time()
+                while len(self.prompt_copy_threads) >= self.max_num_prompt_copy_threads:
+                    pass
+                if (time.time() - t) > 0.1:
+                    print(f'GPU computation stalled over {(time.time() - t):.3f} seconds due to copy previous layer\'s cache. Is your bandwidth okay?')
+                
                 self.prompt_copy_stream.wait_stream(torch.cuda.default_stream(cache_position.device))
                 with torch.cuda.stream(self.prompt_copy_stream):
                     cache_position_key = cache_position.to(k_out.device, non_blocking=True)
                     cache_position_value = cache_position.to(v_out.device, non_blocking=True)
                     key_states_cpu = key_states.to(k_out.dtype).to(k_out.device, non_blocking=True)
                     value_states_cpu = value_states.to(k_out.dtype).to(v_out.device, non_blocking=True)
+                
+                # self.prompt_copy_stream.synchronize()
+                # k_out.index_copy_(1, cache_position_key, key_states_cpu)
+                # v_out.index_copy_(1, cache_position_value, value_states_cpu)
+                
                 @torch.inference_mode(True)
                 def job():
-                    self.prompt_copy_stream.synchronize()
-                    k_out.index_copy_(1, cache_position_key, key_states_cpu)
-                    v_out.index_copy_(1, cache_position_value, value_states_cpu)
+                    try:
+                        t1 = time.time()
+                        # self.prompt_copy_stream.synchronize()
+                        t2 = time.time()
+                        k_out.index_copy_(1, cache_position_key, key_states_cpu)
+                        v_out.index_copy_(1, cache_position_value, value_states_cpu)
+                        t3 = time.time()
+                        # print(t2-t1, t3-t2, flush=True)
+                    finally:
+                        self.prompt_copy_threads.remove(t)
                 t = threading.Thread(target=job, daemon=True)
                 self.prompt_copy_threads.append(t)
                 t.start()
@@ -1470,21 +1495,22 @@ def convert_llama_to_vllm(model: LlamaForCausalLM):
         layer.input_layernorm = input_layernorm
         layer.post_attention_layernorm = output_layernorm
         
-        mlp = LlamaMLP(
-            hidden_size=model.config.hidden_size,
-            intermediate_size=model.config.intermediate_size,
-            hidden_act=model.config.hidden_act,
-            bias=getattr(model.config, "mlp_bias", False),
-            prefix=f"layer{ilayer}.mlp",
-        ).to(model.device).half()
-        mlp.down_proj.load_state_dict(layer.mlp.down_proj.state_dict())
-        mlp.gate_up_proj.load_state_dict({
-            'weight': torch.cat([
-                layer.mlp.gate_proj.weight,
-                layer.mlp.up_proj.weight,
-            ], dim=0)
-        })
-        layer.mlp = mlp
+        # NOTE: to use chunking in MLP disable vLLM
+        # mlp = LlamaMLP(
+        #     hidden_size=model.config.hidden_size,
+        #     intermediate_size=model.config.intermediate_size,
+        #     hidden_act=model.config.hidden_act,
+        #     bias=getattr(model.config, "mlp_bias", False),
+        #     prefix=f"layer{ilayer}.mlp",
+        # ).to(model.device).half()
+        # mlp.down_proj.load_state_dict(layer.mlp.down_proj.state_dict())
+        # mlp.gate_up_proj.load_state_dict({
+        #     'weight': torch.cat([
+        #         layer.mlp.gate_proj.weight,
+        #         layer.mlp.up_proj.weight,
+        #     ], dim=0)
+        # })
+        # layer.mlp = mlp
         
         self_attn = layer.self_attn # type: LlamaAttention
         qkv_proj = QKVParallelLinear(
@@ -1770,6 +1796,8 @@ class Runner:
         
         slack_memory = torch.empty((1 * 1024 * 1024 * 1024), dtype=torch.uint8, device=self.model.device) # NOTE: resever 1GB for cuda-graph
         
+        print('before static cache', torch.cuda.memory_allocated() / 1024 / 1024, torch.cuda.max_memory_allocated() / 1024 / 1024)
+        
         cache = StaticCache(
             self.model.config,
             max_batch_size=bsz,
@@ -1789,6 +1817,8 @@ class Runner:
             offload_cache_method=self.offload_cache_method,
         )
         
+        print('after static cache', torch.cuda.memory_allocated() / 1024 / 1024, torch.cuda.max_memory_allocated() / 1024 / 1024)
+        
         prompt_cache_pos = torch.arange(0, context_len, dtype=torch.long, device=self.model.device)
         ibatch = 0
         self.reset_prefix()
@@ -1802,6 +1832,7 @@ class Runner:
                         cache.last_prefill_chunk = True
                         cache.prefill_seq_len = input_ids.shape[1]
                         i_tsrc_end = min(input_ids.shape[1], i_tsrc_end)
+                    # print('a', torch.cuda.memory_allocated())
                     self.model(
                         input_ids=input_ids[ibatch:ibatch+1, i_tsrc_start:i_tsrc_end], 
                         position_ids=prompt_cache_pos.unsqueeze(0).expand(1, -1)[:, i_tsrc_start:i_tsrc_end], 
@@ -1923,7 +1954,8 @@ class Runner:
             event_decode_end.record()
             event_decode_end.synchronize()
             
-            elapsed_decode += event_decode_start.elapsed_time(event_decode_end) / 1000
+            last_tick = event_decode_start.elapsed_time(event_decode_end) / 1000
+            elapsed_decode += last_tick
             
             if self.kv_offload_cache:
                 stats = cache.decode_reset_stats()
@@ -1940,7 +1972,7 @@ class Runner:
                     unit = 'M'
                     unit_scale = 1024 ** 2
                 tqdm.tqdm.write(
-                    f'[{istep}] \t '
+                    f'[{istep}, {last_tick * 1000:.3f} ms] \t '
                     f'hit ratio {stats.cache_hit_ratio * 100:.2f} % \t '
                     f'(accessed = {stats.num_accessed / unit_scale:.2f} {unit}, '
                     f'hit = {stats.num_cache_hit / unit_scale:.2f} {unit}) \t '

@@ -121,6 +121,7 @@ class HiPAttentionArgs:
     
     output_key_access_log: bool = False
     output_block_access_log: bool = False
+    access_log_num_blocks_to_keep: Optional[int] = 987654321
     
     q_quant: Optional[Tensor] = None
     k_quant: Optional[Tensor] = None
@@ -339,10 +340,10 @@ def masking_iteration_draft_cuda_initialize(
     
     BLOCK_MASK_BLOCK_K: tl.constexpr,
 ):
-    idx_b = tl.program_id(0)
-    idx_bdst = tl.program_id(1)
-    idx_group = tl.program_id(2)
-    idx_tdst = tl.arange(0, block_size_q) + idx_bdst * block_size_q
+    idx_b = tl.program_id(0).to(tl.int64)
+    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_group = tl.program_id(2).to(tl.int64)
+    idx_tdst = tl.arange(0, block_size_q).to(tl.int64) + idx_bdst * block_size_q
     mask_tdst = idx_tdst < MAX_TDST
     
     mask_block_k = tl.cdiv(mask_k, block_size_k)
@@ -827,6 +828,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -932,16 +934,17 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         block_access_location = tl.atomic_add(
             BLOCK_ACCESS_COUNT +\
                 idx_b * stride_block_access_count_b +\
-                idx_bdst * stride_block_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_count_bdst,
             val=len_block_access,
+            mask=(idx_bdst - ACCESS_LOG_STORE_FROM) >= 0,
         )
         idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
         tl.store(
             BLOCK_ACCESS_LOG +\
                 idx_b * stride_block_access_log_b +\
-                idx_bdst * stride_block_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_log_bdst +\
                 idx_block_access * stride_block_access_log_t,
-            mask=mask_block_access,
+            mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             value=list_block_access,
         )
     
@@ -965,18 +968,19 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         key_access_location = tl.atomic_add(
             KEY_ACCESS_COUNT +\
                 idx_b * stride_key_access_count_b +\
-                idx_bdst * stride_key_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_count_bdst,
             val=len_access,
+            mask=((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0)
         )
         idx_access = (key_access_location + tl.cumsum(mask_access.to(tl.int32)) - 1) % MAX_ACCESS_COUNT
         # idx_access = tl.arange(0, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K)
         tl.store(
             KEY_ACCESS_LOG +\
                 idx_b * stride_key_access_log_b +\
-                idx_bdst * stride_key_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_log_bdst +\
                 idx_access * stride_key_access_log_t,
             value=idx_tsrc_grouped,
-            mask=mask_access,
+            mask=mask_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             # eviction_policy='evict_first'
         )
     
@@ -1324,9 +1328,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             tl.store(
                 BLOCK_ACCESS_SCORE +\
                     idx_b * stride_block_access_score_b +\
-                    idx_bdst * stride_block_access_score_bdst +\
+                    (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_score_bdst +\
                     idx_block_access * stride_block_access_score_t,
-                mask=mask_block_access,
+                mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
                 value=checkout_scores,
             )
     
@@ -1363,6 +1367,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -1690,6 +1695,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                 DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                 
+                ACCESS_LOG_STORE_FROM,
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -1856,6 +1862,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1993,6 +2000,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -2541,7 +2549,15 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=512)]
+        device_name = torch.cuda.get_device_name()
+        defaults = {
+            'NVIDIA A100-SXM4-80GB': dict(
+                num_warps=4, 
+                num_stages=2, 
+                maxnreg=512,
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=512))
+        return [triton.Config({}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
@@ -2682,6 +2698,7 @@ def masking_iteration_draft_cuda_fused(
     stride_diagonal_mask_n, 
     stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -2856,9 +2873,9 @@ def masking_iteration_draft_cuda_fused(
     # # BSZ
     # _pid_2 = _pid_bsz
     
-    _pid_0 = tl.program_id(0) % GROUP_BH + tl.program_id(1) * GROUP_BH
-    _pid_1 = (tl.program_id(0) // GROUP_BH) % _grid_gdst
-    _pid_2 = tl.program_id(2)
+    _pid_0 = tl.program_id(0).to(tl.int64) % GROUP_BH + tl.program_id(1).to(tl.int64) * GROUP_BH
+    _pid_1 = (tl.program_id(0).to(tl.int64) // GROUP_BH) % _grid_gdst
+    _pid_2 = tl.program_id(2).to(tl.int64)
     
     # _pid_0 = _pid % BH
     # _pid_1 = (_pid // BH) % _grid_gdst
@@ -2896,6 +2913,7 @@ def masking_iteration_draft_cuda_fused(
                     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                     
+                    ACCESS_LOG_STORE_FROM,
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
                     stride_key_access_log_bdst, 
@@ -3195,6 +3213,7 @@ def masking_iteration_draft_cuda_initialize_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -3305,7 +3324,7 @@ def masking_iteration_draft_cuda_initialize_score(
     
     KEY_DUP: tl.constexpr = 1,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     
     grid_bh = BH
     grid_bk = tl.cdiv(indices_bk_len, BLOCK_BK)
@@ -3313,10 +3332,10 @@ def masking_iteration_draft_cuda_initialize_score(
     
     pid_bh = tl.program_id(0) % BH
     pid_bk = tl.program_id(0) // BH
-    pid_bdst = tl.program_id(1)
-    pid_bsz = tl.program_id(2)
+    pid_bdst = tl.program_id(1).to(tl.int64)
+    pid_bsz = tl.program_id(2).to(tl.int64)
     
-    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK)
+    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK).to(tl.int64)
     mask_bk = idx_bk < indices_bk_len
     idx_bdst = pid_bdst
     idx_b = pid_bsz * BH + pid_bh
@@ -3348,7 +3367,7 @@ def masking_iteration_draft_cuda_initialize_score(
                 idx_tdst_no_proj * stride_pos_tdst,
             mask=mask_tdst,
             other=0,
-        )
+        ).to(tl.int64)
     else:
         pos_tdst = tl.full((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, ), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
@@ -3376,6 +3395,7 @@ def masking_iteration_draft_cuda_initialize_score(
         VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
         DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
         
+        ACCESS_LOG_STORE_FROM,
         KEY_ACCESS_LOG, 
         stride_key_access_log_b, 
         stride_key_access_log_bdst, 
@@ -3612,15 +3632,17 @@ def masking_iteration_draft(
     else:
         KEY_ACCESS_LEN = args.mask_k * 2 * math.ceil(math.log2(MAX_BSRC) + 1)
     
+    access_log_num_blocks_to_keep = min(args.access_log_num_blocks_to_keep, BDST)
+    access_log_store_from = BDST - access_log_num_blocks_to_keep
     if args.output_key_access_log:
         key_access_log = torch.full(
-            (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
+            (B, access_log_num_blocks_to_keep, KEY_ACCESS_LEN,), dtype=torch.int32, 
             # fill_value=torch.iinfo(torch.int32).max,
             device=q.device,
             fill_value=-1,
         )
         key_access_count = torch.zeros(
-            (B, BDST, ), 
+            (B, access_log_num_blocks_to_keep, ), 
             dtype=torch.long,
             device=q.device,
         )
@@ -3631,18 +3653,18 @@ def masking_iteration_draft(
     BLOCK_ACCESS_LEN = KEY_ACCESS_LEN // (args.block_size_k // args.block_stride_k)
     if args.output_block_access_log:
         block_access_log = torch.full(
-            (B, BDST, BLOCK_ACCESS_LEN,), dtype=torch.int32,
+            (B, access_log_num_blocks_to_keep, BLOCK_ACCESS_LEN,), dtype=torch.int32,
             device=q.device,
             fill_value=-1,
         )
         block_access_score = torch.full(
-            (B, BDST, BLOCK_ACCESS_LEN), 
+            (B, access_log_num_blocks_to_keep, BLOCK_ACCESS_LEN), 
             device=q.device,
             dtype=torch.float16,
             fill_value=-32000.0,
         )
         block_access_count = torch.zeros(
-            (B, BDST,),
+            (B, access_log_num_blocks_to_keep,),
             dtype=torch.long,
             device=q.device,
         )
@@ -3868,6 +3890,7 @@ def masking_iteration_draft(
             vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
             diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
+            access_log_store_from,
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
@@ -3972,6 +3995,7 @@ def masking_iteration_draft(
             vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
             diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
+            access_log_store_from,
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
@@ -4462,7 +4486,15 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=256)]
+        device_name = torch.cuda.get_device_name()
+        block_bk, defaults = {
+            'NVIDIA A100-SXM4-80GB': (16, dict(
+                num_warps=4, 
+                num_stages=2, 
+                maxnreg=256,
+            )),
+        }.get(device_name, (int(os.getenv('SA_BLOCK_BK', '8')), dict(num_warps=4, num_stages=2, maxnreg=256)))
+        return [triton.Config({'BLOCK_BK': block_bk}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
