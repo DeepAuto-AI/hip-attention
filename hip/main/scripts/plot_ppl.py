@@ -5,12 +5,12 @@ import os
 def proc_copy_paste(t: str, scale: float = 1):
     return list(map(lambda x: float(x) * scale, t.split()))
 
-FLASH_ATTN = 'Flash Attention'
-HIP_ATTN = 'HiP Attention'
+FLASH_ATTN = 'Flash Attn'
+HIP_ATTN = 'HiP Attn'
 BIGBIRD = 'BigBird'
 SLLM = 'StreamingLLM'
 H2O = 'H2O'
-HYPER_ATTN = 'Hyper Attention'
+HYPER_ATTN = 'Hyper Attn'
 
 Ts = [8, 16, 32, 64, 128]
 
@@ -60,7 +60,11 @@ wt2_data = {
 }
 
 from hip.utils import setup_seaborn
-setup_seaborn()
+setup_seaborn(
+    label_fontsize=11,
+    legend_fontsize=8,
+    axes_label_fontsize=8,
+)
 
 import seaborn as sb
 
@@ -72,7 +76,7 @@ def render(plot_data: dict, figsize=FIGSIZE, reset_figure=True, ax=None, text_of
         plt.figure(figsize=figsize)
     
     def render_line(xs, ys, label, method=None):
-        line_ax = sb.lineplot(x=xs, y=ys, label=label, ax=ax, legend=False, linewidth=2.0)
+        line_ax = sb.lineplot(x=xs, y=ys, label=label, ax=ax, legend=False, linewidth=3.0)
         if any(map(math.isnan, ys)):
             for last_okay, y in enumerate(ys):
                 if math.isnan(y):
@@ -130,8 +134,8 @@ plt.ylim(0, 300)
 plt.legend(loc='upper right')
 plt.xlabel('$T$ (k)')
 plt.ylabel('Latency (ms)')
-plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.png'), bbox_inches='tight')
-plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.pdf'), bbox_inches='tight')
+plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.png'), bbox_inches='tight', pad_inches=0)
+plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.pdf'), bbox_inches='tight', pad_inches=0)
 
 def split_plot(plot_data, range1, range2, legend_anchor, text_offset_scale_y=0.9):
     plt.clf()
@@ -159,22 +163,22 @@ def split_plot(plot_data, range1, range2, legend_anchor, text_offset_scale_y=0.9
     ax2.plot([0, 1], [1, 1], transform=ax2.transAxes, **kwargs)
     return fig, ax1, ax2
 
-fig, ax1, ax2 = split_plot(decode_data, (0, 50), (175, 225), (0.47, 0.765), text_offset_scale_y=1.5)
+fig, ax1, ax2 = split_plot(decode_data, (0, 50), (175, 225), (0.42, 0.72), text_offset_scale_y=1.5)
 
 ax1.set_title('Decode Latency')
-ax2.set_xlabel('$T$ (k)', fontsize=7, fontweight=800)
+ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
 ax2.set_ylabel('Latency ($\mu$s)')
 ax2.yaxis.set_label_coords(-0.1, 0.75)
-fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight')
-fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight', pad_inches=0)
+fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
 
-fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.35, 0.7), text_offset_scale_y=0.96)
+fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.37, 0.55), text_offset_scale_y=0.96)
 ax1.set_title('PG19 Perplexity')
-ax2.set_xlabel('$T$ (k)', fontsize=7, fontweight=800)
+ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
 ax2.set_ylabel('Perplexity')
 ax2.yaxis.set_label_coords(-0.1, 0.75)
-fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.png'), bbox_inches='tight')
-fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.png'), bbox_inches='tight', pad_inches=0)
+fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.pdf'), bbox_inches='tight', pad_inches=0)
 
 render(wt2_data)
 plt.title('Wikitext2 Perplexity')
@@ -182,5 +186,5 @@ plt.ylim(5, 8)
 plt.legend()
 plt.xlabel('$T$ (k)')
 plt.ylabel('Perplexity')
-plt.savefig(os.path.join(working_directory, 'plot_ppl_wt2.png'), bbox_inches='tight')
-plt.savefig(os.path.join(working_directory, 'plot_ppl_wt2.pdf'), bbox_inches='tight')
+plt.savefig(os.path.join(working_directory, 'plot_ppl_wt2.png'), bbox_inches='tight', pad_inches=0)
+plt.savefig(os.path.join(working_directory, 'plot_ppl_wt2.pdf'), bbox_inches='tight', pad_inches=0)
