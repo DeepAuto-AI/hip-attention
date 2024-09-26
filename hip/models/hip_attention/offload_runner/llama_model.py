@@ -690,9 +690,9 @@ class LlamaFlashAttention2(LlamaAttention):
                     ks_start_end=attn_metadata.ks_start_end[:, -1:].clone(),
                     key_access_log=None,
                     key_access_count=None,
-                    block_access_log=attn_metadata.block_access_log.clone(),
-                    block_access_score=attn_metadata.block_access_score.clone(),
-                    block_access_count=attn_metadata.block_access_count.clone(),
+                    block_access_log=attn_metadata.block_access_log.clone() if attn_metadata.block_access_log is not None else None,
+                    block_access_score=attn_metadata.block_access_score.clone() if attn_metadata.block_access_log is not None else None,
+                    block_access_count=attn_metadata.block_access_count.clone() if attn_metadata.block_access_log is not None else None,
                 )
         else:
             if q_len == 1:
