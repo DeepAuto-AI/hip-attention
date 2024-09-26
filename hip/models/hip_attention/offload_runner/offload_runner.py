@@ -928,7 +928,7 @@ class StaticCache(Cache):
                 self.prompt_copy_stream.wait_stream(torch.cuda.default_stream(cache_position.device))
                 with torch.cuda.stream(self.prompt_copy_stream):
                     cache_position_key = cache_position.to(k_out.device, non_blocking=True)
-                    cache_position_value = cache_position.to(v_out.device, non_blocking=True)
+                    cache_position_value = cache_position_key # cache_position.to(v_out.device, non_blocking=True)
                     key_states_cpu = key_states.to(k_out.dtype).to(k_out.device, non_blocking=True)
                     value_states_cpu = value_states.to(k_out.dtype).to(v_out.device, non_blocking=True)
                 
@@ -940,7 +940,7 @@ class StaticCache(Cache):
                 def job():
                     try:
                         t1 = time.time()
-                        # self.prompt_copy_stream.synchronize()
+                        self.prompt_copy_stream.synchronize()
                         t2 = time.time()
                         k_out.index_copy_(1, cache_position_key, key_states_cpu)
                         v_out.index_copy_(1, cache_position_value, value_states_cpu)
