@@ -666,6 +666,12 @@ class StaticCache(Cache):
                 f'SA keys: (bank = {self.sa_key_banks.numel() * self.sa_key_banks.element_size()/1024/1024} MB, table = {self.sa_key_tables.numel() * self.sa_key_tables.element_size() / 1024 / 1024} MB), '
                 f'SA values: (bank = {self.sa_value_banks.numel() * self.sa_value_banks.element_size()/1024/1024} MB, table = {self.sa_value_tables.numel() * self.sa_value_tables.element_size() / 1024 / 1024} MB)'
             )
+            unit_size = 1024 * 1024
+            print(
+                f'allocated for cache | '
+                f'tables: {(self.masking_key_tables.numel() + self.sa_key_tables.numel() + self.sa_value_tables.numel()) * self.sa_value_tables.element_size() / unit_size:.2f} MB, '
+                f'banks: {(self.masking_key_banks.numel() + self.sa_key_banks.numel() + self.sa_value_banks.numel()) * self.sa_value_banks.element_size() / unit_size:.2f} MB'
+            )
             
             # dummy initialize
             dummy_init_offload_cache = simulate_hit_ratio
