@@ -1911,6 +1911,7 @@ class Runner:
             #     num_logits_to_keep=1,
             # )
         cache.prompt_end()
+        event_prefill_end.record() # NOTE: do not include cache duplicates.
         self.push_last_query_to_prefix(item_repeat)
         
         for _ in range(bsz):
@@ -1930,7 +1931,6 @@ class Runner:
         decoded_tokens.append(next_token)
         decode_input_ids.copy_(next_token, non_blocking=True)
         del prompt_output
-        event_prefill_end.record()
         
         event_prefill_end.synchronize()
         elapsed_prefill = event_prefill_start.elapsed_time(event_prefill_end)
