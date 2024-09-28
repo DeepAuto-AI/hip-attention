@@ -4489,7 +4489,7 @@ def get_block_sparse_attention_configs():
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         block_bk, defaults = {
-            'NVIDIA A100-SXM4-80GB': (16, dict(
+            'NVIDIA A100-SXM4-80GB': (int(os.getenv('SA_BLOCK_BK', '16')), dict(
                 num_warps=4, 
                 num_stages=2, 
                 maxnreg=256,
