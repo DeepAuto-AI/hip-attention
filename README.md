@@ -16,7 +16,7 @@ After installation, you can access to `hip` package from any project. `hip` is c
 
 ![TLDR](docs/tldr.png)
 
-## API
+## API (This is oudated, please refer hip.HipAttentionArgs)
 
 ```py
 from torch import Tensor
@@ -32,9 +32,9 @@ position_ids: Optional[Tensor] = \
     position_ids.repeat_interleave(self.num_heads, 0) if rope_method != 'none' else None
 
 """
-- q: Tensor[N*H, TDST, HID]
-- k: Tensor[N*H, TSRC, HID]
-- v: Tensor[N*H, TSRC, HID]
+- q: Tensor[N, TDST, H, HID]
+- k: Tensor[N, TSRC, H, HID]
+- v: Tensor[N, TSRC, H, HID]
     query, key, value of attention mechanism.
 - mask_k: int, 
     same as $k$ in the paper
@@ -62,19 +62,11 @@ output, _ = hip_attention(
     v=v,
     
     mask_k=512,
-    block_size_q=32,
+    block_size_q=64,
+    block_stride_q=2,
     block_size_k=2,
-    
-    dense_queries_exp=None if rope_method == 'none' else 0,
-    
-    rope_method=rope_method,
-    rope_cos=rope_cos,
-    rope_sin=rope_sin,
-    position_ids=position_ids,
-    
-    self_extend_scale=self.self_extend_scale,
-    self_extend_window=self.self_extend_window,
-) # type: Tuple[Tensor[N*H, TDST, HID], ...]
+    block_stride_k=1,
+) # type: Tuple[Tensor[N, TDST, HEAD, HID], HiPAttentionMetadata]
 
 from hip import hip_attention, paged_hip_attention
 
@@ -87,7 +79,7 @@ OpenAI compatible API server with HiP.
 """
 output, _ = paged_hip_attention(
     ...
-) # type: Tuple[Tensor[N*H, TDST, HID], ...]
+) # type: Tuple[Tensor[N, TDST, H, HID], ...]
 ```
 
 # How To Install
@@ -252,9 +244,16 @@ CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=hip HIP_K=512 HIP_REFRESH_INTERVAL=8 HI
 CUDA_VISIBLE_DEVICES=0 ATTENTION_BACKEND=none python hip/main/model_eval.py --model vllm_llama13b_32k --job booksum --stride 32000 --max_tokens 256 --method none --name exp_name --overwrite
 ```
 
-## UVM Benchmark
+## UVM Benchmark (no longer supported)
 ```bash
 BENCHMARK_RUNNER=1 CACHE_ENGINE='offload_v' ATTENTION_BACKEND='hip' HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 HIP_K=512 CUDA_VISIBLE_DEVICES=0 python hip/main/model_eval.py --model vllm_qwen14b_gptq --job stream --batch_size 4 --input samples/16k.md --stride 22000 --max_tokens 32
+```
+
+## KV Offload Runner
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HIP_DISABLE_AUTOTUNE=1 
+python hip/models/hip_attention/offload_runner/offload_runner.py --cache_backend uvm --kv_share 1 --method hip --offload-cache --batch_size 1 --sw 256 --k 512 --max_tokens 256 --input ./samples/32k.md --cache_size 4096 --refresh_interval 8 --offload_cache_method single_level
 ```
 
 ## Nsight-System
