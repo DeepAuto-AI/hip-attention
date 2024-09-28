@@ -48,6 +48,7 @@ def cdiv_python(a, b):
     return math.ceil(float(a) / float(b))
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
+EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
 
 @dataclass
 class HiPAttentionOutputMetadata:
@@ -1669,9 +1670,9 @@ def masking_iteration_draft_cuda_dup_and_score(
         dupped_indices_for_keys = dupped_indices + tl.maximum(
             0, dupped_group_sizes // 2
         )
-    elif SAMPLE_METHOD == 'sqrt2':
+    elif SAMPLE_METHOD == 'position':
         dupped_indices_for_keys = dupped_indices + tl.maximum(
-            0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
+            0, tl.extra.cuda.libdevice.round(dupped_group_sizes * EXPERIMENTAL_SAMPLING_POSITION).to(tl.int32)
         )
     elif SAMPLE_METHOD == 'oracle':
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
@@ -3698,7 +3699,7 @@ def masking_iteration_draft(
         'first', 
         'last', 
         'center',
-        'sqrt2',
+        'position',
         'random', 
         'oracle', 
     ]

@@ -64,6 +64,7 @@ setup_seaborn(
     label_fontsize=11,
     legend_fontsize=8,
     axes_label_fontsize=8,
+    axis_below=True,
 )
 
 import seaborn as sb
@@ -129,7 +130,7 @@ def render(plot_data: dict, figsize=FIGSIZE, reset_figure=True, ax=None, text_of
     return
 
 render(prefill_data, text_offset_scale_y=0.7)
-plt.title('Prefill Latency')
+plt.title('Prefill Latency', fontsize=13)
 plt.ylim(0, 300)
 plt.legend(loc='upper right')
 plt.xlabel('$T$ (k)')
@@ -165,7 +166,7 @@ def split_plot(plot_data, range1, range2, legend_anchor, text_offset_scale_y=0.9
 
 fig, ax1, ax2 = split_plot(decode_data, (0, 50), (175, 225), (0.42, 0.72), text_offset_scale_y=1.5)
 
-ax1.set_title('Decode Latency')
+ax1.set_title('Decode Latency', fontsize=13)
 ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
 ax2.set_ylabel('Latency ($\mu$s)')
 ax2.yaxis.set_label_coords(-0.1, 0.75)
@@ -173,7 +174,7 @@ fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches=
 fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
 
 fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.37, 0.55), text_offset_scale_y=0.96)
-ax1.set_title('PG19 Perplexity')
+ax1.set_title('PG19 Perplexity', fontsize=13)
 ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
 ax2.set_ylabel('Perplexity')
 ax2.yaxis.set_label_coords(-0.1, 0.75)
@@ -181,7 +182,7 @@ fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.png'), bbox_inches='t
 fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.pdf'), bbox_inches='tight', pad_inches=0)
 
 render(wt2_data)
-plt.title('Wikitext2 Perplexity')
+plt.title('Wikitext2 Perplexity', fontsize=13)
 plt.ylim(5, 8)
 plt.legend()
 plt.xlabel('$T$ (k)')

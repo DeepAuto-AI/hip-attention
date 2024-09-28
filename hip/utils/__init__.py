@@ -569,7 +569,7 @@ def setup_seaborn(
     sns.set_theme(
         context='paper',
         style='whitegrid',
-        palette='Set2',
+        palette='bright',
         font='Noto Sans, Sans Serif',
         font_scale=1.0,
         color_codes=True,
