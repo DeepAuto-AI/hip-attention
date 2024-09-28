@@ -2,7 +2,7 @@
 ![demo gif](docs/demo.gif)
 > [**Link to Demo Video**](docs/demo.mp4)
 
-> [**Link to Preprint**](https://arxiv.org/abs/2406.09827)
+> [**Link to Preprint**]()
 
 # Usage
 
