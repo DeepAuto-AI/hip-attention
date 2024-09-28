@@ -48,7 +48,7 @@ def cdiv_python(a, b):
     return math.ceil(float(a) / float(b))
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
-EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
+EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ.get('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
 
 @dataclass
 class HiPAttentionOutputMetadata:
