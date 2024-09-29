@@ -2483,7 +2483,7 @@ def masking_iteration_draft_cuda_argsort(
     #     cache_modifier=DEFAULT_CACHE_MODIFIER,
     # )
     
-    _, ids = tl_argsort(probs.to(tl.float32), ids, 1, True)
+    # _, ids = tl_argsort(probs.to(tl.float32), ids, 1, True)
     # ids, _ = tl.split(tl.trans(tl.reshape(ids, 2, TOP_BK), 1, 0))
     
     tl.store(
