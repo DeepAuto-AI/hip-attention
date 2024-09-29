@@ -16,6 +16,16 @@ Ts = [8, 16, 32, 64, 128]
 
 FIGSIZE = (3.0, 2.5)
 
+LINESTYLE = {
+    f'{HIP_ATTN} Heal': '--'
+}
+
+LINEWIDTH = {
+    f'{HIP_ATTN} Heal': 2,
+    FLASH_ATTN: 3,
+}
+
+
 DEAD_REASON = {
     HYPER_ATTN: 'Crashed\nafter this point',
     SLLM: 'OOM\nafter this point',
@@ -40,10 +50,13 @@ decode_data = {
 }
 
 pg19_data = {
-    FLASH_ATTN: proc_copy_paste('8.7684	8.5071	8.3100	8.1655	8.1151'),
-    HIP_ATTN: proc_copy_paste('8.7994	8.6028	8.5057	8.4810	8.6499'),
-    BIGBIRD: proc_copy_paste('9.4713	9.5047	9.5993	9.7382	10.0082'),
-    SLLM: proc_copy_paste('9.7224	9.7039	9.7342	NaN	NaN'),
+    FLASH_ATTN: proc_copy_paste('8.3581	8.1028	7.9056	7.7571	7.6737'),
+    HIP_ATTN: {
+        '': proc_copy_paste('8.3937	8.2025	8.0977	8.0554	8.1850'),
+        'Heal': proc_copy_paste('8.3895	8.1822	8.0623	8.0088	8.1277'),
+    },
+    BIGBIRD: proc_copy_paste('9.0230	9.0442	9.1189	9.2325	9.4282'),
+    SLLM: proc_copy_paste('9.2065	9.2128	9.2402	NaN	NaN'),
     HYPER_ATTN: {
         '$l_d$=3': proc_copy_paste('63.9827	73.6145	67.735	NaN	NaN'),
         '$l_d$=25': proc_copy_paste('10.4919	10.5695	10.4721	NaN	NaN'),
@@ -77,7 +90,7 @@ def render(plot_data: dict, figsize=FIGSIZE, reset_figure=True, ax=None, text_of
         plt.figure(figsize=figsize)
     
     def render_line(xs, ys, label, method=None):
-        line_ax = sb.lineplot(x=xs, y=ys, label=label, ax=ax, legend=False, linewidth=3.0)
+        line_ax = sb.lineplot(x=xs, y=ys, label=label, ax=ax, legend=False, linewidth=LINEWIDTH.get(label, 3), linestyle=LINESTYLE.get(label, '-'))
         if any(map(math.isnan, ys)):
             for last_okay, y in enumerate(ys):
                 if math.isnan(y):
@@ -173,7 +186,7 @@ ax2.yaxis.set_label_coords(-0.1, 0.75)
 fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight', pad_inches=0)
 fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
 
-fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.37, 0.55), text_offset_scale_y=0.96)
+fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.37, 0.42), text_offset_scale_y=0.96)
 ax1.set_title('PG19 Perplexity', fontsize=13)
 ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
 ax2.set_ylabel('Perplexity')
@@ -183,7 +196,7 @@ fig.savefig(os.path.join(working_directory, 'plot_ppl_pg19.pdf'), bbox_inches='t
 
 render(wt2_data)
 plt.title('Wikitext2 Perplexity', fontsize=13)
-plt.ylim(5, 8)
+plt.ylim(5, 7)
 plt.legend()
 plt.xlabel('$T$ (k)')
 plt.ylabel('Perplexity')

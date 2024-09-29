@@ -13,17 +13,22 @@ setup_seaborn(
 
 import seaborn as sb
 
-HIP_CUDA = 'HiP CUDA'
+HIP_CUDA = 'HiP w/o Offload'
 HIP_UVM = 'HiP UVM w/o Cache'
 HIP_CACHE = 'HiP UVM w/ Vector Map'
 HIP_HASHMAP = 'HiP UVM w/ Hash Map'
-FA_CUDA = 'Flash Attn CUDA'
+FA_CUDA = 'Flash Attn w/o Offload'
 FA_UVM = 'Flash Attn UVM'
 
 def proc_copy_paste(t: str, scale: float = 1):
     return list(map(lambda x: float(x.replace(',', '')) * scale, t.split()))
 
 Ts = [8, 16, 32, 64]
+
+LINEWIDTH = {
+    FA_CUDA: 5,
+    HIP_CUDA: 3,
+}
 
 DEAD_REASON = {
     FA_CUDA: 'OOM',
@@ -83,7 +88,7 @@ def render_data(plot_data, ax=None, linestyle='-'):
         line_ax = (ax if ax is not None else plt).plot(
             xs, ys, 
             label=label, 
-            linewidth=3.0, 
+            linewidth=LINEWIDTH.get(label, 3), 
             linestyle=linestyle, 
             marker=MARKERS[label], 
             markersize=10,
