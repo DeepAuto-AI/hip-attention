@@ -3875,6 +3875,9 @@ def masking_iteration_draft(
         
         BLOCK_BK = 256 // (args.block_size_k // args.block_stride_k) * G
         
+        if args.using_extend:
+            BLOCK_BK //= 4
+        
         assert B == BSZ * BH
         grid = (
             BH * triton.cdiv(indices.shape[-1], BLOCK_BK),
@@ -3968,6 +3971,9 @@ def masking_iteration_draft(
         # BLOCK_BK = indices.shape[-1] // 4
         
         # BLOCK_BK = indices.shape[-1] // 4
+        
+        if args.using_extend:
+            BLOCK_BK //= 4
         
         GROUP_BDST = 1
         GROUP_BH = 1

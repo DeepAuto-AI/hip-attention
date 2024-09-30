@@ -358,6 +358,25 @@ class Gemma2CustomAttention(Gemma2Attention):
         output_attn_sparsity_loss: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        se_group_size = 16
+        force_dense = False
+        disalbe_sliding_window = False
+        using_self_extend = True
+        if using_self_extend:
+            if self.layer_idx in self.tree_dense_layers:
+                self.tree_k = 1024
+                self.tree_sliding_window_size = 1024
+                self.tree_dense_layers.clear()
+            self.tree_rope_method = 'self_extend'
+            # if self.sliding_window != None:
+            #     se_group_size *= 2
+            if self.sliding_window != None:
+                force_dense = True
+            self.tree_sliding_window_size = 1024
+            # if self.sliding_window != None:
+            #     self.attention_method = 'streaming_llm'
+            #     self.tree_k = self.sliding_window
+        
         bsz, q_len, _ = hidden_states.size()
         
         query_states = self.q_proj(hidden_states)
@@ -367,6 +386,9 @@ class Gemma2CustomAttention(Gemma2Attention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        # if self.sliding_window != None and disalbe_sliding_window:
+        #     position_ids = position_ids // 2
 
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -410,12 +432,10 @@ class Gemma2CustomAttention(Gemma2Attention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
         
-        force_dense = False
-        
-        if self.sliding_window != None:
-            force_dense = True
-            self.tree_k = 32
-            self.tree_sliding_window_size = self.sliding_window
+        # if self.sliding_window != None:
+        #     force_dense = True
+        #     self.tree_k = 32
+        #     self.tree_sliding_window_size = self.sliding_window
         
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, 
@@ -457,6 +477,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             rope_cos=cos,
             rope_sin=sin,
             position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+            self_extend_group_size=se_group_size,
 
             # Attention sparsity loss
             output_attn_sparsity_loss=output_attn_sparsity_loss,
@@ -467,7 +488,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             
             sm_scaler=self.scaling,
             attn_logit_softcapping=self.config.attn_logit_softcapping,
-            model_sliding_window=self.sliding_window,
+            model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
         )
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):

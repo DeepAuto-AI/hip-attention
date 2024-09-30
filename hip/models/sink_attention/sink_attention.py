@@ -134,6 +134,7 @@ def _attention_scores_compute(
     # calc dot product.
     score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
     score = score * (1 / tl.sqrt(HID.to(tl.float32)))
+    # score = tl.extra.cuda.libdevice.tanh(score / 50.0) * 50.0 # gemma2
     score = tl.where(idx_tsrc <= tdst, score, float('-inf'))
     
     # output

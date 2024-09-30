@@ -20,7 +20,7 @@ def safe_name(txt: str):
     return txt.replace('\\', '_').replace('/', '_').replace('.', '_')
 
 @torch.inference_mode
-def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=False):
+def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=os.getenv('HIP_QUITE', '0') == '1'):
     try:
         from vllm import LLM, SamplingParams
     except ModuleNotFoundError:
@@ -73,7 +73,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
     nlls = []
     prev_end_loc = 0
     t = time.time()
-    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True, disable=quite) as pbar:
+    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True, leave=not quite) as pbar:
         for begin_loc in pbar:
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
@@ -202,7 +202,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
     with open(outfile, 'w') as f:
         json.dump({'ppl': ppl}, f)
 
-    if not quite:
-        print(f'PPL: {ppl:.4f}')
+    # if not quite:
+    print(f'PPL: {ppl:.4f}')
 
     return ppl
