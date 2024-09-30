@@ -148,6 +148,9 @@ class HiPAttentionArgs:
     offload_cache_sa_v_banks: Optional[Tensor] = None
     offload_cache_counters: Optional[Tensor] = None
     
+    # to support gemma2
+    logit_softcap: Optional[float] = None
+    
     # NOTE: this will be equivalant BigBird
     randomize_mask: bool = False
     
@@ -4324,6 +4327,7 @@ def block_sparse_attention_cuda_step(
     
     sliding_window_size,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
+    LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -4414,7 +4418,10 @@ def block_sparse_attention_cuda_step(
             keys.to(tl.float16),
             # allow_tf32=True,
             out_dtype=tl.float16,
-        ).to(tl.float16) * 1.44269504
+        ).to(tl.float16)
+        if LOGIT_SOFTCAP is not None:
+            qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+        qk = qk * 1.44269504
     
     # qk_mask = (
     #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
@@ -4563,6 +4570,7 @@ def block_sparse_attention_cuda(
     KV_HEAD_REPEAT: tl.constexpr,
     
     sliding_window_size: tl.constexpr,
+    LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -4830,6 +4838,7 @@ def block_sparse_attention_cuda(
                     
                     sliding_window_size,
                     True,
+                    LOGIT_SOFTCAP,
                     
                     USING_EXTEND,
                     extend_window_size,
@@ -4965,6 +4974,7 @@ def block_sparse_attention_cuda(
                 
                 sliding_window_size,
                 False,
+                LOGIT_SOFTCAP,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -5086,9 +5096,10 @@ def block_sparse_attention(
         
         context, *args.safe_stride(context, 4),
         
-        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT,
+        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT, 
         
         args.sliding_window_size,
+        args.logit_softcap,
         
         *args.args_extend(),
         *args.args_paged_kv_cache(),

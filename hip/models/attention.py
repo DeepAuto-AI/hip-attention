@@ -32,6 +32,7 @@ def custom_attention(
     tree_enable_flash=False, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
+    tree_sliding_window_size=256,
 
     # Context averaging parameters
     tree_using_context_avg=False, 
@@ -51,6 +52,10 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
+    
+    sm_scaler=None,
+    attn_logit_softcapping=None,
+    model_sliding_window=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -83,7 +88,11 @@ def custom_attention(
     @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
     @return: Attention output, last cumsum, attention sparsity loss
     """
+    if sm_scaler is None:
+        sm_scaler = 1 / (query_states.shape[-1] ** 0.5)
     attn_sparsity_loss = None
+    if model_sliding_window is not None:
+        assert isinstance(model_sliding_window, int)
     
     N, H, T, HID = query_states.shape
     _N, _H, _T, _HID = key_states.shape
@@ -103,13 +112,15 @@ def custom_attention(
         
         if is_prompt:
             if attention_method in ['none', 'fa2']:
-                assert causal_mask is None
+                assert causal_mask is None, causal_mask.shape
                 attn_output = flash_attn_func(
                     q=query_states.permute(0, 2, 1, 3),
                     k=key_states.permute(0, 2, 1, 3),
                     v=value_states.permute(0, 2, 1, 3),
-                    softmax_scale=None,
+                    softmax_scale=sm_scaler,
                     causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['spda']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -130,8 +141,10 @@ def custom_attention(
                     q=query_states.permute(0, 2, 1, 3),
                     k_cache=key_states.permute(0, 2, 1, 3),
                     v_cache=value_states.permute(0, 2, 1, 3),
-                    softmax_scale=None,
+                    softmax_scale=sm_scaler,
                     causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['sdpa']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -195,7 +208,7 @@ def custom_attention(
         )
 
     elif attention_method == 'hip' or attention_method == 'hip' or attention_method == 'tree':
-        q = query_states / (query_states.shape[-1] ** 0.5)
+        q = query_states * sm_scaler
         k = key_states
         v = value_states
 
@@ -314,7 +327,7 @@ def custom_attention(
                     # block_stride_k=1,
                     block_size_k_group=1,
                     
-                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
+                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
                     sink_token_size=16,
                     
                     using_extend=False,
@@ -347,6 +360,8 @@ def custom_attention(
                     
                     q_quant=q_quant,
                     k_quant=k_quant,
+                    
+                    logit_softcap=attn_logit_softcapping,
                 )
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:

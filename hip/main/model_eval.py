@@ -24,6 +24,7 @@ from hip.main.jobs.greedy_replace import job_greedy_replace
 from hip.main.jobs.passkey import job_passkey
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
+from hip.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
 from hip.utils import seed
 
 
@@ -132,20 +133,30 @@ def load_model(args):
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+        'gemma2_2b': 'google/gemma-2-2b',
+        'gemma2_9b': 'google/gemma-2-9b',
+        'gemma2_2b_it': 'google/gemma-2-2b-it',
+        'gemma2_9b_it': 'google/gemma-2-9b-it',
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
     else:
         model_id = args.model
-    print(f'Loading model {model_id}')
 
     if args.model.startswith('qwen'):
         config = Qwen2Config.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
-
+        ModelClass = Qwen2ForCausalLM
+    elif args.model.startswith('gemma2'):
+        config = Gemma2Config.from_pretrained(model_id)
+        config._attn_implementation = config.attn_implementation = 'sdpa'
+        ModelClass = Gemma2ForCausalLM
     else:
         config = LlamaConfig.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
+        ModelClass = LlamaForCausalLM
+    
+    print(f'Loading model {model_id} {ModelClass} {type(config)}')
     
     if torch.cuda.is_bf16_supported():
         infer_dtype = torch.bfloat16
@@ -155,9 +166,6 @@ def load_model(args):
     if os.getenv('FORCE_FP32', '0') == '1':
         infer_dtype = torch.float32
 
-    ModelClass = LlamaForCausalLM
-    if args.model.startswith('qwen'):
-        ModelClass = Qwen2ForCausalLM
     if args.method == 'h2o':
         # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
         from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
