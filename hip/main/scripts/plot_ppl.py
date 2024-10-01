@@ -45,7 +45,7 @@ decode_data = {
     HIP_ATTN: proc_copy_paste('0.0149	0.0159	0.0168	0.0180	0.0188', scale=1000),
     BIGBIRD: proc_copy_paste('0.0131	0.0135	0.0137	0.0138	0.0138', scale=1000),
     SLLM: proc_copy_paste('0.0134	0.0134	0.0134	NaN	NaN', scale=1000),
-    H2O: proc_copy_paste('0.1941	0.1946	0.1996	0.1972	0.1949', scale=1000),
+    H2O: proc_copy_paste('0.03913788	0.03913788	0.03913788	0.03913788	0.03913788', scale=1000),
     # HYPER_ATTN: proc_copy_paste('NaN	NaN	NaN	NaN	NaN', scale=1000),
 }
 
@@ -151,6 +151,15 @@ plt.ylabel('Latency (ms)')
 plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.png'), bbox_inches='tight', pad_inches=0)
 plt.savefig(os.path.join(working_directory, 'plot_ppl_prefill.pdf'), bbox_inches='tight', pad_inches=0)
 
+render(decode_data, text_offset_scale_y=0.7)
+plt.title('Decode Latency', fontsize=13)
+plt.ylim(10, 42)
+plt.legend(loc='upper right')
+plt.xlabel('$T$ (k)')
+plt.ylabel('Latency ($\mu$s)')
+plt.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight', pad_inches=0)
+plt.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
+
 def split_plot(plot_data, range1, range2, legend_anchor, text_offset_scale_y=0.9):
     plt.clf()
 
@@ -177,14 +186,14 @@ def split_plot(plot_data, range1, range2, legend_anchor, text_offset_scale_y=0.9
     ax2.plot([0, 1], [1, 1], transform=ax2.transAxes, **kwargs)
     return fig, ax1, ax2
 
-fig, ax1, ax2 = split_plot(decode_data, (0, 50), (175, 225), (0.42, 0.72), text_offset_scale_y=1.5)
+# fig, ax1, ax2 = split_plot(decode_data, (0, 50), (175, 225), (0.42, 0.72), text_offset_scale_y=1.5)
 
-ax1.set_title('Decode Latency', fontsize=13)
-ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
-ax2.set_ylabel('Latency ($\mu$s)')
-ax2.yaxis.set_label_coords(-0.1, 0.75)
-fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight', pad_inches=0)
-fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
+# ax1.set_title('Decode Latency', fontsize=13)
+# ax2.set_xlabel('$T$ (k)', fontsize=11, fontweight=800)
+# ax2.set_ylabel('Latency ($\mu$s)')
+# ax2.yaxis.set_label_coords(-0.1, 0.75)
+# fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.png'), bbox_inches='tight', pad_inches=0)
+# fig.savefig(os.path.join(working_directory, 'plot_ppl_decode.pdf'), bbox_inches='tight', pad_inches=0)
 
 fig, ax1, ax2 = split_plot(pg19_data, (7, 11.5), (60, 80), (0.37, 0.42), text_offset_scale_y=0.96)
 ax1.set_title('PG19 Perplexity', fontsize=13)
