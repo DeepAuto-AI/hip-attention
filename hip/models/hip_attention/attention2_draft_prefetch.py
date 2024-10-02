@@ -526,6 +526,7 @@ def adjust_rope(
     tokens: tl.tensor,
     old_t: tl.tensor,
     new_t: tl.tensor,
+    mask_t: tl.tensor,
     idx_hid: tl.tensor,
     
     COS, stride_cos_t, stride_cos_hid,
@@ -535,24 +536,32 @@ def adjust_rope(
 ):
     cos_old = tl.load(
         COS +\
-            old_t[:, None] * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid
+            old_t[:, None].to(tl.int64) * stride_cos_t +\
+            idx_hid[None, :] * stride_cos_hid,
+        mask=tl.ravel(mask_t)[:, None],
+        other=0,
     )
     sin_old = tl.load(
         SIN +\
-            old_t[:, None] * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid
+            old_t[:, None].to(tl.int64) * stride_sin_t +\
+            idx_hid[None, :] * stride_sin_hid,
+        mask=tl.ravel(mask_t)[:, None],
+        other=0,
     )
     
     cos_new = tl.load(
         COS +\
-            new_t[:, None] * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid
+            new_t[:, None].to(tl.int64) * stride_cos_t +\
+            idx_hid[None, :] * stride_cos_hid,
+        mask=tl.ravel(mask_t)[:, None],
+        other=0,
     )
     sin_new = tl.load(
         SIN +\
-            new_t[:, None] * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid
+            new_t[:, None].to(tl.int64) * stride_sin_t +\
+            idx_hid[None, :] * stride_sin_hid,
+        mask=tl.ravel(mask_t)[:, None],
+        other=0,
     )
     
     tokens = de_rope(tokens, cos_old, sin_old, T, HID)
@@ -1122,7 +1131,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     K +\
                         idx_bsz.to(tl.int64) * stride_k_bsz +\
                         idx_tsrc_calib[None, :] * stride_k_tsrc +\
-                        (idx_bh * BH + i_group) * stride_k_head +\
+                        idx_kv_head * stride_k_head +\
                         idx_hid[:, None] * stride_k_hid,
                     mask=mask_tsrc_calib[None, :],
                     other=0
@@ -1133,6 +1142,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     idx_tsrc_calib, 
                     # idx_tsrc_calib // extend_group_size,
                     (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
+                    mask_tsrc_calib,
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
@@ -1150,7 +1160,11 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 
                 keys = keys.trans(1, 0)
                 keys = adjust_rope(
-                    keys, old_tsrc, new_tsrc, idx_hid,
+                    keys, 
+                    old_tsrc, 
+                    new_tsrc,
+                    mask_keys, 
+                    idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, HID,
@@ -1163,7 +1177,11 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
                 
                 queries_grouped = adjust_rope(
-                    queries, old_tdst, new_tdst, idx_hid,
+                    queries, 
+                    old_tdst, 
+                    new_tdst, 
+                    mask_tdst,
+                    idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
@@ -3875,6 +3893,9 @@ def masking_iteration_draft(
         
         BLOCK_BK = 256 // (args.block_size_k // args.block_stride_k) * G
         
+        if HID == 256:
+            BLOCK_BK //= 2
+        
         if args.using_extend:
             BLOCK_BK //= 4
         
@@ -3971,6 +3992,8 @@ def masking_iteration_draft(
         # BLOCK_BK = indices.shape[-1] // 4
         
         # BLOCK_BK = indices.shape[-1] // 4
+        if HID == 256:
+            BLOCK_BK //= 2
         
         if args.using_extend:
             BLOCK_BK //= 4
@@ -4386,7 +4409,11 @@ def block_sparse_attention_cuda_step(
         
         keys = keys.trans(1, 0)
         keys = adjust_rope(
-            keys, old_tsrc, new_tsrc, idx_hid,
+            keys, 
+            old_tsrc, 
+            new_tsrc, 
+            mask_tsrc,
+            idx_hid,
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             BLOCK_TK, HID,
@@ -4398,7 +4425,11 @@ def block_sparse_attention_cuda_step(
         new_tdst = old_tdst // extend_group_size
         
         queries_grouped = adjust_rope(
-            queries, old_tdst, new_tdst, idx_hid,
+            queries, 
+            old_tdst, 
+            new_tdst, 
+            mask_tdst,
+            idx_hid,
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             BLOCK_TQ, HID,

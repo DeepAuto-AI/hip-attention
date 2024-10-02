@@ -283,7 +283,7 @@ class Gemma2CustomAttention(Gemma2Attention):
 
         self.attention_method = 'none'
         self.tree_k = 512
-        self.tree_block_size_q = 32
+        self.tree_block_size_q = 64
         self.tree_block_stride_q = 2
         self.tree_block_size_k = 2
         self.tree_block_stride_k = 1
@@ -298,7 +298,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         self.tree_enable_sparq = False
         self.tree_enable_flash = True
         self.tree_use_sliding_window = True
-        self.tree_sampling_method = 'random'
+        self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
         self.tree_sliding_window_size = 256
 
@@ -390,8 +390,13 @@ class Gemma2CustomAttention(Gemma2Attention):
         # if self.sliding_window != None and disalbe_sliding_window:
         #     position_ids = position_ids // 2
 
+        seq_len = position_ids.max().item() + 1
+        
         cos, sin = self.rotary_emb(value_states, position_ids)
+        cos_full, sin_full = self.rotary_emb(value_states, torch.arange(0, seq_len, device=query_states.device)[None, :])
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # print(cos.shape, cos_full.shape, self.attention_method, force_dense)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -437,10 +442,13 @@ class Gemma2CustomAttention(Gemma2Attention):
         #     self.tree_k = 32
         #     self.tree_sliding_window_size = self.sliding_window
         
+        # print(self.attention_method, 'asdfdasf')
+        # print(position_ids.shape)
+        
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, 
-            key_states=key_states, 
-            value_states=value_states,
+            key_states=key_states[:,:,:seq_len].repeat_interleave(2,1), 
+            value_states=value_states[:,:,:seq_len].repeat_interleave(2,1),
             attention_mask=attention_mask, 
             causal_mask=causal_mask,
             attention_dropout=self.attention_dropout if self.training else 0.0,
@@ -474,9 +482,9 @@ class Gemma2CustomAttention(Gemma2Attention):
 
             # RoPE parameters
             tree_rope_method=self.tree_rope_method,
-            rope_cos=cos,
-            rope_sin=sin,
-            position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+            rope_cos=cos_full,
+            rope_sin=sin_full,
+            position_ids=position_ids.repeat_interleave(8, 0)[:, :seq_len],
             self_extend_group_size=se_group_size,
 
             # Attention sparsity loss
@@ -1169,6 +1177,7 @@ class Gemma2Model(Gemma2PreTrainedModel):
         # So we will pass in attention mask as is in any case, not only when ther's padding. Then we'll use its shape
         # to cut out keys/values trailing 0 used in static cache. This workaround should be compile compatible
         # as it doesn't cause dynamic control issues.
+        # print(self.config._attn_implementation, attention_mask.shape, 'asdighuopqwh')
         if self.config._attn_implementation == "flash_attention_2":
             return attention_mask
         if self.config._attn_implementation == "sdpa":
@@ -1242,7 +1251,7 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        output_logits: bool = False,
+        output_logits: bool = True,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1274,6 +1283,8 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "What is your favorite condiment?"
         ```"""
+        
+        # print(attention_mask.shape,'ipguhe3')
 
         if self.training and self.config._attn_implementation != "eager":
             logger.warning_once(
@@ -1357,6 +1368,12 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
             #     logits = torch.cat(logits, dim=-1)
             # else:
             #     logits = self.lm_head(hidden_states)
+            
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+            if self.config.final_logit_softcapping is not None:
+                logits = logits / self.config.final_logit_softcapping
+                logits = torch.tanh(logits)
+                logits = logits * self.config.final_logit_softcapping
 
             loss = None
             if labels is not None:

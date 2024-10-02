@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 import nvtx
 
@@ -113,7 +114,9 @@ def custom_attention(
         
         if is_prompt:
             if attention_method in ['none', 'fa2']:
-                assert causal_mask is None, causal_mask.shape
+                # assert causal_mask is None, causal_mask.shape
+                if causal_mask is not None:
+                    warnings.warn(f'causal mask provided. this is useless {causal_mask.shape}')
                 attn_output = flash_attn_func(
                     q=query_states.permute(0, 2, 1, 3),
                     k=key_states.permute(0, 2, 1, 3),
@@ -319,6 +322,7 @@ def custom_attention(
                 attn_output_hip, _ = hip_attention_11(
                     q, k, v,
                     args=HiPAttentionArgs11(
+                        position_ids=position_ids + 1,
                         mask_k=tree_k,
                         
                         block_size_q=tree_block_size_q,
