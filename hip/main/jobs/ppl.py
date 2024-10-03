@@ -70,6 +70,9 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
     if not quite:
         print(f'[{args.dataset}] {seq_len} tokens loaded')
 
+    nll_topk = round(seq_len * 0.01)
+    topk_nlls = torch.tensor([], dtype=torch.float)
+    lowk_nlls = torch.tensor([], dtype=torch.float)
     nlls = []
     prev_end_loc = 0
     t = time.time()
@@ -175,10 +178,20 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                     output_logits=False,
                                     use_cache=False,
                                 )
-                                samples.append(outputs.loss)
-                                pbar_sample.set_description(
-                                    f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
-                                )
+                                if outputs.loss.numel() > 1:
+                                    v, _ = outputs.loss.topk(k=min(len(outputs.loss), nll_topk))
+                                    v = v.cpu()
+                                    topk_nlls = torch.cat([topk_nlls, v])
+                                    topk_nlls, _ = torch.topk(topk_nlls, k=min(len(topk_nlls), nll_topk))
+                                    
+                                    v, _ = outputs.loss.topk(k=min(len(outputs.loss), nll_topk), largest=False)
+                                    v = v.cpu()
+                                    lowk_nlls = torch.cat([lowk_nlls, v])
+                                    lowk_nlls, _ = torch.topk(lowk_nlls, k=min(len(lowk_nlls), nll_topk), largest=False)
+                                samples.append(outputs.loss.mean())
+                                # pbar_sample.set_description(
+                                #     f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}, top: {torch.exp(topk_nlls.mean()).item()}'
+                                # )
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
@@ -188,10 +201,12 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
             prev_end_loc = end_loc
             
             ppl = torch.exp(torch.stack(nlls).mean()).item()
+            ppl_worst = torch.exp(topk_nlls.mean()).item()
+            ppl_best = torch.exp(lowk_nlls.mean()).item()
             if not quite:
-                tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
+                tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, PPL_WST: {ppl_worst:.6f}, PPL_BST: {ppl_best:.6f}, {time.time() - t:.4f} sec')
             t = time.time()
-            pbar.set_description(f"ppl: {ppl:.3f}")
+            pbar.set_description(f"ppl: {ppl:.3f}, worse: {ppl_worst:.3f}")
             
             if end_loc == seq_len:
                 break

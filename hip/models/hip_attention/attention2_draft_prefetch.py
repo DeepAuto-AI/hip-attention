@@ -4521,7 +4521,7 @@ def block_sparse_attention_cuda_step(
                 t_grouped,
             ).to(tl.float32) * 1.44269504
         elif EXTEND_BACKEND == 'streaming':
-            if tl.min(pos_tdst) > sliding_window_size:
+            if tl.min(pos_tdst) > (mask_k + sliding_window_size):
                 assert COS is not None
                 assert SIN is not None
                 
@@ -4554,17 +4554,25 @@ def block_sparse_attention_cuda_step(
                     keys_adjusted.to(queries.dtype),
                     allow_tf32=True,
                     out_dtype=tl.float32,
-                ).to(tl.float32) * 1.44269504
+                ).to(tl.float32) 
+                # if LOGIT_SOFTCAP is not None:
+                #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+                # qk = qk * 1.44269504
             else:
                 qk = tl.dot(
                     queries.to(tl.float16), 
                     keys.to(tl.float16),
                     # allow_tf32=True,
                     out_dtype=tl.float32,
-                ).to(tl.float16)
-                if LOGIT_SOFTCAP is not None:
-                    qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
-                qk = qk * 1.44269504
+                ).to(tl.float32)
+                # if LOGIT_SOFTCAP is not None:
+                #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+                # qk = qk * 1.44269504
+            if USING_EXTEND:
+                qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
+            if LOGIT_SOFTCAP is not None:
+                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+            qk = qk * 1.44269504
         else:
             raise Exception()
     else:
@@ -4583,8 +4591,6 @@ def block_sparse_attention_cuda_step(
     #     (~(mask_tdst[:, None] & mask_tsrc[None, :]))
     # )
     
-    if USING_EXTEND:
-        qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
     
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:

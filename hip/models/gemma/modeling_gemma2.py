@@ -1362,6 +1362,7 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
                     self.lm_head.weight,
                     shift_labels,
                     softcap=self.config.final_logit_softcapping,
+                    reduction='none'
                 )
             logits = None
         else:
