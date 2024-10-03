@@ -1127,7 +1127,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     assert COS is not None
                     assert SIN is not None
                     
-                    # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
+                    # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
                     dynamic_group_size = extend_group_size
                     
                     idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
@@ -1232,7 +1232,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     t = tl.dot(
                         queries.to(tl.float16),
                         keys.to(tl.float16),
-                        out_dtype=tl.float16,
+                        out_dtype=tl.float32,
                     ).to(tl.float32)
             elif EXTEND_BACKEND == 'streaming':
                 assert COS is not None
@@ -1248,9 +1248,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 new_tsrc = tl.where(mask_keys, new_tsrc, old_tsrc)
                 new_tsrc = tl.ravel(new_tsrc)
                 
-                keys_adjuested = keys.trans(1, 0)
-                keys_adjuested = adjust_rope(
-                    keys_adjuested, 
+                keys_adjusted = keys.trans(1, 0)
+                keys_adjusted = adjust_rope(
+                    keys_adjusted, 
                     old_tsrc, 
                     new_tsrc,
                     mask_keys, 
@@ -1260,12 +1260,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
                     HID,
                 ).to(keys.dtype)
-                keys_adjuested = tl.trans(keys_adjuested, 1, 0)
-                keys_adjuested = (keys_adjuested * mask_keys).to(keys_adjuested.dtype)
+                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                keys_adjusted = (keys_adjusted * mask_keys).to(keys_adjusted.dtype)
                 
                 t = tl.dot(
                     queries, 
-                    keys_adjuested.to(queries.dtype),
+                    keys_adjusted.to(queries.dtype),
                 ).to(tl.float32)
             else:
                 raise Exception()
@@ -4467,12 +4467,15 @@ def block_sparse_attention_cuda_step(
             assert COS is not None
             assert SIN is not None
             
+            # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
+            dynamic_group_size = extend_group_size
+            
             old_tsrc = idx_tsrc
             mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
             new_tsrc = tl.where(
                 mask_tsrc_window,
                 old_tsrc,
-                old_tsrc // extend_group_size
+                old_tsrc // dynamic_group_size
             )
             
             keys = keys.trans(1, 0)
@@ -4490,7 +4493,7 @@ def block_sparse_attention_cuda_step(
             keys = keys * mask_tsrc[None, :]
             
             old_tdst = (pos_tdst - 1)
-            new_tdst = old_tdst // extend_group_size
+            new_tdst = old_tdst // dynamic_group_size
             
             queries_grouped = adjust_rope(
                 queries, 
@@ -4518,7 +4521,7 @@ def block_sparse_attention_cuda_step(
                 t_grouped,
             ).to(tl.float32) * 1.44269504
         elif EXTEND_BACKEND == 'streaming':
-            if tl.min(pos_tdst) > 1024:
+            if tl.min(pos_tdst) > sliding_window_size:
                 assert COS is not None
                 assert SIN is not None
                 
@@ -4550,13 +4553,14 @@ def block_sparse_attention_cuda_step(
                     queries.to(queries.dtype), 
                     keys_adjusted.to(queries.dtype),
                     allow_tf32=True,
+                    out_dtype=tl.float32,
                 ).to(tl.float32) * 1.44269504
             else:
                 qk = tl.dot(
                     queries.to(tl.float16), 
                     keys.to(tl.float16),
                     # allow_tf32=True,
-                    out_dtype=tl.float16,
+                    out_dtype=tl.float32,
                 ).to(tl.float16)
                 if LOGIT_SOFTCAP is not None:
                     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
@@ -4578,6 +4582,9 @@ def block_sparse_attention_cuda_step(
     #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
     #     (~(mask_tdst[:, None] & mask_tsrc[None, :]))
     # )
+    
+    if USING_EXTEND:
+        qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
     
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
