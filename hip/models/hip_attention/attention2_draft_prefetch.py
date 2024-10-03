@@ -866,7 +866,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     idx_b, 
     idx_bdst,
-    idx_tdst, mask_tdst, pos_tdst,
+    idx_tdst, 
+    mask_tdst, 
+    pos_tdst,
+    idx_bk, # for streamingLLM
     mask_key_blocks,
     
     sliding_window_size,
@@ -876,6 +879,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     MAX_TSRC, 
     HID: tl.constexpr,
     KV_HEAD_REPEAT: tl.constexpr,
+    MASK_K: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -1117,117 +1121,154 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
         if USING_EXTEND:
-            if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
+            EXTEND_BACKEND: tl.constexpr = 'streaming'
+            if EXTEND_BACKEND == 'self_extend':
+                if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
+                    assert COS is not None
+                    assert SIN is not None
+                    
+                    # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
+                    dynamic_group_size = extend_group_size
+                    
+                    idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
+                    idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, NUM_CALIB)
+                    mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
+                    keys_calib_old = tl.load(
+                        K +\
+                            idx_bsz.to(tl.int64) * stride_k_bsz +\
+                            idx_tsrc_calib[None, :] * stride_k_tsrc +\
+                            idx_kv_head * stride_k_head +\
+                            idx_hid[:, None] * stride_k_hid,
+                        mask=mask_tsrc_calib[None, :],
+                        other=0
+                    )
+                    
+                    keys_calib_new = adjust_rope(
+                        keys_calib_old.trans(1, 0), 
+                        idx_tsrc_calib, 
+                        # idx_tsrc_calib // extend_group_size,
+                        (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
+                        mask_tsrc_calib,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        NUM_CALIB, HID,
+                    ).trans(1, 0)
+                    
+                    old_tsrc = idx_tsrc
+                    mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 9999999)) - extend_window_size)
+                    new_tsrc = tl.where(
+                        mask_tsrc_window,
+                        old_tsrc,
+                        # old_tsrc // extend_group_size
+                        (old_tsrc / dynamic_group_size).to(tl.int32)
+                    )
+                    
+                    keys = keys.trans(1, 0)
+                    keys = adjust_rope(
+                        keys, 
+                        old_tsrc, 
+                        new_tsrc,
+                        mask_keys, 
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, HID,
+                    ).to(keys.dtype)
+                    keys = tl.trans(keys, 1, 0)
+                    keys = (keys * mask_keys).to(keys.dtype)
+                    
+                    old_tdst = (pos_tdst - 1)
+                    # new_tdst = old_tdst // extend_group_size
+                    new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
+                    
+                    queries_grouped = adjust_rope(
+                        queries, 
+                        old_tdst, 
+                        new_tdst, 
+                        mask_tdst,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
+                    ).to(queries.dtype)
+                    
+                    t_calib_old = tl.dot(
+                        queries, 
+                        keys_calib_old.to(queries.dtype),
+                    )
+                    t_calib_new = tl.dot(
+                        queries_grouped, 
+                        keys_calib_new.to(queries.dtype),
+                    )
+                    
+                    calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
+                    
+                    # calib_old_mean = tl.sum(t_calib_old, axis=-1) / NUM_CALIB
+                    # calib_old_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_old - calib_old_mean[:, None], 2), axis=-1) / NUM_CALIB)
+                    # calib_new_mean = tl.sum(t_calib_new, axis=-1) / NUM_CALIB
+                    # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
+                    
+                    t_window = tl.dot(
+                        queries, keys.to(queries.dtype),
+                    )
+                    
+                    t_grouped = tl.dot(
+                        queries_grouped, keys.to(queries.dtype),
+                    )
+                    
+                    # NOTE: this calibration trick is very important.
+                    # > w/o std
+                    t_grouped = t_grouped - calibration[:, None]
+                    # > with std
+                    # t_grouped = ((t_grouped - calib_new_mean[:, None]) / calib_new_std[:, None]) * calib_old_std[:, None] + calib_old_mean[:, None]
+                    
+                    t = tl.where(
+                        mask_tsrc_window[None, :],
+                        t_window,
+                        t_grouped,
+                    ).to(tl.float32)
+                else:
+                    t = tl.dot(
+                        queries.to(tl.float16),
+                        keys.to(tl.float16),
+                        out_dtype=tl.float16,
+                    ).to(tl.float32)
+            elif EXTEND_BACKEND == 'streaming':
                 assert COS is not None
                 assert SIN is not None
                 
-                # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
-                dynamic_group_size = extend_group_size
-                
-                idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
-                idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, NUM_CALIB)
-                mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
-                keys_calib_old = tl.load(
-                    K +\
-                        idx_bsz.to(tl.int64) * stride_k_bsz +\
-                        idx_tsrc_calib[None, :] * stride_k_tsrc +\
-                        idx_kv_head * stride_k_head +\
-                        idx_hid[:, None] * stride_k_hid,
-                    mask=mask_tsrc_calib[None, :],
-                    other=0
-                )
-                
-                keys_calib_new = adjust_rope(
-                    keys_calib_old.trans(1, 0), 
-                    idx_tsrc_calib, 
-                    # idx_tsrc_calib // extend_group_size,
-                    (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
-                    mask_tsrc_calib,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    NUM_CALIB, HID,
-                ).trans(1, 0)
-                
                 old_tsrc = idx_tsrc
-                mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 9999999)) - extend_window_size)
-                new_tsrc = tl.where(
-                    mask_tsrc_window,
-                    old_tsrc,
-                    # old_tsrc // extend_group_size
-                    (old_tsrc / dynamic_group_size).to(tl.int32)
-                )
+                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
+                    tl.maximum(0, 
+                        tl.min(tl.maximum(0, pos_tdst - 1)) -\
+                            sliding_window_size -\
+                            MASK_K#tl.arange(0, BLOCK_TK)
+                    )
+                new_tsrc = tl.where(mask_keys, new_tsrc, old_tsrc)
+                new_tsrc = tl.ravel(new_tsrc)
                 
-                keys = keys.trans(1, 0)
-                keys = adjust_rope(
-                    keys, 
+                keys_adjuested = keys.trans(1, 0)
+                keys_adjuested = adjust_rope(
+                    keys_adjuested, 
                     old_tsrc, 
                     new_tsrc,
                     mask_keys, 
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, HID,
+                    BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
+                    HID,
                 ).to(keys.dtype)
-                keys = tl.trans(keys, 1, 0)
-                keys = (keys * mask_keys).to(keys.dtype)
+                keys_adjuested = tl.trans(keys_adjuested, 1, 0)
+                keys_adjuested = (keys_adjuested * mask_keys).to(keys_adjuested.dtype)
                 
-                old_tdst = (pos_tdst - 1)
-                # new_tdst = old_tdst // extend_group_size
-                new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
-                
-                queries_grouped = adjust_rope(
+                t = tl.dot(
                     queries, 
-                    old_tdst, 
-                    new_tdst, 
-                    mask_tdst,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
-                ).to(queries.dtype)
-                
-                t_calib_old = tl.dot(
-                    queries, 
-                    keys_calib_old.to(queries.dtype),
-                )
-                t_calib_new = tl.dot(
-                    queries_grouped, 
-                    keys_calib_new.to(queries.dtype),
-                )
-                
-                calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
-                
-                # calib_old_mean = tl.sum(t_calib_old, axis=-1) / NUM_CALIB
-                # calib_old_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_old - calib_old_mean[:, None], 2), axis=-1) / NUM_CALIB)
-                # calib_new_mean = tl.sum(t_calib_new, axis=-1) / NUM_CALIB
-                # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
-                
-                t_window = tl.dot(
-                    queries, keys.to(queries.dtype),
-                )
-                
-                t_grouped = tl.dot(
-                    queries_grouped, keys.to(queries.dtype),
-                )
-                
-                # NOTE: this calibration trick is very important.
-                # > w/o std
-                t_grouped = t_grouped - calibration[:, None]
-                # > with std
-                # t_grouped = ((t_grouped - calib_new_mean[:, None]) / calib_new_std[:, None]) * calib_old_std[:, None] + calib_old_mean[:, None]
-                
-                t = tl.where(
-                    mask_tsrc_window[None, :],
-                    t_window,
-                    t_grouped,
+                    keys_adjuested.to(queries.dtype),
                 ).to(tl.float32)
             else:
-                t = tl.dot(
-                    queries.to(tl.float16),
-                    keys.to(tl.float16),
-                    out_dtype=tl.float16,
-                ).to(tl.float32)
+                raise Exception()
         else:
             if not USING_SPARQ:
                 NUM_QUERIES: tl.constexpr = tl.constexpr(BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
@@ -1742,7 +1783,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 idx_b, 
                 idx_bdst,
-                idx_tdst, mask_tdst, pos_tdst,
+                idx_tdst, 
+                mask_tdst, 
+                pos_tdst,
+                idx_bk_dup,
                 dupped_mask,
                 
                 sliding_window_size, 
@@ -1752,6 +1796,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 MAX_TSRC, 
                 HID, 
                 KV_HEAD_REPEAT,
+                mask_k,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -1909,10 +1954,13 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             idx_b, 
             idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
+            idx_tdst, 
+            mask_tdst, 
+            pos_tdst,
+            idx_bk,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
             extend_window_size,
@@ -2047,10 +2095,13 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             idx_b, 
             idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
+            idx_tdst, 
+            mask_tdst, 
+            pos_tdst,
+            idx_bk_dup,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
             extend_window_size,
@@ -3282,6 +3333,7 @@ def masking_iteration_draft_cuda_initialize_score(
     MAX_TSRC, 
     HID: tl.constexpr,
     KV_HEAD_REPEAT: tl.constexpr,
+    MASK_K: tl.constexpr,
                 
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -3442,10 +3494,20 @@ def masking_iteration_draft_cuda_initialize_score(
         
         idx_b,
         idx_bdst,
-        idx_tdst, mask_tdst, pos_tdst,
+        idx_tdst, 
+        mask_tdst, 
+        pos_tdst,
+        idx_bk,
         mask_bk,
         
-        sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+        sliding_window_size, 
+        BH, 
+        G, 
+        MAX_TDST, 
+        MAX_TSRC, 
+        HID, 
+        KV_HEAD_REPEAT, 
+        MASK_K,
                 
         USING_EXTEND,
         extend_window_size,
@@ -3937,7 +3999,7 @@ def masking_iteration_draft(
             
             args.sliding_window_size,
             indices.shape[-1],
-            BH, G, TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            BH, G, TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, args.mask_k,
             
             *args.args_extend(),
             *args.args_sparq(),
@@ -4355,6 +4417,7 @@ def block_sparse_attention_cuda_step(
     # TSRC,
     
     sliding_window_size,
+    mask_k,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
     LOGIT_SOFTCAP: tl.constexpr,
     
@@ -4364,12 +4427,14 @@ def block_sparse_attention_cuda_step(
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     
+    idx_bk,
     pos_tdst,
     idx_hid, 
     IS_CAUSAL: tl.constexpr,
     HID: tl.constexpr, 
     BLOCK_TQ, 
-    BLOCK_TK,
+    BLOCK_TK, 
+    BLOCK_SIZE_K: tl.constexpr,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -4395,60 +4460,109 @@ def block_sparse_attention_cuda_step(
     #     allow_tf32=True,
     # ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
     
+    EXTEND_BACKEND: tl.constexpr = 'streaming'
+    
     if USING_EXTEND:
-        assert COS is not None
-        assert SIN is not None
-        
-        old_tsrc = idx_tsrc
-        mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
-        new_tsrc = tl.where(
-            mask_tsrc_window,
-            old_tsrc,
-            old_tsrc // extend_group_size
-        )
-        
-        keys = keys.trans(1, 0)
-        keys = adjust_rope(
-            keys, 
-            old_tsrc, 
-            new_tsrc, 
-            mask_tsrc,
-            idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_TK, HID,
-        )
-        keys = tl.trans(keys, 1, 0)
-        keys = keys * mask_tsrc[None, :]
-        
-        old_tdst = (pos_tdst - 1)
-        new_tdst = old_tdst // extend_group_size
-        
-        queries_grouped = adjust_rope(
-            queries, 
-            old_tdst, 
-            new_tdst, 
-            mask_tdst,
-            idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_TQ, HID,
-        )
-        queries_grouped = queries_grouped * mask_tdst[:, None]
-        
-        t_window = tl.dot(
-            queries, keys.to(queries.dtype),
-            allow_tf32=True,
-        )
-        t_grouped = tl.dot(
-            queries_grouped.to(queries.dtype), keys.to(queries.dtype),
-            allow_tf32=True,
-        )
-        qk = tl.where(
-            mask_tsrc_window[None, :],
-            t_window,
-            t_grouped,
-        ).to(tl.float32) * 1.44269504
+        if EXTEND_BACKEND == 'self_extend':
+            assert COS is not None
+            assert SIN is not None
+            
+            old_tsrc = idx_tsrc
+            mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
+            new_tsrc = tl.where(
+                mask_tsrc_window,
+                old_tsrc,
+                old_tsrc // extend_group_size
+            )
+            
+            keys = keys.trans(1, 0)
+            keys = adjust_rope(
+                keys, 
+                old_tsrc, 
+                new_tsrc, 
+                mask_tsrc,
+                idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_TK, HID,
+            )
+            keys = tl.trans(keys, 1, 0)
+            keys = keys * mask_tsrc[None, :]
+            
+            old_tdst = (pos_tdst - 1)
+            new_tdst = old_tdst // extend_group_size
+            
+            queries_grouped = adjust_rope(
+                queries, 
+                old_tdst, 
+                new_tdst, 
+                mask_tdst,
+                idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_TQ, HID,
+            )
+            queries_grouped = queries_grouped * mask_tdst[:, None]
+            
+            t_window = tl.dot(
+                queries, keys.to(queries.dtype),
+                allow_tf32=True,
+            )
+            t_grouped = tl.dot(
+                queries_grouped.to(queries.dtype), keys.to(queries.dtype),
+                allow_tf32=True,
+            )
+            qk = tl.where(
+                mask_tsrc_window[None, :],
+                t_window,
+                t_grouped,
+            ).to(tl.float32) * 1.44269504
+        elif EXTEND_BACKEND == 'streaming':
+            if tl.min(pos_tdst) > 1024:
+                assert COS is not None
+                assert SIN is not None
+                
+                old_tsrc = idx_tsrc
+                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
+                    tl.maximum(0, 
+                        tl.min(tl.maximum(0, pos_tdst - 1)) -\
+                            sliding_window_size -\
+                            mask_k#tl.arange(0, BLOCK_TK)
+                    )
+                new_tsrc = tl.where(mask_tsrc, new_tsrc, old_tsrc)
+                
+                keys_adjusted = keys.trans(1, 0)
+                keys_adjusted = adjust_rope(
+                    keys_adjusted, 
+                    old_tsrc, 
+                    new_tsrc, 
+                    mask_tsrc,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_TK, 
+                    HID,
+                )
+                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                keys_adjusted = keys_adjusted * mask_tsrc[None, :]
+                
+                qk = tl.dot(
+                    queries.to(queries.dtype), 
+                    keys_adjusted.to(queries.dtype),
+                    allow_tf32=True,
+                ).to(tl.float32) * 1.44269504
+            else:
+                qk = tl.dot(
+                    queries.to(tl.float16), 
+                    keys.to(tl.float16),
+                    # allow_tf32=True,
+                    out_dtype=tl.float16,
+                ).to(tl.float16)
+                if LOGIT_SOFTCAP is not None:
+                    qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+                qk = qk * 1.44269504
+        else:
+            raise Exception()
     else:
         qk = tl.dot(
             queries.to(tl.float16), 
@@ -4725,20 +4839,23 @@ def block_sparse_attention_cuda(
         # volatile=True,
     )
     
+    range_start = tl.load(
+        KS_START_END + \
+            idx_b * stride_ks_start_end_b +\
+            idx_bdst * stride_ks_start_end_bdst +\
+            idx_g * stride_ks_start_end_g
+    )
+    range_end = tl.load(
+        KS_START_END + \
+            idx_b * stride_ks_start_end_b +\
+            idx_bdst * stride_ks_start_end_bdst +\
+            (idx_g + 1) * stride_ks_start_end_g
+    )
+    if BK <= 0:
+        range_start = 0
+        range_end = 0
+    
     if (BK > 0):
-        range_start = tl.load(
-            KS_START_END + \
-                idx_b * stride_ks_start_end_b +\
-                idx_bdst * stride_ks_start_end_bdst +\
-                idx_g * stride_ks_start_end_g
-        )
-        range_end = tl.load(
-            KS_START_END + \
-                idx_b * stride_ks_start_end_b +\
-                idx_bdst * stride_ks_start_end_bdst +\
-                (idx_g + 1) * stride_ks_start_end_g
-        )
-        
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
@@ -4874,6 +4991,7 @@ def block_sparse_attention_cuda(
                     acc, l_i, m_i,
                     
                     sliding_window_size,
+                    (range_end - range_start) * BLOCK_SIZE_K,
                     True,
                     LOGIT_SOFTCAP,
                     
@@ -4883,22 +5001,24 @@ def block_sparse_attention_cuda(
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     
+                    idx_bk,
                     pos_tdst,
                     idx_hid, 
                     IS_CAUSAL,
                     HID, 
                     BLOCK_SIZE_Q, 
                     BLOCK_BK * BLOCK_SIZE_K,
+                    BLOCK_SIZE_K,
                 )
-                # else:
-                #     pass
             else:
                 pass
     
     if (sliding_window_size > 0):
         CURR_TSRC = tl.max(pos_tdst)
         # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
-        for i_tsrc in range(tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q), CURR_TSRC, BLOCK_BK * BLOCK_SIZE_K):
+        i_tsrc_range_start = tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q)
+        TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
+        for i_tsrc in range(i_tsrc_range_start, CURR_TSRC, TSRC_RANGE_STEP):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < MAX_TSRC
             
@@ -5010,6 +5130,7 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i,
                 
                 sliding_window_size,
+                (range_end - range_start) * BLOCK_SIZE_K,
                 False,
                 LOGIT_SOFTCAP,
                 
@@ -5019,12 +5140,16 @@ def block_sparse_attention_cuda(
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
                 
+                tl.arange(0, BLOCK_BK) +\
+                    (range_end - range_start) +\
+                    (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
                 pos_tdst,
                 idx_hid, 
                 IS_CAUSAL,
                 HID, 
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
+                BLOCK_SIZE_K,
             )
     
     # epilogue

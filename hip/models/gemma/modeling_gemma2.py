@@ -358,7 +358,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         output_attn_sparsity_loss: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        se_group_size = 16
+        se_group_size = int(os.getenv('SE_GROUP_SIZE', '16'))
         force_dense = False
         disalbe_sliding_window = False
         using_self_extend = True
