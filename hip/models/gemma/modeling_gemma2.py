@@ -447,8 +447,8 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
             query_states=query_states, 
-            key_states=key_states[:,:,:seq_len].repeat_interleave(2,1), 
-            value_states=value_states[:,:,:seq_len].repeat_interleave(2,1),
+            key_states=key_states[:,:,:seq_len], 
+            value_states=value_states[:,:,:seq_len],
             attention_mask=attention_mask, 
             causal_mask=causal_mask,
             attention_dropout=self.attention_dropout if self.training else 0.0,
