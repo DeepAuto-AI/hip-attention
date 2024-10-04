@@ -49,6 +49,7 @@ def cdiv_python(a, b):
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
 EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ.get('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
+DEFAULT_EXTEND_BACKEND = tl.constexpr(os.environ.get('HIP_EXTEND_BACKEND', 'streaming'))
 
 @dataclass
 class HiPAttentionOutputMetadata:
@@ -941,7 +942,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     BLOCK_BK: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
     
-    NUM_CALIB: tl.constexpr = 32
+    NUM_CALIB: tl.constexpr = 32,
+    EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND
 ):
     if BLOCK_ACCESS_LOG is not None:
         list_block_access = idx_key_blocks
@@ -1121,7 +1123,6 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
         if USING_EXTEND:
-            EXTEND_BACKEND: tl.constexpr = 'streaming'
             if EXTEND_BACKEND == 'self_extend':
                 if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
                     assert COS is not None
@@ -4435,6 +4436,8 @@ def block_sparse_attention_cuda_step(
     BLOCK_TQ, 
     BLOCK_TK, 
     BLOCK_SIZE_K: tl.constexpr,
+    
+    EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -4459,8 +4462,6 @@ def block_sparse_attention_cuda_step(
     #     queries, keys,
     #     allow_tf32=True,
     # ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
-    
-    EXTEND_BACKEND: tl.constexpr = 'streaming'
     
     if USING_EXTEND:
         if EXTEND_BACKEND == 'self_extend':
