@@ -4569,8 +4569,8 @@ def block_sparse_attention_cuda_step(
                 # if LOGIT_SOFTCAP is not None:
                 #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
                 # qk = qk * 1.44269504
-            if USING_EXTEND:
-                qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
+            # if USING_EXTEND:
+            #     qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
             if LOGIT_SOFTCAP is not None:
                 qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
             qk = qk * 1.44269504

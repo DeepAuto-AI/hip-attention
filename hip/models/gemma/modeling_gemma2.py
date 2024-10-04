@@ -364,8 +364,8 @@ class Gemma2CustomAttention(Gemma2Attention):
         using_self_extend = True
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
-                self.tree_k = 2048
-                self.tree_sliding_window_size = 4096
+                self.tree_k = 1024
+                self.tree_sliding_window_size = 1024
                 self.tree_dense_layers.clear()
             self.tree_rope_method = 'self_extend'
             # if self.sliding_window != None:
