@@ -147,7 +147,7 @@ def load_model(args):
         config = Qwen2Config.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
         ModelClass = Qwen2ForCausalLM
-    elif args.model.startswith('gemma2'):
+    elif args.model.startswith('gemma2') or ('gemma' in args.model):
         config = Gemma2Config.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
         ModelClass = Gemma2ForCausalLM

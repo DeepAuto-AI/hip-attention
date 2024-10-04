@@ -1242,7 +1242,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 old_tsrc = idx_tsrc
                 new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
                     tl.maximum(0, 
-                        tl.min(tl.maximum(0, pos_tdst - 1)) -\
+                        tl.min(tl.maximum(0, tl.where(mask_tdst, pos_tdst, 987654321) - 1)) -\
                             sliding_window_size -\
                             MASK_K#tl.arange(0, BLOCK_TK)
                     )
@@ -4529,7 +4529,7 @@ def block_sparse_attention_cuda_step(
                 old_tsrc = idx_tsrc
                 new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
                     tl.maximum(0, 
-                        tl.min(tl.maximum(0, pos_tdst - 1)) -\
+                        tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321)) -\
                             sliding_window_size -\
                             mask_k#tl.arange(0, BLOCK_TK)
                     )
@@ -5259,6 +5259,10 @@ def block_sparse_attention(
     grid = (HEAD, BDST, BSZ)
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
+    
+    # print(indices.shape, indices[0, -1], ks_start_end[0, -1])
+    # if indices.shape[1] == 1:
+    #     input()
     
     block_sparse_attention_cuda[grid](
         q, *args.safe_stride(q, 4),

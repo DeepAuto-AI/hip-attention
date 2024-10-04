@@ -124,7 +124,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1) -> Tuple[torch.Tensor, torch.Tensor]:
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -372,7 +372,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             #     se_group_size *= 2
             if self.sliding_window != None:
                 force_dense = True
-            # self.tree_sliding_window_size = 1024
+            self.tree_sliding_window_size = 1024
             # if self.sliding_window != None:
             #     self.attention_method = 'streaming_llm'
             #     self.tree_k = self.sliding_window
@@ -392,8 +392,10 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         # if self.sliding_window != None and disalbe_sliding_window:
         #     position_ids = position_ids // 2
-
+        
+        # seq_len = attention_mask.shape[-1]
         seq_len = position_ids.max().item() + 1
+        # print(seq_len, cache_position)
         
         cos, sin = self.rotary_emb(value_states, position_ids)
         cos_full, sin_full = self.rotary_emb(value_states, torch.arange(0, seq_len, device=query_states.device)[None, :])
@@ -433,8 +435,9 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         causal_mask = attention_mask
         # if attention_mask is not None and cache_position is not None:
-        if attention_mask is not None:
-            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+        causal_mask = attention_mask = None
+        # if attention_mask is not None:
+        #     causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
@@ -448,16 +451,21 @@ class Gemma2CustomAttention(Gemma2Attention):
         # print(self.attention_method, 'asdfdasf')
         # print(position_ids.shape)
         
-        attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
-            query_states=query_states, 
-            key_states=key_states[:,:,:seq_len], 
-            value_states=value_states[:,:,:seq_len],
+        q_repeat = 1
+        if q_len == 1:
+            q_repeat = 1
+            # print(query_states.shape)
+        
+        attn_output, _, _ = custom_attention(
+            query_states=query_states.repeat_interleave(q_repeat, 2), 
+            key_states=key_states[:,:,:seq_len].repeat_interleave(2, 1), 
+            value_states=value_states[:,:,:seq_len].repeat_interleave(2, 1),
             attention_mask=attention_mask, 
             causal_mask=causal_mask,
             attention_dropout=self.attention_dropout if self.training else 0.0,
 
             # Attention method
-            attention_method='fa2' if (self.layer_idx in self.tree_dense_layers) or force_dense else self.attention_method,
+            attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) or force_dense) else self.attention_method,
             tree_reformer=self.tree_reformer,
             tree_performer=self.tree_performer,
 
@@ -487,7 +495,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             tree_rope_method=self.tree_rope_method,
             rope_cos=cos_full,
             rope_sin=sin_full,
-            position_ids=position_ids.repeat_interleave(8, 0)[:, :seq_len],
+            position_ids=position_ids.repeat_interleave(8, 0)[:, :q_len].repeat_interleave(q_repeat, 1),
             self_extend_group_size=se_group_size,
 
             # Attention sparsity loss
@@ -501,6 +509,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             attn_logit_softcapping=self.config.attn_logit_softcapping,
             model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
         )
+        attn_output = attn_output[:, :, -q_len:]
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -1373,7 +1382,10 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
             # else:
             #     logits = self.lm_head(hidden_states)
             
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+            if num_logits_to_keep < 0:
+                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:-num_logits_to_keep+1, :])
+            else:
+                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
             if self.config.final_logit_softcapping is not None:
                 logits = logits / self.config.final_logit_softcapping
                 logits = torch.tanh(logits)

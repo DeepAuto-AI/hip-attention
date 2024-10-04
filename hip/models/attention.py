@@ -319,6 +319,8 @@ def custom_attention(
                     q_quant = q
                     k_quant = k
                 
+                # print(q.shape, k.shape, v.shape, rope_cos.shape, rope_sin.shape, position_ids)
+                
                 attn_output_hip, _ = hip_attention_11(
                     q, k, v,
                     args=HiPAttentionArgs11(
