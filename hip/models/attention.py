@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 import nvtx
 
@@ -21,7 +22,9 @@ def custom_attention(
     # hip parameters
     tree_k=512, 
     tree_block_size_q=32, 
+    tree_block_stride_q=2, 
     tree_block_size_k=2,
+    tree_block_stride_k=1,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
     tree_sampling_method='last',
@@ -30,6 +33,7 @@ def custom_attention(
     tree_enable_flash=False, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
+    tree_sliding_window_size=256,
 
     # Context averaging parameters
     tree_using_context_avg=False, 
@@ -42,6 +46,7 @@ def custom_attention(
     rope_cos=None, 
     rope_sin=None, 
     position_ids=None,
+    self_extend_group_size=4,
 
     # Attention sparsity loss
     output_attn_sparsity_loss=False, 
@@ -49,6 +54,10 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
+    
+    sm_scaler=None,
+    attn_logit_softcapping=None,
+    model_sliding_window=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -81,7 +90,11 @@ def custom_attention(
     @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
     @return: Attention output, last cumsum, attention sparsity loss
     """
+    if sm_scaler is None:
+        sm_scaler = 1 / (query_states.shape[-1] ** 0.5)
     attn_sparsity_loss = None
+    if model_sliding_window is not None:
+        assert isinstance(model_sliding_window, int)
     
     N, H, T, HID = query_states.shape
     _N, _H, _T, _HID = key_states.shape
@@ -101,13 +114,17 @@ def custom_attention(
         
         if is_prompt:
             if attention_method in ['none', 'fa2']:
-                assert causal_mask is None
+                # assert causal_mask is None, causal_mask.shape
+                if causal_mask is not None:
+                    warnings.warn(f'causal mask provided. this is useless {causal_mask.shape}')
                 attn_output = flash_attn_func(
                     q=query_states.permute(0, 2, 1, 3),
                     k=key_states.permute(0, 2, 1, 3),
                     v=value_states.permute(0, 2, 1, 3),
-                    softmax_scale=None,
+                    softmax_scale=sm_scaler,
                     causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['spda']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -128,8 +145,10 @@ def custom_attention(
                     q=query_states.permute(0, 2, 1, 3),
                     k_cache=key_states.permute(0, 2, 1, 3),
                     v_cache=value_states.permute(0, 2, 1, 3),
-                    softmax_scale=None,
+                    softmax_scale=sm_scaler,
                     causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['sdpa']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -193,7 +212,7 @@ def custom_attention(
         )
 
     elif attention_method == 'hip' or attention_method == 'hip' or attention_method == 'tree':
-        q = query_states / (query_states.shape[-1] ** 0.5)
+        q = query_states * sm_scaler
         k = key_states
         v = value_states
 
@@ -263,7 +282,7 @@ def custom_attention(
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
-                from hip import hip_attention_11
+                from hip import hip_attention_11, HiPAttentionArgs11
                 
                 # attn_output_hip, _ = hip_attention_draft_cpu(
                 #     q_hip,
@@ -300,51 +319,57 @@ def custom_attention(
                     q_quant = q
                     k_quant = k
                 
+                # print(q.shape, k.shape, v.shape, rope_cos.shape, rope_sin.shape, position_ids)
+                
                 attn_output_hip, _ = hip_attention_11(
                     q, k, v,
-                    
-                    mask_k=tree_k,
-                    
-                    block_size_q=tree_block_size_q,
-                    block_stride_q=2,
-                    block_size_k=tree_block_size_k,
-                    block_stride_k=max(1, tree_block_size_k // 2),
-                    # block_stride_k=1,
-                    block_size_k_group=1,
-                    
-                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
-                    sink_token_size=16,
-                    
-                    using_extend=False,
-                    rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                    rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                    self_extend_neighboor_window=1024,
-                    self_extend_group_size=4,
-                    
-                    topk_head_group_size=1,
-                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
-                    branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
-                    
-                    # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=False,
-                    step_size=None,
-                    num_samples=1,
-                    # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    chunk_size=None,
-                    # BUG: union has bug now...
-                    num_unions=1,
-                    
-                    score_head_group_size=1,
-                    
-                    using_sparq=False,
-                    sparq_hid=32,
-                    
-                    low_res_sample_scale=1,
-                    low_res_oversample_rate=1,
-                    low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
-                    
-                    q_quant=q_quant,
-                    k_quant=k_quant,
+                    args=HiPAttentionArgs11(
+                        position_ids=position_ids + 1,
+                        mask_k=tree_k,
+                        
+                        block_size_q=tree_block_size_q,
+                        block_stride_q=tree_block_stride_q,
+                        block_size_k=tree_block_size_k,
+                        block_stride_k=tree_block_stride_k,
+                        # block_stride_k=1,
+                        block_size_k_group=1,
+                        
+                        sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
+                        sink_token_size=16,
+                        
+                        using_extend=tree_rope_method == 'self_extend',
+                        rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                        rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                        self_extend_neighboor_window=1024,
+                        self_extend_group_size=self_extend_group_size,
+                        
+                        topk_head_group_size=1,
+                        sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
+                        branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
+                        
+                        # this may good or not, but definatly great with self-extend
+                        traverse_from_last_step=False,
+                        step_size=None,
+                        num_samples=1,
+                        # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
+                        chunk_size=None,
+                        # BUG: union has bug now...
+                        num_unions=1,
+                        
+                        score_head_group_size=1,
+                        
+                        using_sparq=False,
+                        sparq_hid=32,
+                        
+                        low_res_sample_scale=1,
+                        low_res_oversample_rate=1,
+                        low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
+                        
+                        q_quant=q_quant,
+                        k_quant=k_quant,
+                        
+                        logit_softcap=attn_logit_softcapping,
+                    )
                 )
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
@@ -411,6 +436,8 @@ def custom_attention(
         from hip.models.sink_attention.sink_attention import sink_attention
         
         q = query_states # / (query_states.shape[-1] ** 0.5)
+        if sm_scaler is not None:
+            q = q * (query_states.shape[-1] ** 0.5) * sm_scaler
         k = key_states
         v = value_states
 
@@ -426,7 +453,7 @@ def custom_attention(
             q, k, v, 
             rope_cos.squeeze(0), 
             rope_sin.squeeze(0), 
-            num_sink=4, 
+            num_sink=4,
             window_size=tree_k,
         )
 

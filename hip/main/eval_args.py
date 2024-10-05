@@ -10,7 +10,7 @@ class ArgsType:
     stride: int = -1
     lora_r: int = 32
     checkpoint: Optional[str] = None
-    count: int = 100
+    count: int = -1
     block_size_q: int = 32
     block_size_k: int = 2
     batch_size: int = 1
@@ -19,7 +19,7 @@ class ArgsType:
     dense_layers: int = 3
 
 def eval_args(
-    default_model = 'llama32k',
+    default_model = 'llama3.1_8b',
     default_job = 'ppl',
 ) -> ArgsType:
     parser = argparse.ArgumentParser()
@@ -30,8 +30,10 @@ def eval_args(
     parser.add_argument('--lora_r', type=int, default=32)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--count', type=int, default=-1)
-    parser.add_argument('--block_size_q', type=int, default=32)
+    parser.add_argument('--block_size_q', type=int, default=64)
+    parser.add_argument('--block_stride_q', type=int, default=2)
     parser.add_argument('--block_size_k', type=int, default=2)
+    parser.add_argument('--block_stride_k', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--k', type=int, default=512)
     parser.add_argument('--dense_layers', type=int, default=3)
@@ -47,7 +49,7 @@ def eval_args(
     parser.add_argument('--disable_flash', default=False, action='store_true')
     parser.add_argument('--disable_sparq', default=False, action='store_true')
     parser.add_argument('--disable_sliding_window', default=False, action='store_true')
-    parser.add_argument('--sampling_method', default='random', type=str)
+    parser.add_argument('--sampling_method', default='center', type=str)
     parser.add_argument('--overwrite', default=False, action='store_true')
     parser.add_argument('--dataset', default='wikitext', type=str)
     args = parser.parse_args()

@@ -5,17 +5,17 @@ from hip.models.hip_attention.attention1_block_gpu \
     import paged_hip_attention as paged_hip_attention_10
 
 # version 1.1
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import hip_attention as hip_attention_11
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import paged_hip_attention as paged_hip_attention_11
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import varlen_hip_attention as varlen_hip_attention_11
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import paged_varlen_hip_attention as paged_varlen_hip_attention_11
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import HiPAttentionArgs as HiPAttentionArgs11
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec \
+from hip.models.hip_attention.attention2_draft_prefetch \
     import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11
 
 # api

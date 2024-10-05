@@ -12,7 +12,7 @@ def memory_efficient_llm_ce_cuda(
     
     LOSS, stride_loss_n,
     
-    N, HID, KOUT,
+    N, HID, KOUT, softcap,
     
     BLOCK_N: tl.constexpr,
     BLOCK_HID: tl.constexpr,
@@ -55,6 +55,8 @@ def memory_efficient_llm_ce_cuda(
                 proj.to(hidden.dtype),
                 allow_tf32=True,
             ).to(acc.dtype)
+        if softcap is not None:
+            acc = tl.extra.cuda.libdevice.tanh(acc / softcap) * softcap
         score_max = tl.maximum(tl.max(acc, axis=1), score_max)
     
     exp_label_score = tl.zeros((BLOCK_N,), dtype=tl.float64)
@@ -86,6 +88,8 @@ def memory_efficient_llm_ce_cuda(
                 proj.to(hidden.dtype),
                 allow_tf32=True,
             ).to(acc.dtype)
+        if softcap is not None:
+            acc = tl.extra.cuda.libdevice.tanh(acc / softcap) * softcap
         exp_score = tl.exp(acc - score_max[:, None])
         exp_score_sum += tl.sum(exp_score, axis=1)
         exp_label_score += tl.sum(tl.where(
@@ -107,6 +111,7 @@ def memory_efficient_llm_ce(
     out_proj_weight: Tensor,
     labels: Tensor,
     reduction: str = 'mean',
+    softcap: float = None,
 ):
     assert hidden_states.ndim == 2
     assert out_proj_weight.ndim == 2
@@ -139,7 +144,7 @@ def memory_efficient_llm_ce(
         
         losses, *losses.stride(),
         
-        N, HID, KOUT,
+        N, HID, KOUT, softcap,
         
         BLOCK_N,
         BLOCK_HID,
