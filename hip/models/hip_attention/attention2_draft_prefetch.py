@@ -1234,6 +1234,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                         queries.to(tl.float16),
                         keys.to(tl.float16),
                         out_dtype=tl.float32,
+                        allow_tf32=True,
                     ).to(tl.float32)
             elif EXTEND_BACKEND == 'streaming':
                 assert COS is not None
@@ -4509,11 +4510,13 @@ def block_sparse_attention_cuda_step(
             queries_grouped = queries_grouped * mask_tdst[:, None]
             
             t_window = tl.dot(
-                queries, keys.to(queries.dtype),
+                queries, 
+                keys.to(queries.dtype),
                 allow_tf32=True,
             )
             t_grouped = tl.dot(
-                queries_grouped.to(queries.dtype), keys.to(queries.dtype),
+                queries_grouped.to(queries.dtype), 
+                keys.to(queries.dtype),
                 allow_tf32=True,
             )
             qk = tl.where(
@@ -4553,8 +4556,8 @@ def block_sparse_attention_cuda_step(
                 qk = tl.dot(
                     queries.to(queries.dtype), 
                     keys_adjusted.to(queries.dtype),
-                    allow_tf32=True,
                     out_dtype=tl.float32,
+                    allow_tf32=True,
                 ).to(tl.float32) 
                 # if LOGIT_SOFTCAP is not None:
                 #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
@@ -4563,8 +4566,8 @@ def block_sparse_attention_cuda_step(
                 qk = tl.dot(
                     queries.to(tl.float16), 
                     keys.to(tl.float16),
-                    # allow_tf32=True,
                     out_dtype=tl.float32,
+                    allow_tf32=True,
                 ).to(tl.float32)
                 # if LOGIT_SOFTCAP is not None:
                 #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
@@ -4580,9 +4583,9 @@ def block_sparse_attention_cuda_step(
         qk = tl.dot(
             queries.to(tl.float16), 
             keys.to(tl.float16),
-            # allow_tf32=True,
-            out_dtype=tl.float16,
-        ).to(tl.float16)
+            out_dtype=tl.float32,
+            allow_tf32=True,
+        ).to(tl.float32)
         if LOGIT_SOFTCAP is not None:
             qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
         qk = qk * 1.44269504
@@ -4649,7 +4652,12 @@ def block_sparse_attention_cuda_step(
     # )
     
     # update acc
-    acc += tl.dot(p.to(values.dtype), values).to(acc.dtype)
+    acc += tl.dot(
+        p.to(tl.float16),
+        values.to(tl.float16),
+        out_dtype=tl.float32,
+        allow_tf32=True,
+    ).to(acc.dtype)
     
     # update m_i and l_i
     m_i = m_ij.to(m_i.dtype)
