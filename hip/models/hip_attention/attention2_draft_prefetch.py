@@ -1242,7 +1242,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 old_tsrc = idx_tsrc
                 new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
                     tl.maximum(0, 
-                        tl.min(tl.maximum(0, tl.where(mask_tdst, pos_tdst, 987654321) - 1)) -\
+                        tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321)) -\
                             sliding_window_size -\
                             MASK_K#tl.arange(0, BLOCK_TK)
                     )
@@ -4531,7 +4531,7 @@ def block_sparse_attention_cuda_step(
                     tl.maximum(0, 
                         tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321)) -\
                             sliding_window_size -\
-                            mask_k#tl.arange(0, BLOCK_TK)
+                            mask_k
                     )
                 new_tsrc = tl.where(mask_tsrc, new_tsrc, old_tsrc)
                 
