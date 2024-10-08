@@ -2966,6 +2966,19 @@ def masking_iteration_draft_cuda_fused(
     pid_1 = _pid_2 * BH + _pid_0
     
     num_groups = tl.minimum(GROUP_BDST, (MAX_BDST - _pid_1 * GROUP_BDST))
+    
+    if num_groups == 1:
+        pid_0 = _pid_1 * GROUP_BDST
+        idx_b = pid_1
+        idx_bdst = pid_0
+        max_group_size = tl.load(
+            T_GROUP_SIZE +\
+                idx_b * stride_t_group_size_b +\
+                idx_bdst * stride_t_group_size_bdst,
+        ).to(tl.float32)
+        if max_group_size <= 1:
+            return
+    
     for i_group in range(num_groups):
         # originally bdst dim, before vectorize head
         pid_0 = _pid_1 * GROUP_BDST + i_group

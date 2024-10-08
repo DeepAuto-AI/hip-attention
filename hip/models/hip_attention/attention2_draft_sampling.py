@@ -24,15 +24,18 @@ def sampling_hip_attention(
     chunk_size = TSRC // chunk_count
     assert (chunk_size * chunk_count) == TSRC
     first_stage_chunk_args = first_stage_args.clone()
-    first_stage_chunk_args.mask_k = first_stage_chunk_args.block_size_k
+    first_stage_chunk_args.mask_k = first_stage_args.block_size_k
     
     k_chunked = k.view(BSZ * chunk_count, chunk_size, HEAD_KV, HID)
     q_chunked = q.expand(BSZ * chunk_count, TDST, HEAD, HID)
     
     position_ids = torch.arange(0, TDST, device=q.device)[None, :].expand(BSZ * chunk_count, TDST)
     position_ids = position_ids - torch.arange(0, TSRC, chunk_size, device=q.device)[:, None]
-    position_ids = position_ids.clamp(0, chunk_size - 1)
+    position_ids = position_ids.clamp(-1, chunk_size - 1)
     first_stage_chunk_args.position_ids = position_ids + 1
+    
+    # print(q_chunked.shape, k_chunked.shape, chunk_count, chunk_size)
+    # print(position_ids[:, 512])
     
     _, metadata = hip_attention(
         q=q_chunked, k=k_chunked, v=None, 
@@ -57,25 +60,26 @@ def main_debug():
     k = k.permute(1, 0, 2).contiguous().unsqueeze(0)
     v = v.permute(1, 0, 2).contiguous().unsqueeze(0)
     
-    for i in range(10):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+    # for i in range(10):
+    #     start = torch.cuda.Event(True)
+    #     end = torch.cuda.Event(True)
         
-        start.record()
-        hip_attention(
-            q, k, v,
-            args=HiPAttentionArgs(
-                mask_k=512,
-                block_size_q=64,
-                block_stride_q=2,
-                block_size_k=2,
-                block_stride_k=1,
-            ),
-        )
-        end.record()
+    #     start.record()
+    #     hip_attention(
+    #         q, k, v,
+    #         args=HiPAttentionArgs(
+    #             mask_k=512,
+    #             block_size_q=64,
+    #             block_stride_q=2,
+    #             block_size_k=2,
+    #             block_stride_k=1,
+    #         ),
+    #         mask_only=True,
+    #     )
+    #     end.record()
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+    #     end.synchronize()
+    #     print(start.elapsed_time(end))
     
     for i in range(10):
         start = torch.cuda.Event(True)
@@ -90,6 +94,8 @@ def main_debug():
                 block_stride_q=2,
                 block_size_k=2,
                 block_stride_k=1,
+                sliding_window_size=0,
+                sink_token_size=0,
             ),
             second_stage_range_k=1024, 
         )
