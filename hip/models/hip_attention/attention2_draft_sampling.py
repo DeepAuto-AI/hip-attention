@@ -29,15 +29,18 @@ def sampling_hip_attention(
     chunk_size = TSRC // chunk_count
     assert (chunk_size * chunk_count) == TSRC
     first_stage_chunk_args = first_stage_args.clone()
-    first_stage_chunk_args.mask_k = first_stage_chunk_args.block_size_k
+    first_stage_chunk_args.mask_k = first_stage_args.block_size_k
     
     k_chunked = k.view(BSZ * chunk_count, chunk_size, HEAD_KV, HID)
     q_chunked = q.expand(BSZ * chunk_count, TDST, HEAD, HID)
     
     position_ids = torch.arange(0, TDST, device=q.device)[None, :].expand(BSZ * chunk_count, TDST)
     position_ids = position_ids - torch.arange(0, TSRC, chunk_size, device=q.device)[:, None]
-    position_ids = position_ids.clamp(0, chunk_size - 1)
+    position_ids = position_ids.clamp(-1, chunk_size - 1)
     first_stage_chunk_args.position_ids = position_ids + 1
+    
+    # print(q_chunked.shape, k_chunked.shape, chunk_count, chunk_size)
+    # print(position_ids[:, 512])
     
     _, metadata = hip_attention(
         q=q_chunked, k=k_chunked, v=None, 
