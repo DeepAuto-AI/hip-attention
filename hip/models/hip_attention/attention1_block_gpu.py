@@ -1750,7 +1750,8 @@ def main_latency_benchmark():
                         block_stride_k=args.block_stride_k if args.block_stride_k is not None else max(2, args.block_size_k//2),
                         q_quant=q_quant,
                         k_quant=k_quant,
-                        sample_method='center'
+                        sample_method='center',
+                        mask_only=False,
                     )
                 else:
                     _, mask = hip_attention_11(
