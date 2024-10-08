@@ -34,6 +34,7 @@ def custom_attention(
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
     tree_sliding_window_size=256,
+    tree_sink_token_size=128,
 
     # Context averaging parameters
     tree_using_context_avg=False, 
@@ -56,7 +57,7 @@ def custom_attention(
     hyper_attention=None,
     
     sm_scaler=None,
-    attn_logit_softcapping=None,
+    attn_logit_softcapping=0,
     model_sliding_window=None,
 ):
     """
@@ -312,12 +313,12 @@ def custom_attention(
                 # k = k.reshape(N * H, TSRC, HID)
                 # v = v.reshape(N * H, TSRC, HID)
                 
-                if q.shape == k.shape:
-                    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                else:
-                    q_quant = q
-                    k_quant = k
+                # if q.shape == k.shape:
+                #     q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                #     k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                # else:
+                q_quant = q
+                k_quant = k
                 
                 # print(q.shape, k.shape, v.shape, rope_cos.shape, rope_sin.shape, position_ids)
                 
@@ -335,7 +336,7 @@ def custom_attention(
                         block_size_k_group=1,
                         
                         sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
-                        sink_token_size=16,
+                        sink_token_size=int(os.getenv('HIP_DRAFT_SINK_TOKEN_SIZE', f'{tree_sink_token_size}')),
                         
                         using_extend=tree_rope_method == 'self_extend',
                         rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,

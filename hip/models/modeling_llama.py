@@ -433,7 +433,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_enable_sparq = False
         self.tree_enable_flash = True
         self.tree_use_sliding_window = True
-        self.tree_sampling_method = 'random'
+        self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
 
         self.tree_reformer = self.tree_performer = None
@@ -584,7 +584,7 @@ class LlamaCustomAttention(LlamaAttention):
             attention_dropout=self.attention_dropout if self.training else 0.0,
 
             # Attention method
-            attention_method='none' if self.layer_idx in self.tree_dense_layers else self.attention_method,
+            attention_method='fa2' if self.layer_idx in self.tree_dense_layers else self.attention_method,
             tree_reformer=self.tree_reformer,
             tree_performer=self.tree_performer,
 
@@ -613,7 +613,7 @@ class LlamaCustomAttention(LlamaAttention):
             tree_rope_method=self.tree_rope_method,
             rope_cos=cos,
             rope_sin=sin,
-            position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+            position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
 
             # Attention sparsity loss
             output_attn_sparsity_loss=output_attn_sparsity_loss,
@@ -621,6 +621,8 @@ class LlamaCustomAttention(LlamaAttention):
             
             # Hyper attention states
             hyper_attention=self.hyper_attention,
+            
+            sm_scaler=1 / math.sqrt(self.head_dim),
         )
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
