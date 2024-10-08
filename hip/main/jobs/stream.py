@@ -95,35 +95,40 @@ def job_stream(args, model, tokenizer, device):
                     last_output_text = ""
                     with torch.no_grad():
                         import triton
-                        target_index = inputs['input_ids'].shape[-1] - 1
+                        input_ids_len = inputs['input_ids'].shape[-1]
+                        target_index = input_ids_len - 1
+                        pad_size = 32
                         padded_inputs = torch.zeros(
-                            (triton.next_power_of_2(inputs['input_ids'].shape[-1] + 256), ), 
+                            (input_ids_len + 256, ), 
                             dtype=torch.long, 
                             device=inputs['input_ids'].device
                         )
-                        padded_inputs[:inputs['input_ids'].shape[-1]] = inputs['input_ids'][0]
+                        padded_inputs[:input_ids_len] = inputs['input_ids'][0]
                         output = model(
                             use_cache=False, 
                             output_logits=True, 
                             num_logits_to_keep=-target_index, 
-                            input_ids=padded_inputs.unsqueeze(0)
+                            input_ids=padded_inputs[:target_index+pad_size].unsqueeze(0)
                         )
                         output_tokens = [output.logits[0, -1, :].topk(k=1).indices]
+                        new_output_text = tokenizer.batch_decode(torch.cat(output_tokens).cpu().unsqueeze(0), skip_special_tokens=False)[0]
+                        print(new_output_text[len(last_output_text):].replace('\n', '\\n\n'), end='', flush=True)
+                        last_output_text = new_output_text
                         for i in range(256):
                             target_index += 1
                             padded_inputs[
-                                inputs['input_ids'].shape[-1]:
-                                inputs['input_ids'].shape[-1] + len(output_tokens)
+                                input_ids_len:
+                                input_ids_len + len(output_tokens)
                             ] = torch.cat(output_tokens)
                             output = model(
-                                input_ids = padded_inputs.unsqueeze(0),
+                                input_ids = padded_inputs[:target_index+pad_size].unsqueeze(0),
                                 use_cache=False,
                                 output_logits=True,
                                 num_logits_to_keep=-target_index,
                             )
                             output_tokens += [output.logits[0, -1, :].topk(k=1).indices]
                             new_output_text = tokenizer.batch_decode(torch.cat(output_tokens).cpu().unsqueeze(0), skip_special_tokens=False)[0]
-                            print(new_output_text[len(last_output_text):], end='', flush=True)
+                            print(new_output_text[len(last_output_text):].replace('\n', '\\n\n'), end='', flush=True)
                             last_output_text = new_output_text
                             # print(output_tokens[-1], )
                 else:
@@ -139,6 +144,7 @@ def job_stream(args, model, tokenizer, device):
                             top_p=0.9,
                             top_k=10,
                             repetition_penalty=1.0,
+                            cache_implementation='static',
                         )
         except KeyboardInterrupt:
             traceback.print_exc()

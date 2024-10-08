@@ -361,7 +361,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         se_group_size = int(os.getenv('SE_GROUP_SIZE', '16'))
         force_dense = False
         disalbe_sliding_window = False
-        using_self_extend = True
+        using_self_extend = False
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
                 self.tree_k = 1024
@@ -376,9 +376,9 @@ class Gemma2CustomAttention(Gemma2Attention):
             # if self.sliding_window != None:
             #     self.attention_method = 'streaming_llm'
             #     self.tree_k = self.sliding_window
-        
-        # if self.sliding_window != None:
-        #     force_dense = True
+        else:
+            if self.sliding_window != None:
+                force_dense = True
         
         bsz, q_len, _ = hidden_states.size()
         
@@ -458,8 +458,8 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         attn_output, _, _ = custom_attention(
             query_states=query_states.repeat_interleave(q_repeat, 2), 
-            key_states=key_states[:,:,:seq_len].repeat_interleave(2, 1), 
-            value_states=value_states[:,:,:seq_len].repeat_interleave(2, 1),
+            key_states=key_states[:,:,:seq_len], 
+            value_states=value_states[:,:,:seq_len],
             attention_mask=attention_mask, 
             causal_mask=causal_mask,
             attention_dropout=self.attention_dropout if self.training else 0.0,
@@ -509,7 +509,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             attn_logit_softcapping=self.config.attn_logit_softcapping,
             model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
         )
-        attn_output = attn_output[:, :, -q_len:]
+        attn_output = attn_output[:, :, :q_len]
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(

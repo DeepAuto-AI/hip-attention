@@ -1497,6 +1497,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         output_attn_sparsity_loss: bool = False,
+        num_logits_to_keep: int = 0,
         output_logits = False,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1548,7 +1549,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         loss = None
         hidden_states = outputs[0]
-        if not self.training and not output_logits and past_key_values is None:
+        if not self.training and not output_logits and past_key_values is None and num_logits_to_keep == 0:
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
                 from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
@@ -1574,7 +1575,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
                 logits = torch.cat(logits, dim=-1)
             else:
-                logits = self.lm_head(hidden_states)
+                if num_logits_to_keep >= 0:
+                    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+                else:
+                    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:-num_logits_to_keep+1, :])
 
             loss = None
             if labels is not None:
