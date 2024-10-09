@@ -279,39 +279,12 @@ def custom_attention(
                     num_sink=16,
                 )
             else:
-                # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
-                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
-                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
-                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
                 from hip import hip_attention_11, HiPAttentionArgs11
-                
-                # attn_output_hip, _ = hip_attention_draft_cpu(
-                #     q_hip,
-                #     k[:, :LAST_DENSE_QUERIES, :],
-                #     v[:, :LAST_DENSE_QUERIES, :],
-                    
-                #     mask_k=tree_k,
-                    
-                #     block_size_q=tree_block_size_q,
-                #     block_size_k=tree_block_size_k,
-                #     block_size_k_group=1,
-                    
-                #     using_extend=True,
-                #     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                #     rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                #     self_extend_neighboor_window=1024,
-                #     self_extend_group_size=8,
-                    
-                #     topk_head_group_size=1,
-                # )
+                from hip.models.hip_attention.attention2_draft_sampling import sampling_mask
                 
                 q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)
                 v = v.permute(0, 2, 1, 3)
-                
-                # q = q.reshape(N * H, TDST, HID)
-                # k = k.reshape(N * H, TSRC, HID)
-                # v = v.reshape(N * H, TSRC, HID)
                 
                 # if q.shape == k.shape:
                 #     q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
@@ -320,7 +293,31 @@ def custom_attention(
                 q_quant = q
                 k_quant = k
                 
-                # print(q.shape, k.shape, v.shape, rope_cos.shape, rope_sin.shape, position_ids)
+                # first_stage_k = 128
+                # second_stage_k = 512
+                
+                # attn_output_hip = sampling_mask(
+                #     q, k, v,
+                #     first_stage_args=HiPAttentionArgs11(
+                #         mask_k=first_stage_k,
+                #         block_size_q=64,
+                #         block_stride_q=2,
+                #         block_size_k=64,
+                #         sliding_window_size=512,
+                #         sink_token_size=512,
+                #     ),
+                #     second_stage_init_chunk=first_stage_k // 8,
+                #     second_stage_init_k=1024,
+                #     second_stage_args=HiPAttentionArgs11(
+                #         mask_k=512,
+                #         block_size_q=64,
+                #         block_stride_q=2,
+                #         block_size_k=second_stage_k//first_stage_k,
+                #         block_stride_k=1,
+                #         sliding_window_size=512,
+                #         sink_token_size=512,
+                #     )
+                # )
                 
                 attn_output_hip, _ = hip_attention_11(
                     q, k, v,
@@ -372,6 +369,7 @@ def custom_attention(
                         logit_softcap=attn_logit_softcapping,
                     )
                 )
+                
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)

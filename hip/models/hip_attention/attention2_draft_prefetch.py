@@ -336,15 +336,15 @@ def masking_iteration_draft_cuda_initialize(
     
     # param
     mask_k: int,
+    sliding_window_size: int,
+    sink_token_size: int,
+    max_group_size_seed: float,
+    G, MAX_TDST, MAX_TSRC, HEAD,
+    
     block_size_q: tl.constexpr,
     block_stride_q: tl.constexpr,
     block_size_k: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
-    
-    sliding_window_size: int,
-    sink_token_size: int,
-    
-    G, MAX_TDST, MAX_TSRC, HEAD,
     
     BLOCK_MASK_BLOCK_K: tl.constexpr,
 ):
@@ -448,6 +448,8 @@ def masking_iteration_draft_cuda_initialize(
                     indices_next - indices,
                     indices_group_id * MAX_BSRC + BSRC - indices,
                 ).to(tl.int32)
+        if max_group_size_seed is not None:
+            group_sizes = tl.minimum(group_sizes, max_group_size_seed.to(group_sizes.dtype))
         
         if INDICES is not None:
             tl.store(
@@ -3713,7 +3715,7 @@ def masking_iteration_draft(
             elif max_group_strategy == 'worst':
                 # > worst case  5.1097  17.6545 sec
                 #   (always complete search)
-                max_group_size = triton.cdiv(BSRC, args.block_size_k)
+                max_group_size = max(1, BSRC - mask_block_k)
             elif max_group_strategy == 'greedy':
                 # > greedy      5.1202  11.4861 sec
                 #   (slightly generous then best stratgy)
@@ -3787,10 +3789,10 @@ def masking_iteration_draft(
     assert len(group_sizes.stride()) == 3
     assert len(t_group_sizes.stride()) == 2
     if indices_seed is not None:
-        assert len(indices_seed.stride()) == 3
+        assert len(indices_seed.stride()) == 3, indices_seed.shape
         assert len(ks_seed.stride()) == 2
         assert indices_seed.shape == indices.shape, f'{indices_seed.shape} == {indices.shape}'
-        assert ks_seed.shape == ks.shape
+        assert ks_seed.shape == ks.shape, f'{ks_seed.shape} == {ks.shape}'
         indices_seed = indices_seed // args.block_size_k
     if args.rope_cos is not None:
         assert len(args.rope_cos.stride()) == 2, args.rope_cos.shape
@@ -3927,15 +3929,15 @@ def masking_iteration_draft(
             t_group_sizes, *t_group_sizes.stride(),
             
             args.mask_k,
+            args.sliding_window_size,
+            args.sink_token_size,
+            max_group_size_seed if max_group_size_seed is not None else MAX_TSRC,
+            G, TDST, MAX_TSRC, HEAD,
+            
             args.block_size_q, 
             args.block_stride_q,
             args.block_size_k, 
             args.is_causal,
-            
-            args.sliding_window_size,
-            args.sink_token_size,
-            
-            G, TDST, MAX_TSRC, HEAD,
             
             BLOCK_MASK_BLOCK_K,
             
@@ -3947,6 +3949,7 @@ def masking_iteration_draft(
     else:
         indices.copy_(indices_seed)
         ks.copy_(ks_seed)
+        assert group_sizes.shape == group_size_seed.shape, f'{group_sizes.shape} == {group_size_seed.shape}'
         group_sizes.copy_(group_size_seed)
         t_group_sizes = group_sizes.max(dim=-1)[0].float()
     # print('init in after', indices[0, 0, :10])
