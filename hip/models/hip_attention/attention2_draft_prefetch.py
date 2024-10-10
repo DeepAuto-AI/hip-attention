@@ -1011,7 +1011,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     acc = tl.zeros((
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
         BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K
-    ), dtype=tl.float16)
+    ), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
     for i_group in tl.range(0, G):
         queries = tl.load(
@@ -1026,7 +1026,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             # cache_modifier='.cs', # TODO: uncomment this (do not uncomment others)
             # eviction_policy='evict_last'
         )
-        # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float16)
+        # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float32)
         
         if queries.dtype == tl.uint8:
             queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
@@ -1123,7 +1123,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             
             BLOCK_SIZE_K,
         )
-        # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
+        # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float32)
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
@@ -1298,11 +1298,11 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     # 4090: 16 ms, A100: 31.97 ms
                     # scale = 256 / tl.max(tl.abs(queries))
                     # t = tl.dot(
-                    #     tl.clamp(queries.to(tl.float16) * scale, -127, 127).to(tl.int8), 
-                    #     tl.clamp(keys.to(tl.float16) * scale, -127, 127).to(tl.int8),
+                    #     tl.clamp(queries.to(tl.float32) * scale, -127, 127).to(tl.int8), 
+                    #     tl.clamp(keys.to(tl.float32) * scale, -127, 127).to(tl.int8),
                     #     out_dtype=tl.int32,
                     # ).to(tl.float32) / (scale * scale)
-                    # t = t.to(tl.float16)
+                    # t = t.to(tl.float32)
                     
                     # 4090: 10.13 ms, A100: 19.18704981 ms
                     # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
@@ -1751,7 +1751,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
-        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float16) - 32000.0
+        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.bfloat16) - 32000.0
         for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
             t_dupped_indices_for_keys = tl.where(
                 i_shift < dupped_group_sizes,
@@ -2469,9 +2469,9 @@ def masking_iteration_draft_cuda_partial_softmax(
         mask=mask_bk,
         other=float('-inf'),
         cache_modifier=DEFAULT_CACHE_MODIFIER,
-    ).to(tl.float16)
+    ).to(tl.bfloat16)
     
-    one = tl.zeros((1, ), dtype=tl.float16) + 1
+    one = tl.zeros((1, ), dtype=tl.bfloat16) + 1
     for i_group in range(G):
         mask_softmax = groups == i_group
         scores_masked = tl.where(mask_softmax, scores, float('-inf'))
@@ -3768,7 +3768,7 @@ def masking_iteration_draft(
         block_access_score = torch.full(
             (B, access_log_num_blocks_to_keep, BLOCK_ACCESS_LEN), 
             device=q.device,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             fill_value=-32000.0,
         )
         block_access_count = torch.zeros(
@@ -4680,7 +4680,7 @@ def block_sparse_attention_cuda_step(
     # update acc
     acc += tl.dot(
         p.to(queries.dtype),
-        values,
+        values.to(queries.dtype),
         out_dtype=tl.float32,
         allow_tf32=True,
     ).to(acc.dtype)
@@ -4829,9 +4829,9 @@ def block_sparse_attention_cuda(
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
 ):
-    pid_bsz = tl.program_id(2)
-    pid_bdst = tl.program_id(1)
-    pid_head = tl.program_id(0)
+    pid_bsz = tl.program_id(2).to(tl.int64)
+    pid_bdst = tl.program_id(1).to(tl.int64)
+    pid_head = tl.program_id(0).to(tl.int64)
     
     idx_bsz = pid_bsz.to(tl.int64)
     idx_head = pid_head
@@ -4921,10 +4921,11 @@ def block_sparse_attention_cuda(
                 mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
                 mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
                 mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
+                idx_tsrc = idx_tsrc % MAX_TSRC
+                mask_tsrc = mask_tsrc & (idx_tsrc < tl.max(pos_tdst))
                 # mask_tsrc = True
                 # mask_tsrc = idx_tsrc > 0
                 # idx_group = idx_tsrc // MAX_TSRC
-                idx_tsrc = idx_tsrc % MAX_TSRC
                 
                 # min_tsrc = tl.min(idx_tsrc)
                 
@@ -6739,7 +6740,8 @@ def paged_hip_attention(
             args.cache_seq_lens[:, None] - TDST + 1
         args.position_ids = position_ids
     
-    q = q * softmax_scale
+    q_dtype = q.dtype
+    q = (q * softmax_scale).to(q.dtype)#.to(torch.float32)
     
     if previous_mask_metadata is None:
         # print(q.shape, args.json())
@@ -6786,6 +6788,8 @@ def paged_hip_attention(
         ks_start_end=ks_start_end,
         args=args,
     )
+    
+    context = context.to(q_dtype)
     
     return context, HiPAttentionOutputMetadata(
         indices=indices,
