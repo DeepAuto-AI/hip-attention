@@ -4861,11 +4861,11 @@ def block_sparse_attention_cuda(
     idx_hid = tl.arange(0, HID)
     
     if BLOCK_SIZE_Q < 16:
-        acc = tl.zeros((16, HID), dtype=tl.bfloat16)
+        acc = tl.zeros((16, HID), dtype=tl.float32)
         m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
     else:
-        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.bfloat16)
+        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
     
