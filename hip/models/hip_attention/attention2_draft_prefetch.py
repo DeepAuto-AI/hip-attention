@@ -1236,8 +1236,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     ).to(tl.float32)
                 else:
                     t = tl.dot(
-                        queries.to(tl.float16),
-                        keys.to(tl.float16),
+                        queries,
+                        keys.to(queries.dtype),
                         out_dtype=tl.float32,
                         allow_tf32=True,
                     ).to(tl.float32)
@@ -1285,20 +1285,21 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 else:
                     # BQ=64, BSQ=2
                     # 4090: 20 ms, A100: 34.81ms
-                    # t = tl.dot(
-                    #     queries.to(tl.float16), 
-                    #     keys.to(tl.float16),
-                    #     out_dtype=tl.float16,
-                    # )
+                    t = tl.dot(
+                        queries, 
+                        keys.to(queries.dtype),
+                        out_dtype=tl.float32,
+                        allow_tf32=True,
+                    )
                     
                     # 4090: 16 ms, A100: 31.97 ms
-                    scale = 256 / tl.max(tl.abs(queries))
-                    t = tl.dot(
-                        tl.clamp(queries.to(tl.float16) * scale, -127, 127).to(tl.int8), 
-                        tl.clamp(keys.to(tl.float16) * scale, -127, 127).to(tl.int8),
-                        out_dtype=tl.int32,
-                    ).to(tl.float32) / (scale * scale)
-                    t = t.to(tl.float16)
+                    # scale = 256 / tl.max(tl.abs(queries))
+                    # t = tl.dot(
+                    #     tl.clamp(queries.to(tl.float16) * scale, -127, 127).to(tl.int8), 
+                    #     tl.clamp(keys.to(tl.float16) * scale, -127, 127).to(tl.int8),
+                    #     out_dtype=tl.int32,
+                    # ).to(tl.float32) / (scale * scale)
+                    # t = t.to(tl.float16)
                     
                     # 4090: 10.13 ms, A100: 19.18704981 ms
                     # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
@@ -4576,7 +4577,7 @@ def block_sparse_attention_cuda_step(
                 keys_adjusted = keys_adjusted * mask_tsrc[None, :]
                 
                 qk = tl.dot(
-                    queries.to(queries.dtype), 
+                    queries, 
                     keys_adjusted.to(queries.dtype),
                     out_dtype=tl.float32,
                     allow_tf32=True,
@@ -4586,8 +4587,8 @@ def block_sparse_attention_cuda_step(
                 # qk = qk * 1.44269504
             else:
                 qk = tl.dot(
-                    queries.to(tl.float16), 
-                    keys.to(tl.float16),
+                    queries, 
+                    keys.to(queries.dtype),
                     out_dtype=tl.float32,
                     allow_tf32=True,
                 ).to(tl.float32)
@@ -4603,8 +4604,8 @@ def block_sparse_attention_cuda_step(
             raise Exception()
     else:
         qk = tl.dot(
-            queries.to(tl.float16), 
-            keys.to(tl.float16),
+            queries, 
+            keys.to(queries.dtype),
             out_dtype=tl.float32,
             allow_tf32=True,
         ).to(tl.float32)
@@ -4675,8 +4676,8 @@ def block_sparse_attention_cuda_step(
     
     # update acc
     acc += tl.dot(
-        p.to(tl.float16),
-        values.to(tl.float16),
+        p.to(queries.dtype),
+        values,
         out_dtype=tl.float32,
         allow_tf32=True,
     ).to(acc.dtype)
