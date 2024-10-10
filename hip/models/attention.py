@@ -280,7 +280,10 @@ def custom_attention(
                 )
             else:
                 from hip import hip_attention_11, HiPAttentionArgs11
-                from hip.models.hip_attention.attention2_draft_sampling import sampling_mask
+                from hip.models.hip_attention.attention2_draft_sampling import (
+                    sampling_only_attention, 
+                    dual_stage_sub_quadratic_hip_attention
+                )
                 
                 q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)
@@ -293,82 +296,94 @@ def custom_attention(
                 q_quant = q
                 k_quant = k
                 
-                # first_stage_k = 128
-                # second_stage_k = 512
-                
-                # attn_output_hip = sampling_mask(
+                # attn_output_hip = sampling_only_attention(
                 #     q, k, v,
-                #     first_stage_args=HiPAttentionArgs11(
-                #         mask_k=first_stage_k,
+                #     args=HiPAttentionArgs11(
+                #         mask_k=512,
                 #         block_size_q=64,
                 #         block_stride_q=2,
                 #         block_size_k=64,
                 #         sliding_window_size=512,
                 #         sink_token_size=512,
                 #     ),
-                #     second_stage_init_chunk=first_stage_k // 8,
-                #     second_stage_init_k=1024,
-                #     second_stage_args=HiPAttentionArgs11(
-                #         mask_k=512,
-                #         block_size_q=64,
-                #         block_stride_q=2,
-                #         block_size_k=second_stage_k//first_stage_k,
-                #         block_stride_k=1,
-                #         sliding_window_size=512,
-                #         sink_token_size=512,
-                #     )
                 # )
                 
-                attn_output_hip, _ = hip_attention_11(
+                first_stage_k = 64
+                second_stage_k = 512
+                
+                attn_output_hip = dual_stage_sub_quadratic_hip_attention(
                     q, k, v,
-                    args=HiPAttentionArgs11(
-                        position_ids=position_ids + 1,
-                        mask_k=tree_k,
-                        
-                        block_size_q=tree_block_size_q,
-                        block_stride_q=tree_block_stride_q,
-                        block_size_k=tree_block_size_k,
-                        block_stride_k=tree_block_stride_k,
-                        # block_stride_k=1,
-                        block_size_k_group=1,
-                        
-                        sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
-                        sink_token_size=int(os.getenv('HIP_DRAFT_SINK_TOKEN_SIZE', f'{tree_sink_token_size}')),
-                        
-                        using_extend=tree_rope_method == 'self_extend',
-                        rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                        rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                        self_extend_neighboor_window=1024,
-                        self_extend_group_size=self_extend_group_size,
-                        
-                        topk_head_group_size=1,
-                        sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
-                        branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
-                        
-                        # this may good or not, but definatly great with self-extend
-                        traverse_from_last_step=False,
-                        step_size=None,
-                        num_samples=1,
-                        # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                        chunk_size=None,
-                        # BUG: union has bug now...
-                        num_unions=1,
-                        
-                        score_head_group_size=1,
-                        
-                        using_sparq=False,
-                        sparq_hid=32,
-                        
-                        low_res_sample_scale=1,
-                        low_res_oversample_rate=1,
-                        low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
-                        
-                        q_quant=q_quant,
-                        k_quant=k_quant,
-                        
-                        logit_softcap=attn_logit_softcapping,
+                    first_stage_args=HiPAttentionArgs11(
+                        mask_k=first_stage_k,
+                        block_size_q=64,
+                        block_stride_q=2,
+                        block_size_k=64,
+                        sliding_window_size=512,
+                        sink_token_size=512,
+                    ),
+                    second_stage_init_chunk=first_stage_k // 8,
+                    second_stage_init_k=1024,
+                    second_stage_args=HiPAttentionArgs11(
+                        mask_k=second_stage_k,
+                        block_size_q=64,
+                        block_stride_q=2,
+                        block_size_k=second_stage_k // first_stage_k,
+                        block_stride_k=4,
+                        sliding_window_size=512,
+                        sink_token_size=512,
                     )
                 )
+                
+                # attn_output_hip, _ = hip_attention_11(
+                #     q, k, v,
+                #     args=HiPAttentionArgs11(
+                #         position_ids=position_ids + 1,
+                #         mask_k=tree_k,
+                        
+                #         block_size_q=tree_block_size_q,
+                #         block_stride_q=tree_block_stride_q,
+                #         block_size_k=tree_block_size_k,
+                #         block_stride_k=tree_block_stride_k,
+                #         # block_stride_k=1,
+                #         block_size_k_group=1,
+                        
+                #         sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
+                #         sink_token_size=int(os.getenv('HIP_DRAFT_SINK_TOKEN_SIZE', f'{tree_sink_token_size}')),
+                        
+                #         using_extend=tree_rope_method == 'self_extend',
+                #         rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                #         rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                #         self_extend_neighboor_window=1024,
+                #         self_extend_group_size=self_extend_group_size,
+                        
+                #         topk_head_group_size=1,
+                #         sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
+                #         branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
+                        
+                #         # this may good or not, but definatly great with self-extend
+                #         traverse_from_last_step=False,
+                #         step_size=None,
+                #         num_samples=1,
+                #         # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
+                #         chunk_size=None,
+                #         # BUG: union has bug now...
+                #         num_unions=1,
+                        
+                #         score_head_group_size=1,
+                        
+                #         using_sparq=False,
+                #         sparq_hid=32,
+                        
+                #         low_res_sample_scale=1,
+                #         low_res_oversample_rate=1,
+                #         low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
+                        
+                #         q_quant=q_quant,
+                #         k_quant=k_quant,
+                        
+                #         logit_softcap=attn_logit_softcapping,
+                #     )
+                # )
                 
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:

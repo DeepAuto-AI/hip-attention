@@ -4690,40 +4690,37 @@ def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
-        block_bk, defaults = {
-            'NVIDIA A100-SXM4-80GB': (int(os.getenv('SA_BLOCK_BK', '16')), dict(
+        defaults = {
+            'NVIDIA A100-SXM4-80GB': dict(
                 num_warps=4, 
                 num_stages=2, 
                 maxnreg=256,
-            )),
-        }.get(device_name, (int(os.getenv('SA_BLOCK_BK', '8')), dict(num_warps=4, num_stages=2, maxnreg=256)))
-        return [triton.Config({'BLOCK_BK': block_bk}, **defaults)]
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=256))
+        return [triton.Config({}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
-    for block_bk in [1, 2, 4, 8, 16, 32, 64]:
-        for max_nreg in [128, 256, 512]:
-            for num_warps in [4, 8]:
-                for num_stages in [2, 4]:
-                    configs.append(triton.Config(
-                        {
-                            'BLOCK_BK': block_bk
-                        }, 
-                        num_warps=num_warps, 
-                        num_stages=num_stages, 
-                        maxnreg=max_nreg
-                    ))
+    for max_nreg in [128, 256, 512]:
+        for num_warps in [4, 8]:
+            for num_stages in [2, 4]:
+                configs.append(triton.Config(
+                    {},
+                    num_warps=num_warps, 
+                    num_stages=num_stages, 
+                    maxnreg=max_nreg
+                ))
     return configs
 
-def perf_model_block_sparse_attention(**kwargs):
-    block_bk = kwargs['BLOCK_BK']
-    block_k = kwargs['BLOCK_SIZE_K']
-    assert block_k <= 64, 'this will not good idea'
-    if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
-        return 0
-    return 999999999 # run might fails
+# def perf_model_block_sparse_attention(**kwargs):
+#     block_bk = kwargs['BLOCK_BK']
+#     block_k = kwargs['BLOCK_SIZE_K']
+#     assert block_k <= 64, 'this will not good idea'
+#     if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
+#         return 0
+#     return 999999999 # run might fails
 
 @triton.autotune(
     configs=get_block_sparse_attention_configs(),
@@ -4733,10 +4730,10 @@ def perf_model_block_sparse_attention(**kwargs):
         'HID',
         'TDST_NEXT_POWER_OF_2',
     ],
-    prune_configs_by={
-        'perf_model': perf_model_block_sparse_attention,
-        'top_k': 24,
-    }
+    # prune_configs_by={
+    #     'perf_model': perf_model_block_sparse_attention,
+    #     'top_k': 24,
+    # }
 )
 @triton.jit
 def block_sparse_attention_cuda(
@@ -5352,7 +5349,7 @@ def block_sparse_attention(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
-    position_ids: Tensor,
+    seq_lens: Tensor,
     
     indices: Tensor,
     ks: Tensor,
@@ -5397,7 +5394,13 @@ def block_sparse_attention(
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
-    # assert BLOCK_BK > 0, BLOCK_BK
+    
+    BLOCK_BK = 64 // args.block_size_k
+    BLOCK_BK = max(1, min(32, BLOCK_BK))
+    if 'SA_BLOCK_BK' in os.environ:
+        BLOCK_BK = int(os.environ['BLOCK_BK'])
+    
+    assert BLOCK_BK > 0, BLOCK_BK
     
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
@@ -5419,7 +5422,7 @@ def block_sparse_attention(
         assert args.v_cache.ndim == 4
     else:
         raise Exception()
-    assert position_ids.ndim == 2
+    assert seq_lens.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
     pre_device = torch.get_default_device()
@@ -5433,7 +5436,7 @@ def block_sparse_attention(
         q, *args.safe_stride(q, 4),
         k, *args.safe_stride(k, 4),
         v, *args.safe_stride(v, 4),
-        position_ids, *args.safe_stride(position_ids, 2),
+        seq_lens, *args.safe_stride(seq_lens, 2),
         
         indices, *args.safe_stride(indices, 3),
         
@@ -5458,7 +5461,7 @@ def block_sparse_attention(
         args.block_size_k,
         HID,
         # 2,
-        # BLOCK_BK,
+        BLOCK_BK=BLOCK_BK,
         
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
@@ -5635,12 +5638,12 @@ def masking_step_loop(
         idx_tdst = idx_tdst.reshape(-1)
         if args.position_ids is not None:
             pos_tdst = args.position_ids\
-                .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
+                .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1))# + 1
         else:
             if TSRC is not None:
-                pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
+                pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1)# + 1
             else:
-                pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
+                pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST# + 1
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(args.num_samples):
@@ -6691,7 +6694,7 @@ def hip_attention(
         q=q, 
         k=k, 
         v=v,
-        position_ids=args.position_ids,
+        seq_lens=args.position_ids,
         
         indices=indices, 
         ks=ks, 
@@ -6772,7 +6775,7 @@ def paged_hip_attention(
         q=q,
         k=None,
         v=None,
-        position_ids=args.position_ids,
+        seq_lens=args.position_ids,
         indices=indices,
         ks=ks,
         ks_count=ks_count,
