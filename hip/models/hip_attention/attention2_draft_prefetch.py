@@ -1200,12 +1200,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     ).to(queries.dtype)
                     
                     t_calib_old = tl.dot(
-                        queries, 
-                        keys_calib_old.to(queries.dtype),
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys_calib_old.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                     )
                     t_calib_new = tl.dot(
-                        queries_grouped, 
-                        keys_calib_new.to(queries.dtype),
+                        (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                        (keys_calib_new.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
                     )
                     
                     calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
@@ -1216,11 +1216,13 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
                     
                     t_window = tl.dot(
-                        queries, keys.to(queries.dtype),
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                     )
                     
                     t_grouped = tl.dot(
-                        queries_grouped, keys.to(queries.dtype),
+                        (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                        (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
                     )
                     
                     # NOTE: this calibration trick is very important.
@@ -1236,8 +1238,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     ).to(tl.float32)
                 else:
                     t = tl.dot(
-                        queries,
-                        keys.to(queries.dtype),
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                         out_dtype=tl.float32,
                         allow_tf32=True,
                     ).to(tl.float32)
@@ -1271,8 +1273,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 keys_adjusted = (keys_adjusted * mask_keys).to(keys_adjusted.dtype)
                 
                 t = tl.dot(
-                    queries, 
-                    keys_adjusted.to(queries.dtype),
+                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                    (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                 ).to(tl.float32)
             else:
                 raise Exception()
@@ -1285,9 +1287,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 else:
                     # BQ=64, BSQ=2
                     # 4090: 20 ms, A100: 34.81ms
+                    
                     t = tl.dot(
-                        queries, 
-                        keys.to(queries.dtype),
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                         out_dtype=tl.float32,
                         allow_tf32=True,
                     )
@@ -1335,8 +1338,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 )
                 
                 t = tl.dot(
-                    q_sparq, 
-                    k_sparq,
+                    (q_sparq * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_sparq.dtype), 
+                    (k_sparq.to(q_sparq.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_sparq.dtype),
                 ).to(tl.float32)
         acc += t.to(acc.dtype)
         # acc += tl.sum(queries)
@@ -4533,13 +4536,13 @@ def block_sparse_attention_cuda_step(
             queries_grouped = queries_grouped * mask_tdst[:, None]
             
             t_window = tl.dot(
-                queries, 
-                keys.to(queries.dtype),
+                (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                 allow_tf32=True,
             )
             t_grouped = tl.dot(
-                queries_grouped.to(queries.dtype), 
-                keys.to(queries.dtype),
+                (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
                 allow_tf32=True,
             )
             qk = tl.where(
@@ -4577,8 +4580,8 @@ def block_sparse_attention_cuda_step(
                 keys_adjusted = keys_adjusted * mask_tsrc[None, :]
                 
                 qk = tl.dot(
-                    queries, 
-                    keys_adjusted.to(queries.dtype),
+                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                    (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                     out_dtype=tl.float32,
                     allow_tf32=True,
                 ).to(tl.float32) 
@@ -4587,8 +4590,8 @@ def block_sparse_attention_cuda_step(
                 # qk = qk * 1.44269504
             else:
                 qk = tl.dot(
-                    queries, 
-                    keys.to(queries.dtype),
+                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                    (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                     out_dtype=tl.float32,
                     allow_tf32=True,
                 ).to(tl.float32)
@@ -4604,8 +4607,8 @@ def block_sparse_attention_cuda_step(
             raise Exception()
     else:
         qk = tl.dot(
-            queries, 
-            keys.to(queries.dtype),
+            (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+            (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
             out_dtype=tl.float32,
             allow_tf32=True,
         ).to(tl.float32)
