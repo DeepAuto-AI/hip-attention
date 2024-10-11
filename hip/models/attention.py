@@ -304,8 +304,9 @@ def custom_attention(
                         block_size_q=64,
                         block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
-                        sliding_window_size=256,
-                        sink_token_size=256,
+                        sliding_window_size=512,
+                        sink_token_size=512,
+                        position_ids=position_ids,
                     ),
                     second_stage_k=1024,
                     stages=[
@@ -315,6 +316,7 @@ def custom_attention(
                         (32, 2048),
                     ],
                 )
+                
                 
                 # attn_output_hip = sampling_only_attention(
                 #     q, k, v,

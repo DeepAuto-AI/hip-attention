@@ -205,7 +205,7 @@ def sampling_mask_cuda(
         mask=mask_chunk,
     )
 
-DEBUG = False
+DEBUG = (os.getenv('HIP_DEBUG', '0') == '1')
 
 def dual_stage_sub_quadratic_hip_attention(
     q: Tensor, 
@@ -221,7 +221,6 @@ def dual_stage_sub_quadratic_hip_attention(
     BSZ, TDST, HEAD, HID = q.shape
     BSZ, TSRC, HEAD_KV, HID = k.shape
     assert v.shape == k.shape
-    assert TDST == TSRC
     
     chunk_count = first_stage_args.mask_k
     chunk_size = TSRC // chunk_count
@@ -795,7 +794,7 @@ def dual_stage_quadratic_hip_attention(
     BSZ, TDST, HEAD, HID = q.shape
     BSZ, TSRC, HEAD_KV, HID = k.shape
     assert v.shape == k.shape
-    assert TDST == TSRC
+    # assert TDST == TSRC
     
     chunk_size = args.mask_k
     chunk_count = triton.cdiv(TSRC - args.sink_token_size - args.sliding_window_size, chunk_size)
@@ -808,6 +807,7 @@ def dual_stage_quadratic_hip_attention(
         position_ids = args.position_ids
     else:
         position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[None, :].expand(BSZ, TDST)
+    assert position_ids.shape == (BSZ, TDST)
     
     BLOCK_CHUNK=args.block_size_k
     BLOCK_SIZE_Q=args.block_size_q
