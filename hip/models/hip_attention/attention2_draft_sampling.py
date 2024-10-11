@@ -1001,32 +1001,32 @@ def dual_stage_quadratic_hip_attention(
     ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
     ks_start_end[:, :, -1] = ks
     
-    if DEBUG:
-        if k is not None:
-            _, TSRC, H_KV, _ = k.shape
-        else:
-            TSRC = torch.max(args.cache_seq_lens).item()
-        max_query = 8192 * 8192 // TSRC
-        B, TDST, H, HID = q.shape
-        TDST = min(TDST, max_query)
-        N = B * H
-        def render_mask():
-            debug_mask = to_dense(
-                indices[:, -triton.cdiv(TDST, args.block_size_q):].cpu().numpy(),
-                ks[:, -triton.cdiv(TDST, args.block_size_q):].cpu().numpy(),
-                None,
-                triton.cdiv(N, args.topk_head_group_size),
-                TDST, 
-                TSRC * args.topk_head_group_size, 
-                args.block_size_q, 
-                args.block_size_k * args.block_size_k_group,
-            )[0]
-            if args.group_size_q > 1:
-                debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
+    # if DEBUG:
+    #     if k is not None:
+    #         _, TSRC, H_KV, _ = k.shape
+    #     else:
+    #         TSRC = torch.max(args.cache_seq_lens).item()
+    #     max_query = 8192 * 8192 // TSRC
+    #     B, TDST, H, HID = q.shape
+    #     TDST = min(TDST, max_query)
+    #     N = B * H
+    #     def render_mask():
+    #         debug_mask = to_dense(
+    #             indices[:, -triton.cdiv(TDST, args.block_size_q):].cpu().numpy(),
+    #             ks[:, -triton.cdiv(TDST, args.block_size_q):].cpu().numpy(),
+    #             None,
+    #             triton.cdiv(N, args.topk_head_group_size),
+    #             TDST, 
+    #             TSRC * args.topk_head_group_size, 
+    #             args.block_size_q, 
+    #             args.block_size_k * args.block_size_k_group,
+    #         )[0]
+    #         if args.group_size_q > 1:
+    #             debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
             
-            cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
-            print('saved dummy_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
-        render_mask()
+    #         cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
+    #         print('saved dummy_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
+    #     render_mask()
     
     # print(indices[0, -1], ks[0, -1])
     
@@ -1131,19 +1131,19 @@ def main_debug():
             q, k, v,
             args=HiPAttentionArgs(
                 mask_k=1024,
-                block_size_q=32,
-                block_stride_q=2,
+                block_size_q=64,
+                block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
                 sliding_window_size=256,
                 sink_token_size=256,
             ),
             second_stage_k=1024,
-            # stages=[
-            #     (256, 16384),
-            #     (128, 8192),
-            #     (64, 4096),
-            #     (32, 2048),
-            # ],
+            stages=[
+                (256, 16384),
+                (128, 8192),
+                (64, 4096),
+                (32, 2048),
+            ],
             mask_only=True,
         )
         

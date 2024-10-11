@@ -300,9 +300,9 @@ def custom_attention(
                 attn_output_hip = dual_stage_quadratic_hip_attention(
                     q, k, v,
                     args=HiPAttentionArgs11(
-                        mask_k=512,
-                        block_size_q=32,
-                        block_stride_q=2,
+                        mask_k=1024,
+                        block_size_q=64,
+                        block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
                         sliding_window_size=256,
                         sink_token_size=256,
@@ -313,7 +313,7 @@ def custom_attention(
                         (128, 8192),
                         (64, 4096),
                         (32, 2048),
-                    ]
+                    ],
                 )
                 
                 # attn_output_hip = sampling_only_attention(
