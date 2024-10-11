@@ -695,6 +695,7 @@ def chunk_controllable_sampling_mask_cuda(
             (keys_left / 1).to(tl.float16),
             out_dtype=tl.float16,
         )
+        scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
         scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
         
@@ -712,6 +713,7 @@ def chunk_controllable_sampling_mask_cuda(
             (keys_right / 1).to(tl.float16),
             out_dtype=tl.float16,
         )
+        scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
         scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
         scores_right = tl.where(mask_tsrc_active, scores_right, float('-inf')).to(scores_right.dtype)
         
