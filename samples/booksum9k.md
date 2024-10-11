@@ -1,3 +1,9 @@
+<|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
 Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
@@ -136,4 +142,8 @@ During this eulogium on the rare production of his native poets, the stranger ha
 
 The delivery of these skilful rhymes was accompanied, on the part of the stranger, by a regular rise and fall of his right hand, which terminated at the descent, by suffering the fingers to dwell a moment on the leaves of the little volume; and on the ascent, by such a flourish of the member as none but the initiated may ever hope to imitate. It would seem that long practice had rendered this manual accompaniment necessary; for it did not cease until the preposition which the poet had selected for the close of his verse, had been duly delivered like a word of two syllables.
 
-### Response:
+####################################################################################
+
+Now, please answer given request. (Summary the book)
+
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
