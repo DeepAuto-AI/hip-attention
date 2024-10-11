@@ -118,6 +118,9 @@ def custom_attention(
                 # assert causal_mask is None, causal_mask.shape
                 if causal_mask is not None:
                     warnings.warn(f'causal mask provided. this is useless {causal_mask.shape}')
+                assert query_states.dtype in [torch.float16, torch.bfloat16], query_states.dtype
+                assert key_states.dtype in [torch.float16, torch.bfloat16], key_states.dtype
+                assert value_states.dtype in [torch.float16, torch.bfloat16], value_states.dtype
                 attn_output = flash_attn_func(
                     q=query_states.permute(0, 2, 1, 3),
                     k=key_states.permute(0, 2, 1, 3),
