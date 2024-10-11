@@ -303,20 +303,21 @@ def custom_attention(
                 attn_output_hip = dual_stage_quadratic_hip_attention(
                     q, k, v,
                     args=HiPAttentionArgs11(
-                        mask_k=1024,
+                        mask_k=512,
                         block_size_q=64,
                         block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
-                        sliding_window_size=512,
-                        sink_token_size=512,
-                        position_ids=position_ids,
+                        sliding_window_size=256,
+                        sink_token_size=256,
+                        # position_ids=position_ids,
                     ),
                     second_stage_k=1024,
                     stages=[
-                        (256, 16384),
-                        (128, 8192),
-                        (64, 4096),
-                        (32, 2048),
+                        # (128, 8192),
+                        (256, 65536),
+                        (128, 16384),
+                        (32, 4096),
+                        # (16, 1024),
                     ],
                 )
                 

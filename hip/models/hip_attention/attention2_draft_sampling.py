@@ -805,6 +805,9 @@ def dual_stage_quadratic_hip_attention(
     MAX_TDST = TDST
     MAX_TSRC = TSRC
     
+    args = args.clone()
+    args.sliding_window_size //= 2
+    
     if args.position_ids is not None:
         position_ids = args.position_ids
     else:
@@ -886,6 +889,8 @@ def dual_stage_quadratic_hip_attention(
         cv2.imwrite('dummy_sampled.png', debug * 255)
     
     for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
+        if stage_chunk_size > chunk_size: continue
+        
         assert (stage_k % chunk_size) == 0
         indices_left = indices_left[..., :stage_k // chunk_size]
         indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)#.clamp_(args.sink_token_size // 2, TSRC)
@@ -967,8 +972,8 @@ def dual_stage_quadratic_hip_attention(
         cv2.imwrite('dummy_sampled_final.png', debug * 255)
     
     args = args.clone()
-    args.sliding_window_size += BLOCK_SIZE_Q
-    args.sink_token_size += BLOCK_SIZE_Q
+    args.sliding_window_size *= 2
+    # args.sink_token_size += BLOCK_SIZE_Q
     args.block_size_k = chunk_size
     args.mask_k = second_stage_k
     
@@ -976,7 +981,7 @@ def dual_stage_quadratic_hip_attention(
     seq_lens = position_ids\
         .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
     
-    repeated_seq_lens = seq_lens[:, ::BLOCK_SIZE_Q].repeat_interleave(HEAD, 0)
+    # repeated_seq_lens = seq_lens[:, ::BLOCK_SIZE_Q].repeat_interleave(HEAD, 0)
     # ks_seed = indices
     
     # print(ks_seed[0, -1])
@@ -1080,7 +1085,7 @@ def main_debug():
                 block_size_k=2,
                 block_stride_k=1,
             ),
-            mask_only=True,
+            mask_only=False,
         )
         end.record()
         
@@ -1132,21 +1137,22 @@ def main_debug():
         dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
-                mask_k=1024,
+                mask_k=512,
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
                 sliding_window_size=256,
                 sink_token_size=256,
+                # position_ids=position_ids,
             ),
             second_stage_k=1024,
             stages=[
-                (256, 16384),
-                (128, 8192),
-                (64, 4096),
-                (32, 2048),
+                # (256, 16384),
+                # (128, 8192),
+                (128, 16384),
+                (32, 4096),
             ],
-            mask_only=True,
+            mask_only=False,
         )
         
         if i==0: DEBUG = False

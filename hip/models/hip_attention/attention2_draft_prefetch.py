@@ -4922,7 +4922,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
                 mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
                 idx_tsrc = idx_tsrc % MAX_TSRC
-                mask_tsrc = mask_tsrc & (idx_tsrc < tl.max(pos_tdst))
+                mask_tsrc = mask_tsrc & (idx_tsrc < tl.max(pos_tdst)) & (idx_tsrc >= sink_token_size)
                 # mask_tsrc = True
                 # mask_tsrc = idx_tsrc > 0
                 # idx_group = idx_tsrc // MAX_TSRC
