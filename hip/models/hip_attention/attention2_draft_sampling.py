@@ -134,6 +134,7 @@ def sampling_mask_cuda(
             (keys_left / 8).to(tl.float16),
             out_dtype=tl.float16,
         )
+        scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf')).to(scores_left.dtype)
         scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
         
@@ -151,6 +152,7 @@ def sampling_mask_cuda(
             (keys_right / 8).to(tl.float16),
             out_dtype=tl.float16,
         )
+        scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf')).to(scores_right.dtype)
         scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
         scores_right = tl.where(mask_tsrc_active, scores_right, float('-inf')).to(scores_right.dtype)
         
@@ -224,7 +226,7 @@ def dual_stage_sub_quadratic_hip_attention(
     
     chunk_count = first_stage_args.mask_k
     chunk_size = TSRC // chunk_count
-    assert (chunk_size * chunk_count) == TSRC
+    # assert (chunk_size * chunk_count) == TSRC
     
     MAX_TDST = TDST
     MAX_TSRC = TSRC
@@ -441,7 +443,7 @@ def sampling_only_attention(
     
     chunk_count = TSRC // args.block_size_k
     chunk_size = TSRC // chunk_count
-    assert (chunk_size * chunk_count) == TSRC
+    # assert (chunk_size * chunk_count) == TSRC
     
     MAX_TDST = TDST
     MAX_TSRC = TSRC
@@ -581,8 +583,16 @@ def sampling_only_attention(
 
 @triton.jit
 def chunk_controllable_sampling_mask_cuda(
-    Q, stride_q_bsz, stride_q_tdst, stride_q_head, stride_q_hid,
-    K, stride_k_bsz, stride_k_tsrc, stride_k_head_kv, stride_k_hid,
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst, 
+    stride_q_head, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc, 
+    stride_k_head_kv, 
+    stride_k_hid,
     
     INDICES_LEFT, 
     stride_indices_left_bsz, 
@@ -890,6 +900,7 @@ def dual_stage_quadratic_hip_attention(
     
     for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
         if stage_chunk_size > chunk_size: continue
+        if stage_k > TSRC: continue
         
         assert (stage_k % chunk_size) == 0
         indices_left = indices_left[..., :stage_k // chunk_size]
@@ -1055,7 +1066,8 @@ def dual_stage_quadratic_hip_attention(
 def main_debug():
     global DEBUG
     
-    seq_len = 131072
+    seq_len = 1024
+    seq_dups = int(os.getenv('DUPS', '1'))
     
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
@@ -1066,10 +1078,30 @@ def main_debug():
     )
     HEAD = q.shape[0]
     HEAD_KV = k.shape[0]
+    seq_len = seq_len * seq_dups
     
-    q = q.permute(1, 0, 2).contiguous().unsqueeze(0)
-    k = k.permute(1, 0, 2).contiguous().unsqueeze(0)
-    v = v.permute(1, 0, 2).contiguous().unsqueeze(0)
+    q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    
+    from flash_attn import flash_attn_func
+    
+    print('-' * 20)
+    
+    for i in range(3):
+        start = torch.cuda.Event(True)
+        end = torch.cuda.Event(True)
+        
+        start.record()
+        flash_attn_func(
+            q, k, v, causal=True
+        )
+        end.record()
+        
+        end.synchronize()
+        print(start.elapsed_time(end))
+    
+    print('-' * 20)
     
     for i in range(10):
         start = torch.cuda.Event(True)
@@ -1092,12 +1124,14 @@ def main_debug():
         end.synchronize()
         print(start.elapsed_time(end))
     
+    print('-' * 20)
+    
     for i in range(10):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
         start.record()
-        if i==0: DEBUG = True
+        if i==0: DEBUG = False
         
         # dual_stage_hip_attention(
         #     q, k, v,
@@ -1147,10 +1181,11 @@ def main_debug():
             ),
             second_stage_k=1024,
             stages=[
-                # (256, 16384),
                 # (128, 8192),
-                (128, 16384),
-                (32, 4096),
+                (256, 64*1024),
+                (128, 16*1024),
+                (32, 4*1024),
+                # (16, 1024),
             ],
             mask_only=False,
         )
