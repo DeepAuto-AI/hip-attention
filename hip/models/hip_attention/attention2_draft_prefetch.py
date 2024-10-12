@@ -1013,6 +1013,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K
     ), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
+    mask_acc_keys = tl.zeros((BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, ), dtype=tl.int1)
     for i_group in tl.range(0, G):
         queries = tl.load(
             Q +\
@@ -1073,6 +1074,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             ).to(tl.int1)
             mask_keys = mask_keys & diagonal_mask
         
+        mask_acc_keys = mask_acc_keys | tl.ravel(mask_keys)
         keys = load_tokens(
             K, 
             stride_k_bsz, 
@@ -1364,6 +1366,20 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
             acc
         )
+    if REDUCE_METHOD == 'max':
+        acc = tl.where(
+            mask_acc_keys[None, :] & mask_tdst[:, None],
+            acc,
+            float('-inf')
+        )
+    elif REDUCE_METHOD == 'min':
+        acc = tl.where(
+            mask_acc_keys[None, :] & mask_tdst[:, None],
+            acc,
+            float('inf')
+        )
+    else:
+        raise Exception()
     scores = tl.reshape(
         acc, (
             BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
@@ -1591,7 +1607,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     idx_b = pid_b
     idx_bdst = pid_bdst
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (tl.minimum(MAX_TDST, BLOCK_STRIDE_Q) - 1)
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.random.randint(idx_b * 131072 * BLOCK_SIZE_Q + idx_bdst * BLOCK_SIZE_Q, tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q)).to(tl.int32) % BLOCK_SIZE_Q
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
@@ -3446,7 +3462,7 @@ def masking_iteration_draft_cuda_initialize_score(
     if t_group_size <= 1.0:
         return
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (tl.minimum(MAX_TDST, BLOCK_STRIDE_Q) - 1)
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
@@ -5646,9 +5662,9 @@ def masking_step_loop(
                 .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1))# + 1
         else:
             if TSRC is not None:
-                pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1)# + 1
+                pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
             else:
-                pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST# + 1
+                pos_tdst = idx_tdst[None, :] + args.cache_seq_lens[:, None] - TDST + 1
         scores_seed = None
         with nvtx.annotate(f'masking_samples(seed={tuple(indices_seed.shape) if indices_seed is not None else None})'):
             for idx_sample in range(args.num_samples):
