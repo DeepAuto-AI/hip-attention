@@ -112,7 +112,7 @@ def sampling_mask_cuda(
     
     idx_tsrc_left = idx_tsrc_start
     idx_tsrc_right = idx_tsrc_end
-    scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float16) - 32000.0
+    scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
     
     while (max_chunk_size > 1):
         max_chunk_size /= 2.0
@@ -719,10 +719,10 @@ def chunk_controllable_sampling_mask_cuda(
             other=0,
         )
         scores_left = tl.dot(
-            (queries / 1).to(tl.float16),
-            (keys_left / 1).to(tl.float16),
-            out_dtype=tl.float16,
-        )
+            queries,
+            keys_left.to(queries.dtype),
+            out_dtype=tl.float32,
+        ).to(queries.dtype)
         if REDUCE == 'max':
             scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
             scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
@@ -744,10 +744,10 @@ def chunk_controllable_sampling_mask_cuda(
             other=0,
         )
         scores_right = tl.dot(
-            (queries / 1).to(tl.float16),
-            (keys_right / 1).to(tl.float16),
-            out_dtype=tl.float16,
-        )
+            queries,
+            keys_right.to(queries.dtype),
+            out_dtype=tl.float32,
+        ).to(queries.dtype)
         # scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
         # scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
         if REDUCE == 'max':
@@ -882,15 +882,18 @@ def dual_stage_quadratic_hip_attention(
     indices_right[:, :, :, :] = indices_left + chunk_size
     indices_right.clamp_max_(TSRC - args.sliding_window_size)
     
+    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     out_scores = torch.full(
-        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, triton.next_power_of_2(chunk_count)), 
+        (BSZ, BDST, HEAD, triton.next_power_of_2(chunk_count)), 
         device=q.device,
-        dtype=torch.float16,
+        dtype=q.dtype,
         fill_value=-32000.0
     )
     
     # print(indices_left[0, -1, 0].sort().values)
     # print(indices_right[0, -1, 0].sort().values)
+    
+    VANILLA = False
     
     grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * triton.cdiv(TDST, BLOCK_SIZE_Q) * HEAD,)
     chunk_controllable_sampling_mask_cuda[grid](
@@ -921,19 +924,32 @@ def dual_stage_quadratic_hip_attention(
     # out_scores.scatter_(dim=-1, index=t_indices, value=-32000.0)
     # out_scores = out_scores.flatten(-2, -1)
     
-    out_scores = torch.nn.functional.conv2d(
-        out_scores, 
-        weight=torch.tensor([
-            [-1, 2, -1]
-        ], device=out_scores.dtype, dtype=out_scores.dtype),
+    pre_conv = out_scores.clone()
+    strength = 1.0
+    after_conv = torch.nn.functional.conv2d(
+        out_scores.view(BSZ * BDST * HEAD, 1, 1, -1), 
+        weight=torch.tensor([[[
+            [-strength, 2 * strength, -strength]
+        ]]], device=out_scores.device, dtype=out_scores.dtype).expand(1, 1, 1, 3),
         bias=None,
         stride=1,
-        padding=(0, 1),
-    )
+        padding='same',
+    ).view(BSZ, BDST, HEAD, -1)
+    after_conv[..., indices_left.shape[-1]:].fill_(-32000.0)
+    after_conv = torch.where(pre_conv < -30000.0, pre_conv, after_conv)
+    
+    # print(out_scores[0, -1, DEBUG_HEAD])
+    # print(after_conv[0, -1, DEBUG_HEAD])
+    
+    if not VANILLA:
+        t_indices = after_conv.topk(dim=-1, k=second_stage_k // chunk_size // 8).indices
+        out_scores.scatter_(dim=-1, index=t_indices, value=32000.0)
+    # t_indices = pre_conv.topk(dim=-1, k=second_stage_k // chunk_size // 2).indices
+    # out_scores.scatter_(dim=-1, index=t_indices, value=32000.0)
     
     _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
     indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-    indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+    indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
     
     if DEBUG:
         out_indices_cpu = indices_left.cpu()
@@ -951,6 +967,21 @@ def dual_stage_quadratic_hip_attention(
                 debug[i, t:t+t_chunk_size] = 1
         cv2.imwrite('dummy_sampled.png', debug * 255)
         print('saved dummy_sampled.png')
+        
+        debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+        for i in range(out_indices_cpu.shape[1]):
+            t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
+            # print(i, t_chunk_size)
+            for j in range(max(
+                0,
+                math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
+            )):
+                if j >= out_indices_cpu.shape[-1]: continue
+                t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
+                t = t // t_chunk_size * t_chunk_size
+                debug[i, t:t+t_chunk_size] = 1
+        cv2.imwrite('dummy_sampled_cut.png', debug * 255)
+        print('saved dummy_sampled_cut.png')
     
     for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
         if stage_chunk_size > chunk_size: continue
@@ -961,9 +992,13 @@ def dual_stage_quadratic_hip_attention(
         indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)#.clamp_(args.sink_token_size // 2, TSRC)
         indices_right = (indices_left + chunk_size)#.clamp_(args.sink_token_size // 2, TSRC)
         # indices_right = indices_right[..., :stage_k // chunk_size]
-        out_scores.fill_(0.0)
+        # out_scores.fill_(0.0)
         out_scores = out_scores[..., :stage_k // chunk_size]
-        out_scores.fill_(-32000.0)
+        # out_scores.fill_(-32000.0)
+        
+        indices_left, t_indices = indices_left.sort(dim=-1)
+        indices_right = indices_right.gather(dim=-1, index=t_indices)
+        out_scores = out_scores.gather(dim=-1, index=t_indices)
         
         # print(indices_left[0, -1, 0].sort().values)
         # print(indices_right[0, -1, 0].sort().values)
@@ -1006,9 +1041,8 @@ def dual_stage_quadratic_hip_attention(
             HEAD_GROUP=HEAD // HEAD_KV,
         )
         
-        head_reduced_out_scores = out_scores.sum(dim=-2, keepdim=True).values
-        _, t_indices = head_reduced_out_scores.topk(dim=-1, k=second_stage_k // chunk_size // 8)
-        out_scores.scatter_(dim=-1, index=t_indices, value=32000.0)
+        # head_reduced_out_scores = out_scores.sum(dim=-2, keepdim=True)
+        # _, t_indices = head_reduced_out_scores.topk(dim=-1, k=second_stage_k // chunk_size // 8)
         
         # local_chunk_size = 8
         # local_drop_chunk_count = 4
@@ -1016,6 +1050,40 @@ def dual_stage_quadratic_hip_attention(
         # _, t_indices = out_scores.topk(dim=-1, k=local_drop_chunk_count, sorted=False, largest=False)
         # out_scores.scatter_(dim=-1, index=t_indices, value=-32000.0)
         # out_scores = out_scores.flatten(-2, -1)
+        
+        pre_conv = out_scores.clone()
+        strength = 1.0
+        after_conv = torch.nn.functional.conv2d(
+            (indices_left.to(torch.float32) / TSRC).to(torch.bfloat16).view(BSZ * BDST * HEAD, 1, 1, -1), 
+            weight=torch.tensor([[[
+                [
+                    -3*strength, 
+                    -2*strength, 
+                    -strength, 
+                    12*strength, 
+                    -strength, 
+                    -2* strength, 
+                    -3* strength
+                ]
+            ]]], device=out_scores.device, dtype=torch.bfloat16).expand(1, 1, 1, -1),
+            bias=None,
+            stride=1,
+            padding='same',
+        ).view(BSZ, BDST, HEAD, -1).abs()
+        
+        # print(indices_left[0, -1, DEBUG_HEAD])
+        # print(after_conv[0, -1, DEBUG_HEAD])
+        
+        after_conv[..., indices_left.shape[-1]:].fill_(-32000.0)
+        after_conv = torch.where(pre_conv < -30000.0, pre_conv, after_conv)
+        
+        if not VANILLA:
+            _, t_indices = after_conv.topk(dim=-1, k=second_stage_k // chunk_size // 8)
+            out_scores.scatter_add_(dim=-1, index=t_indices, src=torch.tensor(32000.0, device=q.device, dtype=out_scores.dtype).broadcast_to(t_indices.shape))
+        # _, t_indices = pre_conv.topk(dim=-1, k=second_stage_k // chunk_size // 2)
+        # out_scores.scatter_add_(dim=-1, index=t_indices, src=torch.tensor(32000.0, device=q.device, dtype=out_scores.dtype).broadcast_to(t_indices.shape))
+        
+        # out_scores.scatter_add_(dim=-1, index=t_indices, src=torch.tensor(64000.0, device=q.device, dtype=out_scores.dtype).broadcast_to(t_indices.shape))
         
         _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
         indices_left = indices_left.gather(dim=-1, index=t_indices)
@@ -1049,6 +1117,7 @@ def dual_stage_quadratic_hip_attention(
                 debug[i, t:t+1] = 1
         cv2.imwrite('dummy_sampled_final.png', debug * 255)
         print('saved dummy_sampled_final.png')
+        input('>>>')
     
     args = args.clone()
     args.sliding_window_size += args.mask_k
@@ -1351,7 +1420,7 @@ def dual_stage_quadratic_scan_hip_attention(
 def main_debug():
     global DEBUG
     
-    seq_len = 65536
+    seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
     
     q, k, v, out, cos, sin = load_checkouts(

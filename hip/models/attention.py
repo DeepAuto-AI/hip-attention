@@ -328,7 +328,7 @@ def custom_attention(
                         sink_token_size=256,
                         position_ids=position_ids,
                     ),
-                    second_stage_k=1024,
+                    second_stage_k=2048,
                     stages=[
                         # (128, 8192),
                         # (128, 65536),
