@@ -361,7 +361,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         se_group_size = int(os.getenv('SE_GROUP_SIZE', '16'))
         force_dense = False
         disalbe_sliding_window = False
-        using_self_extend = False
+        using_self_extend = True
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
                 self.tree_k = 1024
@@ -495,7 +495,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             tree_rope_method=self.tree_rope_method,
             rope_cos=cos_full,
             rope_sin=sin_full,
-            position_ids=position_ids.repeat_interleave(8, 0)[:, :q_len].repeat_interleave(q_repeat, 1),
+            position_ids=position_ids[:, :q_len].repeat_interleave(q_repeat, 1),
             self_extend_group_size=se_group_size,
 
             # Attention sparsity loss

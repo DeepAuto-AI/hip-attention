@@ -287,6 +287,7 @@ def custom_attention(
                     sampling_only_attention, 
                     dual_stage_sub_quadratic_hip_attention,
                     dual_stage_quadratic_hip_attention,
+                    dual_stage_quadratic_scan_hip_attention,
                 )
                 
                 q = q.permute(0, 2, 1, 3)
@@ -300,27 +301,42 @@ def custom_attention(
                 q_quant = q
                 k_quant = k
                 
+                # attn_output_hip = dual_stage_quadratic_scan_hip_attention(
+                #     q, k, v,
+                #     scan_chunk_size=512,
+                #     scan_k=32768,
+                #     args=HiPAttentionArgs11(
+                #         mask_k=512,
+                #         block_size_q=64,
+                #         block_stride_q=2,
+                #         block_size_k=2, # BLOCK_CHUNK
+                #         block_stride_k=1,
+                #         sliding_window_size=256,
+                #         sink_token_size=256,
+                #         position_ids=position_ids,
+                #     )
+                # )
+                
                 attn_output_hip = dual_stage_quadratic_hip_attention(
                     q, k, v,
                     args=HiPAttentionArgs11(
-                        mask_k=512,
+                        mask_k=256,
                         block_size_q=64,
                         block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
                         sliding_window_size=256,
                         sink_token_size=256,
-                        # position_ids=position_ids,
+                        position_ids=position_ids,
                     ),
                     second_stage_k=1024,
                     stages=[
                         # (128, 8192),
-                        (256, 65536),
-                        (128, 16384),
-                        (32, 4096),
+                        # (128, 65536),
+                        # (64, 16384),
+                        (64, 8192),
                         # (16, 1024),
                     ],
                 )
-                
                 
                 # attn_output_hip = sampling_only_attention(
                 #     q, k, v,

@@ -1,6 +1,9 @@
-<|im_start|>system
-Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.<|im_end|>
-<|im_start|>user
+<|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
 ### Instruction:
 Summarize the following text
 
@@ -4145,6 +4148,8 @@ Since this same wayward girl is so reclaim’d.
 
  [_Exeunt._]
 
-### Response:
-<|im_end|>
-<|im_start|>assistant
+####################################################################################
+
+Now, please answer given request. (Summary the book)
+
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>

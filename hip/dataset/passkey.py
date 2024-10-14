@@ -63,7 +63,7 @@ def gen_text():
 
     for l in prompt_lens:
         n_fillers = (l - prefix_len - query_len) // filler_len + 1
-        for i in range(50):
+        for i in range(100):
 
             text = [PREFIX] + [FILLER_TEXT] * n_fillers
 

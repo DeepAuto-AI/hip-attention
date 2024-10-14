@@ -49,6 +49,7 @@ def sampling_mask_cuda(
     BLOCK_CHUNK: tl.constexpr = 32,
     HEAD_GROUP: tl.constexpr = 4,
     CAUSAL_CHUNKING: tl.constexpr = True,
+    REDUCE: tl.constexpr = 'mean',
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BCHUNK = tl.cdiv(CHUNK_COUNT, BLOCK_CHUNK)
@@ -134,8 +135,15 @@ def sampling_mask_cuda(
             (keys_left / 8).to(tl.float16),
             out_dtype=tl.float16,
         )
-        scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf')).to(scores_left.dtype)
-        scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
+        if REDUCE == 'max':
+            scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf')).to(scores_left.dtype)
+            scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
+        elif REDUCE == 'mean':
+            scores_left = tl.where(mask_tdst[:, None], scores_left, 0.0).to(scores_left.dtype)
+            scores_left = tl.sum(scores_left, axis=0).to(scores_left.dtype)
+            scores_left = (scores_left / tl.sum(mask_tdst.to(tl.float32))).to(scores_left.dtype)
+        else:
+            raise Exception()
         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
         
         keys_right = tl.load(
@@ -152,8 +160,17 @@ def sampling_mask_cuda(
             (keys_right / 8).to(tl.float16),
             out_dtype=tl.float16,
         )
-        scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf')).to(scores_right.dtype)
-        scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        # scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf')).to(scores_right.dtype)
+        # scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        if REDUCE == 'max':
+            scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf')).to(scores_right.dtype)
+            scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        elif REDUCE == 'mean':
+            scores_right = tl.where(mask_tdst[:, None], scores_right, 0.0).to(scores_right.dtype)
+            scores_right = tl.sum(scores_right, axis=0).to(scores_right.dtype)
+            scores_right = (scores_right / tl.sum(mask_tdst.to(tl.float32))).to(scores_right.dtype)
+        else:
+            raise Exception()
         scores_right = tl.where(mask_tsrc_active, scores_right, float('-inf')).to(scores_right.dtype)
         
         mask_left_win = scores_left > scores_right
@@ -624,6 +641,7 @@ def chunk_controllable_sampling_mask_cuda(
     STRIDE_Q: tl.constexpr = 1,
     BLOCK_CHUNK: tl.constexpr = 32,
     HEAD_GROUP: tl.constexpr = 4,
+    REDUCE: tl.constexpr = 'mean'
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BCHUNK = tl.cdiv(CHUNK_COUNT, BLOCK_CHUNK)
@@ -705,8 +723,15 @@ def chunk_controllable_sampling_mask_cuda(
             (keys_left / 1).to(tl.float16),
             out_dtype=tl.float16,
         )
-        scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
-        scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
+        if REDUCE == 'max':
+            scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
+            scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
+        elif REDUCE == 'mean':
+            scores_left = tl.where(mask_tdst[:, None], scores_left, float('0'))
+            scores_left = tl.sum(scores_left, axis=0).to(scores_left.dtype)
+            scores_left = (scores_left / tl.sum(mask_tdst.to(tl.float32))).to(scores_left.dtype)
+        else:
+            raise Exception()
         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
         
         keys_right = tl.load(
@@ -723,8 +748,17 @@ def chunk_controllable_sampling_mask_cuda(
             (keys_right / 1).to(tl.float16),
             out_dtype=tl.float16,
         )
-        scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
-        scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        # scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
+        # scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        if REDUCE == 'max':
+            scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
+            scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
+        elif REDUCE == 'mean':
+            scores_right = tl.where(mask_tdst[:, None], scores_right, float('0'))
+            scores_right = tl.sum(scores_right, axis=0).to(scores_right.dtype)
+            scores_right = (scores_right / tl.sum(mask_tdst.to(tl.float32))).to(scores_right.dtype)
+        else:
+            raise Exception()
         scores_right = tl.where(mask_tsrc_active, scores_right, float('-inf')).to(scores_right.dtype)
         
         mask_left_win = scores_left > scores_right
@@ -793,7 +827,7 @@ def dual_stage_quadratic_hip_attention(
     k: Optional[Tensor], 
     v: Optional[Tensor], 
     args: HiPAttentionArgs,
-    second_stage_k: 1024,
+    second_stage_k: int = 1024,
     stages = [
         (256, 8192),
         (128, 4096),
@@ -801,6 +835,7 @@ def dual_stage_quadratic_hip_attention(
     ],
     mask_only = False,
 ):
+    DEBUG_HEAD = -5
     global DEBUG
     
     BSZ, TDST, HEAD, HID = q.shape
@@ -816,13 +851,13 @@ def dual_stage_quadratic_hip_attention(
     MAX_TSRC = TSRC
     
     args = args.clone()
-    args.sliding_window_size //= 2
+    args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
     if args.position_ids is not None:
         position_ids = args.position_ids
     else:
         position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[None, :].expand(BSZ, TDST)
-    assert position_ids.shape == (BSZ, TDST)
+    assert position_ids.shape == (BSZ, TDST), position_ids.shape
     
     BLOCK_CHUNK=args.block_size_k
     BLOCK_SIZE_Q=args.block_size_q
@@ -845,13 +880,14 @@ def dual_stage_quadratic_hip_attention(
         ).to(torch.int64)
     )[None, None, None, :]
     indices_right[:, :, :, :] = indices_left + chunk_size
-    indices_right.clamp_max_(TDST - args.sliding_window_size)
+    indices_right.clamp_max_(TSRC - args.sliding_window_size)
     
-    out_scores = torch.zeros(
-        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, chunk_count), 
+    out_scores = torch.full(
+        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, triton.next_power_of_2(chunk_count)), 
         device=q.device,
         dtype=torch.float16,
-    ).fill_(-32000.0)
+        fill_value=-32000.0
+    )
     
     # print(indices_left[0, -1, 0].sort().values)
     # print(indices_right[0, -1, 0].sort().values)
@@ -878,9 +914,26 @@ def dual_stage_quadratic_hip_attention(
         HEAD_GROUP=HEAD // HEAD_KV,
     )
     
+    # local_chunk_size = 4
+    # local_drop_chunk_count = 1
+    # out_scores = out_scores.view(out_scores.shape[0], out_scores.shape[1], out_scores.shape[2], out_scores.shape[3] // local_chunk_size, local_chunk_size)
+    # _, t_indices = out_scores.topk(dim=-1, k=local_drop_chunk_count, sorted=False, largest=False)
+    # out_scores.scatter_(dim=-1, index=t_indices, value=-32000.0)
+    # out_scores = out_scores.flatten(-2, -1)
+    
+    out_scores = torch.nn.functional.conv2d(
+        out_scores, 
+        weight=torch.tensor([
+            [-1, 2, -1]
+        ], device=out_scores.dtype, dtype=out_scores.dtype),
+        bias=None,
+        stride=1,
+        padding=(0, 1),
+    )
+    
     _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-    indices_left = indices_left.gather(dim=-1, index=t_indices)
-    indices_right = indices_right.gather(dim=-1, index=t_indices)
+    indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+    indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
     
     if DEBUG:
         out_indices_cpu = indices_left.cpu()
@@ -893,10 +946,11 @@ def dual_stage_quadratic_hip_attention(
                 math.ceil(out_indices_cpu.shape[-1] * (stages[0][1] / TDST))
             )):
                 if j >= out_indices_cpu.shape[-1]: continue
-                t = out_indices_cpu[0, i, -3, j] // BLOCK_CHUNK
+                t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
                 t = t // t_chunk_size * t_chunk_size
                 debug[i, t:t+t_chunk_size] = 1
         cv2.imwrite('dummy_sampled.png', debug * 255)
+        print('saved dummy_sampled.png')
     
     for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
         if stage_chunk_size > chunk_size: continue
@@ -907,6 +961,7 @@ def dual_stage_quadratic_hip_attention(
         indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)#.clamp_(args.sink_token_size // 2, TSRC)
         indices_right = (indices_left + chunk_size)#.clamp_(args.sink_token_size // 2, TSRC)
         # indices_right = indices_right[..., :stage_k // chunk_size]
+        out_scores.fill_(0.0)
         out_scores = out_scores[..., :stage_k // chunk_size]
         out_scores.fill_(-32000.0)
         
@@ -951,6 +1006,17 @@ def dual_stage_quadratic_hip_attention(
             HEAD_GROUP=HEAD // HEAD_KV,
         )
         
+        head_reduced_out_scores = out_scores.sum(dim=-2, keepdim=True).values
+        _, t_indices = head_reduced_out_scores.topk(dim=-1, k=second_stage_k // chunk_size // 8)
+        out_scores.scatter_(dim=-1, index=t_indices, value=32000.0)
+        
+        # local_chunk_size = 8
+        # local_drop_chunk_count = 4
+        # out_scores = out_scores.view(out_scores.shape[0], out_scores.shape[1], out_scores.shape[2], out_scores.shape[3] // local_chunk_size, local_chunk_size)
+        # _, t_indices = out_scores.topk(dim=-1, k=local_drop_chunk_count, sorted=False, largest=False)
+        # out_scores.scatter_(dim=-1, index=t_indices, value=-32000.0)
+        # out_scores = out_scores.flatten(-2, -1)
+        
         _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
         indices_left = indices_left.gather(dim=-1, index=t_indices)
         indices_right = indices_right.gather(dim=-1, index=t_indices)
@@ -966,6 +1032,7 @@ def dual_stage_quadratic_hip_attention(
                     t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
                     debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
             cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
+            print(f'saved dummy_sampled_stage_{i_stage}.png')
     
     assert (second_stage_k % chunk_size) == 0
     indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
@@ -978,19 +1045,20 @@ def dual_stage_quadratic_hip_attention(
         for i in range(out_indices_cpu.shape[1]):
             for j in range(indices.shape[-1]):
                 if j >= out_indices_cpu.shape[-1]: continue
-                t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
+                t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
                 debug[i, t:t+1] = 1
         cv2.imwrite('dummy_sampled_final.png', debug * 255)
+        print('saved dummy_sampled_final.png')
     
     args = args.clone()
-    args.sliding_window_size *= 2
+    args.sliding_window_size += args.mask_k
     # args.sink_token_size += BLOCK_SIZE_Q
     args.block_size_k = chunk_size
     args.mask_k = second_stage_k
     
-    idx_tdst = torch.arange(0, TDST, device=q.device)
-    seq_lens = position_ids\
-        .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
+    # idx_tdst = torch.arange(0, TDST, device=q.device)
+    # seq_lens = position_ids\
+    #     .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
     
     # repeated_seq_lens = seq_lens[:, ::BLOCK_SIZE_Q].repeat_interleave(HEAD, 0)
     # ks_seed = indices
@@ -1062,11 +1130,228 @@ def dual_stage_quadratic_hip_attention(
         )
         
         return context
+
+def dual_stage_quadratic_scan_hip_attention(
+    q: Tensor, 
+    k: Optional[Tensor], 
+    v: Optional[Tensor], 
+    scan_chunk_size: int,
+    scan_k: int,
+    args: HiPAttentionArgs,
     
+    scan_block_k: int = 64,
+    # scan_block_q: int = 64,
+    scan_block_stride_q: int = 4,
+):
+    DEBUG_HEAD = -11
+    global DEBUG
+    
+    BSZ, TDST, HEAD, HID = q.shape
+    BSZ, TSRC, HEAD_KV, HID = k.shape
+    assert v.shape == k.shape
+    # assert TDST == TSRC
+    
+    args = args.clone()
+    args.sliding_window_size = max(0, args.sliding_window_size - scan_chunk_size)
+    
+    chunk_size = scan_chunk_size
+    chunk_count = triton.cdiv(TSRC - args.sink_token_size - args.sliding_window_size, chunk_size)
+    # assert (chunk_size * chunk_count) == TSRC
+    
+    MAX_TDST = TDST
+    MAX_TSRC = TSRC
+    
+    if args.position_ids is not None:
+        position_ids = args.position_ids
+    else:
+        position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[None, :].expand(BSZ, TDST)
+    assert position_ids.shape == (BSZ, TDST)
+    
+    BLOCK_CHUNK=scan_block_k
+    BLOCK_SIZE_Q=args.block_size_q
+    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
+    
+    indices_left = torch.zeros(
+        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, chunk_count), 
+        device=q.device,
+        dtype=torch.int64
+    )
+    indices_right = torch.zeros(
+        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, chunk_count), 
+        device=q.device,
+        dtype=torch.int64
+    )
+    
+    indices_left[:, :, :, :] = (
+        torch.floor(
+            torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
+        ).to(torch.int64)
+    )[None, None, None, :]
+    indices_right[:, :, :, :] = indices_left + chunk_size
+    indices_right.clamp_max_(TSRC - args.sliding_window_size)
+    
+    out_scores = torch.zeros(
+        (BSZ, triton.cdiv(TDST, BLOCK_SIZE_Q), HEAD, chunk_count), 
+        device=q.device,
+        dtype=torch.float16,
+    ).fill_(-32000.0)
+    
+    # print(indices_left[0, -1, 0, :])
+    # print('a', indices_right[0, -1, 0, :])
+    
+    grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * triton.cdiv(TDST, BLOCK_SIZE_Q) * HEAD,)
+    chunk_controllable_sampling_mask_cuda[grid](
+        q, *q.stride(),
+        k, *k.stride(),
+        indices_left, *indices_left.stride(),
+        indices_right, *indices_right.stride(),
+        out_scores, *out_scores.stride(),
+        
+        chunk_count,
+        TSRC,
+        TDST,
+        HEAD,
+        args.sliding_window_size - max(BLOCK_SIZE_Q, BLOCK_CHUNK),
+        args.sink_token_size,
+        
+        BLOCK_HID=q.shape[-1],
+        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+        STRIDE_Q=scan_block_stride_q,
+        BLOCK_CHUNK=BLOCK_CHUNK,
+        HEAD_GROUP=HEAD // HEAD_KV,
+    )
+    
+    # print(indices_left[0, -1, 0, :])
+    # print('a', indices_right[0, -1, 0, :])
+    
+    _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
+    indices_left = indices_left.gather(dim=-1, index=t_indices)
+    # indices_right = indices_right.gather(dim=-1, index=t_indices)
+    indices_left = (
+        indices_left[:, :, :, :triton.cdiv(scan_k, chunk_size)] -\
+        args.sink_token_size
+    ) // chunk_size * chunk_size + args.sink_token_size
+    indices_right = indices_left + chunk_size
+    
+    # print(indices_left.shape)
+    
+    if DEBUG:
+        out_indices_left_cpu = indices_left.cpu()
+        out_indices_right_cpu = indices_right.cpu()
+        debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+        for i in range(out_indices_left_cpu.shape[1]):
+            for j in range(out_indices_left_cpu.shape[-1]):
+                debug[i, out_indices_left_cpu[0, i, DEBUG_HEAD, j]//BLOCK_SIZE_Q:out_indices_right_cpu[0, i, DEBUG_HEAD, j]//BLOCK_SIZE_Q] = 1
+        cv2.imwrite('dummy_sampled.png', debug * 255)
+        print('saved dummy_sampled.png')
+
+    idx_tdst = torch.arange(0, TDST, device=q.device)
+    seq_lens = position_ids\
+        .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
+    
+    indices_seed = indices_left.permute(0, 2, 1, 3).flatten(0, 1)
+    group_size_seed = (indices_right - indices_left).permute(0, 2, 1, 3).flatten(0, 1)
+    
+    BK = args.mask_k // args.block_size_k
+    indices_seed_padded = torch.full(
+        (indices_seed.shape[0], indices_seed.shape[1], BK),
+        dtype=indices_seed.dtype,
+        device=q.device,
+        fill_value=MAX_TSRC * args.block_size_k + 1,
+    )
+    indices_seed_padded[:, :, :indices_seed.shape[-1]] = indices_seed
+    indices_seed, indices_permute = indices_seed_padded.sort(dim=-1)
+    
+    group_size_seed_padded = torch.zeros(
+        (group_size_seed.shape[0], group_size_seed.shape[1], BK),
+        dtype=group_size_seed.dtype,
+        device=q.device,
+    )
+    group_size_seed_padded[:, :, :group_size_seed.shape[-1]] = group_size_seed
+    group_size_seed = group_size_seed_padded.gather(dim=-1, index=indices_permute)
+    
+    ks_seed = torch.full(
+        (indices_seed.shape[0], indices_seed.shape[1]), 
+        dtype=torch.int32, 
+        device=q.device, 
+        fill_value=indices_seed.shape[-1]
+    )
+    
+    (
+        indices, 
+        ks, 
+        ks_count, 
+        ks_start_end, 
+        scores, 
+        group_sizes, 
+        key_access_log, 
+        key_access_count,
+        block_access_log,
+        block_access_score,
+        block_access_count,
+    ) = masking_iteration_draft(
+        q=q, 
+        k=k, 
+        position_ids=seq_lens, 
+        indices_tdst=idx_tdst,
+        args=args,
+        indices_seed=indices_seed,
+        ks_seed=ks_seed,
+        group_size_seed=group_size_seed // args.block_size_k,
+        max_group_size_seed=chunk_size // args.block_size_k,
+        scores_seed=None,
+    )
+    
+    # print(
+    #     q.shape, k.shape,
+    #     TDST, 
+    #     TSRC, 
+    #     seq_lens[0, -1],
+    #     idx_tdst[-1],
+    #     # indices_seed[DEBUG_HEAD, -1], 
+    #     indices[DEBUG_HEAD, -1], 
+    #     ks[DEBUG_HEAD, -1]
+    # )
+    
+    HIP_DEBUG_MASK_UNIQUE = os.getenv('HIP_DEBUG_MASK_UNIQUE', '0') == '1'
+    if HIP_DEBUG_MASK_UNIQUE:
+        # indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+        indices = indices.sort(dim=-1).values
+        # active_mask = unique_mask
+        active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+        ks = active_mask.int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end[:, :, -1] = ks
+    
+    if DEBUG:
+        out_indices_cpu = indices.cpu()
+        debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+        for i in range(out_indices_cpu.shape[1]):
+            for j in range(out_indices_cpu.shape[-1]):
+                debug[i, out_indices_cpu[DEBUG_HEAD, i, j] // BLOCK_SIZE_Q : out_indices_cpu[DEBUG_HEAD, i, j]//BLOCK_SIZE_Q + 1] = 1
+        cv2.imwrite('dummy_sampled_after.png', debug * 128 + 128)
+        print('saved dummy_sampled_after.png')
+    
+    args.sliding_window_size += scan_chunk_size
+    
+    context = block_sparse_attention(
+        q=q, k=k, v=v,
+        seq_lens=position_ids + 1,
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        args=args
+    )
+    
+    return context
+
 def main_debug():
     global DEBUG
     
-    seq_len = 1024
+    seq_len = 65536
     seq_dups = int(os.getenv('DUPS', '1'))
     
     q, k, v, out, cos, sin = load_checkouts(
@@ -1131,7 +1416,7 @@ def main_debug():
         end = torch.cuda.Event(True)
         
         start.record()
-        if i==0: DEBUG = False
+        if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
         
         # dual_stage_hip_attention(
         #     q, k, v,
@@ -1171,7 +1456,7 @@ def main_debug():
         dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
-                mask_k=512,
+                mask_k=256,
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
@@ -1179,16 +1464,31 @@ def main_debug():
                 sink_token_size=256,
                 # position_ids=position_ids,
             ),
-            second_stage_k=1024,
+            second_stage_k=2048,
             stages=[
                 # (128, 8192),
-                (256, 64*1024),
-                (128, 16*1024),
-                (32, 4*1024),
+                # (128, 65536),
+                # (64, 16384),
+                (64, 8192),
                 # (16, 1024),
             ],
-            mask_only=False,
         )
+        
+        # dual_stage_quadratic_scan_hip_attention(
+        #     q, k, v,
+        #     scan_chunk_size=512,
+        #     scan_k=32768,
+        #     args=HiPAttentionArgs(
+        #         mask_k=512,
+        #         block_size_q=64,
+        #         block_stride_q=2,
+        #         block_size_k=2, # BLOCK_CHUNK
+        #         block_stride_k=1,
+        #         sliding_window_size=256,
+        #         sink_token_size=256,
+        #         # position_ids=position_ids,
+        #     )
+        # )
         
         if i==0: DEBUG = False
         end.record()

@@ -97,9 +97,9 @@ def job_stream(args, model, tokenizer, device):
                         import triton
                         input_ids_len = inputs['input_ids'].shape[-1]
                         target_index = input_ids_len - 1
-                        pad_size = 32
+                        pad_size = 128
                         padded_inputs = torch.zeros(
-                            (input_ids_len + 256, ), 
+                            (input_ids_len + pad_size * 4, ), 
                             dtype=torch.long, 
                             device=inputs['input_ids'].device
                         )

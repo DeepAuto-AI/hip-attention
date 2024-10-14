@@ -68,4 +68,13 @@ def job_passkey(args, model, tokenizer, device):
                 acc_count += 1
         accuracy[accuracy_key] = (acc_sum, acc_count)
         
+        accuracy_key = (seq_len,)
+        acc_sum, acc_count = accuracy.get(accuracy_key, (0, 0))
+        for x, y in zip(truth, est):
+            for cx, cy in zip(x, y):
+                if cx == cy:
+                    acc_sum += 1
+                acc_count += 1
+        accuracy[accuracy_key] = (acc_sum, acc_count)
+        
         tqdm.write(f"current accuracy { {k: f'{v[0] / (v[1] + 1e-20)*100:.2f}' for k, v in accuracy.items()} } | {truth[0]}, {est[0]}")
