@@ -3,8 +3,12 @@ import math
 import torch
 from torch.utils.data import Dataset
 import numpy as np
+import tqdm
 
-PREFIX = """<|start_header_id|>system<|end_header_id|>
+IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
+
+if not IS_GEMMA:
+    PREFIX = """<|start_header_id|>system<|end_header_id|>
 
 Cutting Knowledge Date: December 2023
 Today Date: 26 Jul 2024
@@ -14,8 +18,20 @@ Today Date: 26 Jul 2024
 There is a pass key hidden inside a lot of irrelevant text. Find the pass key and memorize it. I will quiz you about the the pass key.
 
 """
-FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
-QUERY = """\n So now, I will ask the question. What is the five digit pass key?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    QUERY = """\n So now, I will ask the question. What is the five digit pass key?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Sure! I surely remember the five digits pass key. The pass key is $"""
+else:
+    PREFIX = """<start_of_turn>user
+
+There is a pass key hidden inside a lot of irrelevant text. Find the pass key and memorize it. I will quiz you about the the pass key.
+
+"""
+    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    QUERY = """\n So now, I will ask the question. What is the five digit pass key?
+<end_of_turn>
+<start_of_turn>assistant
 
 Sure! I surely remember the five digits pass key. The pass key is $"""
 
@@ -52,18 +68,30 @@ def gen_text():
     filler_len = int(len(FILLER_TEXT[:-1].split(" ")) * 1.275)
     query_len = int(len(QUERY[:-1].split(" ")) * 1.275)
 
+    n_samples = int(os.getenv('PASSKEY_SAMPLES', '100'))
     inputs, targets = [], []
-    # prompt_lens = [2000, 4000, 8000, 16000, 32000, 64000]
-    # prompt_lens = [2000, 4000, 8000, 16000, 32000]
-    # prompt_lens = [16000, 32000, 64000, 128000]
-    # prompt_lens = [2000, 4000, 8000, 16000, 32000, 64000, 128000]
-    prompt_lens = [128000, 64000, 32000, 16000, 8000, 4000]
-    # prompt_lens = [32000]
-    # prompt_lens.reverse()
+    if os.getenv('PASSKEY_MAX_LEN', '0') != '0':
+        start_seq = int(os.getenv('PASSKEY_MAX_LEN', '0'))
+        prompt_lens = []
+        while int(start_seq) >= 4:
+            prompt_lens.append(int(start_seq) * 1000)
+            if start_seq > 32:
+                start_seq = max(start_seq - 32, 32)
+            else:
+                start_seq /= 2
+        print('passkey sequences', prompt_lens)
+    else:
+        # prompt_lens = [2000, 4000, 8000, 16000, 32000, 64000]
+        # prompt_lens = [2000, 4000, 8000, 16000, 32000]
+        # prompt_lens = [16000, 32000, 64000, 128000]
+        # prompt_lens = [2000, 4000, 8000, 16000, 32000, 64000, 128000]
+        prompt_lens = [128000, 64000, 32000, 16000, 8000, 4000]
+        # prompt_lens = [32000]
+        # prompt_lens.reverse()
 
     for l in prompt_lens:
         n_fillers = (l - prefix_len - query_len) // filler_len + 1
-        for i in range(100):
+        for i in range(n_samples):
 
             text = [PREFIX] + [FILLER_TEXT] * n_fillers
 
@@ -86,7 +114,7 @@ def gen_dataset(tokenizer):
     inputs, targets = gen_text()
 
     x, y = [], []
-    for inp, tgt in zip(inputs, targets):
+    for inp, tgt in tqdm.tqdm(list(zip(inputs, targets)), dynamic_ncols=True, leave=False, delay=3, desc='passkey'):
         x += [
             tokenizer(
                 inp, 

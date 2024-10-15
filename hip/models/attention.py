@@ -33,8 +33,8 @@ def custom_attention(
     tree_enable_flash=False, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
-    tree_sliding_window_size=256,
-    tree_sink_token_size=128,
+    tree_sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
+    tree_sink_token_size=256,
 
     # Context averaging parameters
     tree_using_context_avg=False, 
@@ -59,6 +59,7 @@ def custom_attention(
     sm_scaler=None,
     attn_logit_softcapping=0,
     model_sliding_window=None,
+    model_context_length=131072,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -289,6 +290,7 @@ def custom_attention(
                     dual_stage_quadratic_hip_attention,
                     dual_stage_quadratic_scan_hip_attention,
                 )
+                from hip.models.hip_attention.attention2_draft_sampling_extend import dual_stage_quadratic_hip_attention as dual_stage_quadratic_hip_attention_extend
                 
                 q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)
@@ -316,26 +318,33 @@ def custom_attention(
                 #         position_ids=position_ids,
                 #     )
                 # )
-                
-                attn_output_hip = dual_stage_quadratic_hip_attention(
+    
+                # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype)
+                IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
+                attn_output_hip = dual_stage_quadratic_hip_attention_extend(
                     q, k, v,
                     args=HiPAttentionArgs11(
-                        mask_k=256,
-                        block_size_q=64,
-                        block_stride_q=4,
-                        block_size_k=64, # BLOCK_CHUNK
-                        sliding_window_size=256,
-                        sink_token_size=256,
                         position_ids=position_ids,
+                        
+                        mask_k=256,
+                        block_size_q=32 if IS_GEMMA else 64,
+                        block_stride_q=2 if IS_GEMMA else 4,
+                        block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
+                        
+                        sliding_window_size=tree_sliding_window_size,
+                        sink_token_size=tree_sink_token_size,
+                        
+                        using_extend=tree_rope_method != 'none',
+                        rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                        rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                        
+                        logit_softcap=attn_logit_softcapping,
                     ),
                     second_stage_k=2048,
                     stages=[
-                        # (128, 8192),
-                        # (128, 65536),
-                        # (64, 16384),
-                        (64, 8192),
-                        # (16, 1024),
+                        (32 if IS_GEMMA else 64, 8192),
                     ],
+                    model_context_length=model_context_length,
                 )
                 
                 # attn_output_hip = sampling_only_attention(

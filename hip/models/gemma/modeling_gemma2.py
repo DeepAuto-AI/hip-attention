@@ -301,39 +301,9 @@ class Gemma2CustomAttention(Gemma2Attention):
         self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
         self.tree_sliding_window_size = 256
+        self.tree_sink_token_size = 256
 
         self.tree_reformer = self.tree_performer = None
-
-        if self.attention_method == 'reformer':
-            try:
-                from reformer_pytorch import LSHAttention
-                self.tree_reformer = LSHAttention(
-                    dropout=config.attention_dropout,
-                    bucket_size=self.tree_k,
-                    n_hashes=8,
-                    causal=True,
-                )
-            except ImportError:
-                logger.error("Please install reformer-pytorch to use Reformer attention.")
-                raise
-
-        elif self.attention_method == 'performer':
-            try:
-                from performer_pytorch import FastAttention
-                if not os.environ.get('IGNORE_PERFORMER', '0') == '1':
-                    dim_heads = config.hidden_size // config.num_attention_heads
-                    default_dtype = torch.get_default_dtype()
-                    torch.set_default_dtype(torch.float32)
-                    self.tree_performer = FastAttention(
-                        dim_heads=dim_heads,
-                        nb_features=int(dim_heads * (dim_heads ** 0.5)),  # NOTE: this may lead OOM
-                        # nb_features=dim_heads,
-                        causal=True,
-                    )
-                    torch.set_default_dtype(default_dtype)
-            except ImportError:
-                logger.error("Please install performer-pytorch to use Performer attention.")
-                raise
         
         from hip.models.hyper_attention.hyper_attn import HyperAttention
         self.hyper_attention = HyperAttention(
@@ -365,7 +335,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
                 self.tree_k = 1024
-                self.tree_sliding_window_size = 1024
+                self.tree_sliding_window_size = 4096
                 self.tree_dense_layers.clear()
             self.tree_rope_method = 'self_extend'
             # if self.sliding_window != None:
@@ -484,6 +454,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             tree_enable_flash=self.tree_enable_flash,
             tree_enable_sparq=self.tree_enable_sparq,
             tree_use_sliding_window=self.tree_use_sliding_window,
+            tree_sink_token_size=self.tree_sink_token_size,
 
             # Context averaging parameters
             tree_using_context_avg=False,
@@ -508,6 +479,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             sm_scaler=self.scaling,
             attn_logit_softcapping=self.config.attn_logit_softcapping,
             model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
+            model_context_length=4096,
         )
         attn_output = attn_output[:, :, :q_len]
 
@@ -1426,7 +1398,7 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         cache_position=None,
         position_ids=None,
         use_cache=True,
-        num_logits_to_keep=None,
+        num_logits_to_keep=1,
         **kwargs,
     ):
         # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
@@ -1470,16 +1442,17 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
                 device = model_inputs["input_ids"].device
             dtype = self.lm_head.weight.dtype
             min_dtype = torch.finfo(dtype).min
-            attention_mask = _prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask,
-                sequence_length=sequence_length,
-                target_length=past_key_values.get_max_length(),
-                dtype=dtype,
-                device=device,
-                min_dtype=min_dtype,
-                cache_position=cache_position,
-                batch_size=batch_size,
-            )
+            # attention_mask = None
+            # attention_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+            #     attention_mask,
+            #     sequence_length=sequence_length,
+            #     target_length=past_key_values.get_max_length(),
+            #     dtype=dtype,
+            #     device=device,
+            #     min_dtype=min_dtype,
+            #     cache_position=cache_position,
+            #     batch_size=batch_size,
+            # )
 
         if num_logits_to_keep is not None:
             model_inputs["num_logits_to_keep"] = num_logits_to_keep

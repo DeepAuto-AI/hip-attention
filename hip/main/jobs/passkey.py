@@ -7,9 +7,11 @@ import numpy as np
 from hip.dataset.passkey import Passkey
 from vllm import LLM, SamplingParams
 
-def get_numbers(s):
+def get_numbers(s, cnt):
     lst = [c for c in s if c.isdigit()]
     # print(lst, s)
+    if len(lst) < cnt:
+        lst += ['_'] * (cnt - len(lst))
     return ''.join(lst)
 
 def job_passkey(args, model, tokenizer, device):
@@ -48,8 +50,9 @@ def job_passkey(args, model, tokenizer, device):
                 )
                 output = output[:, input_ids.shape[1]:]
     
+        # tqdm(tokenizer.batch_decode(output))
         truth = tokenizer.batch_decode(target_ids)
-        est = [get_numbers(s.strip())[:5] for s in (output if isinstance(output[0], str) else tokenizer.batch_decode(output))]
+        est = [get_numbers(s.strip(), 5)[:5] for s in (output if isinstance(output[0], str) else tokenizer.batch_decode(output))]
         
         t = tokenizer.batch_decode(input_ids)[0] # type: str
         e = truth[0] # type: str

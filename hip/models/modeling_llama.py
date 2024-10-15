@@ -27,6 +27,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+import tqdm
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
@@ -555,6 +556,8 @@ class LlamaCustomAttention(LlamaAttention):
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+        cos_all, sin_all = self.rotary_emb(value_states, torch.arange(0, key_states.shape[-2], device=query_states.device)[None, :])
+        
         # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         # if attention_mask is not None:  # no matter the length, we just slice it
@@ -575,55 +578,115 @@ class LlamaCustomAttention(LlamaAttention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-        attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
-            query_states=query_states, 
-            key_states=key_states, 
-            value_states=value_states,
-            attention_mask=attention_mask, 
-            causal_mask=causal_mask,
-            attention_dropout=self.attention_dropout if self.training else 0.0,
+        force_extend = True
+        model_context_length = 65536
 
-            # Attention method
-            attention_method='fa2' if self.layer_idx in self.tree_dense_layers else self.attention_method,
-            tree_reformer=self.tree_reformer,
-            tree_performer=self.tree_performer,
+        if force_extend and (self.layer_idx in self.tree_dense_layers):
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask, 
+                causal_mask=causal_mask,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
 
-            # hip parameters
-            tree_k=mask_k,
-            tree_block_size_q=self.tree_block_size_q,
-            tree_block_stride_q=self.tree_block_stride_q, 
-            tree_block_size_k=self.tree_block_size_k,
-            tree_block_stride_k=self.tree_block_stride_k, 
-            tree_dense_queries=self.tree_dense_queries,
-            tree_last_dense_queries=self.tree_last_dense_queries,
-            tree_sampling_method=self.tree_sampling_method,
+                # Attention method
+                attention_method='hip',
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
 
-            # Latency optimization tweaks
-            tree_enable_flash=self.tree_enable_flash,
-            tree_enable_sparq=self.tree_enable_sparq,
-            tree_use_sliding_window=self.tree_use_sliding_window,
+                # hip parameters
+                tree_k=1,
+                tree_block_size_q=64,
+                tree_block_stride_q=4, 
+                tree_block_size_k=64,
+                tree_block_stride_k=4, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
 
-            # Context averaging parameters
-            tree_using_context_avg=False,
-            tree_avgpool_scaler=None,
-            last_cumsum=None,
-            hidden_states=hidden_states,
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+                tree_sink_token_size=256,
+                tree_sliding_window_size=7680,
 
-            # RoPE parameters
-            tree_rope_method=self.tree_rope_method,
-            rope_cos=cos,
-            rope_sin=sin,
-            position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
 
-            # Attention sparsity loss
-            output_attn_sparsity_loss=output_attn_sparsity_loss,
-            tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-            
-            # Hyper attention states
-            hyper_attention=self.hyper_attention,
-            
-            sm_scaler=1 / math.sqrt(self.head_dim),
-        )
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                rope_cos=cos_all,
+                rope_sin=sin_all,
+                position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=self.hyper_attention,
+                
+                sm_scaler=1 / math.sqrt(self.head_dim),
+                model_sliding_window=None if not force_extend else 131072,
+                model_context_length=model_context_length,
+            )
+        else:
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask, 
+                causal_mask=causal_mask,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
+
+                # Attention method
+                attention_method='fa2' if (self.layer_idx in self.tree_dense_layers) else self.attention_method,
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
+
+                # hip parameters
+                tree_k=mask_k,
+                tree_block_size_q=self.tree_block_size_q,
+                tree_block_stride_q=self.tree_block_stride_q, 
+                tree_block_size_k=self.tree_block_size_k,
+                tree_block_stride_k=self.tree_block_stride_k, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
+
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
+
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                rope_cos=cos_all,
+                rope_sin=sin_all,
+                position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=self.hyper_attention,
+                
+                sm_scaler=1 / math.sqrt(self.head_dim),
+                model_sliding_window=None if not force_extend else 131072,
+                model_context_length=model_context_length,
+            )
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -1310,7 +1373,7 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for decoder_layer in tqdm.tqdm(self.layers, desc='decoder', delay=3, leave=False, dynamic_ncols=True):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 

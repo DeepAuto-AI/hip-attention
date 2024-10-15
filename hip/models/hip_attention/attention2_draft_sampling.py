@@ -893,7 +893,7 @@ def dual_stage_quadratic_hip_attention(
     # print(indices_left[0, -1, 0].sort().values)
     # print(indices_right[0, -1, 0].sort().values)
     
-    VANILLA = False
+    VANILLA = True
     
     grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * triton.cdiv(TDST, BLOCK_SIZE_Q) * HEAD,)
     chunk_controllable_sampling_mask_cuda[grid](

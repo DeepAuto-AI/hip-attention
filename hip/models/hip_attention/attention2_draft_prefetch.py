@@ -570,8 +570,10 @@ def adjust_rope(
         other=0,
     )
     
-    tokens = de_rope(tokens, cos_old, sin_old, T, HID)
-    tokens = apply_rope(tokens, cos_new, sin_new, T, HID)
+    tokens_adjusted = de_rope(tokens.to(tl.float32), cos_old.to(tl.float32), sin_old.to(tl.float32), T, HID)
+    tokens_adjusted = apply_rope(tokens_adjusted.to(tl.float32), cos_new.to(tl.float32), sin_new.to(tl.float32), T, HID)
+    
+    tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
     
     return tokens
 
@@ -1248,6 +1250,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             elif EXTEND_BACKEND == 'streaming':
                 assert COS is not None
                 assert SIN is not None
+                
+                # tl.static_print(idx_tsrc.shape, mask_keys.shape, idx_bk.shape)
                 
                 old_tsrc = idx_tsrc
                 new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
@@ -4461,8 +4465,10 @@ def block_sparse_attention_cuda_step(
     # TSRC,
     
     sliding_window_size,
+    sink_token_size,
     mask_k,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
+    HAS_FIRST_TOKEN: tl.constexpr,
     LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
@@ -4470,6 +4476,7 @@ def block_sparse_attention_cuda_step(
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    model_context_length,
     
     idx_bk,
     pos_tdst,
@@ -4567,40 +4574,64 @@ def block_sparse_attention_cuda_step(
                 t_grouped,
             ).to(tl.float32) * 1.44269504
         elif EXTEND_BACKEND == 'streaming':
-            if tl.min(pos_tdst) > (mask_k + sliding_window_size):
+            pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
+            # if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
+            if (EXCLUDE_SLIDING_WINDOW) and True:
                 assert COS is not None
                 assert SIN is not None
                 
-                old_tsrc = idx_tsrc
-                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
-                    tl.maximum(0, 
-                        tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321)) -\
-                            sliding_window_size -\
-                            mask_k
-                    )
-                new_tsrc = tl.where(mask_tsrc, new_tsrc, old_tsrc)
+                # tl.static_assert((idx_tsrc.dtype == tl.int32) | (idx_tsrc.dtype == tl.int64))
+                # tl.static_assert((idx_bk.dtype == tl.int32) | (idx_bk.dtype == tl.int64))
+                # tl.static_print('hi', idx_tsrc.shape, mask_tsrc.shape, idx_hid.shape)
+                # tl.static_print(idx_bk.shape)
                 
-                keys_adjusted = keys.trans(1, 0)
-                keys_adjusted = adjust_rope(
-                    keys_adjusted, 
-                    old_tsrc, 
-                    new_tsrc, 
-                    mask_tsrc,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_TK, 
-                    HID,
-                )
-                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
-                keys_adjusted = keys_adjusted * mask_tsrc[None, :]
+                if HAS_FIRST_TOKEN:
+                    old_tdst = (pos_tdst - 1)
+                    new_tdst = old_tdst * 0 + sliding_window_size + mask_k + sink_token_size - 1
+                    
+                    queries_adjusted = adjust_rope(
+                        queries, 
+                        old_tdst, 
+                        new_tdst, 
+                        mask_tdst & (old_tdst != 0),
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_TQ, 
+                        HID,
+                    )
+                    
+                    keys_adjusted = keys
+                else:
+                    old_tsrc = idx_tsrc
+                    new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ)
+                    
+                    keys_adjusted = keys.trans(1, 0)
+                    # tl.static_print(keys_adjusted.shape)
+                    keys_adjusted = adjust_rope(
+                        keys_adjusted, 
+                        old_tsrc, 
+                        new_tsrc, 
+                        mask_tsrc & (old_tsrc != 0),
+                        # old_tsrc == new_tsrc,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_TK, 
+                        HID,
+                    )
+                    keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                    # keys_adjusted = keys_adjusted * mask_tsrc[None, :]
+                    
+                    queries_adjusted = queries
                 
                 qk = tl.dot(
-                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                    (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
                     (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                     out_dtype=tl.float32,
                     allow_tf32=True,
-                ).to(tl.float32) 
+                ).to(tl.float32)
                 # if LOGIT_SOFTCAP is not None:
                 #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
                 # qk = qk * 1.44269504
@@ -4616,6 +4647,60 @@ def block_sparse_attention_cuda_step(
                 # qk = qk * 1.44269504
             # if USING_EXTEND:
             #     qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
+            if LOGIT_SOFTCAP is not None:
+                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+            qk = qk * 1.44269504
+        elif EXTEND_BACKEND == 'dynamic_extend':
+            assert COS is not None
+            assert SIN is not None
+            
+            pos_tdst_min = tl.min(tl.where(mask_tdst, tl.maximum(0, pos_tdst - 1), 987654321))
+            if pos_tdst_min >= model_context_length and EXCLUDE_SLIDING_WINDOW:
+                old_tsrc = idx_tsrc
+                
+                old_tdst = (pos_tdst - 1)
+                new_tdst = old_tdst * 0 + model_context_length - 1
+                new_tdst = old_tdst // 16
+                
+                queries = adjust_rope(
+                    queries, 
+                    old_tdst, 
+                    new_tdst, 
+                    mask_tdst,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_TQ, HID,
+                ).to(queries.dtype)
+                queries = (queries * mask_tdst[:, None]).to(queries.dtype)
+                
+                new_tsrc = (old_tsrc / tl.maximum(1.0, (pos_tdst_min + 1) / model_context_length)).to(tl.int32)
+                new_tsrc = old_tsrc // 16
+                
+                keys_adjusted = keys.trans(1, 0)
+                keys_adjusted = adjust_rope(
+                    keys_adjusted, 
+                    old_tsrc, 
+                    new_tsrc, 
+                    mask_tsrc,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_TK,
+                    HID,
+                ).to(keys.dtype)
+                keys_adjusted = tl.trans(keys_adjusted, 1, 0).to(keys.dtype)
+                keys_adjusted = (keys_adjusted * mask_tsrc[None, :]).to(keys.dtype)
+            else:
+                keys_adjusted = keys
+            
+            qk = tl.dot(
+                (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                out_dtype=tl.float32,
+                allow_tf32=True,
+            ).to(tl.float32)
+            
             if LOGIT_SOFTCAP is not None:
                 qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
             qk = qk * 1.44269504
@@ -4713,7 +4798,7 @@ def get_block_sparse_attention_configs():
         defaults = {
             'NVIDIA A100-SXM4-80GB': dict(
                 num_warps=4, 
-                num_stages=2, 
+                num_stages=2,
                 maxnreg=256,
             ),
         }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=256))
@@ -4790,6 +4875,7 @@ def block_sparse_attention_cuda(
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    model_context_length,
     
     # paged attention args template
     USING_PAGES: tl.constexpr,
@@ -4844,6 +4930,7 @@ def block_sparse_attention_cuda(
     
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
+    EXTEND_BACKEND: tl.constexpr,
 ):
     pid_bsz = tl.program_id(2).to(tl.int64)
     pid_bdst = tl.program_id(1).to(tl.int64)
@@ -4917,7 +5004,7 @@ def block_sparse_attention_cuda(
         range_start = 0
         range_end = 0
     
-    if (BK > 0):
+    if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
@@ -5054,8 +5141,10 @@ def block_sparse_attention_cuda(
                     acc, l_i, m_i,
                     
                     sliding_window_size,
+                    sink_token_size,
                     (range_end - range_start) * BLOCK_SIZE_K,
                     True,
+                    False,
                     LOGIT_SOFTCAP,
                     
                     USING_EXTEND,
@@ -5063,8 +5152,9 @@ def block_sparse_attention_cuda(
                     extend_group_size,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
+                    model_context_length,
                     
-                    idx_bk,
+                    idx_bk + sink_token_size // BLOCK_SIZE_K,
                     pos_tdst,
                     idx_hid, 
                     IS_CAUSAL,
@@ -5072,6 +5162,8 @@ def block_sparse_attention_cuda(
                     BLOCK_SIZE_Q, 
                     BLOCK_BK * BLOCK_SIZE_K,
                     BLOCK_SIZE_K,
+                    
+                    EXTEND_BACKEND=EXTEND_BACKEND,
                 )
             else:
                 pass
@@ -5189,7 +5281,9 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i,
                 
                 sliding_window_size,
+                sink_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
+                True,
                 True,
                 LOGIT_SOFTCAP,
                 
@@ -5198,6 +5292,7 @@ def block_sparse_attention_cuda(
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
+                model_context_length, 
                 
                 tl.arange(0, BLOCK_BK) +\
                     i_tsrc // BLOCK_SIZE_K,
@@ -5208,6 +5303,8 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
+                
+                EXTEND_BACKEND=EXTEND_BACKEND,
             )
     
     if (sliding_window_size > 0):
@@ -5327,7 +5424,9 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i,
                 
                 sliding_window_size,
+                sink_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
+                False,
                 False,
                 LOGIT_SOFTCAP,
                 
@@ -5336,9 +5435,11 @@ def block_sparse_attention_cuda(
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
+                model_context_length, 
                 
                 tl.arange(0, BLOCK_BK) +\
                     (range_end - range_start) +\
+                    (sink_token_size // BLOCK_SIZE_K) +\
                     (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
                 pos_tdst,
                 idx_hid, 
@@ -5347,6 +5448,8 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
+                
+                EXTEND_BACKEND=EXTEND_BACKEND,
             )
     
     # epilogue
@@ -5378,6 +5481,9 @@ def block_sparse_attention(
     ks_start_end: Tensor,
     
     args: "HiPAttentionArgs",
+    
+    EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,
+    model_context_length: int = 131072,
 ):
     if os.getenv('HIP_DEBUG_SA', '0') == '1':
         return block_sparse_attention_pytorch(
@@ -5416,7 +5522,7 @@ def block_sparse_attention(
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
     
-    BLOCK_BK = 64 // args.block_size_k
+    BLOCK_BK = 32 // args.block_size_k
     BLOCK_BK = max(1, min(32, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
         BLOCK_BK = int(os.environ['BLOCK_BK'])
@@ -5472,6 +5578,7 @@ def block_sparse_attention(
         args.logit_softcap,
         
         *args.args_extend(),
+        model_context_length,
         *args.args_paged_kv_cache(),
         *args.args_offload_cache(is_masking=False),
         
@@ -5483,6 +5590,7 @@ def block_sparse_attention(
         HID,
         # 2,
         BLOCK_BK=BLOCK_BK,
+        EXTEND_BACKEND=EXTEND_BACKEND,
         
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
