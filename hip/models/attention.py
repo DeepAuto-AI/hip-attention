@@ -290,7 +290,9 @@ def custom_attention(
                     dual_stage_quadratic_hip_attention,
                     dual_stage_quadratic_scan_hip_attention,
                 )
-                from hip.models.hip_attention.attention2_draft_sampling_extend import dual_stage_quadratic_hip_attention as dual_stage_quadratic_hip_attention_extend
+                from hip.models.hip_attention.attention2_draft_sampling_extend import \
+                    dual_stage_quadratic_hip_attention as \
+                    dual_stage_quadratic_hip_attention_extend
                 
                 q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)

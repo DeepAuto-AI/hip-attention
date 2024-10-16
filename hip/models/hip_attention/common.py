@@ -33,7 +33,7 @@ def load_checkouts(idx = 24, window = 1, seq_len = 4096, dtype = torch.float16, 
     out = out.to(device, dtype=dtype)
     
     if not return_cos_sin:
-        return q, k, v, out
+        return q, k, v, out, None, None
     else:
         cos = cos.to(device, dtype=dtype)
         sin = sin.to(device, dtype=dtype)

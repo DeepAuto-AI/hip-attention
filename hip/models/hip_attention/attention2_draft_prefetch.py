@@ -49,7 +49,7 @@ def cdiv_python(a, b):
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
 EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ.get('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
-DEFAULT_EXTEND_BACKEND = tl.constexpr(os.environ.get('HIP_EXTEND_BACKEND', 'streaming'))
+DEFAULT_EXTEND_BACKEND: tl.constexpr = os.environ.get('HIP_EXTEND_BACKEND', 'streaming')
 
 @dataclass
 class HiPAttentionOutputMetadata:
@@ -4575,8 +4575,8 @@ def block_sparse_attention_cuda_step(
             ).to(tl.float32) * 1.44269504
         elif EXTEND_BACKEND == 'streaming':
             pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
-            # if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
-            if (EXCLUDE_SLIDING_WINDOW) and True:
+            if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
+            # if (EXCLUDE_SLIDING_WINDOW) and True:
                 assert COS is not None
                 assert SIN is not None
                 
@@ -4605,7 +4605,7 @@ def block_sparse_attention_cuda_step(
                 else:
                     old_tsrc = idx_tsrc
                     new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ)
+                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
                     
                     keys_adjusted = keys.trans(1, 0)
                     # tl.static_print(keys_adjusted.shape)

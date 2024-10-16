@@ -174,14 +174,8 @@ def chunk_controllable_sampling_mask_cuda(
         if USING_EXTEND:
             if real_pos_tdst_min >= model_context_length:
                 old_tsrc = idx_tsrc
-                # new_tsrc = tl.maximum(0, idx_chunk * 2 + (TSRC - TDST) - CHUNK_COUNT * 2)
-                # new_tsrc = tl.where(mask_tsrc_active, new_tsrc, old_tsrc)
                 
-                # new_tsrc = idx_chunk * 2 + pos_tdst_min - CHUNK_COUNT * 2
-                
-                new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)# + pos_tdst_min - model_context_length
-                
-                # new_tsrc = old_tsrc // 16
+                new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
                 
                 keys_left = keys_left.trans(1, 0)
                 keys_left = adjust_rope(
@@ -203,55 +197,6 @@ def chunk_controllable_sampling_mask_cuda(
             keys_left.to(queries.dtype),
             out_dtype=tl.float32,
         ).to(queries.dtype)
-        
-        # scores_calib = tl.zeros((BLOCK_SIZE_Q // STRIDE_Q, 1), dtype=tl.float32)
-        # if USING_EXTEND:
-        #     if pos_tdst_min >= model_context_length:
-        #         # idx_tsrc_calib = (tl.arange(0, 16) + pos_tdst_min - 16)
-        #         # mask_tsrc_calib = idx_tsrc_calib < TSRC
-        #         # keys_calib = tl.load(
-        #         #     K +\
-        #         #         idx_bsz * stride_k_bsz +\
-        #         #         idx_tsrc_calib[None, :] * stride_k_tsrc +\
-        #         #         (idx_head // HEAD_GROUP) * stride_k_head_kv +\
-        #         #         idx_hid[:, None] * stride_k_hid,
-        #         #     mask=mask_tsrc_calib[None, :],
-        #         #     other=0,
-        #         # )
-        #         # scores_calib_before = tl.dot(
-        #         #     queries,
-        #         #     keys_calib.to(queries.dtype),
-        #         #     out_dtype=tl.float32,
-        #         # ).to(queries.dtype)
-                
-        #         # old_tsrc = idx_tsrc_calib
-        #         # new_tsrc = (old_tsrc / tl.maximum(1.0, pos_tdst_min / model_context_length)).to(tl.int32) + pos_tdst_min - model_context_length
-                
-        #         # keys_calib = keys_calib.trans(1, 0)
-        #         # keys_calib = adjust_rope(
-        #         #     keys_calib, 
-        #         #     old_tsrc, 
-        #         #     new_tsrc, 
-        #         #     mask_tsrc_calib,
-        #         #     idx_hid,
-        #         #     COS, stride_cos_t, stride_cos_hid,
-        #         #     SIN, stride_sin_t, stride_sin_hid,
-        #         #     16, 
-        #         #     BLOCK_HID,
-        #         # ).to(keys_calib.dtype)
-        #         # keys_calib = tl.trans(keys_calib, 1, 0)
-                
-        #         # scores_calib_after = tl.dot(
-        #         #     queries,
-        #         #     keys_calib.to(queries.dtype),
-        #         #     out_dtype=tl.float32,
-        #         # ).to(queries.dtype)
-                
-        #         # scores_calib = (tl.sum(scores_calib_before - scores_calib_after, axis=1, keep_dims=True) / 16).to(tl.float32)
-                
-        #         scores_calib += (pos_tdst_min / model_context_length - 1) * 0
-                
-        #         scores_left = tl.where(((idx_tsrc_left + idx_tsrc_center) // 2)[None, :] < model_context_length, scores_left + scores_calib, scores_left).to(scores_left.dtype)
         
         if REDUCE == 'max':
             scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
@@ -279,11 +224,7 @@ def chunk_controllable_sampling_mask_cuda(
             if real_pos_tdst_min >= model_context_length:
                 old_tsrc = idx_tsrc
                 
-                # new_tsrc = idx_chunk * 2 + 1 + pos_tdst_min - CHUNK_COUNT * 2
-                
-                new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)# + pos_tdst_min - model_context_length
-                
-                # new_tsrc = old_tsrc // 16
+                new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
                 
                 keys_right = keys_right.trans(1, 0)
                 keys_right = adjust_rope(
@@ -306,12 +247,6 @@ def chunk_controllable_sampling_mask_cuda(
             out_dtype=tl.float32,
         ).to(queries.dtype)
         
-        # if USING_EXTEND:
-        #     if pos_tdst_min >= model_context_length:
-        #         scores_right = tl.where(((idx_tsrc_right + idx_tsrc_center) // 2)[None, :] < model_context_length, scores_right + scores_calib, scores_right).to(scores_right.dtype)
-        
-        # scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
-        # scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
         if REDUCE == 'max':
             scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
             scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
@@ -397,6 +332,7 @@ def dual_stage_quadratic_hip_attention(
     ],
     mask_only = False,
     model_context_length = 16384,
+    block_sparse_block_size_q: Optional[int] = 32,
 ):
     DEBUG_HEAD = -1
     global DEBUG
@@ -438,7 +374,7 @@ def dual_stage_quadratic_hip_attention(
     indices_left[:, :, :, :] = (
         torch.floor(
             torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
-        ).to(torch.int64)
+        ).to(indices_left.dtype)
     )[None, None, None, :]
     indices_right[:, :, :, :] = indices_left + chunk_size
     indices_right.clamp_max_(TSRC - args.sliding_window_size)
@@ -460,8 +396,8 @@ def dual_stage_quadratic_hip_attention(
         indices_left, *indices_left.stride(),
         indices_right, *indices_right.stride(),
         out_scores, *out_scores.stride(),
-        args.rope_cos, *args.rope_cos.stride(),
-        args.rope_sin, *args.rope_sin.stride(),
+        args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+        args.rope_sin, *args.safe_stride(args.rope_sin, 2),
         
         chunk_count,
         TSRC,
@@ -550,8 +486,8 @@ def dual_stage_quadratic_hip_attention(
             indices_left, *indices_left.stride(),
             indices_right, *indices_right.stride(),
             out_scores, *out_scores.stride(),
-            args.rope_cos, *args.rope_cos.stride(),
-            args.rope_sin, *args.rope_sin.stride(),
+            args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+            args.rope_sin, *args.safe_stride(args.rope_sin, 2),
             
             chunk_count,
             TSRC,
@@ -603,7 +539,7 @@ def dual_stage_quadratic_hip_attention(
     args.sliding_window_size += args.mask_k
     args.block_size_k = chunk_size
     args.mask_k = second_stage_k
-    args.using_extend = True
+    args.using_extend = args.using_extend and True
     
     indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
     
@@ -618,6 +554,14 @@ def dual_stage_quadratic_hip_attention(
     ks_count = ks.unsqueeze(-1)
     ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
     ks_start_end[:, :, -1] = ks
+    
+    if  (block_sparse_block_size_q is not None) and (block_sparse_block_size_q != args.block_size_q):
+        assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
+        indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+        ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+        ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+        ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+        args.block_size_q = block_sparse_block_size_q
     
     if mask_only:
         return
@@ -644,12 +588,13 @@ def main_debug():
     
     seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
+    using_extend = os.getenv('USING_EXTEND', '1') == '1'
     
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
         window=40, 
         seq_len=seq_len, 
-        return_cos_sin=True, 
+        return_cos_sin=using_extend, 
         dtype=torch.bfloat16
     )
     HEAD = q.shape[0]
@@ -659,8 +604,9 @@ def main_debug():
     q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
     k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
     v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-    cos = cos.repeat(seq_dups, 1)
-    sin = sin.repeat(seq_dups, 1)
+    if cos is not None:
+        cos = cos.repeat(seq_dups, 1)
+        sin = sin.repeat(seq_dups, 1)
     
     from flash_attn import flash_attn_func
     
@@ -721,11 +667,11 @@ def main_debug():
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
-                sliding_window_size=256,
+                sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
                 
-                using_extend=True,
+                using_extend=using_extend,
                 rope_cos=cos,
                 rope_sin=sin,
             ),
@@ -733,6 +679,8 @@ def main_debug():
             stages=[
                 (64, 8192),
             ],
+            block_sparse_block_size_q=32,
+            model_context_length=65536,
         )
         
         if i==0: DEBUG = False
