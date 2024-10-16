@@ -342,7 +342,7 @@ def dual_stage_quadratic_hip_attention(
     assert v.shape == k.shape
     
     chunk_size = args.mask_k
-    chunk_count = triton.cdiv(TSRC - args.sink_token_size - args.sliding_window_size, chunk_size)
+    chunk_count = triton.cdiv(max(0, TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     MAX_TDST = TDST
     MAX_TSRC = TSRC
