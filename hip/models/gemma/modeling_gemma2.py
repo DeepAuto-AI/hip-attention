@@ -381,7 +381,7 @@ class Gemma2CustomAttention(Gemma2Attention):
                 "sliding_window": self.sliding_window,
                 "cache_position": cache_position,
             }
-            key_states, value_states = past_key_value.update(key_states.half(), value_states.half(), self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
         
         # if self.sliding_window != None:
         #     self.tree_k = self.sliding_window
