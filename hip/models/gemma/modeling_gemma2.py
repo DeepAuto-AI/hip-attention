@@ -382,6 +382,9 @@ class Gemma2CustomAttention(Gemma2Attention):
                 "cache_position": cache_position,
             }
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            query_states = query_states.to(key_states.dtype)
+            assert key_states.dtype == value_states.dtype
+            assert query_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
         
         # if self.sliding_window != None:
         #     self.tree_k = self.sliding_window
