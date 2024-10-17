@@ -332,6 +332,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         force_dense = False
         disalbe_sliding_window = False
         using_self_extend = True
+        model_context_length = 8192
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
                 self.tree_k = 1024
@@ -341,11 +342,11 @@ class Gemma2CustomAttention(Gemma2Attention):
             # if self.sliding_window != None:
             #     se_group_size *= 2
             if self.sliding_window != None:
+                # self.tree_sliding_window_size = 1024
+                # disalbe_sliding_window = True
+                # model_context_length = 4096
                 force_dense = True
             self.tree_sliding_window_size = 1024
-            # if self.sliding_window != None:
-            #     self.attention_method = 'streaming_llm'
-            #     self.tree_k = self.sliding_window
         else:
             if self.sliding_window != None:
                 force_dense = True
@@ -416,18 +417,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
         
-        # if self.sliding_window != None:
-        #     force_dense = True
-        #     self.tree_k = 32
-        #     self.tree_sliding_window_size = self.sliding_window
-        
-        # print(self.attention_method, 'asdfdasf')
-        # print(position_ids.shape)
-        
         q_repeat = 1
-        if q_len == 1:
-            q_repeat = 1
-            # print(query_states.shape)
         
         attn_output, _, _ = custom_attention(
             query_states=query_states.repeat_interleave(q_repeat, 2), 
@@ -482,7 +472,7 @@ class Gemma2CustomAttention(Gemma2Attention):
             sm_scaler=self.scaling,
             attn_logit_softcapping=self.config.attn_logit_softcapping,
             model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
-            model_context_length=4096,
+            model_context_length=model_context_length,
         )
         attn_output = attn_output[:, :, :q_len]
 

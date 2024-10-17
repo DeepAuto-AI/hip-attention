@@ -4674,13 +4674,28 @@ def block_sparse_attention_cuda_step(
                 
                 if not HAS_FIRST_TOKEN:
                     old_tsrc = idx_tsrc
-                    src_scale = (
-                        (pos_tdst_min + 1 - sink_token_size - sliding_window_size) /\
-                        (model_context_length - sink_token_size - sliding_window_size)
+                    
+                    # src_scale = (
+                    #     (pos_tdst_min + 1 - sink_token_size - sliding_window_size) /\
+                    #     (model_context_length - sink_token_size - sliding_window_size)
+                    # )
+                    # new_tsrc = (
+                    #     (old_tsrc - sink_token_size) / src_scale + sink_token_size
+                    # ).to(tl.int32)
+                    
+                    # new_tsrc = tl.where(
+                    #     (old_tsrc - pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                    #     old_tsrc - pos_tdst_min + model_context_length - 1,
+                    #     ((old_tsrc - sink_token_size) * ((model_context_length // 2 - 1 - sink_token_size - sliding_window_size) / (pos_tdst_min - sink_token_size - sliding_window_size))).to(tl.int32) + sink_token_size
+                    # )
+                    
+                    new_tsrc = tl.where(
+                        (old_tsrc - pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                        old_tsrc - pos_tdst_min + model_context_length - 1,
+                        ((old_tsrc - sink_token_size) * ((model_context_length // 2) / (pos_tdst_min - model_context_length // 2))).to(tl.int32) + sink_token_size
+                        # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
                     )
-                    new_tsrc = (
-                        (old_tsrc - sink_token_size) / src_scale + sink_token_size
-                    ).to(tl.int32)
+                    
                     # new_tsrc = old_tsrc // 16
                     
                     keys_adjusted = keys.trans(1, 0)

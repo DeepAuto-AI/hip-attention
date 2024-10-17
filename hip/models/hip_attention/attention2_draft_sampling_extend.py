@@ -136,7 +136,7 @@ def chunk_controllable_sampling_mask_cuda(
     if USING_EXTEND:
         if real_pos_tdst_min >= model_context_length:
             old_tdst = idx_tdst + TSRC - TDST
-            new_tdst = tl.maximum(idx_tdst, model_context_length - 1)
+            new_tdst = tl.minimum(idx_tdst, model_context_length - 1)
             # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
             # new_tdst = old_tdst // 16
             
@@ -177,9 +177,17 @@ def chunk_controllable_sampling_mask_cuda(
             if real_pos_tdst_min >= model_context_length:
                 old_tsrc = idx_tsrc
                 
-                new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
+                # new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
                 
                 # new_tsrc = idx_chunk + 4
+                
+                new_tsrc = tl.where(
+                    (old_tsrc - real_pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                    old_tsrc - real_pos_tdst_min + model_context_length - 1,
+                    ((old_tsrc - num_sinks) * ((model_context_length // 2) / (real_pos_tdst_min - model_context_length // 2))).to(tl.int32) + num_sinks
+                    # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
+                )
+                # new_tsrc = tl.maximum(0 , old_tsrc - (real_pos_tdst_min - model_context_length))
                 
                 keys_left = keys_left.trans(1, 0)
                 keys_left = adjust_rope(
@@ -228,9 +236,17 @@ def chunk_controllable_sampling_mask_cuda(
             if real_pos_tdst_min >= model_context_length:
                 old_tsrc = idx_tsrc
                 
-                new_tsrc = (old_tsrc * ((model_context_length - 1) / real_pos_tdst_min)).to(tl.int32)
+                # new_tsrc = (old_tsrc * ((model_context_length - 1) / real_pos_tdst_min)).to(tl.int32)
                 
                 # new_tsrc = idx_chunk + 4
+                
+                new_tsrc = tl.where(
+                    (old_tsrc - real_pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                    old_tsrc - real_pos_tdst_min + model_context_length - 1,
+                    ((old_tsrc - num_sinks) * ((model_context_length // 2) / (real_pos_tdst_min - model_context_length // 2))).to(tl.int32) + num_sinks
+                    # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
+                )
+                # new_tsrc = tl.maximum(0 , old_tsrc - (real_pos_tdst_min - model_context_length))
                 
                 keys_right = keys_right.trans(1, 0)
                 keys_right = adjust_rope(
@@ -580,7 +596,7 @@ def dual_stage_quadratic_hip_attention(
         ks_count=ks_count,
         ks_start_end=ks_start_end,
         args=args,
-        EXTEND_BACKEND='dynamic_extend',
+        EXTEND_BACKEND='streaming', # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=model_context_length,
     )
     

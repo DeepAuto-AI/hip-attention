@@ -580,7 +580,7 @@ class LlamaCustomAttention(LlamaAttention):
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
         force_extend = True
-        model_context_length = 131072
+        model_context_length = 32768
 
         if force_extend and (self.layer_idx in self.tree_dense_layers):
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
