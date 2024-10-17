@@ -129,6 +129,7 @@ def load_model(args):
         'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
         'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
         'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+        'llama3.2_1b': 'meta-llama/Llama-3.2-1B',
         'llama3.2_3b': 'meta-llama/Llama-3.2-3B',
         'llama3.2_3b_instruct': 'meta-llama/Llama-3.2-3B-Instruct',
         'llama3.2_1b_instruct': 'meta-llama/Llama-3.2-1B-Instruct',

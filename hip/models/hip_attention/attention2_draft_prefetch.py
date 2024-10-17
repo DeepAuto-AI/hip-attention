@@ -4654,19 +4654,17 @@ def block_sparse_attention_cuda_step(
             assert COS is not None
             assert SIN is not None
             
-            pos_tdst_min = tl.min(tl.where(mask_tdst, tl.maximum(0, pos_tdst - 1), 987654321))
-            if pos_tdst_min >= model_context_length and EXCLUDE_SLIDING_WINDOW:
-                old_tsrc = idx_tsrc
-                
+            pos_tdst_min = tl.min(tl.where(mask_tdst, tl.maximum(0, pos_tdst - 1), 987654321)) + tl.sum(mask_tdst.to(tl.int32))
+            if (pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW:
                 old_tdst = (pos_tdst - 1)
-                new_tdst = old_tdst * 0 + model_context_length - 1
-                new_tdst = old_tdst // 16
+                new_tdst = tl.minimum(model_context_length - 1, old_tdst)
+                # new_tdst = old_tdst // 16
                 
                 queries = adjust_rope(
                     queries, 
                     old_tdst, 
                     new_tdst, 
-                    mask_tdst,
+                    mask_tdst & (old_tdst != 0),
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
@@ -4674,23 +4672,33 @@ def block_sparse_attention_cuda_step(
                 ).to(queries.dtype)
                 queries = (queries * mask_tdst[:, None]).to(queries.dtype)
                 
-                new_tsrc = (old_tsrc / tl.maximum(1.0, (pos_tdst_min + 1) / model_context_length)).to(tl.int32)
-                new_tsrc = old_tsrc // 16
-                
-                keys_adjusted = keys.trans(1, 0)
-                keys_adjusted = adjust_rope(
-                    keys_adjusted, 
-                    old_tsrc, 
-                    new_tsrc, 
-                    mask_tsrc,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_TK,
-                    HID,
-                ).to(keys.dtype)
-                keys_adjusted = tl.trans(keys_adjusted, 1, 0).to(keys.dtype)
-                keys_adjusted = (keys_adjusted * mask_tsrc[None, :]).to(keys.dtype)
+                if not HAS_FIRST_TOKEN:
+                    old_tsrc = idx_tsrc
+                    src_scale = (
+                        (pos_tdst_min + 1 - sink_token_size - sliding_window_size) /\
+                        (model_context_length - sink_token_size - sliding_window_size)
+                    )
+                    new_tsrc = (
+                        (old_tsrc - sink_token_size) / src_scale + sink_token_size
+                    ).to(tl.int32)
+                    # new_tsrc = old_tsrc // 16
+                    
+                    keys_adjusted = keys.trans(1, 0)
+                    keys_adjusted = adjust_rope(
+                        keys_adjusted, 
+                        old_tsrc, 
+                        new_tsrc, 
+                        mask_tsrc & (old_tsrc != 0),
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_TK,
+                        HID,
+                    ).to(keys.dtype)
+                    keys_adjusted = tl.trans(keys_adjusted, 1, 0).to(keys.dtype)
+                    # keys_adjusted = (keys_adjusted * mask_tsrc[None, :]).to(keys.dtype)
+                else:
+                    keys_adjusted = keys
             else:
                 keys_adjusted = keys
             
