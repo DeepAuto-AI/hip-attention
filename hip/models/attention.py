@@ -33,7 +33,7 @@ def custom_attention(
     tree_enable_flash=False, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
-    tree_sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
+    tree_sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '1024')),
     tree_sink_token_size=256,
 
     # Context averaging parameters
