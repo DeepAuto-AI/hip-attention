@@ -579,7 +579,7 @@ class LlamaCustomAttention(LlamaAttention):
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
         force_extend = True
-        model_context_length = 65536
+        model_context_length = 131072
 
         if force_extend and (self.layer_idx in self.tree_dense_layers):
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -1402,6 +1402,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+            
+            if hidden_states.shape[1] >= 4096:
+                torch.cuda.synchronize()
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
