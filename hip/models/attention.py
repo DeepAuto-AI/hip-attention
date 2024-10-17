@@ -21,16 +21,16 @@ def custom_attention(
 
     # hip parameters
     tree_k=512, 
-    tree_block_size_q=32, 
+    tree_block_size_q=64, 
     tree_block_stride_q=2, 
     tree_block_size_k=2,
     tree_block_stride_k=1,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
-    tree_sampling_method='last',
+    tree_sampling_method='center',
 
     # Latency optimization tweaks
-    tree_enable_flash=False, 
+    tree_enable_flash=True, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
     tree_sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '1024')),
