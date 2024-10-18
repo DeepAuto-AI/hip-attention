@@ -506,8 +506,10 @@ def dual_stage_quadratic_hip_attention(
         (128, 4096),
         (64, 2048),
     ],
-    mask_only = False,
     model_context_length = 16384,
+    
+    # kernel args,
+    mask_only = False,
     block_sparse_block_size_q: Optional[int] = 32,
 ):
     DEBUG_HEAD = -1
@@ -763,7 +765,9 @@ def dual_stage_quadratic_hip_attention(
         return None, None
     
     context = block_sparse_attention(
-        q=q, k=k, v=v,
+        q=q, 
+        k=k, 
+        v=v,
         seq_lens=position_ids + 1,
         indices=indices,
         ks=ks,
@@ -778,7 +782,17 @@ def dual_stage_quadratic_hip_attention(
         print('context', context)
         print('indices', indices[0, -1])
     
-    return context
+    return context, HiPAttentionOutputMetadata(
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        key_access_log=None,
+        key_access_count=None,
+        block_access_log=None,
+        block_access_score=None,
+        block_access_count=None,
+    )
 
 def main_debug():
     global DEBUG
