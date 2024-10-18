@@ -119,6 +119,7 @@ def chunk_controllable_sampling_mask_cuda(
     HEAD_GROUP: tl.constexpr = 4,
     REDUCE: tl.constexpr = 'mean',
     USING_EXTEND: tl.constexpr = False,
+    NEED_APPLY_ROPE: tl.constexpr = False,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BCHUNK = tl.cdiv(CHUNK_COUNT, BLOCK_CHUNK)
@@ -146,7 +147,7 @@ def chunk_controllable_sampling_mask_cuda(
     )
     
     # real_pos_tdst_min = idx_bdst * BLOCK_SIZE_Q + TSRC - TDST
-    real_pos_tdst_min = tl.min(pos_tdst)
+    real_pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst, 99999999999))
     
     pos_tdst_min = (real_pos_tdst_min - sliding_window_size - num_sinks).to(tl.int32)
     pos_tdst_min = tl.maximum(pos_tdst_min, 0)
@@ -205,8 +206,23 @@ def chunk_controllable_sampling_mask_cuda(
                 SIN, stride_sin_t, stride_sin_hid,
                 BLOCK_SIZE_Q // STRIDE_Q, 
                 BLOCK_HID,
+                NEED_APPLY_ROPE,
             ).to(queries.dtype)
             queries = (queries * mask_tdst[:, None]).to(queries.dtype)
+        else:
+            if NEED_APPLY_ROPE:
+                queries = adjust_rope(
+                    queries,
+                    pos_tdst,
+                    pos_tdst,
+                    mask_tdst,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_SIZE_Q // STRIDE_Q, 
+                    BLOCK_HID,
+                    NEED_APPLY_ROPE,
+                ).to(queries.dtype)
     
     scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
     
@@ -303,13 +319,30 @@ def chunk_controllable_sampling_mask_cuda(
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_CHUNK,
                     BLOCK_HID,
+                    NEED_APPLY_ROPE,
                 ).to(keys_left.dtype)
                 keys_left = tl.trans(keys_left, 1, 0)
                 keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
-        
+            else:
+                if NEED_APPLY_ROPE:
+                    keys_left = keys_left.trans(1, 0)
+                    keys_left = adjust_rope(
+                        keys_left,
+                        idx_tsrc,
+                        idx_tsrc,
+                        mask_tsrc_active,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_CHUNK,
+                        BLOCK_HID,
+                        NEED_APPLY_ROPE,
+                    ).to(keys_left.dtype)
+                    keys_left = tl.trans(keys_left, 1, 0)
+            
         scores_left = tl.dot(
-            queries,
-            keys_left.to(queries.dtype),
+            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
+            (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
             out_dtype=tl.float32,
         ).to(queries.dtype)
         
@@ -413,13 +446,30 @@ def chunk_controllable_sampling_mask_cuda(
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_CHUNK, 
                     BLOCK_HID,
+                    NEED_APPLY_ROPE,
                 ).to(keys_right.dtype)
                 keys_right = tl.trans(keys_right, 1, 0).to(keys_right.dtype)
                 keys_right = (keys_right * mask_tsrc_active[None, :]).to(keys_right.dtype)
+            else:
+                if NEED_APPLY_ROPE:
+                    keys_right = keys_right.trans(1, 0)
+                    keys_right = adjust_rope(
+                        keys_right, 
+                        idx_tsrc, 
+                        idx_tsrc, 
+                        mask_tsrc_active,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_CHUNK, 
+                        BLOCK_HID,
+                        NEED_APPLY_ROPE,
+                    ).to(keys_right.dtype)
+                    keys_right = tl.trans(keys_right, 1, 0).to(keys_right.dtype)
         
         scores_right = tl.dot(
-            queries,
-            keys_right.to(queries.dtype),
+            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
+            (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
             out_dtype=tl.float32,
         ).to(queries.dtype)
         
@@ -519,11 +569,12 @@ def dual_stage_quadratic_hip_attention(
     if k is not None:
         BSZ, TSRC, HEAD_KV, HID = k.shape
         assert v.shape == k.shape
+        MAX_TSRC = TSRC
     else:
-        TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
+        MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
         HEAD_KV = args.k_cache.shape[-2]
-    
-    MAX_TSRC = TSRC
+        TSRC = MAX_TSRC
+        # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
     
     chunk_size = args.mask_k
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
@@ -571,6 +622,8 @@ def dual_stage_quadratic_hip_attention(
     
     # print(q.shape, k.shape, args.rope_cos.shape, args.rope_sin.shape, TDST, TSRC)
     
+    # print('neeeed rope', args.need_apply_rope)
+    
     pre_device = torch.cuda.current_device()
     torch.cuda.set_device(q.device)
     grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * BDST * HEAD,)
@@ -602,6 +655,7 @@ def dual_stage_quadratic_hip_attention(
         BLOCK_CHUNK=BLOCK_CHUNK,
         HEAD_GROUP=HEAD // HEAD_KV,
         USING_EXTEND=args.using_extend,
+        NEED_APPLY_ROPE=args.need_apply_rope,
     )
     torch.cuda.set_device(pre_device)
     
@@ -610,7 +664,7 @@ def dual_stage_quadratic_hip_attention(
     indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
     indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
     
-    if DEBUG and not torch.cuda.is_current_stream_capturing():
+    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10000):
         out_indices_cpu = indices_left.cpu()
         debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
         for i in range(out_indices_cpu.shape[1]):
@@ -700,6 +754,7 @@ def dual_stage_quadratic_hip_attention(
             BLOCK_CHUNK=BLOCK_CHUNK,
             HEAD_GROUP=HEAD // HEAD_KV,
             USING_EXTEND=args.using_extend,
+            NEED_APPLY_ROPE=args.need_apply_rope,
         )
         torch.cuda.set_device(pre_device)
         
@@ -721,7 +776,7 @@ def dual_stage_quadratic_hip_attention(
     assert (second_stage_k % chunk_size) == 0
     indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
     
-    if DEBUG and not torch.cuda.is_current_stream_capturing():
+    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10000):
         out_indices_cpu = indices.cpu()
         debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
         for i in range(out_indices_cpu.shape[1]):
@@ -731,7 +786,10 @@ def dual_stage_quadratic_hip_attention(
                 debug[i, t:t+1] = 1
         cv2.imwrite('dummy_sampled_final.png', debug * 255)
         print('saved dummy_sampled_final.png')
-        input('>>>')
+        try:
+            input('>>>')
+        except EOFError:
+            pass
     
     args = args.clone()
     args.sliding_window_size += args.mask_k
@@ -739,6 +797,7 @@ def dual_stage_quadratic_hip_attention(
     args.mask_k = second_stage_k
     args.using_extend = args.using_extend and True
     
+    # print('ff', indices.shape)
     indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
     
     indices, _ = indices.sort(dim=-1)
@@ -753,7 +812,10 @@ def dual_stage_quadratic_hip_attention(
     ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
     ks_start_end[:, :, -1] = ks
     
-    if  (block_sparse_block_size_q is not None) and (block_sparse_block_size_q != args.block_size_q):
+    if  (
+            (block_sparse_block_size_q is not None) and\
+            (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
+        ):
         assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
         indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
         ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)

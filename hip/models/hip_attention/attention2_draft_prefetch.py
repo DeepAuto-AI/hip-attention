@@ -97,10 +97,11 @@ class HiPAttentionArgs:
     num_dense_queries: int = -1
     
     using_extend: bool = False
-    rope_cos: Optional[Tensor] = None
-    rope_sin: Optional[Tensor] = None
+    need_apply_rope: bool = False
     self_extend_neighboor_window: int = 1024
     self_extend_group_size: int = 8
+    rope_cos: Optional[Tensor] = None
+    rope_sin: Optional[Tensor] = None
     
     topk_head_group_size: int = 1
     sample_method: str = 'center'
@@ -203,6 +204,7 @@ class HiPAttentionArgs:
     def args_extend(self):
         return (
             self.using_extend,
+            self.need_apply_rope,
             self.self_extend_neighboor_window,
             self.self_extend_group_size,
             *self.args_rope_cos(),
@@ -538,44 +540,75 @@ def adjust_rope(
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     
-    T: tl.constexpr, HID: tl.constexpr,
+    T: tl.constexpr, 
+    HID: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
 ):
-    cos_old = tl.load(
-        COS +\
-            old_t[:, None].to(tl.int64) * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid,
-        mask=tl.ravel(mask_t)[:, None],
-        other=0,
-    )
-    sin_old = tl.load(
-        SIN +\
-            old_t[:, None].to(tl.int64) * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid,
-        mask=tl.ravel(mask_t)[:, None],
-        other=0,
-    )
-    
-    cos_new = tl.load(
-        COS +\
-            new_t[:, None].to(tl.int64) * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid,
-        mask=tl.ravel(mask_t)[:, None],
-        other=0,
-    )
-    sin_new = tl.load(
-        SIN +\
-            new_t[:, None].to(tl.int64) * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid,
-        mask=tl.ravel(mask_t)[:, None],
-        other=0,
-    )
-    
-    tokens_adjusted = de_rope(tokens.to(tl.float32), cos_old.to(tl.float32), sin_old.to(tl.float32), T, HID)
-    tokens_adjusted = apply_rope(tokens_adjusted.to(tl.float32), cos_new.to(tl.float32), sin_new.to(tl.float32), T, HID)
-    
-    tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
-    
-    return tokens
+    if not NEED_APPLY_ROPE:
+        mask_t = mask_t & (old_t != 0)
+        
+        cos_old = tl.load(
+            COS +\
+                old_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        sin_old = tl.load(
+            SIN +\
+                old_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        
+        cos_new = tl.load(
+            COS +\
+                new_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        sin_new = tl.load(
+            SIN +\
+                new_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        
+        tokens_adjusted = de_rope(tokens.to(tl.float32), cos_old.to(tl.float32), sin_old.to(tl.float32), T, HID)
+        tokens_adjusted = apply_rope(tokens_adjusted.to(tl.float32), cos_new.to(tl.float32), sin_new.to(tl.float32), T, HID)
+        
+        tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
+        
+        return tokens
+    else:
+        cos_new = tl.load(
+            COS +\
+                new_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        sin_new = tl.load(
+            SIN +\
+                new_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        
+        tokens = apply_rope(
+            tokens.to(tl.float32), 
+            cos_new.to(tl.float32), 
+            sin_new.to(tl.float32), 
+            T, HID
+        ).to(tokens.dtype)
+        
+        # tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
+        
+        return tokens
 
 @triton.jit
 def hash_table_lookup_or_fail(
@@ -890,6 +923,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     MASK_K: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     
@@ -1162,7 +1196,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                         idx_hid,
                         COS, stride_cos_t, stride_cos_hid,
                         SIN, stride_sin_t, stride_sin_hid,
-                        NUM_CALIB, HID,
+                        NUM_CALIB, 
+                        HID,
+                        NEED_APPLY_ROPE,
                     ).trans(1, 0)
                     
                     old_tsrc = idx_tsrc
@@ -1183,7 +1219,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                         idx_hid,
                         COS, stride_cos_t, stride_cos_hid,
                         SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, HID,
+                        BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
+                        HID,
+                        NEED_APPLY_ROPE,
                     ).to(keys.dtype)
                     keys = tl.trans(keys, 1, 0)
                     keys = (keys * mask_keys).to(keys.dtype)
@@ -1200,7 +1238,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                         idx_hid,
                         COS, stride_cos_t, stride_cos_hid,
                         SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
+                        BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
+                        HID,
+                        NEED_APPLY_ROPE,
                     ).to(queries.dtype)
                     
                     t_calib_old = tl.dot(
@@ -1274,6 +1314,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
                     HID,
+                    NEED_APPLY_ROPE,
                 ).to(keys.dtype)
                 keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                 keys_adjusted = (keys_adjusted * mask_keys).to(keys_adjusted.dtype)
@@ -1528,6 +1569,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     
@@ -1830,6 +1872,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 mask_k,
                 
                 USING_EXTEND,
+                NEED_APPLY_ROPE,
                 extend_window_size,
                 extend_group_size,
                 
@@ -1994,6 +2037,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
+            NEED_APPLY_ROPE,
             extend_window_size,
             extend_group_size,
             
@@ -2135,6 +2179,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
+            NEED_APPLY_ROPE,
             extend_window_size,
             extend_group_size,
             
@@ -2888,6 +2933,7 @@ def masking_iteration_draft_cuda_fused(
     KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, 
@@ -3097,6 +3143,7 @@ def masking_iteration_draft_cuda_fused(
                     KV_HEAD_REPEAT,
                     
                     USING_EXTEND,
+                    NEED_APPLY_ROPE,
                     extend_window_size,
                     extend_group_size,
                     
@@ -3380,6 +3427,7 @@ def masking_iteration_draft_cuda_initialize_score(
     MASK_K: tl.constexpr,
                 
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
@@ -3554,6 +3602,7 @@ def masking_iteration_draft_cuda_initialize_score(
         MASK_K,
                 
         USING_EXTEND,
+        NEED_APPLY_ROPE,
         extend_window_size,
         extend_group_size,
         
@@ -4472,6 +4521,7 @@ def block_sparse_attention_cuda_step(
     LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
@@ -4538,7 +4588,9 @@ def block_sparse_attention_cuda_step(
                 idx_hid,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_TK, HID,
+                BLOCK_TK, 
+                HID,
+                NEED_APPLY_ROPE,
             )
             keys = tl.trans(keys, 1, 0)
             keys = keys * mask_tsrc[None, :]
@@ -4554,7 +4606,9 @@ def block_sparse_attention_cuda_step(
                 idx_hid,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_TQ, HID,
+                BLOCK_TQ, 
+                HID,
+                NEED_APPLY_ROPE,
             )
             queries_grouped = queries_grouped * mask_tdst[:, None]
             
@@ -4593,15 +4647,33 @@ def block_sparse_attention_cuda_step(
                         queries, 
                         old_tdst, 
                         new_tdst, 
-                        mask_tdst & (old_tdst != 0),
+                        mask_tdst,
                         idx_hid,
                         COS, stride_cos_t, stride_cos_hid,
                         SIN, stride_sin_t, stride_sin_hid,
                         BLOCK_TQ, 
                         HID,
+                        NEED_APPLY_ROPE,
                     )
                     
-                    keys_adjusted = keys
+                    if NEED_APPLY_ROPE:
+                        keys_adjusted = tl.trans(
+                            adjust_rope(
+                                tl.trans(keys, 1, 0), 
+                                idx_tsrc, 
+                                idx_tsrc, 
+                                mask_tsrc,
+                                idx_hid,
+                                COS, stride_cos_t, stride_cos_hid,
+                                SIN, stride_sin_t, stride_sin_hid,
+                                BLOCK_TK, 
+                                HID,
+                                NEED_APPLY_ROPE,
+                            ),
+                            1, 0
+                        )
+                    else:
+                        keys_adjusted = keys
                 else:
                     old_tsrc = idx_tsrc
                     new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
@@ -4610,21 +4682,36 @@ def block_sparse_attention_cuda_step(
                     keys_adjusted = keys.trans(1, 0)
                     # tl.static_print(keys_adjusted.shape)
                     keys_adjusted = adjust_rope(
-                        keys_adjusted, 
+                        keys_adjusted.to(queries.dtype), 
                         old_tsrc, 
                         new_tsrc, 
-                        mask_tsrc & (old_tsrc != 0),
+                        mask_tsrc,
                         # old_tsrc == new_tsrc,
                         idx_hid,
                         COS, stride_cos_t, stride_cos_hid,
                         SIN, stride_sin_t, stride_sin_hid,
                         BLOCK_TK, 
                         HID,
+                        NEED_APPLY_ROPE,
                     )
                     keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                     # keys_adjusted = keys_adjusted * mask_tsrc[None, :]
                     
-                    queries_adjusted = queries
+                    if NEED_APPLY_ROPE:
+                        queries_adjusted = adjust_rope(
+                            queries,
+                            pos_tdst - 1, 
+                            pos_tdst - 1, 
+                            mask_tdst,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TQ, 
+                            HID,
+                            NEED_APPLY_ROPE,
+                        )
+                    else:
+                        queries_adjusted = queries
                 
                 qk = tl.dot(
                     (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
@@ -4636,6 +4723,38 @@ def block_sparse_attention_cuda_step(
                 #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
                 # qk = qk * 1.44269504
             else:
+                if NEED_APPLY_ROPE:
+                    queries = adjust_rope(
+                        queries.to(tl.float32),
+                        pos_tdst - 1, 
+                        pos_tdst - 1, 
+                        mask_tdst,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_TQ, 
+                        HID,
+                        True,
+                    ).to(queries.dtype)
+                    queries = (queries * mask_tdst[:, None]).to(queries.dtype)
+                    
+                    keys = tl.trans(
+                        adjust_rope(
+                            tl.trans(keys.to(tl.float32), 1, 0), 
+                            idx_tsrc, 
+                            idx_tsrc, 
+                            mask_tsrc,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TK, 
+                            HID,
+                            True,
+                        ),
+                        1, 0
+                    ).to(keys.dtype)
+                    keys = (keys * mask_tsrc[None, :]).to(keys.dtype)
+                
                 qk = tl.dot(
                     (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
                     (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
@@ -4668,7 +4787,9 @@ def block_sparse_attention_cuda_step(
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_TQ, HID,
+                    BLOCK_TQ, 
+                    HID,
+                    NEED_APPLY_ROPE,
                 ).to(queries.dtype)
                 queries = (queries * mask_tdst[:, None]).to(queries.dtype)
                 
@@ -4709,6 +4830,7 @@ def block_sparse_attention_cuda_step(
                         SIN, stride_sin_t, stride_sin_hid,
                         BLOCK_TK,
                         HID,
+                        NEED_APPLY_ROPE,
                     ).to(keys.dtype)
                     keys_adjusted = tl.trans(keys_adjusted, 1, 0).to(keys.dtype)
                     # keys_adjusted = (keys_adjusted * mask_tsrc[None, :]).to(keys.dtype)
@@ -4894,6 +5016,7 @@ def block_sparse_attention_cuda(
     LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
@@ -5171,6 +5294,7 @@ def block_sparse_attention_cuda(
                     LOGIT_SOFTCAP,
                     
                     USING_EXTEND,
+                    NEED_APPLY_ROPE,
                     extend_window_size,
                     extend_group_size,
                     COS, stride_cos_t, stride_cos_hid,
@@ -5311,6 +5435,7 @@ def block_sparse_attention_cuda(
                 LOGIT_SOFTCAP,
                 
                 USING_EXTEND,
+                NEED_APPLY_ROPE,
                 extend_window_size,
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
@@ -5454,6 +5579,7 @@ def block_sparse_attention_cuda(
                 LOGIT_SOFTCAP,
                 
                 USING_EXTEND,
+                NEED_APPLY_ROPE,
                 extend_window_size,
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,

@@ -44,6 +44,7 @@ def custom_attention(
 
     # RoPE parameters
     tree_rope_method='none', 
+    need_apply_rope=False,
     rope_cos=None, 
     rope_sin=None, 
     position_ids=None,
@@ -323,7 +324,7 @@ def custom_attention(
     
                 # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype)
                 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
-                attn_output_hip = dual_stage_quadratic_hip_attention_extend(
+                attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
                     q, k, v,
                     args=HiPAttentionArgs11(
                         position_ids=position_ids,
@@ -337,6 +338,7 @@ def custom_attention(
                         sink_token_size=tree_sink_token_size,
                         
                         using_extend=tree_rope_method != 'none',
+                        need_apply_rope=need_apply_rope,
                         rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                         rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
                         
