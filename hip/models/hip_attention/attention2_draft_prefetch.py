@@ -791,7 +791,7 @@ def load_tokens(
                 idx_kv_head.to(tl.int64) * stride_k_head +\
                 idx_hid.to(tl.int64) * stride_k_hid,
             mask = mask_keys,
-            other = 0,
+            other = 0.0,
             # cache_modifier='.cs', # TODO: uncomment this
         )
         
@@ -828,7 +828,7 @@ def load_tokens(
                 idx_kv_head.to(tl.int64) * stride_k_cache_kv_head +\
                 idx_hid.to(tl.int64) * stride_k_cache_hid,
             mask=mask_keys,
-            other=0,
+            other=0.0,
         )
     
     if keys.dtype == tl.uint8:
