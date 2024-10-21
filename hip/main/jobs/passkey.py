@@ -6,6 +6,7 @@ import json
 import numpy as np
 from hip.dataset.passkey import Passkey
 from vllm import LLM, SamplingParams
+from hip.models.sglang_model import SglangModel
 
 def get_numbers(s, cnt):
     lst = [c for c in s if c.isdigit()]
@@ -24,7 +25,7 @@ def job_passkey(args, model, tokenizer, device):
         target_ids = target_ids.cuda()
         
         if isinstance(model, LLM):
-            prompts = tokenizer.batch_decode(input_ids)
+            prompts = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
             sampling_params = SamplingParams(
                 n=1,
                 temperature=1.0,
@@ -37,6 +38,9 @@ def job_passkey(args, model, tokenizer, device):
             output = []
             for item in outputs:
                 output.append(item.outputs[0].text)
+        elif isinstance(model, SglangModel):
+            input_text = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
+            output = [model.generate(input_text=input_text, max_tokens=10)]
         else:
             with torch.no_grad(), torch.autocast('cuda', torch.float16):
                 output = model.generate(

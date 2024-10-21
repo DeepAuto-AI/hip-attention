@@ -25,8 +25,67 @@ from hip.main.jobs.passkey import job_passkey
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from hip.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
+from hip.models.sglang_model import SglangModel
 from hip.utils import seed
 
+MODELS = {
+    'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+    'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
+    'llama7b': 'meta-llama/Llama-2-7b-chat-hf',
+    'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+    'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
+    'llama13b': 'meta-llama/Llama-2-13b-hf',
+    'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+    'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+    'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
+    'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
+    'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    'llama3.2_1b': 'meta-llama/Llama-3.2-1B',
+    'llama3.2_3b': 'meta-llama/Llama-3.2-3B',
+    'llama3.2_3b_instruct': 'meta-llama/Llama-3.2-3B-Instruct',
+    'llama3.2_1b_instruct': 'meta-llama/Llama-3.2-1B-Instruct',
+    'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+    'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
+    'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
+    'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+    'gemma2_2b': 'google/gemma-2-2b',
+    'gemma2_9b': 'google/gemma-2-9b',
+    'gemma2_2b_it': 'google/gemma-2-2b-it',
+    'gemma2_9b_it': 'google/gemma-2-9b-it',
+}
+
+OBSOLATED_VLLM_MODELS = {
+    'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+    'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
+    'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
+    'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
+    'vllm_llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+    'vllm_llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+    'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
+    'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+    'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
+    'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
+    # 'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+    'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
+    'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
+    'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
+    'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
+    'vllm_qwen7b_pt': 'Qwen/Qwen1.5-7B',
+    'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+    'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+    'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+    'vllm_pythia70m': 'EleutherAI/pythia-70m',
+    'vllm_yi6b': '01-ai/Yi-6B-200K',
+    'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
+    'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
+    'vllm_gemma2b': 'google/gemma-2b-it',
+    'vllm_gemma7b': 'google/gemma-7b-it',
+    'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
+    "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
+    'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
+    "vllm_llama3.1_8b_instruct": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "vllm_llama3.1_8b_instruct_awq": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+}
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
@@ -36,40 +95,10 @@ def load_vllm_model(args: ArgsType):
         warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
     
     device = 'cuda:0'
-    MODELS = {
-        'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-        'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
-        'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
-        'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
-        'vllm_llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
-        'vllm_llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
-        'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
-        'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
-        'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
-        'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
-        # 'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
-        'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
-        'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
-        'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
-        'vllm_qwen7b': 'Qwen/Qwen1.5-7B-Chat-GPTQ-Int4',
-        'vllm_qwen7b_pt': 'Qwen/Qwen1.5-7B',
-        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-        'vllm_qwen14b_gptq': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
-        'vllm_qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
-        'vllm_pythia70m': 'EleutherAI/pythia-70m',
-        'vllm_yi6b': '01-ai/Yi-6B-200K',
-        'vllm_yi34b': 'brucethemoose/Yi-34B-200K-RPMerge',
-        'vllm_mixtral8x7b': 'TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ',
-        'vllm_gemma2b': 'google/gemma-2b-it',
-        'vllm_gemma7b': 'google/gemma-7b-it',
-        'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
-        "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
-        'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
-        "vllm_llama3.1_8b_instruct": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "vllm_llama3.1_8b_instruct_awq": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
-    }
-    if args.model in MODELS:
-        model_id = MODELS[args.model]
+    if args.model.replace('vllm_', '') in MODELS:
+        model_id = MODELS[args.model.replace('vllm_', '')]
+    elif args.model in OBSOLATED_VLLM_MODELS:
+        model_id = OBSOLATED_VLLM_MODELS[args.model]
     else:
         model_id = args.model.replace('vllm_', '')
     print(f'Loading model {model_id}')
@@ -112,36 +141,32 @@ def load_vllm_model(args: ArgsType):
     return model, tokenizer, device
 
 
+def load_sglang_model(args: ArgsType):
+    assert args.model in MODELS, f'Available Models: {list(MODELS.keys())}'
+    
+    model_id = MODELS[args.model]
+    
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+    
+    if tokenizer.bos_token_id is None:
+        tokenizer.bos_token = tokenizer.eos_token
+        tokenizer.bos_token_id = tokenizer.eos_token_id
+    
+    if tokenizer.eos_token_id is None:
+        tokenizer.eos_token = tokenizer.bos_token
+        tokenizer.eos_token_id = tokenizer.bos_token_id
+    
+    model = SglangModel(args.endpoint, tokenizer)
+    
+    return model, tokenizer, torch.device('cpu')
+
 def load_model(args):
     if args.model.startswith('vllm'):
         return load_vllm_model(args)
+    if args.model.startswith('sglang'):
+        return load_sglang_model(args)
     
     device = 'cuda:0'
-    MODELS = {
-        'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
-        'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
-        'llama7b': 'meta-llama/Llama-2-7b-chat-hf',
-        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-        'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
-        'llama13b': 'meta-llama/Llama-2-13b-hf',
-        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
-        'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
-        'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
-        'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
-        'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-        'llama3.2_1b': 'meta-llama/Llama-3.2-1B',
-        'llama3.2_3b': 'meta-llama/Llama-3.2-3B',
-        'llama3.2_3b_instruct': 'meta-llama/Llama-3.2-3B-Instruct',
-        'llama3.2_1b_instruct': 'meta-llama/Llama-3.2-1B-Instruct',
-        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
-        'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
-        'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
-        'gemma2_2b': 'google/gemma-2-2b',
-        'gemma2_9b': 'google/gemma-2-9b',
-        'gemma2_2b_it': 'google/gemma-2-2b-it',
-        'gemma2_9b_it': 'google/gemma-2-9b-it',
-    }
     if args.model in MODELS:
         model_id = MODELS[args.model]
     else:
