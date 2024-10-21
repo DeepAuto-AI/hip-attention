@@ -822,6 +822,9 @@ def dual_stage_quadratic_hip_attention(
         HEAD_GROUP=HEAD // HEAD_KV,
         USING_EXTEND=args.using_extend,
         NEED_APPLY_ROPE=args.need_apply_rope,
+        
+        num_warps=2,
+        num_stages=2,
     )
     torch.cuda.set_device(pre_device)
     
