@@ -187,7 +187,7 @@ def load_keys_with_rope(
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
                         idx_hid[:, None] * stride_cos_hid,
                     mask=mask_tsrc_active[None, :],
-                    other=0,
+                    other=0.0,
                 ).to(keys_left.dtype)
                 tl.debug_barrier()
                 
@@ -256,7 +256,7 @@ def load_keys_with_rope(
                         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
                         idx_hid[:, None] * stride_sin_hid,
                     mask=mask_tsrc_active[None, :],
-                    other=0,
+                    other=0.0,
                 ).to(keys_left.dtype)
                 tl.debug_barrier()
                 
@@ -1033,6 +1033,7 @@ def main_debug():
     
     seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
+    block_size = int(os.getenv('BLOCK_SIZE', '64'))
     mask_only = False
     
     assert seq_dups > 0
@@ -1049,11 +1050,11 @@ def main_debug():
     seq_len = seq_len * seq_dups
     
     q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0).to(torch.float8_e5m2)
+    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0).to(torch.float8_e5m2)
     if cos is not None:
-        cos = cos.repeat(seq_dups, 1)
-        sin = sin.repeat(seq_dups, 1)
+        cos = cos.repeat(seq_dups, 1).to(torch.float8_e5m2)
+        sin = sin.repeat(seq_dups, 1).to(torch.float8_e5m2)
     
     from flash_attn import flash_attn_func
     
@@ -1091,7 +1092,7 @@ def main_debug():
             stages=[
                 (64, 8192),
             ],
-            block_sparse_block_size_q=64,
+            block_sparse_block_size_q=block_size,
             model_context_length=65536,
             mask_only=mask_only,
         )

@@ -589,14 +589,14 @@ def adjust_rope(
                 new_t[:, None].to(tl.int64) * stride_cos_t +\
                 idx_hid[None, :] * stride_cos_hid,
             mask=tl.ravel(mask_t)[:, None],
-            other=0,
+            other=0.0,
         )
         sin_new = tl.load(
             SIN +\
                 new_t[:, None].to(tl.int64) * stride_sin_t +\
                 idx_hid[None, :] * stride_sin_hid,
             mask=tl.ravel(mask_t)[:, None],
-            other=0,
+            other=0.0,
         )
         
         tokens = apply_rope(
@@ -4756,19 +4756,22 @@ def block_sparse_attention_cuda_step(
                 # )
                 # keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                 
+                keys = keys.to(queries.dtype)
+                keys_rot = keys_rot.to(queries.dtype)
+                
                 cos_new = tl.load(
                     COS +\
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
                         idx_hid[:, None] * stride_cos_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 ).to(keys.dtype)
                 sin_new = tl.load(
                     SIN +\
                         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
                         idx_hid[:, None] * stride_sin_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 ).to(keys.dtype)
                 
                 keys_rot = tl.where(
