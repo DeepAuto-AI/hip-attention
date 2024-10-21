@@ -1019,6 +1019,7 @@ def main_debug():
     
     seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
+    mask_only = False
     
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
@@ -1042,7 +1043,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(1000):
+    for i in range(10):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1072,9 +1073,9 @@ def main_debug():
             stages=[
                 (64, 8192),
             ],
-            block_sparse_block_size_q=64,
+            block_sparse_block_size_q=32,
             model_context_length=65536,
-            mask_only=True,
+            mask_only=mask_only,
         )
         
         if i==0: DEBUG = False
@@ -1116,7 +1117,7 @@ def main_debug():
             ],
             block_sparse_block_size_q=64,
             model_context_length=65536,
-            mask_only=True,
+            mask_only=mask_only,
         )
         
         if i==0: DEBUG = False
@@ -1141,7 +1142,7 @@ def main_debug():
                 block_size_k=2,
                 block_stride_k=1,
             ),
-            mask_only=True,
+            mask_only=mask_only,
         )
         end.record()
         

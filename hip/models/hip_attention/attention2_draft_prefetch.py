@@ -4629,79 +4629,19 @@ def block_sparse_attention_cuda_step(
             ).to(tl.float32) * 1.44269504
         elif EXTEND_BACKEND == 'streaming':
             pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
-            if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
-            # if (EXCLUDE_SLIDING_WINDOW) and True:
-                assert COS is not None
-                assert SIN is not None
-                
-                # tl.static_assert((idx_tsrc.dtype == tl.int32) | (idx_tsrc.dtype == tl.int64))
-                # tl.static_assert((idx_bk.dtype == tl.int32) | (idx_bk.dtype == tl.int64))
-                # tl.static_print('hi', idx_tsrc.shape, mask_tsrc.shape, idx_hid.shape)
-                # tl.static_print(idx_bk.shape)
-                
-                if HAS_FIRST_TOKEN:
-                    old_tdst = (pos_tdst - 1)
-                    new_tdst = old_tdst * 0 + sliding_window_size + mask_k + sink_token_size - 1
+            if not NEED_APPLY_ROPE:
+                if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
+                    assert COS is not None
+                    assert SIN is not None
                     
-                    queries_adjusted = adjust_rope(
-                        queries, 
-                        old_tdst, 
-                        new_tdst, 
-                        mask_tdst,
-                        idx_hid,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_TQ, 
-                        HID,
-                        NEED_APPLY_ROPE,
-                    )
-                    
-                    if NEED_APPLY_ROPE:
-                        keys_adjusted = tl.trans(
-                            adjust_rope(
-                                tl.trans(keys, 1, 0), 
-                                idx_tsrc, 
-                                idx_tsrc, 
-                                mask_tsrc,
-                                idx_hid,
-                                COS, stride_cos_t, stride_cos_hid,
-                                SIN, stride_sin_t, stride_sin_hid,
-                                BLOCK_TK, 
-                                HID,
-                                NEED_APPLY_ROPE,
-                            ),
-                            1, 0
-                        )
-                    else:
-                        keys_adjusted = keys
-                else:
-                    old_tsrc = idx_tsrc
-                    new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
-                    
-                    keys_adjusted = keys.trans(1, 0)
-                    # tl.static_print(keys_adjusted.shape)
-                    keys_adjusted = adjust_rope(
-                        keys_adjusted.to(queries.dtype), 
-                        old_tsrc, 
-                        new_tsrc, 
-                        mask_tsrc,
-                        # old_tsrc == new_tsrc,
-                        idx_hid,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_TK, 
-                        HID,
-                        NEED_APPLY_ROPE,
-                    )
-                    keys_adjusted = tl.trans(keys_adjusted, 1, 0)
-                    # keys_adjusted = keys_adjusted * mask_tsrc[None, :]
-                    
-                    if NEED_APPLY_ROPE:
+                    if HAS_FIRST_TOKEN:
+                        old_tdst = (pos_tdst - 1)
+                        new_tdst = tl.minimum(old_tdst, sliding_window_size + mask_k + sink_token_size - 1)
+                        
                         queries_adjusted = adjust_rope(
-                            queries,
-                            pos_tdst - 1, 
-                            pos_tdst - 1, 
+                            queries, 
+                            old_tdst, 
+                            new_tdst, 
                             mask_tdst,
                             idx_hid,
                             COS, stride_cos_t, stride_cos_hid,
@@ -4710,62 +4650,91 @@ def block_sparse_attention_cuda_step(
                             HID,
                             NEED_APPLY_ROPE,
                         )
+                        
+                        keys_adjusted = keys
                     else:
-                        queries_adjusted = queries
-                
-                qk = tl.dot(
-                    (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
-                    (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
-                    out_dtype=tl.float32,
-                    allow_tf32=True,
-                ).to(tl.float32)
-                # if LOGIT_SOFTCAP is not None:
-                #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
-                # qk = qk * 1.44269504
-            else:
-                if NEED_APPLY_ROPE:
-                    queries = adjust_rope(
-                        queries.to(tl.float32),
-                        pos_tdst - 1, 
-                        pos_tdst - 1, 
-                        mask_tdst,
-                        idx_hid,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_TQ, 
-                        HID,
-                        True,
-                    ).to(queries.dtype)
-                    queries = (queries * mask_tdst[:, None]).to(queries.dtype)
-                    
-                    keys = tl.trans(
-                        adjust_rope(
-                            tl.trans(keys.to(tl.float32), 1, 0), 
-                            idx_tsrc, 
-                            idx_tsrc, 
+                        old_tsrc = idx_tsrc
+                        new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                        
+                        keys_adjusted = keys.trans(1, 0)
+                        keys_adjusted = adjust_rope(
+                            keys_adjusted.to(queries.dtype), 
+                            old_tsrc, 
+                            new_tsrc, 
                             mask_tsrc,
                             idx_hid,
                             COS, stride_cos_t, stride_cos_hid,
                             SIN, stride_sin_t, stride_sin_hid,
                             BLOCK_TK, 
                             HID,
+                            NEED_APPLY_ROPE,
+                        )
+                        keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                        
+                        queries_adjusted = queries
+                else:
+                    if NEED_APPLY_ROPE:
+                        queries = adjust_rope(
+                            queries.to(tl.float32),
+                            pos_tdst - 1, 
+                            pos_tdst - 1, 
+                            mask_tdst,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TQ, 
+                            HID,
                             True,
-                        ),
-                        1, 0
-                    ).to(keys.dtype)
-                    keys = (keys * mask_tsrc[None, :]).to(keys.dtype)
+                        ).to(queries.dtype)
+                        queries_adjusted = (queries * mask_tdst[:, None]).to(queries.dtype)
+                        
+                        keys = tl.trans(
+                            adjust_rope(
+                                tl.trans(keys.to(tl.float32), 1, 0), 
+                                idx_tsrc, 
+                                idx_tsrc, 
+                                mask_tsrc,
+                                idx_hid,
+                                COS, stride_cos_t, stride_cos_hid,
+                                SIN, stride_sin_t, stride_sin_hid,
+                                BLOCK_TK, 
+                                HID,
+                                True,
+                            ),
+                            1, 0
+                        ).to(keys.dtype)
+                        keys_adjusted = (keys * mask_tsrc[None, :]).to(keys.dtype)
+            else:
+                tl.static_assert(NEED_APPLY_ROPE)
                 
-                qk = tl.dot(
-                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
-                    (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
-                    out_dtype=tl.float32,
-                    allow_tf32=True,
-                ).to(tl.float32)
-                # if LOGIT_SOFTCAP is not None:
-                #     qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
-                # qk = qk * 1.44269504
-            # if USING_EXTEND:
-            #     qk *= tl.sqrt(tl.maximum(0.0, pos_tdst / 8192.0 - 1.0)[:, None] / 16.0) * 0.5 + 1.0
+                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                new_tsrc = tl.maximum(0, new_tsrc + (pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1) - sliding_window_size - sink_token_size - mask_k)
+                
+                keys_adjusted = keys.trans(1, 0)
+                keys_adjusted = adjust_rope(
+                    keys_adjusted.to(queries.dtype), 
+                    new_tsrc, 
+                    new_tsrc, 
+                    mask_tsrc,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_TK, 
+                    HID,
+                    NEED_APPLY_ROPE,
+                )
+                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                
+                queries_adjusted = queries
+                pass
+                
+            qk = tl.dot(
+                (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                out_dtype=tl.float32,
+                allow_tf32=True,
+            ).to(tl.float32)
             if LOGIT_SOFTCAP is not None:
                 qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
             qk = qk * 1.44269504
@@ -5133,6 +5102,24 @@ def block_sparse_attention_cuda(
         # eviction_policy='evict_last',
         # volatile=True,
     )
+    
+    if USING_EXTEND and NEED_APPLY_ROPE:
+        rope_tdst = tl.minimum(
+            pos_tdst - 1, 
+            sliding_window_size + sink_token_size + mask_bk * BLOCK_SIZE_K - 1
+        )
+        queries = adjust_rope(
+            queries,
+            rope_tdst,
+            rope_tdst,
+            mask_tdst,
+            idx_hid,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            BLOCK_SIZE_Q, 
+            HID,
+            True,
+        ).to(queries.dtype)
     
     range_start = tl.load(
         KS_START_END + \
