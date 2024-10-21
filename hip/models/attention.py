@@ -322,7 +322,7 @@ def custom_attention(
                 #     )
                 # )
     
-                # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype)
+                # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype, need_apply_rope)
                 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
                 attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
                     q, k, v,

@@ -4708,21 +4708,28 @@ def block_sparse_attention_cuda_step(
             else:
                 tl.static_assert(NEED_APPLY_ROPE)
                 
-                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-                new_tsrc = tl.maximum(0, new_tsrc + (pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1) - sliding_window_size - sink_token_size - mask_k)
+                if EXCLUDE_SLIDING_WINDOW:
+                    # new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                    # # new_tsrc = tl.minimum(new_tsrc, sliding_window_size + sink_token_size + mask_k - 1)
+                    # # new_tsrc = tl.minimum(new_tsrc, pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1)
+                    # new_tsrc = tl.maximum(0, new_tsrc)
+                    new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                else:
+                    new_tsrc = idx_tsrc
                 
                 keys_adjusted = keys.trans(1, 0)
                 keys_adjusted = adjust_rope(
                     keys_adjusted.to(queries.dtype), 
-                    new_tsrc, 
-                    new_tsrc, 
+                    new_tsrc,
+                    new_tsrc,
                     mask_tsrc,
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     BLOCK_TK, 
                     HID,
-                    NEED_APPLY_ROPE,
+                    True,
                 )
                 keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                 
@@ -5090,37 +5097,6 @@ def block_sparse_attention_cuda(
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
     
-    queries = tl.load(
-        Q +\
-            idx_bsz * stride_q_bsz +\
-            idx_tdst[:, None] * stride_q_tdst +\
-            idx_head * stride_q_head +\
-            idx_hid[None, :] * stride_q_hid,
-        mask=mask_tdst[:, None],
-        other=0,
-        cache_modifier='.cg',
-        # eviction_policy='evict_last',
-        # volatile=True,
-    )
-    
-    if USING_EXTEND and NEED_APPLY_ROPE:
-        rope_tdst = tl.minimum(
-            pos_tdst - 1, 
-            sliding_window_size + sink_token_size + mask_bk * BLOCK_SIZE_K - 1
-        )
-        queries = adjust_rope(
-            queries,
-            rope_tdst,
-            rope_tdst,
-            mask_tdst,
-            idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_SIZE_Q, 
-            HID,
-            True,
-        ).to(queries.dtype)
-    
     range_start = tl.load(
         KS_START_END + \
             idx_b * stride_ks_start_end_b +\
@@ -5136,6 +5112,38 @@ def block_sparse_attention_cuda(
     if BK <= 0:
         range_start = 0
         range_end = 0
+    
+    queries = tl.load(
+        Q +\
+            idx_bsz * stride_q_bsz +\
+            idx_tdst[:, None] * stride_q_tdst +\
+            idx_head * stride_q_head +\
+            idx_hid[None, :] * stride_q_hid,
+        mask=mask_tdst[:, None],
+        other=0,
+        cache_modifier='.cg',
+        # eviction_policy='evict_last',
+        # volatile=True,
+    )
+    
+    if USING_EXTEND and NEED_APPLY_ROPE:
+        rope_tdst = pos_tdst - 1
+        # rope_tdst = tl.minimum(
+        #     rope_tdst, 
+        #     sliding_window_size + sink_token_size + (range_end - range_start) * BLOCK_SIZE_K - 1
+        # )
+        queries = adjust_rope(
+            queries,
+            rope_tdst,
+            rope_tdst,
+            mask_tdst,
+            idx_hid,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            BLOCK_SIZE_Q, 
+            HID,
+            True,
+        ).to(queries.dtype)
     
     if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
@@ -5302,7 +5310,7 @@ def block_sparse_attention_cuda(
             else:
                 pass
     
-    if (sink_token_size > 0):
+    if (sink_token_size > 0) and True:
         for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < tl.minimum(MAX_TSRC, sink_token_size)
@@ -5573,10 +5581,13 @@ def block_sparse_attention_cuda(
                 SIN, stride_sin_t, stride_sin_hid,
                 model_context_length, 
                 
+                # tl.arange(0, BLOCK_BK) +\
+                #     (range_end - range_start) +\
+                #     (sink_token_size // BLOCK_SIZE_K) +\
+                #     (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
                 tl.arange(0, BLOCK_BK) +\
-                    (range_end - range_start) +\
-                    (sink_token_size // BLOCK_SIZE_K) +\
-                    (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
+                    (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K +\
+                    (tl.max(pos_tdst * mask_tdst) - tl.sum(mask_tdst.to(tl.int32)) - sliding_window_size) // BLOCK_SIZE_K,
                 pos_tdst,
                 idx_hid, 
                 IS_CAUSAL,

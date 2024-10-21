@@ -495,9 +495,14 @@ class LlamaCustomAttention(LlamaAttention):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         
-        force_extend = True
-        need_apply_rope = True
-        model_context_length = 32768
+        if self.attention_method == 'hip':
+            force_extend = True
+            need_apply_rope = True
+            model_context_length = 32768
+        else:
+            force_extend = False
+            need_apply_rope = False
+            model_context_length = 32768
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
