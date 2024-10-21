@@ -24,6 +24,254 @@ import cv2
 DEBUG = (os.getenv('HIP_DEBUG', '0') == '1')
 
 @triton.jit
+def load_keys_with_rope(
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc, 
+    stride_k_head_kv, 
+    stride_k_hid,
+    
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
+    
+    # paged attention args template
+    USING_PAGES,
+    PAGE_SIZE,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE,
+    OFFLOAD_CACHE_METHOD,
+    OFFLOAD_CACHE_BUDGET,
+    OFFLOAD_CACHE_KV_HEAD,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
+    queries,
+    
+    idx_bsz,
+    idx_tsrc,
+    idx_head_kv,
+    idx_hid,
+    mask_tsrc_active,
+    
+    real_pos_tdst_min,
+    model_context_length,
+    num_sinks,
+    
+    USING_EXTEND,
+    NEED_APPLY_ROPE,
+    BLOCK_CHUNK,
+    BLOCK_HID,
+):
+    keys_left = load_tokens(
+        K, 
+        stride_k_bsz,
+        stride_k_tsrc,
+        stride_k_head_kv,
+        stride_k_hid,
+        
+        USING_PAGES,
+        PAGE_SIZE,
+        K_CACHE,
+        stride_k_cache_page,
+        stride_k_cache_offset,
+        stride_k_cache_kv_head,
+        stride_k_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_b,
+        
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        True,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
+        
+        idx_bsz,
+        idx_tsrc[None, :],
+        idx_head_kv,
+        idx_hid[:, None],
+        
+        mask_tsrc_active[None, :],
+        
+        BLOCK_CHUNK,
+    ).to(queries.dtype)
+    
+    if USING_EXTEND:
+        tsrc_extend = (real_pos_tdst_min + 1 - model_context_length)
+        if NEED_APPLY_ROPE or (tsrc_extend >= 0):
+            old_tsrc = idx_tsrc
+            
+            # new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
+            
+            # new_tsrc = idx_chunk + 4
+            
+            new_tsrc = tl.where(
+                (old_tsrc - tsrc_extend) > (model_context_length // 2),
+                old_tsrc - tsrc_extend,
+                ((old_tsrc - num_sinks) * ((model_context_length // 2) / (tsrc_extend // 2))).to(tl.int32) + num_sinks
+                # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
+            )
+            new_tsrc = tl.maximum(0, new_tsrc)
+            new_tsrc = tl.minimum(model_context_length, new_tsrc)
+            
+            if not NEED_APPLY_ROPE:
+                keys_left = keys_left.trans(1, 0)
+                keys_left = adjust_rope(
+                    keys_left,
+                    old_tsrc,
+                    new_tsrc,
+                    mask_tsrc_active,
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_CHUNK,
+                    BLOCK_HID,
+                    NEED_APPLY_ROPE,
+                ).to(keys_left.dtype)
+                keys_left = tl.trans(keys_left, 1, 0)
+                keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
+            else:
+                cos_new = tl.load(
+                    COS +\
+                        new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                        idx_hid[:, None] * stride_cos_hid,
+                    mask=mask_tsrc_active[None, :],
+                    other=0,
+                ).to(keys_left.dtype)
+                keys_left *= cos_new
+                
+                keys_left_rot = load_tokens(
+                    K, 
+                    stride_k_bsz,
+                    stride_k_tsrc,
+                    stride_k_head_kv,
+                    stride_k_hid,
+                    
+                    USING_PAGES,
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    True,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    OFFLOAD_CACHE_K_BANK_STATS,
+                    stride_offload_cache_k_bank_stats_n,
+                    stride_offload_cache_k_bank_stats_page,
+                    stride_offload_cache_k_bank_stats_k,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head_kv,
+                    ((idx_hid + BLOCK_HID) % BLOCK_HID)[:, None],
+                    
+                    mask_tsrc_active[None, :],
+                    
+                    BLOCK_CHUNK,
+                ).to(queries.dtype)
+                
+                # TODO: multiply -right
+                keys_left_rot = tl.where(
+                    (idx_hid + BLOCK_HID)[:, None] < BLOCK_HID,
+                    -keys_left_rot,
+                    keys_left_rot
+                )
+                
+                sin_new = tl.load(
+                    SIN +\
+                        new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                        idx_hid[:, None] * stride_sin_hid,
+                    mask=mask_tsrc_active[None, :],
+                    other=0,
+                ).to(keys_left.dtype)
+                
+                keys_left_rot *= sin_new
+                
+                keys_left = keys_left + keys_left_rot
+                # keys_left = keys_left * cos_new + keys_left_rot * sin_new
+                # keys_left = keys_left * keys_left + keys_left * keys_left
+        # else:
+        #     if NEED_APPLY_ROPE:
+        #         keys_left = keys_left.trans(1, 0)
+        #         keys_left = adjust_rope(
+        #             keys_left,
+        #             idx_tsrc,
+        #             idx_tsrc,
+        #             mask_tsrc_active,
+        #             idx_hid,
+        #             COS, stride_cos_t, stride_cos_hid,
+        #             SIN, stride_sin_t, stride_sin_hid,
+        #             BLOCK_CHUNK,
+        #             BLOCK_HID,
+        #             NEED_APPLY_ROPE,
+        #         ).to(keys_left.dtype)
+        #         keys_left = tl.trans(keys_left, 1, 0)
+    
+    return keys_left
+
+@triton.jit
 def chunk_controllable_sampling_mask_cuda(
     Q, 
     stride_q_bsz, 
@@ -177,6 +425,9 @@ def chunk_controllable_sampling_mask_cuda(
     
     max_chunk_size = tl.ceil(MAX_TSRC / CHUNK_COUNT).to(tl.float32)
     
+    
+    scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
+    
     queries = tl.load(
         Q + \
             idx_bsz * stride_q_bsz +\
@@ -188,9 +439,9 @@ def chunk_controllable_sampling_mask_cuda(
     )
     
     if USING_EXTEND:
-        if real_pos_tdst_min >= model_context_length:
+        if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
             old_tdst = pos_tdst
-            new_tdst = tl.minimum(idx_tdst, model_context_length - 1)
+            new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
             # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
             # new_tdst = old_tdst // 16
             
@@ -224,36 +475,29 @@ def chunk_controllable_sampling_mask_cuda(
                     NEED_APPLY_ROPE,
                 ).to(queries.dtype)
     
-    scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
-    
     while (max_chunk_size > 1):
         max_chunk_size /= 2.0
         mask_tsrc_active = mask_chunk & (idx_tsrc_left < idx_tsrc_right) & (idx_tsrc_left <= pos_tdst_min)
         idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
         
         idx_tsrc = (idx_tsrc_left + idx_tsrc_center) // 2
-        # keys_left = tl.load(
-        #     K +\
-        #         idx_bsz * stride_k_bsz +\
-        #         idx_tsrc[None, :] * stride_k_tsrc +\
-        #         (idx_head // HEAD_GROUP) * stride_k_head_kv +\
-        #         idx_hid[:, None] * stride_k_hid,
-        #     mask=mask_tsrc_active[None, :],
-        #     other=0,
-        # )
-        keys_left = load_tokens(
+        keys_left = load_keys_with_rope(
             K, 
-            stride_k_bsz,
-            stride_k_tsrc,
-            stride_k_head_kv,
+            stride_k_bsz, 
+            stride_k_tsrc, 
+            stride_k_head_kv, 
             stride_k_hid,
             
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            
+            # paged attention args template
             USING_PAGES,
             PAGE_SIZE,
-            K_CACHE,
-            stride_k_cache_page,
-            stride_k_cache_offset,
-            stride_k_cache_kv_head,
+            K_CACHE, 
+            stride_k_cache_page, 
+            stride_k_cache_offset, 
+            stride_k_cache_kv_head, 
             stride_k_cache_hid,
             BLOCK_TABLE,
             stride_block_table_bsz,
@@ -261,11 +505,11 @@ def chunk_controllable_sampling_mask_cuda(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_b,
             
+            # offload cache args template
             USING_OFFLOAD_CACHE,
             OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
-            True,
             OFFLOAD_CACHE_K_TABLES,
             stride_offload_cache_k_tables_n,
             stride_offload_cache_k_tables_t,
@@ -282,63 +526,23 @@ def chunk_controllable_sampling_mask_cuda(
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
             
+            queries,
+            
             idx_bsz,
-            idx_tsrc[None, :],
+            idx_tsrc,
             idx_head // HEAD_GROUP,
-            idx_hid[:, None],
+            idx_hid,
+            mask_tsrc_active,
             
-            mask_tsrc_active[None, :],
+            real_pos_tdst_min,
+            model_context_length,
+            num_sinks,
             
+            USING_EXTEND,
+            NEED_APPLY_ROPE,
             BLOCK_CHUNK,
-        ).to(queries.dtype)
-        
-        if USING_EXTEND:
-            if real_pos_tdst_min >= model_context_length:
-                old_tsrc = idx_tsrc
-                
-                # new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
-                
-                # new_tsrc = idx_chunk + 4
-                
-                new_tsrc = tl.where(
-                    (old_tsrc - real_pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
-                    old_tsrc - real_pos_tdst_min + model_context_length - 1,
-                    ((old_tsrc - num_sinks) * ((model_context_length // 2) / (real_pos_tdst_min - model_context_length // 2))).to(tl.int32) + num_sinks
-                    # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
-                )
-                # new_tsrc = tl.maximum(0 , old_tsrc - (real_pos_tdst_min - model_context_length))
-                
-                keys_left = keys_left.trans(1, 0)
-                keys_left = adjust_rope(
-                    keys_left,
-                    old_tsrc,
-                    new_tsrc,
-                    mask_tsrc_active,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_CHUNK,
-                    BLOCK_HID,
-                    NEED_APPLY_ROPE,
-                ).to(keys_left.dtype)
-                keys_left = tl.trans(keys_left, 1, 0)
-                keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
-            else:
-                if NEED_APPLY_ROPE:
-                    keys_left = keys_left.trans(1, 0)
-                    keys_left = adjust_rope(
-                        keys_left,
-                        idx_tsrc,
-                        idx_tsrc,
-                        mask_tsrc_active,
-                        idx_hid,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_CHUNK,
-                        BLOCK_HID,
-                        NEED_APPLY_ROPE,
-                    ).to(keys_left.dtype)
-                    keys_left = tl.trans(keys_left, 1, 0)
+            BLOCK_HID,
+        )
             
         scores_left = tl.dot(
             (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
@@ -358,29 +562,23 @@ def chunk_controllable_sampling_mask_cuda(
         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
         
         idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
-        # keys_right = tl.load(
-        #     K +\
-        #         idx_bsz * stride_k_bsz +\
-        #         idx_tsrc[None, :] * stride_k_tsrc +\
-        #         (idx_head // HEAD_GROUP) * stride_k_head_kv +\
-        #         idx_hid[:, None] * stride_k_hid,
-        #     mask=mask_tsrc_active[None, :],
-        #     other=0,
-        # )
-        
-        keys_right = load_tokens(
+        keys_right = load_keys_with_rope(
             K, 
-            stride_k_bsz,
-            stride_k_tsrc,
-            stride_k_head_kv,
+            stride_k_bsz, 
+            stride_k_tsrc, 
+            stride_k_head_kv, 
             stride_k_hid,
             
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            
+            # paged attention args template
             USING_PAGES,
             PAGE_SIZE,
-            K_CACHE,
-            stride_k_cache_page,
-            stride_k_cache_offset,
-            stride_k_cache_kv_head,
+            K_CACHE, 
+            stride_k_cache_page, 
+            stride_k_cache_offset, 
+            stride_k_cache_kv_head, 
             stride_k_cache_hid,
             BLOCK_TABLE,
             stride_block_table_bsz,
@@ -388,11 +586,11 @@ def chunk_controllable_sampling_mask_cuda(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_b,
             
+            # offload cache args template
             USING_OFFLOAD_CACHE,
             OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
-            True,
             OFFLOAD_CACHE_K_TABLES,
             stride_offload_cache_k_tables_n,
             stride_offload_cache_k_tables_t,
@@ -409,63 +607,23 @@ def chunk_controllable_sampling_mask_cuda(
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
             
+            queries,
+            
             idx_bsz,
-            idx_tsrc[None, :],
+            idx_tsrc,
             idx_head // HEAD_GROUP,
-            idx_hid[:, None],
+            idx_hid,
+            mask_tsrc_active,
             
-            mask_tsrc_active[None, :],
+            real_pos_tdst_min,
+            model_context_length,
+            num_sinks,
             
+            USING_EXTEND,
+            NEED_APPLY_ROPE,
             BLOCK_CHUNK,
-        ).to(queries.dtype)
-        
-        if USING_EXTEND:
-            if real_pos_tdst_min >= model_context_length:
-                old_tsrc = idx_tsrc
-                
-                # new_tsrc = (old_tsrc * ((model_context_length - 1) / real_pos_tdst_min)).to(tl.int32)
-                
-                # new_tsrc = idx_chunk + 4
-                
-                new_tsrc = tl.where(
-                    (old_tsrc - real_pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
-                    old_tsrc - real_pos_tdst_min + model_context_length - 1,
-                    ((old_tsrc - num_sinks) * ((model_context_length // 2) / (real_pos_tdst_min - model_context_length // 2))).to(tl.int32) + num_sinks
-                    # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
-                )
-                # new_tsrc = tl.maximum(0 , old_tsrc - (real_pos_tdst_min - model_context_length))
-                
-                keys_right = keys_right.trans(1, 0)
-                keys_right = adjust_rope(
-                    keys_right, 
-                    old_tsrc, 
-                    new_tsrc, 
-                    mask_tsrc_active,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_CHUNK, 
-                    BLOCK_HID,
-                    NEED_APPLY_ROPE,
-                ).to(keys_right.dtype)
-                keys_right = tl.trans(keys_right, 1, 0).to(keys_right.dtype)
-                keys_right = (keys_right * mask_tsrc_active[None, :]).to(keys_right.dtype)
-            else:
-                if NEED_APPLY_ROPE:
-                    keys_right = keys_right.trans(1, 0)
-                    keys_right = adjust_rope(
-                        keys_right, 
-                        idx_tsrc, 
-                        idx_tsrc, 
-                        mask_tsrc_active,
-                        idx_hid,
-                        COS, stride_cos_t, stride_cos_hid,
-                        SIN, stride_sin_t, stride_sin_hid,
-                        BLOCK_CHUNK, 
-                        BLOCK_HID,
-                        NEED_APPLY_ROPE,
-                    ).to(keys_right.dtype)
-                    keys_right = tl.trans(keys_right, 1, 0).to(keys_right.dtype)
+            BLOCK_HID,
+        )
         
         scores_right = tl.dot(
             (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
@@ -664,7 +822,7 @@ def dual_stage_quadratic_hip_attention(
     indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
     indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
     
-    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10000):
+    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
         out_indices_cpu = indices_left.cpu()
         debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
         for i in range(out_indices_cpu.shape[1]):
@@ -776,7 +934,7 @@ def dual_stage_quadratic_hip_attention(
     assert (second_stage_k % chunk_size) == 0
     indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
     
-    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10000):
+    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
         out_indices_cpu = indices.cpu()
         debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
         for i in range(out_indices_cpu.shape[1]):
@@ -841,7 +999,7 @@ def dual_stage_quadratic_hip_attention(
     )
     
     if DEBUG:
-        print('context', context)
+        print('context', context[0, :, DEBUG_HEAD, :])
         print('indices', indices[0, -1])
     
     return context, HiPAttentionOutputMetadata(
@@ -861,13 +1019,12 @@ def main_debug():
     
     seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
-    using_extend = os.getenv('USING_EXTEND', '1') == '1'
     
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
         window=40, 
         seq_len=seq_len, 
-        return_cos_sin=using_extend, 
+        return_cos_sin=True, 
         dtype=torch.bfloat16
     )
     HEAD = q.shape[0]
@@ -885,37 +1042,42 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(0):
+    for i in range(1000):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
         start.record()
-        flash_attn_func(
-            q, k, v, causal=True
-        )
-        end.record()
+        if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
         
-        end.synchronize()
-        print(start.elapsed_time(end))
-    
-    print('-' * 20)
-    
-    for i in range(0):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+        # print(cos.shape)
+        # print(sin.shape)
         
-        start.record()
-        hip_attention(
+        dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
-                mask_k=512,
+                mask_k=256,
                 block_size_q=64,
-                block_stride_q=2,
-                block_size_k=2,
-                block_stride_k=1,
+                block_stride_q=4,
+                block_size_k=64, # BLOCK_CHUNK
+                sliding_window_size=1024,
+                sink_token_size=256,
+                # position_ids=position_ids,
+                
+                using_extend=True,
+                rope_cos=cos,
+                rope_sin=sin,
+                need_apply_rope=True,
             ),
-            mask_only=False,
+            second_stage_k=2048,
+            stages=[
+                (64, 8192),
+            ],
+            block_sparse_block_size_q=64,
+            model_context_length=65536,
+            mask_only=True,
         )
+        
+        if i==0: DEBUG = False
         end.record()
         
         end.synchronize()
@@ -944,7 +1106,7 @@ def main_debug():
                 sink_token_size=256,
                 # position_ids=position_ids,
                 
-                using_extend=using_extend,
+                using_extend=False,
                 rope_cos=cos,
                 rope_sin=sin,
             ),
@@ -952,11 +1114,50 @@ def main_debug():
             stages=[
                 (64, 8192),
             ],
-            block_sparse_block_size_q=32,
+            block_sparse_block_size_q=64,
             model_context_length=65536,
+            mask_only=True,
         )
         
         if i==0: DEBUG = False
+        end.record()
+        
+        end.synchronize()
+        print(start.elapsed_time(end))
+    
+    print('-' * 20)
+    
+    for i in range(10):
+        start = torch.cuda.Event(True)
+        end = torch.cuda.Event(True)
+        
+        start.record()
+        hip_attention(
+            q, k, v,
+            args=HiPAttentionArgs(
+                mask_k=512,
+                block_size_q=64,
+                block_stride_q=2,
+                block_size_k=2,
+                block_stride_k=1,
+            ),
+            mask_only=True,
+        )
+        end.record()
+        
+        end.synchronize()
+        print(start.elapsed_time(end))
+    
+    print('-' * 20)
+    
+    for i in range(3):
+        start = torch.cuda.Event(True)
+        end = torch.cuda.Event(True)
+        
+        start.record()
+        flash_attn_func(
+            q, k, v, causal=True
+        )
         end.record()
         
         end.synchronize()
