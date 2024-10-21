@@ -9,7 +9,7 @@ class SglangModel:
     def generate(self, input_ids=None, input_text=None, max_tokens=128):
         if input_text is None:
             assert input_ids is not None
-            input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)
+            input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)[0]
         else:
             assert input_ids is None
 
