@@ -26,8 +26,9 @@ class SglangModel:
         
         assert response.status_code == 200, response.json()
         
-        print(response.json())
-        
-        responses = [response.json()['text']]
+        if isinstance(response.json(), dict):
+            responses = response.json()['text']
+        else:
+            responses = response.json()[0]['text']
         
         return responses[0]
