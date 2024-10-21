@@ -4501,6 +4501,7 @@ def block_sparse_attention_cuda_step(
     # QKV
     queries,
     keys,
+    keys_rot,
     values,
     
     #indices
@@ -4627,7 +4628,7 @@ def block_sparse_attention_cuda_step(
                 t_window,
                 t_grouped,
             ).to(tl.float32) * 1.44269504
-        elif EXTEND_BACKEND == 'streaming':
+        elif (EXTEND_BACKEND == 'streaming') or (EXTEND_BACKEND == 'dynamic_extend'):
             pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
             if not NEED_APPLY_ROPE:
                 if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
@@ -4707,14 +4708,36 @@ def block_sparse_attention_cuda_step(
                         keys_adjusted = (keys * mask_tsrc[None, :]).to(keys.dtype)
             else:
                 tl.static_assert(NEED_APPLY_ROPE)
+                tl.static_assert(USING_EXTEND)
+                # tl.static_assert(not EXCLUDE_SLIDING_WINDOW)
                 
                 if EXCLUDE_SLIDING_WINDOW:
                     # new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
                     # # new_tsrc = tl.minimum(new_tsrc, sliding_window_size + sink_token_size + mask_k - 1)
                     # # new_tsrc = tl.minimum(new_tsrc, pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1)
                     # new_tsrc = tl.maximum(0, new_tsrc)
-                    new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-                    new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                    
+                    if EXTEND_BACKEND == 'streaming':
+                        # streaming
+                        new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                    elif EXTEND_BACKEND == 'dynamic_extend':
+                        # dynamic extend
+                        pos_tdst_max = pos_tdst_min - tl.sum(mask_tdst.to(tl.int32))
+                        
+                        window = model_context_length // 2
+                        new_tsrc = tl.where(
+                            idx_tsrc >= (pos_tdst_max - window),
+                            idx_tsrc,
+                            tl.where(
+                                pos_tdst_max <= model_context_length,
+                                idx_tsrc,
+                                (idx_tsrc * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
+                            )
+                        )
+                        new_tsrc = tl.maximum(0, new_tsrc)
+                    else:
+                        raise Exception()
                 else:
                     new_tsrc = idx_tsrc
                 
@@ -4732,6 +4755,34 @@ def block_sparse_attention_cuda_step(
                     True,
                 )
                 keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                
+                cos_new = tl.load(
+                    COS +\
+                        new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                        idx_hid[:, None] * stride_cos_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0,
+                ).to(keys.dtype)
+                sin_new = tl.load(
+                    SIN +\
+                        new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                        idx_hid[:, None] * stride_sin_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0,
+                ).to(keys.dtype)
+                
+                keys_rot = tl.where(
+                    (idx_hid + HID // 2)[:, None] < HID,
+                    -keys_rot,
+                    keys_rot
+                )
+                # keys_rot = keys_rot * ((idx_hid + HID)[:, None] < HID) * 2 - 1
+                
+                keys_adjusted_ = (keys * cos_new + keys_rot * sin_new).to(keys.dtype) * mask_tsrc[None, :]
+                
+                # error = tl.sum(tl.abs(keys_adjusted * mask_tsrc[None, :] - keys_adjusted_ * mask_tsrc[None, :]))
+                # tl.device_print('err', error)
+                keys_adjusted = keys_adjusted_
                 
                 queries_adjusted = queries
                 pass
@@ -5132,6 +5183,7 @@ def block_sparse_attention_cuda(
         #     rope_tdst, 
         #     sliding_window_size + sink_token_size + (range_end - range_start) * BLOCK_SIZE_K - 1
         # )
+        
         queries = adjust_rope(
             queries,
             rope_tdst,
@@ -5223,6 +5275,57 @@ def block_sparse_attention_cuda(
                     BLOCK_SIZE_K,
                 )
                 
+                if USING_EXTEND and NEED_APPLY_ROPE:
+                    keys_rot = load_tokens(
+                        K, 
+                        stride_k_bsz, 
+                        stride_k_tsrc, 
+                        stride_k_head, 
+                        stride_k_hid,
+                        
+                        USING_PAGES, 
+                        PAGE_SIZE,
+                        K_CACHE,
+                        stride_k_cache_page,
+                        stride_k_cache_offset,
+                        stride_k_cache_kv_head,
+                        stride_k_cache_hid,
+                        BLOCK_TABLE,
+                        stride_block_table_bsz,
+                        stride_block_table_page,
+                        CACHE_SEQ_LENS,
+                        stride_cache_seq_lens_b,
+                        
+                        # offload cache args template
+                        USING_OFFLOAD_CACHE,
+                        OFFLOAD_CACHE_METHOD,
+                        OFFLOAD_CACHE_BUDGET,
+                        OFFLOAD_CACHE_KV_HEAD,
+                        False,
+                        OFFLOAD_CACHE_K_TABLES,
+                        stride_offload_cache_k_tables_n,
+                        stride_offload_cache_k_tables_t,
+                        OFFLOAD_CACHE_K_BANKS,
+                        stride_offload_cache_k_banks_n,
+                        stride_offload_cache_k_banks_page,
+                        stride_offload_cache_k_banks_offset,
+                        stride_offload_cache_k_banks_hid,
+                        None, 0, 0, 0,
+                        OFFLOAD_CACHE_COUNTERS,
+                        stride_offload_cache_counters_n,
+                        stride_offload_cache_counters_k,
+                        
+                        idx_bsz,
+                        idx_tsrc[None, :],
+                        idx_head // KV_HEAD_REPEAT,
+                        ((idx_hid + HID // 2) % HID)[:, None],
+                        mask_tsrc[None, :],
+                        
+                        BLOCK_SIZE_K,
+                    )
+                else:
+                    keys_rot = None
+                
                 values = load_tokens(
                     V, 
                     stride_v_bsz, 
@@ -5274,6 +5377,7 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
                     queries,
                     keys,
+                    keys_rot,
                     values,
                     
                     idx_tsrc, mask_tsrc,
@@ -5364,6 +5468,57 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_K,
             )
             
+            if USING_EXTEND and NEED_APPLY_ROPE:
+                keys_rot = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    ((idx_hid + HID // 2) % HID)[:, None],
+                    mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
+                )
+            else:
+                keys_rot = None
+            
             values = load_tokens(
                 V, 
                 stride_v_bsz, 
@@ -5415,6 +5570,7 @@ def block_sparse_attention_cuda(
             acc, l_i, m_i = block_sparse_attention_cuda_step(
                 queries,
                 keys,
+                keys_rot,
                 values,
                 
                 idx_tsrc, mask_tsrc,
@@ -5508,6 +5664,57 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_K,
             )
             
+            if USING_EXTEND and NEED_APPLY_ROPE:
+                keys_rot = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    ((idx_hid + HID // 2) % HID)[:, None],
+                    mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
+                )
+            else:
+                keys_rot = None
+            
             values = load_tokens(
                 V, 
                 stride_v_bsz, 
@@ -5559,6 +5766,7 @@ def block_sparse_attention_cuda(
             acc, l_i, m_i = block_sparse_attention_cuda_step(
                 queries,
                 keys,
+                keys_rot,
                 values,
                 
                 idx_tsrc, mask_tsrc,

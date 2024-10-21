@@ -498,11 +498,11 @@ class LlamaCustomAttention(LlamaAttention):
         if self.attention_method == 'hip':
             force_extend = True
             need_apply_rope = True
-            model_context_length = 32768
+            model_context_length = 65536
         else:
             force_extend = False
             need_apply_rope = False
-            model_context_length = 32768
+            model_context_length = 65536
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp

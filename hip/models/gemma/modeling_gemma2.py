@@ -19,6 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import os
 from typing import List, Optional, Tuple, Union
 
@@ -300,7 +301,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
-        self.tree_sliding_window_size = 256
+        self.tree_sliding_window_size = 1024
         self.tree_sink_token_size = 256
 
         self.tree_reformer = self.tree_performer = None
@@ -332,20 +333,19 @@ class Gemma2CustomAttention(Gemma2Attention):
         force_dense = False
         disalbe_sliding_window = False
         using_self_extend = True
-        model_context_length = 8192
+        need_apply_rope = False
+        model_context_length = 6144
         if using_self_extend:
             if self.layer_idx in self.tree_dense_layers:
                 self.tree_k = 1024
-                self.tree_sliding_window_size = 4096
+                self.tree_sliding_window_size = 1024
                 self.tree_dense_layers.clear()
             self.tree_rope_method = 'self_extend'
-            # if self.sliding_window != None:
-            #     se_group_size *= 2
+            
             if self.sliding_window != None:
-                # self.tree_sliding_window_size = 1024
-                # disalbe_sliding_window = True
-                # model_context_length = 4096
                 force_dense = True
+            else:
+                need_apply_rope = True
             self.tree_sliding_window_size = 1024
         else:
             if self.sliding_window != None:
@@ -370,7 +370,8 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         cos, sin = self.rotary_emb(value_states, position_ids)
         cos_full, sin_full = self.rotary_emb(value_states, torch.arange(0, seq_len, device=query_states.device)[None, :])
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if not need_apply_rope:
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # print(cos.shape, cos_full.shape, self.attention_method, force_dense)
 
@@ -419,61 +420,77 @@ class Gemma2CustomAttention(Gemma2Attention):
         
         q_repeat = 1
         
-        attn_output, _, _ = custom_attention(
-            query_states=query_states.repeat_interleave(q_repeat, 2), 
-            key_states=key_states[:,:,:seq_len], 
-            value_states=value_states[:,:,:seq_len],
-            attention_mask=attention_mask, 
-            causal_mask=causal_mask,
-            attention_dropout=self.attention_dropout if self.training else 0.0,
-
-            # Attention method
-            attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) or force_dense) else self.attention_method,
-            tree_reformer=self.tree_reformer,
-            tree_performer=self.tree_performer,
-
-            # hip parameters
-            tree_k=mask_k,
-            tree_block_size_q=self.tree_block_size_q,
-            tree_block_stride_q=self.tree_block_stride_q, 
-            tree_block_size_k=self.tree_block_size_k,
-            tree_block_stride_k=self.tree_block_stride_k, 
-            tree_dense_queries=self.tree_dense_queries,
-            tree_last_dense_queries=self.tree_last_dense_queries,
-            tree_sampling_method=self.tree_sampling_method,
-            tree_sliding_window_size=self.tree_sliding_window_size,
-
-            # Latency optimization tweaks
-            tree_enable_flash=self.tree_enable_flash,
-            tree_enable_sparq=self.tree_enable_sparq,
-            tree_use_sliding_window=self.tree_use_sliding_window,
-            tree_sink_token_size=self.tree_sink_token_size,
-
-            # Context averaging parameters
-            tree_using_context_avg=False,
-            tree_avgpool_scaler=None,
-            last_cumsum=None,
-            hidden_states=hidden_states,
-
-            # RoPE parameters
-            tree_rope_method=self.tree_rope_method,
-            rope_cos=cos_full,
-            rope_sin=sin_full,
-            position_ids=position_ids[:, :q_len].repeat_interleave(q_repeat, 1),
-            self_extend_group_size=se_group_size,
-
-            # Attention sparsity loss
-            output_attn_sparsity_loss=output_attn_sparsity_loss,
-            tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+        if force_dense:
+            from flash_attn import flash_attn_func
             
-            # Hyper attention states
-            hyper_attention=self.hyper_attention,
+            assert self.sliding_window is not None
             
-            sm_scaler=self.scaling,
-            attn_logit_softcapping=self.config.attn_logit_softcapping,
-            model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
-            model_context_length=model_context_length,
-        )
+            attn_output = flash_attn_func(
+                q=query_states.permute(0, 2, 1, 3),
+                k=key_states.permute(0, 2, 1, 3),
+                v=value_states.permute(0, 2, 1, 3),
+                softmax_scale=1 / math.sqrt(self.head_dim),
+                causal=True,
+                softcap=self.config.attn_logit_softcapping,
+                window_size=(self.sliding_window, self.sliding_window),
+            ).permute(0, 2, 1, 3)
+        else:
+            attn_output, _, _ = custom_attention(
+                query_states=query_states.repeat_interleave(q_repeat, 2), 
+                key_states=key_states[:,:,:seq_len], 
+                value_states=value_states[:,:,:seq_len],
+                attention_mask=attention_mask, 
+                causal_mask=causal_mask,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
+
+                # Attention method
+                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) or force_dense) else self.attention_method,
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
+
+                # hip parameters
+                tree_k=mask_k,
+                tree_block_size_q=self.tree_block_size_q,
+                tree_block_stride_q=self.tree_block_stride_q, 
+                tree_block_size_k=self.tree_block_size_k,
+                tree_block_stride_k=self.tree_block_stride_k, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
+                tree_sliding_window_size=self.tree_sliding_window_size,
+
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+                tree_sink_token_size=self.tree_sink_token_size,
+
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
+
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method,
+                rope_cos=cos_full,
+                rope_sin=sin_full,
+                position_ids=position_ids[:, :q_len].repeat_interleave(q_repeat, 1),
+                self_extend_group_size=se_group_size,
+                need_apply_rope=need_apply_rope,
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=self.hyper_attention,
+                
+                sm_scaler=self.scaling,
+                attn_logit_softcapping=self.config.attn_logit_softcapping,
+                model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
+                model_context_length=model_context_length,
+            )
         attn_output = attn_output[:, :, :q_len]
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):

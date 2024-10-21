@@ -76,6 +76,7 @@ def load_keys_with_rope(
     idx_head_kv,
     idx_hid,
     mask_tsrc_active,
+    mask_tdst,
     
     real_pos_tdst_min,
     model_context_length,
@@ -138,7 +139,8 @@ def load_keys_with_rope(
     ).to(queries.dtype)
     
     if USING_EXTEND:
-        tsrc_extend = (real_pos_tdst_min + 1 - model_context_length)
+        real_pos_tdst_max = tl.sum(mask_tdst.to(tl.int32)) + real_pos_tdst_min
+        tsrc_extend = tl.maximum(0, real_pos_tdst_max - model_context_length)
         if NEED_APPLY_ROPE or (tsrc_extend >= 0):
             old_tsrc = idx_tsrc
             
@@ -146,16 +148,23 @@ def load_keys_with_rope(
             
             # new_tsrc = idx_chunk + 4
             
+            window = model_context_length // 2
+            
             new_tsrc = tl.where(
-                (old_tsrc - tsrc_extend) > (model_context_length // 2),
-                old_tsrc - tsrc_extend,
-                ((old_tsrc - num_sinks) * ((model_context_length // 2) / (tsrc_extend // 2))).to(tl.int32) + num_sinks
-                # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
+                idx_tsrc >= (real_pos_tdst_max - window),
+                idx_tsrc,
+                tl.where(
+                    real_pos_tdst_max <= model_context_length,
+                    idx_tsrc,
+                    (idx_tsrc * ((model_context_length - window) / (real_pos_tdst_max - window))).to(tl.int32) + (real_pos_tdst_min - model_context_length)
+                )
             )
             new_tsrc = tl.maximum(0, new_tsrc)
-            new_tsrc = tl.minimum(model_context_length, new_tsrc)
+            # new_tsrc = tl.minimum(model_context_length, new_tsrc)
+            # new_tsrc = idx_tsrc
             
             if not NEED_APPLY_ROPE:
+                tl.static_assert(False)
                 keys_left = keys_left.trans(1, 0)
                 keys_left = adjust_rope(
                     keys_left,
@@ -172,6 +181,7 @@ def load_keys_with_rope(
                 keys_left = tl.trans(keys_left, 1, 0)
                 keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
             else:
+                tl.debug_barrier()
                 cos_new = tl.load(
                     COS +\
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
@@ -179,7 +189,7 @@ def load_keys_with_rope(
                     mask=mask_tsrc_active[None, :],
                     other=0,
                 ).to(keys_left.dtype)
-                keys_left *= cos_new
+                tl.debug_barrier()
                 
                 keys_left_rot = load_tokens(
                     K, 
@@ -225,19 +235,21 @@ def load_keys_with_rope(
                     idx_bsz,
                     idx_tsrc[None, :],
                     idx_head_kv,
-                    ((idx_hid + BLOCK_HID) % BLOCK_HID)[:, None],
+                    ((idx_hid + BLOCK_HID // 2) % BLOCK_HID)[:, None],
                     
                     mask_tsrc_active[None, :],
                     
                     BLOCK_CHUNK,
                 ).to(queries.dtype)
+                tl.debug_barrier()
                 
                 # TODO: multiply -right
                 keys_left_rot = tl.where(
-                    (idx_hid + BLOCK_HID)[:, None] < BLOCK_HID,
+                    (idx_hid + BLOCK_HID // 2)[:, None] < BLOCK_HID,
                     -keys_left_rot,
                     keys_left_rot
                 )
+                tl.debug_barrier()
                 
                 sin_new = tl.load(
                     SIN +\
@@ -246,10 +258,9 @@ def load_keys_with_rope(
                     mask=mask_tsrc_active[None, :],
                     other=0,
                 ).to(keys_left.dtype)
+                tl.debug_barrier()
                 
-                keys_left_rot *= sin_new
-                
-                keys_left = keys_left + keys_left_rot
+                keys_left = keys_left * cos_new + keys_left_rot * sin_new
                 # keys_left = keys_left * cos_new + keys_left_rot * sin_new
                 # keys_left = keys_left * keys_left + keys_left * keys_left
         # else:
@@ -441,11 +452,12 @@ def chunk_controllable_sampling_mask_cuda(
     if USING_EXTEND:
         if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
             old_tdst = pos_tdst
-            new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
+            # new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
             # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
             # new_tdst = old_tdst // 16
             
             # new_tdst = tl.maximum(idx_tdst, CHUNK_COUNT + 4)
+            new_tdst = pos_tdst
             
             queries = adjust_rope(
                 queries,
@@ -533,6 +545,7 @@ def chunk_controllable_sampling_mask_cuda(
             idx_head // HEAD_GROUP,
             idx_hid,
             mask_tsrc_active,
+            mask_tdst,
             
             real_pos_tdst_min,
             model_context_length,
@@ -614,6 +627,7 @@ def chunk_controllable_sampling_mask_cuda(
             idx_head // HEAD_GROUP,
             idx_hid,
             mask_tsrc_active,
+            mask_tdst,
             
             real_pos_tdst_min,
             model_context_length,
@@ -1021,6 +1035,8 @@ def main_debug():
     seq_dups = int(os.getenv('DUPS', '1'))
     mask_only = False
     
+    assert seq_dups > 0
+    
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
         window=40, 
@@ -1040,6 +1056,8 @@ def main_debug():
         sin = sin.repeat(seq_dups, 1)
     
     from flash_attn import flash_attn_func
+    
+    print(q.shape, k.shape, v.shape)
     
     print('-' * 20)
     
@@ -1073,7 +1091,7 @@ def main_debug():
             stages=[
                 (64, 8192),
             ],
-            block_sparse_block_size_q=32,
+            block_sparse_block_size_q=64,
             model_context_length=65536,
             mask_only=mask_only,
         )
