@@ -25,6 +25,9 @@ class SglangModel:
         )
         
         assert response.status_code == 200, response.json()
+        
+        print(response.json())
+        
         responses = [response.json()['text']]
         
         return responses[0]
