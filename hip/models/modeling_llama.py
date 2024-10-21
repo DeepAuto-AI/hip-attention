@@ -494,6 +494,10 @@ class LlamaCustomAttention(LlamaAttention):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
+        
+        force_extend = True
+        need_apply_rope = True
+        model_context_length = 32768
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -533,9 +537,12 @@ class LlamaCustomAttention(LlamaAttention):
             cos, sin = position_embeddings
             
         if self.layer_idx in self.tree_dense_layers:
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            if not need_apply_rope:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            else:
+                cos = sin = None
         else:
-            if self.attention_method == 'streaming_llm':
+            if self.attention_method == 'streaming_llm' or need_apply_rope:
                 cos = sin = None
             else:
                 # print(query_states.shape, key_states.shape, cos.shape, sin.shape)
@@ -579,9 +586,6 @@ class LlamaCustomAttention(LlamaAttention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-        force_extend = True
-        model_context_length = 32768
-
         if force_extend and (self.layer_idx in self.tree_dense_layers):
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
                 query_states=query_states, 
@@ -621,6 +625,7 @@ class LlamaCustomAttention(LlamaAttention):
 
                 # RoPE parameters
                 tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                need_apply_rope=need_apply_rope,
                 rope_cos=cos_all,
                 rope_sin=sin_all,
                 position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
@@ -673,6 +678,7 @@ class LlamaCustomAttention(LlamaAttention):
 
                 # RoPE parameters
                 tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                need_apply_rope=need_apply_rope,
                 rope_cos=cos_all,
                 rope_sin=sin_all,
                 position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
