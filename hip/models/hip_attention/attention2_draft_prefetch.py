@@ -4759,20 +4759,36 @@ def block_sparse_attention_cuda_step(
                 keys = keys.to(queries.dtype)
                 keys_rot = keys_rot.to(queries.dtype)
                 
+                # cos_new = tl.load(
+                #     COS +\
+                #         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                #         idx_hid[:, None] * stride_cos_hid,
+                #     mask=mask_tsrc[None, :],
+                #     other=0.0,
+                # ).to(keys.dtype)
+                # sin_new = tl.load(
+                #     SIN +\
+                #         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                #         idx_hid[:, None] * stride_sin_hid,
+                #     mask=mask_tsrc[None, :],
+                #     other=0.0,
+                # ).to(keys.dtype)
+                
                 cos_new = tl.load(
                     COS +\
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
-                        idx_hid[:, None] * stride_cos_hid,
+                        (tl.arange(0, HID) % (HID // 2))[:, None] * stride_cos_hid,
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 ).to(keys.dtype)
                 sin_new = tl.load(
                     SIN +\
                         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
-                        idx_hid[:, None] * stride_sin_hid,
+                        (tl.arange(0, HID) % (HID // 2))[:, None] * stride_sin_hid,
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 ).to(keys.dtype)
+                
                 # rope_theta = 500000.0
                 # inv_freqs = ((tl.arange(0, HID) * 2) % HID) 
                 # 1.0 / tl.extra.cuda.libdevice.fast_powf(
