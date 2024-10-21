@@ -181,16 +181,6 @@ def load_keys_with_rope(
                 keys_left = tl.trans(keys_left, 1, 0)
                 keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
             else:
-                tl.debug_barrier()
-                cos_new = tl.load(
-                    COS +\
-                        new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
-                        idx_hid[:, None] * stride_cos_hid,
-                    mask=mask_tsrc_active[None, :],
-                    other=0.0,
-                ).to(keys_left.dtype)
-                tl.debug_barrier()
-                
                 keys_left_rot = load_tokens(
                     K, 
                     stride_k_bsz,
@@ -241,7 +231,6 @@ def load_keys_with_rope(
                     
                     BLOCK_CHUNK,
                 ).to(queries.dtype)
-                tl.debug_barrier()
                 
                 # TODO: multiply -right
                 keys_left_rot = tl.where(
@@ -249,8 +238,14 @@ def load_keys_with_rope(
                     -keys_left_rot,
                     keys_left_rot
                 )
-                tl.debug_barrier()
                 
+                cos_new = tl.load(
+                    COS +\
+                        new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                        idx_hid[:, None] * stride_cos_hid,
+                    mask=mask_tsrc_active[None, :],
+                    other=0.0,
+                ).to(keys_left.dtype)
                 sin_new = tl.load(
                     SIN +\
                         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
@@ -258,7 +253,6 @@ def load_keys_with_rope(
                     mask=mask_tsrc_active[None, :],
                     other=0.0,
                 ).to(keys_left.dtype)
-                tl.debug_barrier()
                 
                 keys_left = keys_left * cos_new + keys_left_rot * sin_new
                 # keys_left = keys_left * cos_new + keys_left_rot * sin_new
@@ -1050,11 +1044,11 @@ def main_debug():
     seq_len = seq_len * seq_dups
     
     q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0).to(torch.float8_e5m2)
-    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0).to(torch.float8_e5m2)
+    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)#.to(torch.float8_e5m2)
+    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)#.to(torch.float8_e5m2)
     if cos is not None:
-        cos = cos.repeat(seq_dups, 1).to(torch.float8_e5m2)
-        sin = sin.repeat(seq_dups, 1).to(torch.float8_e5m2)
+        cos = cos.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
+        sin = sin.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
     
     from flash_attn import flash_attn_func
     
@@ -1078,7 +1072,7 @@ def main_debug():
                 mask_k=256,
                 block_size_q=64,
                 block_stride_q=4,
-                block_size_k=64, # BLOCK_CHUNK
+                block_size_k=block_size, # BLOCK_CHUNK
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
@@ -1090,7 +1084,7 @@ def main_debug():
             ),
             second_stage_k=2048,
             stages=[
-                (64, 8192),
+                (block_size, 8192),
             ],
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
@@ -1147,7 +1141,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(10):
+    for i in range(1):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1170,7 +1164,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(3):
+    for i in range(1):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         

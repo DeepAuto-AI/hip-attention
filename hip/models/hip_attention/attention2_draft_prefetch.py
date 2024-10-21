@@ -4773,6 +4773,15 @@ def block_sparse_attention_cuda_step(
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 ).to(keys.dtype)
+                # rope_theta = 500000.0
+                # inv_freqs = ((tl.arange(0, HID) * 2) % HID) 
+                # 1.0 / tl.extra.cuda.libdevice.fast_powf(
+                #     rope_theta,
+                #     ((tl.arange(0, HID) * 2) % HID).to(tl.float32) / HID
+                # )
+                # freqs = new_tsrc[None, :].to(tl.float32) * inv_freqs[:, None]
+                # cos_new = tl.extra.cuda.libdevice.fast_cosf(freqs)
+                # sin_new = tl.extra.cuda.libdevice.fast_sinf(freqs)
                 
                 keys_rot = tl.where(
                     (idx_hid + HID // 2)[:, None] < HID,
