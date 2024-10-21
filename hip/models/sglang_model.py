@@ -29,8 +29,8 @@ class SglangModel:
         print(response.json())
         
         if isinstance(response.json(), dict):
-            responses = response.json()['text']
+            responses = response.json()['text'][0]
         else:
             responses = response.json()[0]['text']
         
-        return responses[0]
+        return responses
