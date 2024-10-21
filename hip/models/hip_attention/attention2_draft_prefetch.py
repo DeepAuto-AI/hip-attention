@@ -4741,20 +4741,20 @@ def block_sparse_attention_cuda_step(
                 else:
                     new_tsrc = idx_tsrc
                 
-                keys_adjusted = keys.trans(1, 0)
-                keys_adjusted = adjust_rope(
-                    keys_adjusted.to(queries.dtype), 
-                    new_tsrc,
-                    new_tsrc,
-                    mask_tsrc,
-                    idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_TK, 
-                    HID,
-                    True,
-                )
-                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                # keys_adjusted = keys.trans(1, 0)
+                # keys_adjusted = adjust_rope(
+                #     keys_adjusted.to(queries.dtype), 
+                #     new_tsrc,
+                #     new_tsrc,
+                #     mask_tsrc,
+                #     idx_hid,
+                #     COS, stride_cos_t, stride_cos_hid,
+                #     SIN, stride_sin_t, stride_sin_hid,
+                #     BLOCK_TK, 
+                #     HID,
+                #     True,
+                # )
+                # keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                 
                 cos_new = tl.load(
                     COS +\
@@ -4778,14 +4778,14 @@ def block_sparse_attention_cuda_step(
                 )
                 # keys_rot = keys_rot * ((idx_hid + HID)[:, None] < HID) * 2 - 1
                 
-                keys_adjusted_ = (keys * cos_new + keys_rot * sin_new).to(keys.dtype) * mask_tsrc[None, :]
+                keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype) * mask_tsrc[None, :]
                 
                 # error = tl.sum(tl.abs(keys_adjusted * mask_tsrc[None, :] - keys_adjusted_ * mask_tsrc[None, :]))
                 # tl.device_print('err', error)
-                keys_adjusted = keys_adjusted_
+                # keys_adjusted = keys_adjusted_
                 
                 queries_adjusted = queries
-                pass
+                # pass
                 
             qk = tl.dot(
                 (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
