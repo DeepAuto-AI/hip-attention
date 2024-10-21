@@ -142,9 +142,10 @@ def load_vllm_model(args: ArgsType):
 
 
 def load_sglang_model(args: ArgsType):
-    assert args.model in MODELS, f'Available Models: {list(MODELS.keys())}'
-    
     model_name = args.model.replace('sglang_', '')
+    
+    assert model_name in MODELS, f'Available Models: {list(MODELS.keys())}'
+    
     model_id = MODELS[model_name]
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
