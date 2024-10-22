@@ -788,7 +788,7 @@ def dual_stage_quadratic_hip_attention(
     mask_only = False,
     block_sparse_block_size_q: Optional[int] = 64,
     
-    scan_early_terminate: int = 32,
+    scan_early_terminate: int = 1,
     scan_extend_backend: str = 'dynamic_extend',
     sa_extend_backend: str = 'streaming',
 ):
@@ -1100,6 +1100,7 @@ def main_debug():
     seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
+    num_samples = int(os.getenv('NUM_SAMPLES', '10'))
     mask_only = False
     
     assert seq_dups > 0
@@ -1128,7 +1129,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(10):
+    for i in range(min(num_samples, 10)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1156,11 +1157,12 @@ def main_debug():
             ),
             second_stage_k=2048,
             stages=[
-                (64, 8192),
+                (block_size, 8192),
             ],
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
             mask_only=mask_only,
+            scan_early_terminate=32,
         )
         
         if i==0: DEBUG = False
@@ -1171,7 +1173,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(10):
+    for i in range(min(num_samples, 10)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1213,7 +1215,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(10):
+    for i in range(min(num_samples, 10)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1236,7 +1238,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(3):
+    for i in range(min(num_samples, 3)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
