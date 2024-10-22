@@ -88,6 +88,7 @@ def load_keys_with_rope(
     NEED_APPLY_ROPE,
     BLOCK_CHUNK,
     BLOCK_HID,
+    IS_RIGHT,
 ):
     keys_left = load_tokens(
         K, 
@@ -162,6 +163,10 @@ def load_keys_with_rope(
                 # new_tsrc = tl.minimum(model_context_length, new_tsrc)
                 # new_tsrc = idx_tsrc
                 # new_tsrc = new_tsrc * 0
+            elif EXTEND_BACKEND == 'relative':
+                new_tsrc = idx_chunk * 0
+                if IS_RIGHT:
+                    new_tsrc += 1
             elif EXTEND_BACKEND == 'streaming':
                 # streaming
                 new_tsrc = idx_chunk
@@ -461,6 +466,8 @@ def chunk_controllable_sampling_mask_cuda(
                 
                 # new_tdst = tl.maximum(idx_tdst, CHUNK_COUNT + 4)
                 new_tdst = pos_tdst
+            elif EXTEND_BACKEND == 'relative':
+                new_tdst = pos_tdst * 0 + 1
             elif EXTEND_BACKEND == 'streaming':
                 # streaming
                 new_tdst = tl.minimum(pos_tdst, CHUNK_COUNT)
@@ -603,11 +610,12 @@ def chunk_controllable_sampling_mask_cuda(
             NEED_APPLY_ROPE,
             BLOCK_CHUNK,
             BLOCK_HID,
+            False,
         )
             
         scores_left = tl.dot(
-            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
-            (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
+            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+            (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
             out_dtype=tl.float32,
         ).to(queries.dtype)
         
@@ -687,11 +695,12 @@ def chunk_controllable_sampling_mask_cuda(
             NEED_APPLY_ROPE,
             BLOCK_CHUNK,
             BLOCK_HID,
+            True,
         )
         
         scores_right = tl.dot(
-            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
-            (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0)))).to(queries.dtype),
+            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+            (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
             out_dtype=tl.float32,
         ).to(queries.dtype)
         
@@ -737,9 +746,9 @@ def chunk_controllable_sampling_mask_cuda(
             scores,
         )
     
-    idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
-    idx_tsrc_left = idx_tsrc_center - TERMINATE_SIZE // 2
-    idx_tsrc_right = idx_tsrc_left + TERMINATE_SIZE
+    # idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
+    # idx_tsrc_left = idx_tsrc_center - TERMINATE_SIZE // 2
+    # idx_tsrc_right = idx_tsrc_left + TERMINATE_SIZE
     
     tl.store(
         INDICES_LEFT +\
@@ -771,6 +780,292 @@ def chunk_controllable_sampling_mask_cuda(
         mask=mask_chunk,
     )
 
+@triton.jit
+def calculate_chunk_score(
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst, 
+    stride_q_head, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc, 
+    stride_k_head_kv, 
+    stride_k_hid,
+    POS,
+    stride_pos_bsz,
+    stride_pos_tdst,
+    COS,
+    stride_cos_t,
+    stride_cos_hid,
+    SIN,
+    stride_sin_t,
+    stride_sin_hid,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page, 
+    stride_v_cache_offset, 
+    stride_v_cache_kv_head, 
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
+    INDICES_LEFT,
+    stride_indices_left_bsz,
+    stride_indices_left_bdst,
+    stride_indices_left_head,
+    stride_indices_left_chunk,
+    
+    INDICES_RIGHT,
+    stride_indices_right_bsz,
+    stride_indices_right_bdst,
+    stride_indices_right_head,
+    stride_indices_right_chunk,
+    
+    OUT_SCORES,
+    stride_out_scores_bsz,
+    stride_out_scores_bdst,
+    stride_out_scores_head,
+    stride_out_scores_chunk,
+    
+    model_context_length,
+    sliding_window_size,
+    num_sinks,
+    
+    TDST,
+    BDST,
+    N_HEAD,
+    N_CHUNK,
+    HEAD_GROUP,
+    
+    USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
+    EXTEND_BACKEND: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    
+    # idx_chunk = pid % N_CHUNK
+    # pid = pid // N_CHUNK
+    idx_head = pid % N_HEAD
+    pid = pid // N_HEAD
+    idx_bdst = pid % BDST
+    pid = pid // BDST
+    idx_bsz = pid
+    
+    tl.static_assert(NEED_APPLY_ROPE and USING_EXTEND)
+    
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+    mask_tdst = idx_tdst < TDST
+    idx_hid = tl.arange(0, BLOCK_HID)
+    
+    pos_tdst = tl.load(
+        POS +\
+            idx_bsz * stride_pos_bsz +\
+            idx_tdst * stride_pos_tdst,
+        mask=mask_tdst,
+        other=0,
+    )
+    pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst, 999999999))
+    
+    # real_pos_tdst_min = idx_bdst * BLOCK_SIZE_Q + TSRC - TDST
+    # real_pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst, 99999999999))
+    
+    # pos_tdst_min = (real_pos_tdst_min - sliding_window_size - num_sinks).to(tl.int32)
+    # pos_tdst_min = tl.maximum(pos_tdst_min, 0)
+    
+    queries = tl.load(
+        Q + \
+            idx_bsz * stride_q_bsz +\
+            idx_tdst[:, None] * stride_q_tdst +\
+            idx_head * stride_q_head +\
+            idx_hid[None, :] * stride_q_hid,
+        mask=mask_tdst[:, None],
+        other=0
+    )
+    
+    if EXTEND_BACKEND == 'dynamic_extend':
+        new_tdst = pos_tdst
+    elif EXTEND_BACKEND == 'streaming':
+        new_tdst = tl.minimum(pos_tdst, N_CHUNK)
+    else:
+        raise Exception()
+    
+    queries_rot = tl.load(
+        Q +\
+            idx_bsz * stride_q_bsz +\
+            idx_tdst[:, None] * stride_q_tdst +\
+            idx_head * stride_q_head +\
+            ((idx_hid + BLOCK_HID // 2) % BLOCK_HID)[None, :] * stride_q_hid,
+        mask=mask_tdst[:, None],
+        other=0,
+    )
+    
+    cos_new = tl.load(
+        COS +\
+            new_tdst[:, None].to(tl.int64) * stride_cos_t +\
+            (tl.arange(0, BLOCK_HID) % (BLOCK_HID // 2))[None, :] * stride_cos_hid,
+        mask=mask_tdst[:, None],
+        other=0.0,
+    ).to(queries.dtype)
+    sin_new = tl.load(
+        SIN +\
+            new_tdst[:, None].to(tl.int64) * stride_sin_t +\
+            (tl.arange(0, BLOCK_HID) % (BLOCK_HID // 2))[None, :] * stride_sin_hid,
+        mask=mask_tdst[:, None],
+        other=0.0,
+    ).to(queries.dtype)
+    
+    queries_rot = queries_rot * (((idx_hid + BLOCK_HID // 2)[None, :] < BLOCK_HID) * (-2) + 1).to(queries_rot.dtype)
+    
+    queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
+    
+    for idx_chunk in range(N_CHUNK):
+        idx_tsrc_left = tl.load(
+            INDICES_LEFT +\
+                idx_bsz * stride_indices_left_bsz +\
+                idx_bdst * stride_indices_left_bdst +\
+                idx_head * stride_indices_left_head +\
+                idx_chunk * stride_indices_left_chunk,
+        ).to(tl.int32)
+        
+        idx_tsrc_right = tl.load(
+            INDICES_RIGHT +\
+                idx_bsz * stride_indices_right_bsz +\
+                idx_bdst * stride_indices_right_bdst +\
+                idx_head * stride_indices_right_head +\
+                idx_chunk * stride_indices_right_chunk,
+        ).to(tl.int32)
+        
+        idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
+        idx_tsrc_left = tl.maximum(0, idx_tsrc_center - BLOCK_SIZE_K // 2)
+        idx_tsrc = tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K) * BLOCK_STRIDE_K + idx_tsrc_left
+        mask_tsrc = idx_tsrc <= tl.max(pos_tdst)
+        
+        keys = load_keys_with_rope(
+            K, 
+            stride_k_bsz, 
+            stride_k_tsrc, 
+            stride_k_head_kv, 
+            stride_k_hid,
+            
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            
+            # paged attention args template
+            USING_PAGES,
+            PAGE_SIZE,
+            K_CACHE, 
+            stride_k_cache_page, 
+            stride_k_cache_offset, 
+            stride_k_cache_kv_head, 
+            stride_k_cache_hid,
+            BLOCK_TABLE,
+            stride_block_table_bsz,
+            stride_block_table_page,
+            CACHE_SEQ_LENS,
+            stride_cache_seq_lens_b,
+            
+            # offload cache args template
+            USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
+            OFFLOAD_CACHE_BUDGET,
+            OFFLOAD_CACHE_KV_HEAD,
+            OFFLOAD_CACHE_K_TABLES,
+            stride_offload_cache_k_tables_n,
+            stride_offload_cache_k_tables_t,
+            OFFLOAD_CACHE_K_BANKS,
+            stride_offload_cache_k_banks_n,
+            stride_offload_cache_k_banks_page,
+            stride_offload_cache_k_banks_offset,
+            stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_K_BANK_STATS,
+            stride_offload_cache_k_bank_stats_n,
+            stride_offload_cache_k_bank_stats_page,
+            stride_offload_cache_k_bank_stats_k,
+            OFFLOAD_CACHE_COUNTERS,
+            stride_offload_cache_counters_n,
+            stride_offload_cache_counters_k,
+            
+            queries,
+            
+            idx_bsz,
+            idx_tsrc,
+            idx_head // HEAD_GROUP,
+            idx_hid,
+            idx_chunk,
+            mask_tsrc,
+            mask_tdst,
+            
+            pos_tdst_min,
+            model_context_length,
+            num_sinks,
+            
+            USING_EXTEND,
+            EXTEND_BACKEND,
+            NEED_APPLY_ROPE,
+            BLOCK_SIZE_K,
+            BLOCK_HID,
+            True,
+        )
+        
+        scores = tl.dot(
+            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+            (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+            out_dtype=tl.float32,
+        ).to(queries.dtype)
+        
+        scores_reduced = tl.max(tl.where(
+            mask_tdst[:, None] & mask_tsrc[None, :],
+            scores,
+            -32000.0
+        ))
+        
+        tl.store(
+            OUT_SCORES +\
+                idx_bsz * stride_out_scores_bsz +\
+                idx_bdst * stride_out_scores_bdst +\
+                idx_head * stride_out_scores_head +\
+                idx_chunk * stride_out_scores_chunk,
+            value=scores_reduced,
+        )
+
 def dual_stage_quadratic_hip_attention(
     q: Tensor, 
     k: Optional[Tensor], 
@@ -789,6 +1084,7 @@ def dual_stage_quadratic_hip_attention(
     block_sparse_block_size_q: Optional[int] = 64,
     
     scan_early_terminate: int = 1,
+    # scan_extend_backend: str = 'dynamic_extend',
     scan_extend_backend: str = 'dynamic_extend',
     sa_extend_backend: str = 'streaming',
 ):
@@ -823,6 +1119,8 @@ def dual_stage_quadratic_hip_attention(
     BLOCK_CHUNK = args.block_size_k
     BLOCK_SIZE_Q = args.block_size_q
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
+    
+    require_recalculate_score = True and (scan_early_terminate > 1)
     
     indices_left = torch.zeros(
         (BSZ, BDST, HEAD, chunk_count), 
@@ -886,14 +1184,56 @@ def dual_stage_quadratic_hip_attention(
         BLOCK_CHUNK=BLOCK_CHUNK,
         HEAD_GROUP=HEAD // HEAD_KV,
         USING_EXTEND=args.using_extend,
-        EXTEND_BACKEND=scan_extend_backend,
+        EXTEND_BACKEND=scan_extend_backend if not require_recalculate_score else 'relative',
         NEED_APPLY_ROPE=args.need_apply_rope,
         TERMINATE_SIZE=scan_early_terminate,
         
         num_warps=4,
         num_stages=2,
     )
+    
+    if require_recalculate_score:
+        grid = (
+            BSZ * BDST * HEAD,
+        )
+        calculate_chunk_score[grid](
+            q, *q.stride(),
+            k, *args.safe_stride(k, 4),
+            position_ids, *position_ids.stride(),
+            args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+            args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+            
+            *args.args_paged_kv_cache(),
+            *args.args_offload_cache(True),
+            
+            indices_left, *indices_left.stride(),
+            indices_right, *indices_right.stride(),
+            out_scores, *out_scores.stride(),
+            
+            model_context_length,
+            args.sliding_window_size - max(BLOCK_SIZE_Q, BLOCK_CHUNK),
+            args.sink_token_size,
+            
+            TDST,
+            BDST,
+            HEAD,
+            chunk_count,
+            HEAD // HEAD_KV,
+            
+            USING_EXTEND=args.using_extend,
+            NEED_APPLY_ROPE=args.need_apply_rope,
+            EXTEND_BACKEND='dynamic_extend',
+            BLOCK_HID=q.shape[-1],
+            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            BLOCK_STRIDE_Q=args.block_stride_q,
+            BLOCK_SIZE_K=scan_early_terminate,
+            BLOCK_STRIDE_K=args.block_stride_k,
+        )
+    
     torch.cuda.set_device(pre_device)
+    
+    if require_recalculate_score:
+        pass
     
     out_scores[..., indices_left.shape[-1]:] = float('-inf')
     _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
@@ -1142,10 +1482,11 @@ def main_debug():
         dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
-                mask_k=256,
+                mask_k=512,
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
+                block_stride_k=4,
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
@@ -1162,7 +1503,7 @@ def main_debug():
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
             mask_only=mask_only,
-            scan_early_terminate=32,
+            scan_early_terminate=64,
         )
         
         if i==0: DEBUG = False

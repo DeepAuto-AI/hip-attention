@@ -349,6 +349,8 @@ def custom_attention(
                         (32 if IS_GEMMA else 64, 8192),
                     ],
                     model_context_length=model_context_length,
+                    scan_early_terminate=32,
+                    block_sparse_block_size_q=32 if IS_GEMMA else 64,
                 )
                 
                 # attn_output_hip = sampling_only_attention(
