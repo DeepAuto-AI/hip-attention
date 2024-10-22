@@ -4741,6 +4741,7 @@ def block_sparse_attention_cuda_step(
                         raise Exception()
                 else:
                     new_tsrc = idx_tsrc
+                # new_tsrc = idx_tsrc
                 
                 # keys_adjusted = keys.trans(1, 0)
                 # keys_adjusted = adjust_rope(
@@ -4800,14 +4801,14 @@ def block_sparse_attention_cuda_step(
                 # cos_new = tl.extra.cuda.libdevice.fast_cosf(freqs)
                 # sin_new = tl.extra.cuda.libdevice.fast_sinf(freqs)
                 
-                keys_rot = tl.where(
-                    (idx_hid + HID // 2)[:, None] < HID,
-                    -keys_rot,
-                    keys_rot
-                )
-                # keys_rot = keys_rot * ((idx_hid + HID)[:, None] < HID) * 2 - 1
+                # keys_rot = tl.where(
+                #     (idx_hid + HID // 2)[:, None] < HID,
+                #     -keys_rot,
+                #     keys_rot
+                # )
+                keys_rot = keys_rot * (((idx_hid + HID // 2)[:, None] < HID) * (-2) + 1).to(keys_rot.dtype)
                 
-                keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype) * mask_tsrc[None, :]
+                keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype)
                 
                 # error = tl.sum(tl.abs(keys_adjusted * mask_tsrc[None, :] - keys_adjusted_ * mask_tsrc[None, :]))
                 # tl.device_print('err', error)
@@ -4817,8 +4818,8 @@ def block_sparse_attention_cuda_step(
                 # pass
                 
             qk = tl.dot(
-                (queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
-                (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0))).to(queries.dtype), 
+                keys_adjusted * (1 / tl.sqrt(tl.sqrt(HID * 1.0))).to(queries.dtype),
                 out_dtype=tl.float32,
                 allow_tf32=True,
             ).to(tl.float32)
@@ -5254,11 +5255,12 @@ def block_sparse_attention_cuda(
             other=0.0,
         ).to(queries.dtype)
         
-        queries_rot = tl.where(
-            (idx_hid + HID // 2)[None, :] < HID,
-            -queries_rot,
-            queries_rot
-        )
+        # queries_rot = tl.where(
+        #     (idx_hid + HID // 2)[None, :] < HID,
+        #     -queries_rot,
+        #     queries_rot
+        # )
+        queries_rot = queries_rot * (((idx_hid + HID // 2)[None, :] < HID) * (-2) + 1).to(queries_rot.dtype)
         
         queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
     
@@ -5292,6 +5294,7 @@ def block_sparse_attention_cuda(
                 
                 # if min_tsrc <= tl.max(idx_tdst):
                 # idx_n = idx_b * G + idx_group
+                
                 keys = load_tokens(
                     K, 
                     stride_k_bsz, 
@@ -5945,7 +5948,7 @@ def block_sparse_attention(
     BLOCK_BK = 32 // args.block_size_k
     BLOCK_BK = max(1, min(32, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
-        BLOCK_BK = int(os.environ['BLOCK_BK'])
+        BLOCK_BK = int(os.environ['SA_BLOCK_BK'])
     
     assert BLOCK_BK > 0, BLOCK_BK
     

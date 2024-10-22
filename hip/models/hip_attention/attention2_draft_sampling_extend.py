@@ -238,11 +238,12 @@ def load_keys_with_rope(
                 ).to(queries.dtype)
                 
                 # TODO: multiply -right
-                keys_left_rot = tl.where(
-                    (idx_hid + BLOCK_HID // 2)[:, None] < BLOCK_HID,
-                    -keys_left_rot,
-                    keys_left_rot
-                )
+                # keys_left_rot = tl.where(
+                #     (idx_hid + BLOCK_HID // 2)[:, None] < BLOCK_HID,
+                #     -keys_left_rot,
+                #     keys_left_rot
+                # )
+                keys_left_rot = keys_left_rot * (((idx_hid + BLOCK_HID // 2)[:, None] < BLOCK_HID) * (-2) + 1).to(keys_left_rot.dtype)
                 
                 cos_new = tl.load(
                     COS +\
@@ -379,6 +380,7 @@ def chunk_controllable_sampling_mask_cuda(
     USING_EXTEND: tl.constexpr = False,
     EXTEND_BACKEND: tl.constexpr = 'dynamic_extend',
     NEED_APPLY_ROPE: tl.constexpr = False,
+    TERMINATE_SIZE: tl.constexpr = 16,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BCHUNK = tl.cdiv(CHUNK_COUNT, BLOCK_CHUNK)
@@ -434,7 +436,8 @@ def chunk_controllable_sampling_mask_cuda(
         other=MAX_TSRC,
     ).to(tl.int32)
     
-    max_chunk_size = tl.ceil(MAX_TSRC / CHUNK_COUNT).to(tl.float32)
+    # max_chunk_size = tl.ceil(MAX_TSRC / CHUNK_COUNT).to(tl.float32)
+    max_chunk_size = tl.max(idx_tsrc_right - idx_tsrc_left).to(tl.float32)
     
     scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
     
@@ -493,11 +496,12 @@ def chunk_controllable_sampling_mask_cuda(
                     other=0.0,
                 ).to(queries.dtype)
                 
-                queries_rot = tl.where(
-                    (idx_hid + BLOCK_HID // 2)[None, :] < BLOCK_HID,
-                    -queries_rot,
-                    queries_rot
-                )
+                # queries_rot = tl.where(
+                #     (idx_hid + BLOCK_HID // 2)[None, :] < BLOCK_HID,
+                #     -queries_rot,
+                #     queries_rot
+                # )
+                queries_rot = queries_rot * (((idx_hid + BLOCK_HID // 2)[None, :] < BLOCK_HID) * (-2) + 1).to(queries_rot.dtype)
                 
                 queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
             else:
@@ -529,7 +533,7 @@ def chunk_controllable_sampling_mask_cuda(
         #             NEED_APPLY_ROPE,
         #         ).to(queries.dtype)
     
-    while (max_chunk_size > 1):
+    while (max_chunk_size > TERMINATE_SIZE):
         max_chunk_size /= 2.0
         mask_tsrc_active = mask_chunk & (idx_tsrc_left < idx_tsrc_right) & (idx_tsrc_left <= pos_tdst_min)
         idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
@@ -733,6 +737,10 @@ def chunk_controllable_sampling_mask_cuda(
             scores,
         )
     
+    idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
+    idx_tsrc_left = idx_tsrc_center - TERMINATE_SIZE // 2
+    idx_tsrc_right = idx_tsrc_left + TERMINATE_SIZE
+    
     tl.store(
         INDICES_LEFT +\
             idx_bsz * stride_indices_left_bsz +\
@@ -778,10 +786,11 @@ def dual_stage_quadratic_hip_attention(
     
     # kernel args,
     mask_only = False,
-    block_sparse_block_size_q: Optional[int] = 32,
+    block_sparse_block_size_q: Optional[int] = 64,
     
+    scan_early_terminate: int = 32,
+    scan_extend_backend: str = 'dynamic_extend',
     sa_extend_backend: str = 'streaming',
-    scan_extend_backend: str = 'dynamic_extend'
 ):
     DEBUG_HEAD = -1
     global DEBUG
@@ -793,6 +802,7 @@ def dual_stage_quadratic_hip_attention(
         MAX_TSRC = TSRC
     else:
         MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
+        MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
         HEAD_KV = args.k_cache.shape[-2]
         TSRC = MAX_TSRC
         # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
@@ -878,6 +888,7 @@ def dual_stage_quadratic_hip_attention(
         USING_EXTEND=args.using_extend,
         EXTEND_BACKEND=scan_extend_backend,
         NEED_APPLY_ROPE=args.need_apply_rope,
+        TERMINATE_SIZE=scan_early_terminate,
         
         num_warps=4,
         num_stages=2,
@@ -981,6 +992,7 @@ def dual_stage_quadratic_hip_attention(
             USING_EXTEND=args.using_extend,
             EXTEND_BACKEND=scan_extend_backend,
             NEED_APPLY_ROPE=args.need_apply_rope,
+            TERMINATE_SIZE=1 if (i_stage + 1) == len(stages) else scan_early_terminate,
         )
         torch.cuda.set_device(pre_device)
         
@@ -1132,7 +1144,7 @@ def main_debug():
                 mask_k=256,
                 block_size_q=64,
                 block_stride_q=4,
-                block_size_k=block_size, # BLOCK_CHUNK
+                block_size_k=64, # BLOCK_CHUNK
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
@@ -1144,7 +1156,7 @@ def main_debug():
             ),
             second_stage_k=2048,
             stages=[
-                (block_size, 8192),
+                (64, 8192),
             ],
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
