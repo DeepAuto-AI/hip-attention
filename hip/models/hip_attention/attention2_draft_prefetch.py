@@ -4717,14 +4717,15 @@ def block_sparse_attention_cuda_step(
                     # # new_tsrc = tl.minimum(new_tsrc, pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1)
                     # new_tsrc = tl.maximum(0, new_tsrc)
                     
+                    pos_tdst_max = pos_tdst_min + tl.sum(mask_tdst.to(tl.int32))
+                    
                     if EXTEND_BACKEND == 'streaming':
                         # streaming
                         new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k + 1)
+                        # new_tsrc = idx_tsrc
                     elif EXTEND_BACKEND == 'dynamic_extend':
                         # dynamic extend
-                        pos_tdst_max = pos_tdst_min - tl.sum(mask_tdst.to(tl.int32))
-                        
                         window = model_context_length // 2
                         new_tsrc = tl.where(
                             idx_tsrc >= (pos_tdst_max - window),
@@ -5200,7 +5201,7 @@ def block_sparse_attention_cuda(
             idx_hid[None, :] * stride_q_hid,
         mask=mask_tdst[:, None],
         other=0,
-        cache_modifier='.cg',
+        # cache_modifier='.cg',
         # eviction_policy='evict_last',
         # volatile=True,
     )
@@ -5212,18 +5213,54 @@ def block_sparse_attention_cuda(
         #     sliding_window_size + sink_token_size + (range_end - range_start) * BLOCK_SIZE_K - 1
         # )
         
-        queries = adjust_rope(
-            queries,
-            rope_tdst,
-            rope_tdst,
-            mask_tdst,
-            idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_SIZE_Q, 
-            HID,
-            True,
+        # queries = adjust_rope(
+        #     queries,
+        #     rope_tdst,
+        #     rope_tdst,
+        #     mask_tdst,
+        #     idx_hid,
+        #     COS, stride_cos_t, stride_cos_hid,
+        #     SIN, stride_sin_t, stride_sin_hid,
+        #     BLOCK_SIZE_Q, 
+        #     HID,
+        #     True,
+        # ).to(queries.dtype)
+        
+        queries_rot = tl.load(
+            Q +\
+                idx_bsz * stride_q_bsz +\
+                idx_tdst[:, None] * stride_q_tdst +\
+                idx_head * stride_q_head +\
+                ((idx_hid + HID // 2) % HID)[None, :] * stride_q_hid,
+            mask=mask_tdst[:, None],
+            other=0,
+            # cache_modifier='.cg',
+            # eviction_policy='evict_last',
+            # volatile=True,
+        )
+        
+        cos_new = tl.load(
+            COS +\
+                rope_tdst[:, None].to(tl.int64) * stride_cos_t +\
+                (idx_hid % (HID // 2))[None, :] * stride_cos_hid,
+            mask=mask_tdst[:, None],
+            other=0.0,
         ).to(queries.dtype)
+        sin_new = tl.load(
+            SIN +\
+                rope_tdst[:, None].to(tl.int64) * stride_sin_t +\
+                (idx_hid % (HID // 2))[None, :] * stride_sin_hid,
+            mask=mask_tdst[:, None],
+            other=0.0,
+        ).to(queries.dtype)
+        
+        queries_rot = tl.where(
+            (idx_hid + HID // 2)[None, :] < HID,
+            -queries_rot,
+            queries_rot
+        )
+        
+        queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
     
     if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):

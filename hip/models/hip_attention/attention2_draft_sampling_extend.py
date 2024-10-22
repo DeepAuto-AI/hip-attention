@@ -75,6 +75,7 @@ def load_keys_with_rope(
     idx_tsrc,
     idx_head_kv,
     idx_hid,
+    idx_chunk,
     mask_tsrc_active,
     mask_tdst,
     
@@ -83,6 +84,7 @@ def load_keys_with_rope(
     num_sinks,
     
     USING_EXTEND,
+    EXTEND_BACKEND,
     NEED_APPLY_ROPE,
     BLOCK_CHUNK,
     BLOCK_HID,
@@ -144,24 +146,27 @@ def load_keys_with_rope(
         if NEED_APPLY_ROPE or (tsrc_extend >= 0):
             old_tsrc = idx_tsrc
             
-            # new_tsrc = (old_tsrc * (model_context_length / real_pos_tdst_min)).to(tl.int32)
-            
-            # new_tsrc = idx_chunk + 4
-            
-            window = model_context_length // 2
-            
-            new_tsrc = tl.where(
-                idx_tsrc >= (real_pos_tdst_max - window),
-                idx_tsrc,
-                tl.where(
-                    real_pos_tdst_max <= model_context_length,
+            if EXTEND_BACKEND == 'dynamic_extend':
+                window = model_context_length // 2
+                
+                new_tsrc = tl.where(
+                    idx_tsrc >= (real_pos_tdst_max - window),
                     idx_tsrc,
-                    (idx_tsrc * ((model_context_length - window) / (real_pos_tdst_max - window))).to(tl.int32) + (real_pos_tdst_min - model_context_length)
+                    tl.where(
+                        real_pos_tdst_max <= model_context_length,
+                        idx_tsrc,
+                        (idx_tsrc * ((model_context_length - window) / (real_pos_tdst_max - window))).to(tl.int32) + (real_pos_tdst_min - model_context_length)
+                    )
                 )
-            )
-            new_tsrc = tl.maximum(0, new_tsrc)
-            # new_tsrc = tl.minimum(model_context_length, new_tsrc)
-            # new_tsrc = idx_tsrc
+                new_tsrc = tl.maximum(0, new_tsrc)
+                # new_tsrc = tl.minimum(model_context_length, new_tsrc)
+                # new_tsrc = idx_tsrc
+                # new_tsrc = new_tsrc * 0
+            elif EXTEND_BACKEND == 'streaming':
+                # streaming
+                new_tsrc = idx_chunk
+            else:
+                raise Exception()
             
             if not NEED_APPLY_ROPE:
                 tl.static_assert(False)
@@ -372,6 +377,7 @@ def chunk_controllable_sampling_mask_cuda(
     HEAD_GROUP: tl.constexpr = 4,
     REDUCE: tl.constexpr = 'mean',
     USING_EXTEND: tl.constexpr = False,
+    EXTEND_BACKEND: tl.constexpr = 'dynamic_extend',
     NEED_APPLY_ROPE: tl.constexpr = False,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
@@ -430,7 +436,6 @@ def chunk_controllable_sampling_mask_cuda(
     
     max_chunk_size = tl.ceil(MAX_TSRC / CHUNK_COUNT).to(tl.float32)
     
-    
     scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
     
     queries = tl.load(
@@ -446,32 +451,60 @@ def chunk_controllable_sampling_mask_cuda(
     if USING_EXTEND:
         if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
             old_tdst = pos_tdst
-            # new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
-            # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
-            # new_tdst = old_tdst // 16
+            if EXTEND_BACKEND == 'dynamic_extend':
+                # new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
+                # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
+                # new_tdst = old_tdst // 16
+                
+                # new_tdst = tl.maximum(idx_tdst, CHUNK_COUNT + 4)
+                new_tdst = pos_tdst
+            elif EXTEND_BACKEND == 'streaming':
+                # streaming
+                new_tdst = tl.minimum(pos_tdst, CHUNK_COUNT)
+            else:
+                raise Exception()
             
-            # new_tdst = tl.maximum(idx_tdst, CHUNK_COUNT + 4)
-            new_tdst = pos_tdst
-            
-            queries = adjust_rope(
-                queries,
-                old_tdst,
-                new_tdst,
-                mask_tdst,
-                idx_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_SIZE_Q // STRIDE_Q, 
-                BLOCK_HID,
-                NEED_APPLY_ROPE,
-            ).to(queries.dtype)
-            queries = (queries * mask_tdst[:, None]).to(queries.dtype)
-        else:
             if NEED_APPLY_ROPE:
+                queries_rot = tl.load(
+                    Q +\
+                        idx_bsz * stride_q_bsz +\
+                        idx_tdst[:, None] * stride_q_tdst +\
+                        idx_head * stride_q_head +\
+                        ((idx_hid + BLOCK_HID // 2) % BLOCK_HID)[None, :] * stride_q_hid,
+                    mask=mask_tdst[:, None],
+                    other=0,
+                    # cache_modifier='.cg',
+                    # eviction_policy='evict_last',
+                    # volatile=True,
+                )
+                
+                cos_new = tl.load(
+                    COS +\
+                        new_tdst[:, None].to(tl.int64) * stride_cos_t +\
+                        (tl.arange(0, BLOCK_HID) % (BLOCK_HID // 2))[None, :] * stride_cos_hid,
+                    mask=mask_tdst[:, None],
+                    other=0.0,
+                ).to(queries.dtype)
+                sin_new = tl.load(
+                    SIN +\
+                        new_tdst[:, None].to(tl.int64) * stride_sin_t +\
+                        (tl.arange(0, BLOCK_HID) % (BLOCK_HID // 2))[None, :] * stride_sin_hid,
+                    mask=mask_tdst[:, None],
+                    other=0.0,
+                ).to(queries.dtype)
+                
+                queries_rot = tl.where(
+                    (idx_hid + BLOCK_HID // 2)[None, :] < BLOCK_HID,
+                    -queries_rot,
+                    queries_rot
+                )
+                
+                queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
+            else:
                 queries = adjust_rope(
                     queries,
-                    pos_tdst,
-                    pos_tdst,
+                    old_tdst,
+                    new_tdst,
                     mask_tdst,
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
@@ -480,6 +513,21 @@ def chunk_controllable_sampling_mask_cuda(
                     BLOCK_HID,
                     NEED_APPLY_ROPE,
                 ).to(queries.dtype)
+                queries = (queries * mask_tdst[:, None]).to(queries.dtype)
+        # else:
+        #     if NEED_APPLY_ROPE:
+        #         queries = adjust_rope(
+        #             queries,
+        #             pos_tdst,
+        #             pos_tdst,
+        #             mask_tdst,
+        #             idx_hid,
+        #             COS, stride_cos_t, stride_cos_hid,
+        #             SIN, stride_sin_t, stride_sin_hid,
+        #             BLOCK_SIZE_Q // STRIDE_Q, 
+        #             BLOCK_HID,
+        #             NEED_APPLY_ROPE,
+        #         ).to(queries.dtype)
     
     while (max_chunk_size > 1):
         max_chunk_size /= 2.0
@@ -538,6 +586,7 @@ def chunk_controllable_sampling_mask_cuda(
             idx_tsrc,
             idx_head // HEAD_GROUP,
             idx_hid,
+            idx_chunk,
             mask_tsrc_active,
             mask_tdst,
             
@@ -546,6 +595,7 @@ def chunk_controllable_sampling_mask_cuda(
             num_sinks,
             
             USING_EXTEND,
+            EXTEND_BACKEND,
             NEED_APPLY_ROPE,
             BLOCK_CHUNK,
             BLOCK_HID,
@@ -620,6 +670,7 @@ def chunk_controllable_sampling_mask_cuda(
             idx_tsrc,
             idx_head // HEAD_GROUP,
             idx_hid,
+            idx_chunk,
             mask_tsrc_active,
             mask_tdst,
             
@@ -628,6 +679,7 @@ def chunk_controllable_sampling_mask_cuda(
             num_sinks,
             
             USING_EXTEND,
+            EXTEND_BACKEND,
             NEED_APPLY_ROPE,
             BLOCK_CHUNK,
             BLOCK_HID,
@@ -727,6 +779,9 @@ def dual_stage_quadratic_hip_attention(
     # kernel args,
     mask_only = False,
     block_sparse_block_size_q: Optional[int] = 32,
+    
+    sa_extend_backend: str = 'streaming',
+    scan_extend_backend: str = 'dynamic_extend'
 ):
     DEBUG_HEAD = -1
     global DEBUG
@@ -821,6 +876,7 @@ def dual_stage_quadratic_hip_attention(
         BLOCK_CHUNK=BLOCK_CHUNK,
         HEAD_GROUP=HEAD // HEAD_KV,
         USING_EXTEND=args.using_extend,
+        EXTEND_BACKEND=scan_extend_backend,
         NEED_APPLY_ROPE=args.need_apply_rope,
         
         num_warps=4,
@@ -923,6 +979,7 @@ def dual_stage_quadratic_hip_attention(
             BLOCK_CHUNK=BLOCK_CHUNK,
             HEAD_GROUP=HEAD // HEAD_KV,
             USING_EXTEND=args.using_extend,
+            EXTEND_BACKEND=scan_extend_backend,
             NEED_APPLY_ROPE=args.need_apply_rope,
         )
         torch.cuda.set_device(pre_device)
@@ -1005,7 +1062,7 @@ def dual_stage_quadratic_hip_attention(
         ks_count=ks_count,
         ks_start_end=ks_start_end,
         args=args,
-        EXTEND_BACKEND='streaming', # streaming works way much better in Gemma2, than dynamic_extend
+        EXTEND_BACKEND=sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=model_context_length,
     )
     
@@ -1144,7 +1201,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(1):
+    for i in range(10):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1167,7 +1224,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(1):
+    for i in range(3):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
