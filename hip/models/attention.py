@@ -333,6 +333,7 @@ def custom_attention(
                         block_size_q=32 if IS_GEMMA else 64,
                         block_stride_q=2 if IS_GEMMA else 4,
                         block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
+                        block_stride_k=1 if IS_GEMMA else 2,
                         
                         sliding_window_size=tree_sliding_window_size,
                         sink_token_size=tree_sink_token_size,
@@ -348,9 +349,10 @@ def custom_attention(
                     stages=[
                         (32 if IS_GEMMA else 64, 8192),
                     ],
+                    scan_stride=1,
                     model_context_length=model_context_length,
-                    scan_early_terminate=32,
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,
+                    scan_early_terminate=16 if IS_GEMMA else 32,
                 )
                 
                 # attn_output_hip = sampling_only_attention(
