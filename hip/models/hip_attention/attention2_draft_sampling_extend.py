@@ -1272,10 +1272,17 @@ def dual_stage_quadratic_hip_attention(
     
     torch.cuda.set_device(pre_device)
     
-    out_scores = out_scores[..., :indices_left.shape[-1]]
-    _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-    indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-    indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
+    if (len(stages) > 0):
+        first_stage_bk = stages[0][1] // chunk_size
+        out_scores = out_scores[..., :indices_left.shape[-1]]
+        _, t_indices = out_scores.topk(k=min(out_scores.shape[-1], first_stage_bk), dim=-1, sorted=False)
+        indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+        indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
+    else:
+        out_scores = out_scores[..., :indices_left.shape[-1]]
+        _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
+        indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+        indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
     
     for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
         # if stage_chunk_size > chunk_size: continue
@@ -1479,7 +1486,7 @@ def dual_stage_quadratic_hip_attention(
 def main_debug():
     global DEBUG
     
-    seq_len = 131072
+    seq_len = 8192
     seq_dups = int(os.getenv('DUPS', '1'))
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
     num_samples = int(os.getenv('NUM_SAMPLES', '10'))
@@ -1528,7 +1535,7 @@ def main_debug():
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
-                block_stride_k=2,
+                block_stride_k=1,
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
@@ -1546,7 +1553,7 @@ def main_debug():
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
             mask_only=mask_only,
-            scan_early_terminate=32,
+            scan_early_terminate=1,
         )
         
         if i==0: DEBUG = False
@@ -1574,7 +1581,7 @@ def main_debug():
                 block_size_q=64,
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
-                block_stride_k=2,
+                block_stride_k=1,
                 
                 sliding_window_size=1024,
                 sink_token_size=256,
@@ -1591,7 +1598,7 @@ def main_debug():
             scan_stride=1,
             block_sparse_block_size_q=64,
             model_context_length=65536,
-            scan_early_terminate=32,
+            scan_early_terminate=1,
             mask_only=mask_only,
         )
         
