@@ -68,6 +68,7 @@ def gen_text():
     filler_len = int(len(FILLER_TEXT[:-1].split(" ")) * 1.275)
     query_len = int(len(QUERY[:-1].split(" ")) * 1.275)
 
+    step_size = int(os.getenv('PASSKEY_STEP_SIZE', '32'))
     n_samples = int(os.getenv('PASSKEY_SAMPLES', '100'))
     inputs, targets = [], []
     if os.getenv('PASSKEY_MAX_LEN', '0') != '0':
@@ -75,8 +76,8 @@ def gen_text():
         prompt_lens = []
         while int(start_seq) >= 4:
             prompt_lens.append(int(start_seq) * 1000)
-            if start_seq > 32:
-                start_seq = max(start_seq - 32, 32)
+            if start_seq > step_size:
+                start_seq = max(start_seq - step_size, step_size)
             else:
                 start_seq /= 2
         print('passkey sequences', prompt_lens)

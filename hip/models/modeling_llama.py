@@ -606,7 +606,7 @@ class LlamaCustomAttention(LlamaAttention):
                 tree_performer=self.tree_performer,
 
                 # hip parameters
-                tree_k=1,
+                tree_k=4096,
                 tree_block_size_q=64,
                 tree_block_stride_q=4, 
                 tree_block_size_k=64,
@@ -619,8 +619,8 @@ class LlamaCustomAttention(LlamaAttention):
                 tree_enable_flash=self.tree_enable_flash,
                 tree_enable_sparq=self.tree_enable_sparq,
                 tree_use_sliding_window=self.tree_use_sliding_window,
-                tree_sink_token_size=256,
-                tree_sliding_window_size=7680,
+                tree_sink_token_size=512,
+                tree_sliding_window_size=8192,
 
                 # Context averaging parameters
                 tree_using_context_avg=False,

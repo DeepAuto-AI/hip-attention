@@ -385,7 +385,7 @@ def chunk_controllable_sampling_mask_cuda(
     USING_EXTEND: tl.constexpr = False,
     EXTEND_BACKEND: tl.constexpr = 'dynamic_extend',
     NEED_APPLY_ROPE: tl.constexpr = False,
-    TERMINATE_SIZE: tl.constexpr = 16,
+    TERMINATE_SIZE: tl.constexpr = 1,
     SCAN_STRIDE: tl.constexpr = 1,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
@@ -404,7 +404,7 @@ def chunk_controllable_sampling_mask_cuda(
     
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
     # mask_tdst = idx_tdst < TDST
-    idx_tdst = (BDST - 1 - (BDST_SCAN - 1) * SCAN_STRIDE + idx_bdst_scan * SCAN_STRIDE) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
+    idx_tdst = ((BDST - 1) - (BDST_SCAN - 1) * SCAN_STRIDE + idx_bdst_scan * SCAN_STRIDE) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
     mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
     idx_hid = tl.arange(0, BLOCK_HID)
     
@@ -750,14 +750,17 @@ def chunk_controllable_sampling_mask_cuda(
             idx_tsrc_right
         )
         
-        scores = tl.where(
-            mask_tsrc_active,
-            tl.where(
-                mask_left_win,
-                scores_left,
-                scores_right,
-            ),
+        scores = tl.maximum(
             scores,
+            tl.where(
+                mask_tsrc_active,
+                tl.where(
+                    mask_left_win,
+                    scores_left,
+                    scores_right,
+                ),
+                scores,
+            )
         )
     
     # idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
@@ -979,8 +982,8 @@ def calculate_chunk_score(
         
         queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
     
-    # for idx_chunk in range(N_CHUNK):
-    for idx_chunk in range(tl.cdiv(pos_tdst_max, max_chunk_size)):
+    for idx_chunk in range(N_CHUNK):
+    # for idx_chunk in range(tl.cdiv(pos_tdst_max, max_chunk_size)):
         idx_tsrc_left = tl.load(
             INDICES_LEFT +\
                 idx_bsz * stride_indices_left_bsz +\
@@ -997,107 +1000,117 @@ def calculate_chunk_score(
                 idx_chunk * stride_indices_right_chunk,
         ).to(tl.int64)
         
-        idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
-        idx_tsrc_left = tl.maximum(0, idx_tsrc_center - BLOCK_SIZE_K // 2)
-        idx_tsrc = tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K) * BLOCK_STRIDE_K + idx_tsrc_left
-        mask_tsrc = idx_tsrc <= (tl.max(pos_tdst) - sliding_window_size)
-        
-        keys = load_keys_with_rope(
-            K, 
-            stride_k_bsz, 
-            stride_k_tsrc, 
-            stride_k_head_kv, 
-            stride_k_hid,
+        if idx_tsrc_left <= pos_tdst_max:
+            idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
+            idx_tsrc_left = tl.maximum(0, idx_tsrc_center - BLOCK_SIZE_K // 2)
+            idx_tsrc = tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K) * BLOCK_STRIDE_K + idx_tsrc_left
+            mask_tsrc = idx_tsrc <= (tl.max(pos_tdst) - sliding_window_size)
             
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
+            keys = load_keys_with_rope(
+                K, 
+                stride_k_bsz, 
+                stride_k_tsrc, 
+                stride_k_head_kv, 
+                stride_k_hid,
+                
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_K_BANK_STATS,
+                stride_offload_cache_k_bank_stats_n,
+                stride_offload_cache_k_bank_stats_page,
+                stride_offload_cache_k_bank_stats_k,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                queries,
+                
+                idx_bsz,
+                idx_tsrc,
+                idx_head // HEAD_GROUP,
+                idx_hid,
+                idx_chunk,
+                mask_tsrc,
+                mask_tdst,
+                
+                pos_tdst_min,
+                model_context_length,
+                num_sinks,
+                
+                USING_EXTEND,
+                EXTEND_BACKEND,
+                NEED_APPLY_ROPE,
+                BLOCK_SIZE_K,
+                BLOCK_HID,
+                True,
+            )
             
-            # paged attention args template
-            USING_PAGES,
-            PAGE_SIZE,
-            K_CACHE, 
-            stride_k_cache_page, 
-            stride_k_cache_offset, 
-            stride_k_cache_kv_head, 
-            stride_k_cache_hid,
-            BLOCK_TABLE,
-            stride_block_table_bsz,
-            stride_block_table_page,
-            CACHE_SEQ_LENS,
-            stride_cache_seq_lens_b,
+            scores = tl.dot(
+                (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                out_dtype=tl.float32,
+            ).to(queries.dtype)
             
-            # offload cache args template
-            USING_OFFLOAD_CACHE,
-            OFFLOAD_CACHE_METHOD,
-            OFFLOAD_CACHE_BUDGET,
-            OFFLOAD_CACHE_KV_HEAD,
-            OFFLOAD_CACHE_K_TABLES,
-            stride_offload_cache_k_tables_n,
-            stride_offload_cache_k_tables_t,
-            OFFLOAD_CACHE_K_BANKS,
-            stride_offload_cache_k_banks_n,
-            stride_offload_cache_k_banks_page,
-            stride_offload_cache_k_banks_offset,
-            stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_K_BANK_STATS,
-            stride_offload_cache_k_bank_stats_n,
-            stride_offload_cache_k_bank_stats_page,
-            stride_offload_cache_k_bank_stats_k,
-            OFFLOAD_CACHE_COUNTERS,
-            stride_offload_cache_counters_n,
-            stride_offload_cache_counters_k,
+            if REDUCE == 'max':
+                scores_reduced = tl.max(tl.where(
+                    mask_tdst[:, None] & mask_tsrc[None, :],
+                    scores,
+                    -32000.0
+                ))
+            elif REDUCE == 'mean':
+                scores_reduced = tl.sum(tl.where(
+                    mask_tdst[:, None] & mask_tsrc[None, :],
+                    scores,
+                    0
+                )) / tl.sum((mask_tdst[:, None] & mask_tsrc[None, :]).to(tl.int32))
+            else:
+                raise Exception()
             
-            queries,
-            
-            idx_bsz,
-            idx_tsrc,
-            idx_head // HEAD_GROUP,
-            idx_hid,
-            idx_chunk,
-            mask_tsrc,
-            mask_tdst,
-            
-            pos_tdst_min,
-            model_context_length,
-            num_sinks,
-            
-            USING_EXTEND,
-            EXTEND_BACKEND,
-            NEED_APPLY_ROPE,
-            BLOCK_SIZE_K,
-            BLOCK_HID,
-            True,
-        )
-        
-        scores = tl.dot(
-            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-            (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-            out_dtype=tl.float32,
-        ).to(queries.dtype)
-        
-        if REDUCE == 'max':
-            scores_reduced = tl.max(tl.where(
-                mask_tdst[:, None] & mask_tsrc[None, :],
-                scores,
-                -32000.0
-            ))
-        elif REDUCE == 'mean':
-            scores_reduced = tl.sum(tl.where(
-                mask_tdst[:, None] & mask_tsrc[None, :],
-                scores,
-                0
-            )) / tl.sum((mask_tdst[:, None] & mask_tsrc[None, :]).to(tl.int32))
+            tl.store(
+                OUT_SCORES +\
+                    idx_bsz * stride_out_scores_bsz +\
+                    idx_bdst_scan * stride_out_scores_bdst +\
+                    idx_head * stride_out_scores_head +\
+                    idx_chunk * stride_out_scores_chunk,
+                value=scores_reduced,
+            )
         else:
-            raise Exception()
-        
-        tl.store(
-            OUT_SCORES +\
-                idx_bsz * stride_out_scores_bsz +\
-                idx_bdst_scan * stride_out_scores_bdst +\
-                idx_head * stride_out_scores_head +\
-                idx_chunk * stride_out_scores_chunk,
-            value=scores_reduced,
-        )
+            tl.store(
+                OUT_SCORES +\
+                    idx_bsz * stride_out_scores_bsz +\
+                    idx_bdst_scan * stride_out_scores_bdst +\
+                    idx_head * stride_out_scores_head +\
+                    idx_chunk * stride_out_scores_chunk,
+                value=-32000.0,
+            )
 
 def dual_stage_quadratic_hip_attention(
     q: Tensor, 
@@ -1118,9 +1131,11 @@ def dual_stage_quadratic_hip_attention(
     
     scan_stride: int = 1,
     scan_early_terminate: int = 1,
+    stage_early_terminate: int = 1,
     # scan_extend_backend: str = 'dynamic_extend',
     scan_extend_backend: str = 'dynamic_extend',
-    sa_extend_backend: str = 'streaming',
+    sa_extend_backend: str = 'dynamic_extend',
+    cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
     DEBUG_HEAD = -1
     global DEBUG
@@ -1137,11 +1152,15 @@ def dual_stage_quadratic_hip_attention(
         TSRC = MAX_TSRC
         # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
     
+    BLOCK_CHUNK = args.block_size_k
+    BLOCK_SIZE_Q = args.block_size_q
+    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
+    BDST_SCAN = triton.cdiv(BDST, scan_stride)
     chunk_size = args.mask_k
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     args = args.clone()
-    args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
+    args.sliding_window_size = max(0, args.sliding_window_size)
     
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
         assert args.position_ids is not None
@@ -1150,212 +1169,48 @@ def dual_stage_quadratic_hip_attention(
         position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[None, :].expand(BSZ, TDST)
     assert position_ids.shape == (BSZ, TDST), position_ids.shape
     
-    BLOCK_CHUNK = args.block_size_k
-    BLOCK_SIZE_Q = args.block_size_q
-    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
-    BDST_SCAN = triton.cdiv(BDST, scan_stride)
-    
-    require_recalculate_score = True and (scan_early_terminate > 1)
-    
-    indices_left = torch.zeros(
-        (BSZ, BDST_SCAN, HEAD, chunk_count), 
-        device=q.device,
-        dtype=torch.int64
-    )
-    indices_right = torch.zeros(
-        (BSZ, BDST_SCAN, HEAD, chunk_count), 
-        device=q.device,
-        dtype=torch.int64
-    )
-    
-    indices_left[:, :, :, :] = (
-        torch.floor(
-            torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
-        ).to(indices_left.dtype)
-    )[None, None, None, :]
-    indices_right[:, :, :, :] = indices_left + chunk_size
-    indices_right.clamp_max_(MAX_TSRC - args.sliding_window_size)
-    
-    out_scores = torch.full(
-        (BSZ, BDST_SCAN, HEAD, triton.next_power_of_2(chunk_count)), 
-        device=q.device,
-        dtype=q.dtype,
-        fill_value=-32000.0
-    )
-    
-    # print(q.shape, k.shape, args.rope_cos.shape, args.rope_sin.shape, TDST, TSRC)
-    
-    # print('neeeed rope', args.need_apply_rope)
-    
-    pre_device = torch.cuda.current_device()
-    torch.cuda.set_device(q.device)
-    grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * BDST_SCAN * HEAD,)
-    chunk_controllable_sampling_mask_cuda[grid](
-        q, *q.stride(),
-        k, *args.safe_stride(k, 4),
-        position_ids, *position_ids.stride(),
+    if cached_metadata is None:
+        scan_require_recalculate_score = True and (scan_early_terminate > 1)
+        stage_require_recalculate_score = True and (stage_early_terminate > 1)
         
-        *args.args_paged_kv_cache(),
-        *args.args_offload_cache(True),
-        
-        indices_left, *indices_left.stride(),
-        indices_right, *indices_right.stride(),
-        out_scores, *out_scores.stride(),
-        args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-        args.rope_sin, *args.safe_stride(args.rope_sin, 2),
-        
-        chunk_count,
-        MAX_TSRC,
-        TDST,
-        HEAD,
-        args.sliding_window_size - max(BLOCK_SIZE_Q, BLOCK_CHUNK),
-        args.sink_token_size,
-        model_context_length,
-        
-        BLOCK_HID=q.shape[-1],
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-        STRIDE_Q=args.block_stride_q,
-        BLOCK_CHUNK=BLOCK_CHUNK,
-        HEAD_GROUP=HEAD // HEAD_KV,
-        USING_EXTEND=args.using_extend,
-        EXTEND_BACKEND=scan_extend_backend if not require_recalculate_score else 'dynamic_extend',
-        NEED_APPLY_ROPE=args.need_apply_rope,
-        TERMINATE_SIZE=scan_early_terminate,
-        SCAN_STRIDE=scan_stride,
-        
-        num_warps=4,
-        num_stages=2,
-    )
-    
-    if require_recalculate_score:
-        grid = (
-            BSZ * BDST_SCAN * HEAD,
+        indices_left = torch.zeros(
+            (BSZ, BDST_SCAN, HEAD, chunk_count), 
+            device=q.device,
+            dtype=torch.int64
         )
-        calculate_chunk_score[grid](
-            q, *q.stride(),
-            k, *args.safe_stride(k, 4),
-            position_ids, *position_ids.stride(),
-            args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-            args.rope_sin, *args.safe_stride(args.rope_sin, 2),
-            
-            *args.args_paged_kv_cache(),
-            *args.args_offload_cache(True),
-            
-            indices_left, *indices_left.stride(),
-            indices_right, *indices_right.stride(),
-            out_scores, *out_scores.stride(),
-            
-            model_context_length,
-            args.sliding_window_size - max(BLOCK_SIZE_Q, BLOCK_CHUNK),
-            args.sink_token_size,
-            chunk_size,
-            
-            TDST,
-            BDST,
-            BDST_SCAN,
-            HEAD,
-            chunk_count,
-            HEAD // HEAD_KV,
-            
-            USING_EXTEND=args.using_extend,
-            NEED_APPLY_ROPE=args.need_apply_rope,
-            EXTEND_BACKEND='dynamic_extend',
-            BLOCK_HID=q.shape[-1],
-            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-            BLOCK_STRIDE_Q=args.block_stride_q,
-            BLOCK_SIZE_K=scan_early_terminate,
-            BLOCK_STRIDE_K=args.block_stride_k,
-            SCAN_STRIDE=scan_stride,
-            
-            # num_warps=2,
+        indices_right = torch.zeros(
+            (BSZ, BDST_SCAN, HEAD, chunk_count), 
+            device=q.device,
+            dtype=torch.int64
         )
-    
-    torch.cuda.set_device(pre_device)
-    
-    if (len(stages) > 0):
-        first_stage_bk = stages[0][1] // chunk_size
-        out_scores = out_scores[..., :indices_left.shape[-1]]
-        _, t_indices = out_scores.topk(k=min(out_scores.shape[-1], first_stage_bk), dim=-1, sorted=False)
-        indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-        indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
-    else:
-        out_scores = out_scores[..., :indices_left.shape[-1]]
-        _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-        indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-        indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
-    
-    for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
-        # if stage_chunk_size > chunk_size: continue
-        # if stage_k > TSRC: continue
         
-        assert (stage_k % chunk_size) == 0
-        indices_left = indices_left[..., :stage_k // chunk_size]
-        indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
-        indices_right = (indices_left + chunk_size)
-        out_scores = out_scores[..., :stage_k // chunk_size]
+        indices_left[:, :, :, :] = (
+            torch.floor(
+                torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
+            ).to(indices_left.dtype)
+        )[None, None, None, :]
+        indices_right[:, :, :, :] = indices_left + chunk_size
+        indices_right.clamp_max_(MAX_TSRC - args.sliding_window_size)
         
-        indices_left, t_indices = indices_left.sort(dim=-1)
-        indices_right = indices_right.gather(dim=-1, index=t_indices)
-        out_scores = out_scores.gather(dim=-1, index=t_indices)
+        out_scores = torch.full(
+            (BSZ, BDST_SCAN, HEAD, triton.next_power_of_2(chunk_count)), 
+            device=q.device,
+            dtype=q.dtype,
+            fill_value=-32000.0
+        )
         
-        if (i_stage == 0) and (scan_stride > 1):
-            indices_left = indices_left.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
-            indices_right = indices_right.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
-            out_scores = out_scores.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
+        # print(q.shape, k.shape, args.rope_cos.shape, args.rope_sin.shape, TDST, TSRC)
         
-        if DEBUG and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 0):
-            out_indices_cpu = indices_left.cpu()
-            debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-            for i in range(out_indices_cpu.shape[1]):
-                t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
-                # print(i, t_chunk_size)
-                for j in range(max(
-                    0,
-                    out_indices_cpu.shape[-1]
-                )):
-                    if j >= out_indices_cpu.shape[-1]: continue
-                    t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
-                    t = t // t_chunk_size * t_chunk_size
-                    debug[i, t:t+t_chunk_size] = 1
-            cv2.imwrite('dummy_sampled.png', debug * 255)
-            print('saved dummy_sampled.png')
-            
-            debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-            for i in range(out_indices_cpu.shape[1]):
-                t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
-                # print(i, t_chunk_size)
-                for j in range(max(
-                    0,
-                    math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
-                )):
-                    if j >= out_indices_cpu.shape[-1]: continue
-                    t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
-                    t = t // t_chunk_size * t_chunk_size
-                    debug[i, t:t+t_chunk_size] = 1
-            cv2.imwrite('dummy_sampled_cut.png', debug * 255)
-            print('saved dummy_sampled_cut.png')
-        
-        assert (chunk_size % stage_chunk_size) == 0
-        splits = chunk_size // stage_chunk_size
-        chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
-        indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
-        indices_left = indices_left.flatten(-2, -1)
-        indices_right = indices_right[..., None] - (((splits - 1) - torch.arange(0, splits, device=q.device)[None, None, None, None, :]) * chunk_sizes[..., None]).floor().long()
-        indices_right = indices_right.flatten(-2, -1)
-        out_scores = out_scores.repeat_interleave(splits, -1)
-        
-        chunk_size = stage_chunk_size
-        chunk_count = indices_left.shape[-1]
-        BLOCK_CHUNK = max(16, triton.next_power_of_2(min(chunk_count, BLOCK_CHUNK)))
+        # print('neeeed rope', args.need_apply_rope)
         
         pre_device = torch.cuda.current_device()
         torch.cuda.set_device(q.device)
-        grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * triton.cdiv(TDST, BLOCK_SIZE_Q) * HEAD,)
+        grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * BDST_SCAN * HEAD,)
         chunk_controllable_sampling_mask_cuda[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
             position_ids, *position_ids.stride(),
-        
+            
             *args.args_paged_kv_cache(),
             *args.args_offload_cache(True),
             
@@ -1369,7 +1224,7 @@ def dual_stage_quadratic_hip_attention(
             MAX_TSRC,
             TDST,
             HEAD,
-            args.sliding_window_size - max(BLOCK_SIZE_Q, BLOCK_CHUNK),
+            args.sliding_window_size,
             args.sink_token_size,
             model_context_length,
             
@@ -1379,79 +1234,290 @@ def dual_stage_quadratic_hip_attention(
             BLOCK_CHUNK=BLOCK_CHUNK,
             HEAD_GROUP=HEAD // HEAD_KV,
             USING_EXTEND=args.using_extend,
-            EXTEND_BACKEND=scan_extend_backend,
+            EXTEND_BACKEND=scan_extend_backend if not scan_require_recalculate_score else 'dynamic_extend',
             NEED_APPLY_ROPE=args.need_apply_rope,
-            TERMINATE_SIZE=1 if (i_stage + 1) == len(stages) else scan_early_terminate,
+            TERMINATE_SIZE=scan_early_terminate,
+            SCAN_STRIDE=scan_stride,
+            
+            num_warps=4,
+            num_stages=2,
         )
+        
+        if scan_require_recalculate_score:
+            grid = (
+                BSZ * BDST_SCAN * HEAD,
+            )
+            calculate_chunk_score[grid](
+                q, *q.stride(),
+                k, *args.safe_stride(k, 4),
+                position_ids, *position_ids.stride(),
+                args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                
+                *args.args_paged_kv_cache(),
+                *args.args_offload_cache(True),
+                
+                indices_left, *indices_left.stride(),
+                indices_right, *indices_right.stride(),
+                out_scores, *out_scores.stride(),
+                
+                model_context_length,
+                args.sliding_window_size,
+                args.sink_token_size,
+                chunk_size,
+                
+                TDST,
+                BDST,
+                BDST_SCAN,
+                HEAD,
+                chunk_count,
+                HEAD // HEAD_KV,
+                
+                USING_EXTEND=args.using_extend,
+                NEED_APPLY_ROPE=args.need_apply_rope,
+                EXTEND_BACKEND='dynamic_extend',
+                BLOCK_HID=q.shape[-1],
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q=args.block_stride_q,
+                BLOCK_SIZE_K=scan_early_terminate,
+                BLOCK_STRIDE_K=args.block_stride_k,
+                SCAN_STRIDE=scan_stride,
+                
+                # num_warps=2,
+            )
+        
         torch.cuda.set_device(pre_device)
         
-        _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-        indices_left = indices_left.gather(dim=-1, index=t_indices)
-        indices_right = indices_right.gather(dim=-1, index=t_indices)
+        if (len(stages) > 0):
+            first_stage_bk = stages[0][1] // chunk_size
+            out_scores = out_scores[..., :indices_left.shape[-1]]
+            _, t_indices = out_scores.topk(k=min(out_scores.shape[-1], first_stage_bk), dim=-1, sorted=False)
+            indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+            indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
+        else:
+            out_scores = out_scores[..., :indices_left.shape[-1]]
+            _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
+            indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
+            indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
         
-        if DEBUG and not torch.cuda.is_current_stream_capturing():
-            out_indices_cpu = indices_left.cpu()
+        for i_stage, (stage_chunk_size, stage_k) in enumerate(stages):
+            # if stage_chunk_size > chunk_size: continue
+            # if stage_k > TSRC: continue
+            
+            assert (stage_k % chunk_size) == 0
+            indices_left = indices_left[..., :stage_k // chunk_size]
+            indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
+            indices_right = (indices_left + chunk_size)
+            out_scores = out_scores[..., :stage_k // chunk_size]
+            
+            indices_left, t_indices = indices_left.sort(dim=-1)
+            indices_right = indices_right.gather(dim=-1, index=t_indices)
+            out_scores = out_scores.gather(dim=-1, index=t_indices)
+            
+            if (i_stage == 0) and (scan_stride > 1):
+                indices_left = indices_left.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
+                indices_right = indices_right.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
+                out_scores = out_scores.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
+            
+            if DEBUG and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 0):
+                out_indices_cpu = indices_left.cpu()
+                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+                for i in range(out_indices_cpu.shape[1]):
+                    t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
+                    # print(i, t_chunk_size)
+                    for j in range(max(
+                        0,
+                        out_indices_cpu.shape[-1]
+                    )):
+                        if j >= out_indices_cpu.shape[-1]: continue
+                        t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
+                        t = t // t_chunk_size * t_chunk_size
+                        debug[i, t:t+t_chunk_size] = 1
+                cv2.imwrite('dummy_sampled.png', debug * 255)
+                print('saved dummy_sampled.png')
+                
+                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+                for i in range(out_indices_cpu.shape[1]):
+                    t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
+                    # print(i, t_chunk_size)
+                    for j in range(max(
+                        0,
+                        math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
+                    )):
+                        if j >= out_indices_cpu.shape[-1]: continue
+                        t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
+                        t = t // t_chunk_size * t_chunk_size
+                        debug[i, t:t+t_chunk_size] = 1
+                cv2.imwrite('dummy_sampled_cut.png', debug * 255)
+                print('saved dummy_sampled_cut.png')
+            
+            assert (chunk_size % stage_chunk_size) == 0
+            splits = chunk_size // stage_chunk_size
+            chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
+            indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
+            indices_left = indices_left.flatten(-2, -1)
+            indices_right = indices_right[..., None] - (((splits - 1) - torch.arange(0, splits, device=q.device)[None, None, None, None, :]) * chunk_sizes[..., None]).floor().long()
+            indices_right = indices_right.flatten(-2, -1)
+            out_scores = out_scores.repeat_interleave(splits, -1)
+            
+            chunk_size = stage_chunk_size
+            chunk_count = indices_left.shape[-1]
+            BLOCK_CHUNK = max(16, triton.next_power_of_2(min(chunk_count, BLOCK_CHUNK)))
+            
+            pre_device = torch.cuda.current_device()
+            torch.cuda.set_device(q.device)
+            grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * triton.cdiv(TDST, BLOCK_SIZE_Q) * HEAD,)
+            chunk_controllable_sampling_mask_cuda[grid](
+                q, *q.stride(),
+                k, *args.safe_stride(k, 4),
+                position_ids, *position_ids.stride(),
+            
+                *args.args_paged_kv_cache(),
+                *args.args_offload_cache(True),
+                
+                indices_left, *indices_left.stride(),
+                indices_right, *indices_right.stride(),
+                out_scores, *out_scores.stride(),
+                args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                
+                chunk_count,
+                MAX_TSRC,
+                TDST,
+                HEAD,
+                args.sliding_window_size,
+                args.sink_token_size,
+                model_context_length,
+                
+                BLOCK_HID=q.shape[-1],
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                STRIDE_Q=args.block_stride_q,
+                BLOCK_CHUNK=BLOCK_CHUNK,
+                HEAD_GROUP=HEAD // HEAD_KV,
+                USING_EXTEND=args.using_extend,
+                EXTEND_BACKEND=scan_extend_backend,
+                NEED_APPLY_ROPE=args.need_apply_rope,
+                TERMINATE_SIZE=stage_early_terminate,
+            )
+            
+            if stage_require_recalculate_score:
+                grid = (
+                    BSZ * BDST_SCAN * HEAD,
+                )
+                calculate_chunk_score[grid](
+                    q, *q.stride(),
+                    k, *args.safe_stride(k, 4),
+                    position_ids, *position_ids.stride(),
+                    args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                    args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                    
+                    *args.args_paged_kv_cache(),
+                    *args.args_offload_cache(True),
+                    
+                    indices_left, *indices_left.stride(),
+                    indices_right, *indices_right.stride(),
+                    out_scores, *out_scores.stride(),
+                    
+                    model_context_length,
+                    args.sliding_window_size,
+                    args.sink_token_size,
+                    chunk_size,
+                    
+                    TDST,
+                    BDST,
+                    BDST_SCAN,
+                    HEAD,
+                    chunk_count,
+                    HEAD // HEAD_KV,
+                    
+                    USING_EXTEND=args.using_extend,
+                    NEED_APPLY_ROPE=args.need_apply_rope,
+                    EXTEND_BACKEND='dynamic_extend',
+                    BLOCK_HID=q.shape[-1],
+                    BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q=args.block_stride_q,
+                    BLOCK_SIZE_K=stage_early_terminate,
+                    BLOCK_STRIDE_K=args.block_stride_k,
+                    SCAN_STRIDE=1,
+                    
+                    # num_warps=2,
+                )
+            
+            torch.cuda.set_device(pre_device)
+            
+            _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
+            indices_left = indices_left.gather(dim=-1, index=t_indices)
+            indices_right = indices_right.gather(dim=-1, index=t_indices)
+            
+            if DEBUG and not torch.cuda.is_current_stream_capturing():
+                out_indices_cpu = indices_left.cpu()
+                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
+                for i in range(out_indices_cpu.shape[1]):
+                    for j in range(math.ceil(stage_k / chunk_size)):
+                        if j >= out_indices_cpu.shape[-1]: continue
+                        t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
+                        debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
+                cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
+                print(f'saved dummy_sampled_stage_{i_stage}.png')
+        
+        assert (second_stage_k % chunk_size) == 0
+        indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
+        
+        if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+            out_indices_cpu = indices.cpu()
             debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
             for i in range(out_indices_cpu.shape[1]):
-                for j in range(math.ceil(stage_k / chunk_size)):
+                for j in range(indices.shape[-1]):
                     if j >= out_indices_cpu.shape[-1]: continue
-                    t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
-                    debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
-            cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
-            print(f'saved dummy_sampled_stage_{i_stage}.png')
-    
-    assert (second_stage_k % chunk_size) == 0
-    indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
-    
-    if DEBUG and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
-        out_indices_cpu = indices.cpu()
-        debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-        for i in range(out_indices_cpu.shape[1]):
-            for j in range(indices.shape[-1]):
-                if j >= out_indices_cpu.shape[-1]: continue
-                t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
-                debug[i, t:t+1] = 1
-        cv2.imwrite('dummy_sampled_final.png', debug * 255)
-        print('saved dummy_sampled_final.png')
-        try:
-            input('>>>')
-        except EOFError:
-            pass
-    
-    args = args.clone()
-    args.sliding_window_size += args.mask_k
-    args.block_size_k = chunk_size
-    args.mask_k = second_stage_k
-    args.using_extend = args.using_extend and True
-    
-    # print('ff', indices.shape)
-    indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
-    
-    indices, _ = indices.sort(dim=-1)
-    indices = indices // args.block_size_k * args.block_size_k
-    
-    unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-    indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-    indices = indices.sort(dim=-1).values
-    active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
-    ks = active_mask.int().sum(-1)
-    ks_count = ks.unsqueeze(-1)
-    ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
-    ks_start_end[:, :, -1] = ks
-    
-    if  (
-            (block_sparse_block_size_q is not None) and\
-            (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
-        ):
-        assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
-        indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-        ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-        ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-        ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-        args.block_size_q = block_sparse_block_size_q
-    
-    if mask_only:
-        return None, None
+                    t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
+                    debug[i, t:t+1] = 1
+            cv2.imwrite('dummy_sampled_final.png', debug * 255)
+            print('saved dummy_sampled_final.png')
+            try:
+                input('>>>')
+            except EOFError:
+                pass
+        
+        args = args.clone()
+        # args.sliding_window_size += args.mask_k + max(BLOCK_SIZE_Q, BLOCK_CHUNK)
+        args.block_size_k = chunk_size
+        args.mask_k = second_stage_k
+        args.using_extend = args.using_extend and True
+        
+        # print('ff', indices.shape)
+        indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
+        
+        indices, _ = indices.sort(dim=-1)
+        indices = indices // args.block_size_k * args.block_size_k
+        
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+        indices = indices.sort(dim=-1).values
+        active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+        ks = active_mask.int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
+        ks_start_end[:, :, -1] = ks
+        
+        if  (
+                (block_sparse_block_size_q is not None) and\
+                (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
+            ):
+            assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
+            indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            args.block_size_q = block_sparse_block_size_q
+        
+        if mask_only:
+            return None, None
+    else:
+        assert cached_metadata is not None
+        indices = cached_metadata.indices
+        ks = cached_metadata.indices
+        ks_count = cached_metadata.ks_count
+        ks_start_end = cached_metadata.ks_start_end
     
     context = block_sparse_attention(
         q=q, 
@@ -1486,10 +1552,11 @@ def dual_stage_quadratic_hip_attention(
 def main_debug():
     global DEBUG
     
-    seq_len = 8192
+    seq_len = 1024
     seq_dups = int(os.getenv('DUPS', '1'))
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
-    num_samples = int(os.getenv('NUM_SAMPLES', '10'))
+    num_samples = int(os.getenv('NUM_SAMPLES', '100'))
+    batch_size = int(os.getenv('BATCH_SIZE', '1'))
     mask_only = False
     
     assert seq_dups > 0
@@ -1512,13 +1579,22 @@ def main_debug():
         cos = cos.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
         sin = sin.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
     
-    from flash_attn import flash_attn_func
+    if batch_size > 1:
+        q = q[:, :1, :, :].contiguous()
+        q = q.expand(batch_size, -1, -1, -1)
+        k = k.expand(batch_size, -1, -1, -1)
+        v = v.expand(batch_size, -1, -1, -1)
+    
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
     
     print(q.shape, k.shape, v.shape)
     
     print('-' * 20)
     
-    for i in range(min(num_samples, 10)):
+    is_decode = q.shape[1] == 1
+    
+    metadata = None
+    for i in range(min(num_samples, 24)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1528,7 +1604,8 @@ def main_debug():
         # print(cos.shape)
         # print(sin.shape)
         
-        dual_stage_quadratic_hip_attention(
+        mask_k_1k = 3
+        context, metadata = dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
                 mask_k=256,
@@ -1536,8 +1613,8 @@ def main_debug():
                 block_stride_q=4,
                 block_size_k=64, # BLOCK_CHUNK
                 block_stride_k=1,
-                sliding_window_size=1024,
-                sink_token_size=256,
+                sliding_window_size=1024 if not is_decode else 512,
+                sink_token_size=256 if not is_decode else 256,
                 # position_ids=position_ids,
                 
                 using_extend=True,
@@ -1545,16 +1622,21 @@ def main_debug():
                 rope_sin=sin,
                 need_apply_rope=True,
             ),
-            second_stage_k=2048,
+            second_stage_k=mask_k_1k*1024 if (not is_decode) else 1024,
             stages=[
-                (64, 8192),
+                (64, mask_k_1k*4*1024) if (not is_decode) else (16, 8192),
             ],
             scan_stride=1,
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
             mask_only=mask_only,
             scan_early_terminate=1,
+            stage_early_terminate=1,
+            cached_metadata=metadata
         )
+        
+        if ((i + 1) % (8 if is_decode else 1)) == 0:
+            metadata = None
         
         if i==0: DEBUG = False
         end.record()
@@ -1564,7 +1646,8 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(min(num_samples, 10)):
+    metadata = None
+    for i in range(min(num_samples, 24)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
@@ -1574,7 +1657,7 @@ def main_debug():
         # print(cos.shape)
         # print(sin.shape)
         
-        dual_stage_quadratic_hip_attention(
+        context, metadata = dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
                 mask_k=256,
@@ -1590,6 +1673,7 @@ def main_debug():
                 using_extend=False,
                 rope_cos=cos,
                 rope_sin=sin,
+                need_apply_rope=False,
             ),
             second_stage_k=2048,
             stages=[
@@ -1599,8 +1683,13 @@ def main_debug():
             block_sparse_block_size_q=64,
             model_context_length=65536,
             scan_early_terminate=1,
+            stage_early_terminate=1,
             mask_only=mask_only,
+            cached_metadata=metadata,
         )
+        
+        if ((i + 1) % (8 if is_decode else 1)) == 0:
+            metadata = None
         
         if i==0: DEBUG = False
         end.record()
@@ -1610,12 +1699,13 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(min(num_samples, 10)):
+    metadata = None
+    for i in range(min(num_samples, 24)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
-        
+         
         start.record()
-        hip_attention(
+        context, metadata = hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
                 mask_k=512,
@@ -1625,22 +1715,31 @@ def main_debug():
                 block_stride_k=1,
             ),
             mask_only=mask_only,
+            previous_metadata=metadata,
         )
         end.record()
+        
+        if ((i + 1) % (8 if is_decode else 1)) == 0:
+            metadata = None
         
         end.synchronize()
         print(start.elapsed_time(end))
     
     print('-' * 20)
     
-    for i in range(min(num_samples, 10)):
+    for i in range(min(num_samples, 3)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
         start.record()
-        flash_attn_func(
-            q, k, v, causal=True
-        )
+        if q.shape[1] == 1:
+            flash_attn_with_kvcache(
+                q, k, v, causal=True,
+            )
+        else:
+            flash_attn_func(
+                q, k, v, causal=True
+            )
         end.record()
         
         end.synchronize()
