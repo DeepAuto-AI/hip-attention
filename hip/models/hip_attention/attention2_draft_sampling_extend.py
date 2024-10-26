@@ -1178,18 +1178,13 @@ def dual_stage_quadratic_hip_attention(
             device=q.device,
             dtype=torch.int64
         )
-        indices_right = torch.zeros(
-            (BSZ, BDST_SCAN, HEAD, chunk_count), 
-            device=q.device,
-            dtype=torch.int64
-        )
-        
+
         indices_left[:, :, :, :] = (
             torch.floor(
                 torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
             ).to(indices_left.dtype)
         )[None, None, None, :]
-        indices_right[:, :, :, :] = indices_left + chunk_size
+        indices_right = indices_left + chunk_size
         indices_right.clamp_max_(MAX_TSRC - args.sliding_window_size)
         
         out_scores = torch.full(
@@ -1552,7 +1547,7 @@ def dual_stage_quadratic_hip_attention(
 def main_debug():
     global DEBUG
     
-    seq_len = 1024
+    seq_len = 131072
     seq_dups = int(os.getenv('DUPS', '1'))
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
     num_samples = int(os.getenv('NUM_SAMPLES', '100'))
@@ -1604,8 +1599,7 @@ def main_debug():
         # print(cos.shape)
         # print(sin.shape)
         
-        mask_k_1k = 3
-        context, metadata = dual_stage_quadratic_hip_attention(
+        _, metadata = dual_stage_quadratic_hip_attention(
             q, k, v,
             args=HiPAttentionArgs(
                 mask_k=256,
@@ -1622,9 +1616,9 @@ def main_debug():
                 rope_sin=sin,
                 need_apply_rope=True,
             ),
-            second_stage_k=mask_k_1k*1024 if (not is_decode) else 1024,
+            second_stage_k=1024 if (not is_decode) else 1024,
             stages=[
-                (64, mask_k_1k*4*1024) if (not is_decode) else (16, 8192),
+                (32, 8192) if (not is_decode) else (32, 8192),
             ],
             scan_stride=1,
             block_sparse_block_size_q=block_size,
@@ -1645,6 +1639,9 @@ def main_debug():
         print(start.elapsed_time(end))
     
     print('-' * 20)
+    
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
     
     metadata = None
     for i in range(min(num_samples, 24)):
@@ -1675,9 +1672,9 @@ def main_debug():
                 rope_sin=sin,
                 need_apply_rope=False,
             ),
-            second_stage_k=2048,
+            second_stage_k=1024,
             stages=[
-                (64, 8192),
+                (32, 8192),
             ],
             scan_stride=1,
             block_sparse_block_size_q=64,
@@ -1698,6 +1695,9 @@ def main_debug():
         print(start.elapsed_time(end))
     
     print('-' * 20)
+    
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
     
     metadata = None
     for i in range(min(num_samples, 24)):
@@ -1727,7 +1727,7 @@ def main_debug():
     
     print('-' * 20)
     
-    for i in range(min(num_samples, 3)):
+    for i in range(min(num_samples, 5)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
         
