@@ -32,6 +32,32 @@ def render_plot(
             t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
             debug[i, t:t+1] = 1
 
+@numba.njit(parallel=True)
+def render_plot_dynamic(
+    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size,
+):
+    for i in numba.prange(out_indices_cpu.shape[1]):
+        for j in range(math.ceil(stage_k / chunk_size)):
+            if j >= out_indices_cpu.shape[-1]: continue
+            t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
+            debug[i, t:t+math.ceil(chunk_size / BLOCK_SIZE_Q)] = 1
+
+@numba.njit(parallel=True)
+def render_plot_sampled(
+    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_CHUNK, chunk_count, TDST, sink_token_size, 
+):
+    for i in numba.prange(out_indices_cpu.shape[1]):
+        t_chunk_size = math.ceil(TDST / chunk_count * BLOCK_CHUNK)
+        # print(i, t_chunk_size)
+        for j in range(max(
+            0,
+            out_indices_cpu.shape[-1]
+        )):
+            if j >= out_indices_cpu.shape[-1]: continue
+            t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - sink_token_size) // BLOCK_CHUNK + sink_token_size // BLOCK_CHUNK
+            t = t // t_chunk_size * t_chunk_size
+            debug[i, t:t+t_chunk_size] = 1
+
 DEBUG = (os.getenv('HIP_DEBUG', '0') == '1')
 DEBUG_RENDER = (os.getenv('HIP_DEBUG_RENDER', '1') == '1')
 
@@ -508,7 +534,7 @@ def chunk_controllable_sampling_mask_cuda(
             elif EXTEND_BACKEND == 'self_extend':
                 new_tdst = pos_tdst
             elif EXTEND_BACKEND == 'relative':
-                new_tdst = pos_tdst * 0 + 1
+                new_tdst = pos_tdst * 0 + 1 + sliding_window_size
             elif EXTEND_BACKEND == 'streaming':
                 # streaming
                 new_tdst = tl.minimum(pos_tdst, CHUNK_COUNT + sliding_window_size)
@@ -1167,11 +1193,11 @@ def dual_stage_quadratic_hip_attention(
     scan_early_terminate: int = 1,
     stage_early_terminate: int = 1,
     # scan_extend_backend: str = 'dynamic_extend',
-    scan_extend_backend: str = 'streaming',
-    sa_extend_backend: str = 'streaming',
+    scan_extend_backend: str = 'relative',
+    sa_extend_backend: str = 'dynamic_extend',
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
-    DEBUG_HEAD = -1
+    DEBUG_HEAD = -2
     global DEBUG
     
     BSZ, TDST, HEAD, HID = q.shape
@@ -1257,6 +1283,7 @@ def dual_stage_quadratic_hip_attention(
             HEAD,
             args.sliding_window_size,
             args.sink_token_size,
+            # model_context_length if (not scan_extend_backend == 'streaming') else 0,
             model_context_length,
             
             BLOCK_HID=q.shape[-1],
@@ -1266,6 +1293,7 @@ def dual_stage_quadratic_hip_attention(
             HEAD_GROUP=HEAD // HEAD_KV,
             USING_EXTEND=args.using_extend,
             EXTEND_BACKEND=scan_extend_backend,
+            # EXTEND_BACKEND='relative',
             NEED_APPLY_ROPE=args.need_apply_rope,
             TERMINATE_SIZE=scan_early_terminate,
             SCAN_STRIDE=scan_stride,
@@ -1292,6 +1320,7 @@ def dual_stage_quadratic_hip_attention(
                 indices_right, *indices_right.stride(),
                 out_scores, *out_scores.stride(),
                 
+                # model_context_length if (not scan_extend_backend == 'streaming') else 0,
                 model_context_length,
                 args.sliding_window_size,
                 args.sink_token_size,
@@ -1354,36 +1383,26 @@ def dual_stage_quadratic_hip_attention(
                 out_scores = out_scores.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
             
             if DEBUG and DEBUG_RENDER and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 0):
-                out_indices_cpu = indices_left.cpu()
+                out_indices_cpu = indices_left.cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-                for i in range(out_indices_cpu.shape[1]):
-                    t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
-                    # print(i, t_chunk_size)
-                    for j in range(max(
-                        0,
-                        out_indices_cpu.shape[-1]
-                    )):
-                        if j >= out_indices_cpu.shape[-1]: continue
-                        t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
-                        t = t // t_chunk_size * t_chunk_size
-                        debug[i, t:t+t_chunk_size] = 1
+                render_plot_sampled(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_CHUNK, chunk_count, TDST, args.sink_token_size)
                 cv2.imwrite('dummy_sampled.png', debug * 255)
                 print('saved dummy_sampled.png')
                 
-                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-                for i in range(out_indices_cpu.shape[1]):
-                    t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
-                    # print(i, t_chunk_size)
-                    for j in range(max(
-                        0,
-                        math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
-                    )):
-                        if j >= out_indices_cpu.shape[-1]: continue
-                        t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
-                        t = t // t_chunk_size * t_chunk_size
-                        debug[i, t:t+t_chunk_size] = 1
-                cv2.imwrite('dummy_sampled_cut.png', debug * 255)
-                print('saved dummy_sampled_cut.png')
+                # debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
+                # for i in range(out_indices_cpu.shape[1]):
+                #     t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
+                #     # print(i, t_chunk_size)
+                #     for j in range(max(
+                #         0,
+                #         math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
+                #     )):
+                #         if j >= out_indices_cpu.shape[-1]: continue
+                #         t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
+                #         t = t // t_chunk_size * t_chunk_size
+                #         debug[i, t:t+t_chunk_size] = 1
+                # cv2.imwrite('dummy_sampled_cut.png', debug * 255)
+                # print('saved dummy_sampled_cut.png')
             
             assert (chunk_size % stage_chunk_size) == 0
             splits = chunk_size // stage_chunk_size
@@ -1426,6 +1445,7 @@ def dual_stage_quadratic_hip_attention(
                 HEAD,
                 args.sliding_window_size,
                 args.sink_token_size,
+                # model_context_length if (not scan_extend_backend == 'streaming') else 0,
                 model_context_length,
                 
                 BLOCK_HID=q.shape[-1],
@@ -1458,6 +1478,7 @@ def dual_stage_quadratic_hip_attention(
                     indices_right, *indices_right.stride(),
                     out_scores, *out_scores.stride(),
                     
+                    # model_context_length if (not scan_extend_backend == 'streaming') else 0,
                     model_context_length,
                     args.sliding_window_size,
                     args.sink_token_size,
@@ -1490,16 +1511,17 @@ def dual_stage_quadratic_hip_attention(
             indices_right = indices_right.gather(dim=-1, index=t_indices)
             # print('fuufh', indices_left.shape)
             
-            # if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
-            #     out_indices_cpu = indices_left.cpu()
-            #     debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-            #     for i in range(out_indices_cpu.shape[1]):
-            #         for j in range(math.ceil(stage_k / chunk_size)):
-            #             if j >= out_indices_cpu.shape[-1]: continue
-            #             t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
-            #             debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
-            #     cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
-            #     print(f'saved dummy_sampled_stage_{i_stage}.png')
+            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
+                out_indices_cpu = indices_left.cpu().numpy()
+                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
+                # for i in range(out_indices_cpu.shape[1]):
+                #     for j in range(math.ceil(stage_k / chunk_size)):
+                #         if j >= out_indices_cpu.shape[-1]: continue
+                #         t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
+                #         debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
+                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size)
+                cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
+                print(f'saved dummy_sampled_stage_{i_stage}.png')
         
         # print('ffddffead', indices_left.shape, chunk_size, stages)
         assert (second_stage_k % chunk_size) == 0
@@ -1555,6 +1577,12 @@ def dual_stage_quadratic_hip_attention(
         if mask_only:
             return None, None
     else:
+        args = args.clone()
+        args.sliding_window_size += args.mask_k + max(BLOCK_SIZE_Q, BLOCK_CHUNK)
+        args.block_size_k = stages[-1][1]
+        args.mask_k = second_stage_k
+        args.using_extend = args.using_extend and True
+        
         assert cached_metadata is not None
         indices = cached_metadata.indices
         ks = cached_metadata.indices
@@ -1572,6 +1600,7 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end=ks_start_end,
         args=args,
         EXTEND_BACKEND=sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
+        # model_context_length=model_context_length if (not sa_extend_backend == 'streaming') else 0,
         model_context_length=model_context_length,
     )
     
@@ -1609,6 +1638,7 @@ def main_debug():
         window=40, 
         seq_len=seq_len, 
         return_cos_sin=True, 
+        derope=True,
         dtype=torch.bfloat16
     )
     HEAD = q.shape[0]
@@ -1636,6 +1666,50 @@ def main_debug():
     
     is_decode = q.shape[1] == 1
     
+    dual_stage_kwargs = dict(
+        q=q, k=k, v=v,
+        args=HiPAttentionArgs(
+            mask_k=128,
+            block_size_q=64,
+            block_stride_q=1,
+            block_size_k=64, # BLOCK_CHUNK
+            block_stride_k=1,
+            sliding_window_size=1024 if not is_decode else 512,
+            sink_token_size=256 if not is_decode else 256,
+            # position_ids=position_ids,
+            
+            using_extend=True,
+            rope_cos=cos,
+            rope_sin=sin,
+            need_apply_rope=True,
+        ),
+        second_stage_k=2048 if (not is_decode) else 1024,
+        stages=[
+            (1, 32, 32768),
+            (1, 1, 8192),
+        ],
+        scan_stride=1,
+        block_sparse_block_size_q=block_size,
+        model_context_length=64000,
+        scan_early_terminate=1,
+        stage_early_terminate=1,
+        mask_only=mask_only,
+    )
+    
+    hip_kwargs = dict(
+        q=q, k=k, v=v,
+        args=HiPAttentionArgs(
+            mask_k=512,
+            block_size_q=64,
+            block_stride_q=2,
+            block_size_k=2,
+            block_stride_k=1,
+        ),
+        mask_only=mask_only,
+    )
+    
+    refresh_interval = 8 if is_decode else 2
+    
     metadata = None
     for i in range(min(num_samples, 24)):
         start = torch.cuda.Event(True)
@@ -1648,37 +1722,11 @@ def main_debug():
         # print(sin.shape)
         
         _, metadata = dual_stage_quadratic_hip_attention(
-            q, k, v,
-            args=HiPAttentionArgs(
-                mask_k=512,
-                block_size_q=64,
-                block_stride_q=4,
-                block_size_k=64, # BLOCK_CHUNK
-                block_stride_k=1,
-                sliding_window_size=1024 if not is_decode else 512,
-                sink_token_size=256 if not is_decode else 256,
-                # position_ids=position_ids,
-                
-                using_extend=True,
-                rope_cos=cos,
-                rope_sin=sin,
-                need_apply_rope=True,
-            ),
-            second_stage_k=2048 if (not is_decode) else 1024,
-            stages=[
-                (2, 64, 32768),
-                (1, 8, 8192),
-            ],
-            scan_stride=1,
-            block_sparse_block_size_q=block_size,
-            model_context_length=32768,
-            mask_only=mask_only,
-            scan_early_terminate=1,
-            stage_early_terminate=1,
+            **dual_stage_kwargs,
             cached_metadata=metadata
         )
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
+        if ((i + 1) % refresh_interval) == 0:
             metadata = None
         
         if i==0: DEBUG = False
@@ -1692,6 +1740,9 @@ def main_debug():
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
     
+    dual_stage_kwargs['args'].using_extend = False
+    dual_stage_kwargs['args'].need_apply_rope = False
+    
     metadata = None
     for i in range(min(num_samples, 24)):
         start = torch.cuda.Event(True)
@@ -1704,37 +1755,11 @@ def main_debug():
         # print(sin.shape)
         
         context, metadata = dual_stage_quadratic_hip_attention(
-            q, k, v,
-            args=HiPAttentionArgs(
-                mask_k=512,
-                block_size_q=64,
-                block_stride_q=4,
-                block_size_k=64, # BLOCK_CHUNK
-                block_stride_k=1,
-                sliding_window_size=1024 if not is_decode else 512,
-                sink_token_size=256 if not is_decode else 256,
-                # position_ids=position_ids,
-                
-                using_extend=False,
-                rope_cos=cos,
-                rope_sin=sin,
-                need_apply_rope=False,
-            ),
-            second_stage_k=2048 if (not is_decode) else 1024,
-            stages=[
-                (2, 64, 32768),
-                (1, 8, 8192),
-            ],
-            scan_stride=1,
-            block_sparse_block_size_q=block_size,
-            model_context_length=32768,
-            mask_only=mask_only,
-            scan_early_terminate=1,
-            stage_early_terminate=1,
+            **dual_stage_kwargs,
             cached_metadata=metadata
         )
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
+        if ((i + 1) % refresh_interval) == 0:
             metadata = None
         
         if i==0: DEBUG = False
@@ -1755,15 +1780,7 @@ def main_debug():
          
         start.record()
         context, metadata = hip_attention(
-            q, k, v,
-            args=HiPAttentionArgs(
-                mask_k=512,
-                block_size_q=64,
-                block_stride_q=2,
-                block_size_k=2,
-                block_stride_k=1,
-            ),
-            mask_only=mask_only,
+            **hip_kwargs,
             previous_metadata=metadata,
         )
         end.record()

@@ -61,6 +61,7 @@ def custom_attention(
     attn_logit_softcapping=0,
     model_sliding_window=None,
     model_context_length=131072,
+    layer_idx=10,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -329,7 +330,7 @@ def custom_attention(
                     args=HiPAttentionArgs11(
                         position_ids=position_ids,
                         
-                        mask_k=256,
+                        mask_k=128,
                         block_size_q=32 if IS_GEMMA else 64,
                         block_stride_q=2 if IS_GEMMA else 4,
                         block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
@@ -349,8 +350,8 @@ def custom_attention(
                     stages=[
                         # (128, 32768),
                         # (64, 16384),
-                        (32, 16384),
-                        (8, 8192),
+                        (1, 32, 32768),
+                        (1, 1, 8192),
                     ],
                     scan_stride=1,
                     scan_block_stride_q=-1,
@@ -358,6 +359,9 @@ def custom_attention(
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,
                     scan_early_terminate=1,
                     stage_early_terminate=1,
+                    scan_extend_backend='relative' if layer_idx >= 3 else 'streaming',
+                    # scan_extend_backend='dynamic_extend',
+                    sa_extend_backend='dynamic_extend',
                 )
                 
                 # attn_output_hip = sampling_only_attention(

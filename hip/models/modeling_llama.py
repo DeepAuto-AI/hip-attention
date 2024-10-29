@@ -540,7 +540,9 @@ class LlamaCustomAttention(LlamaAttention):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-            
+        
+        query_states_derope = query_states
+        key_states_derope = key_states
         if self.layer_idx in self.tree_dense_layers:
             if not need_apply_rope:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -645,6 +647,7 @@ class LlamaCustomAttention(LlamaAttention):
                 sm_scaler=1 / math.sqrt(self.head_dim),
                 model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
+                layer_idx=self.layer_idx,
             )
         else:
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -698,8 +701,23 @@ class LlamaCustomAttention(LlamaAttention):
                 sm_scaler=1 / math.sqrt(self.head_dim),
                 model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
+                layer_idx=self.layer_idx,
             )
 
+        if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
+            os.makedirs('./cache/llama/', exist_ok=True)
+            torch.save({
+                'q': query_states,
+                'k': key_states,
+                'v': value_states,
+                'q_derope': query_states_derope,
+                'k_derope': key_states_derope,
+                'out': attn_output,
+                'cos': cos_all,
+                'sin': sin_all,
+            }, './cache/llama/qkvout.pth')
+            input('stored. press enter to continue >>> ')
+        
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
