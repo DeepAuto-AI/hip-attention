@@ -643,7 +643,7 @@ class LlamaCustomAttention(LlamaAttention):
                 hyper_attention=self.hyper_attention,
                 
                 sm_scaler=1 / math.sqrt(self.head_dim),
-                model_sliding_window=None if not force_extend else 131072,
+                model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
             )
         else:
@@ -696,7 +696,7 @@ class LlamaCustomAttention(LlamaAttention):
                 hyper_attention=self.hyper_attention,
                 
                 sm_scaler=1 / math.sqrt(self.head_dim),
-                model_sliding_window=None if not force_extend else 131072,
+                model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
             )
 

@@ -345,11 +345,15 @@ def custom_attention(
                         
                         logit_softcap=attn_logit_softcapping,
                     ),
-                    second_stage_k=1024,
+                    second_stage_k=2048,
                     stages=[
-                        (32 if IS_GEMMA else 32, 8192),
+                        # (128, 32768),
+                        # (64, 16384),
+                        (32, 16384),
+                        (8, 8192),
                     ],
                     scan_stride=1,
+                    scan_block_stride_q=-1,
                     model_context_length=model_context_length,
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,
                     scan_early_terminate=1,

@@ -4726,7 +4726,8 @@ def block_sparse_attention_cuda_step(
                         # new_tsrc = idx_tsrc
                     elif EXTEND_BACKEND == 'dynamic_extend':
                         # dynamic extend
-                        window = model_context_length // 2
+                        window = model_context_length // 4
+                        
                         new_tsrc = tl.where(
                             idx_tsrc >= (pos_tdst_max - window),
                             idx_tsrc,
