@@ -189,18 +189,11 @@ def load_keys_with_rope(
                 window = model_context_length // 4
                 
                 new_tsrc = tl.where(
-                    idx_tsrc >= (real_pos_tdst_max - window),
+                    (idx_tsrc >= (real_pos_tdst_max - window)) | (real_pos_tdst_max <= model_context_length),
                     idx_tsrc,
-                    tl.where(
-                        real_pos_tdst_max <= model_context_length,
-                        idx_tsrc,
-                        (idx_tsrc * ((model_context_length - window) / (real_pos_tdst_max - window))).to(tl.int32) + (real_pos_tdst_min - model_context_length)
-                    )
+                    ((idx_tsrc + window - real_pos_tdst_min) * ((model_context_length - window) / (real_pos_tdst_min - window))).to(tl.int32) + real_pos_tdst_min - window
                 )
-                new_tsrc = tl.maximum(0, new_tsrc)
-                # new_tsrc = tl.minimum(model_context_length, new_tsrc)
-                # new_tsrc = idx_tsrc
-                # new_tsrc = new_tsrc * 0
+                new_tsrc = tl.maximum(real_pos_tdst_max - model_context_length, new_tsrc)
             elif EXTEND_BACKEND == 'self_extend':
                 window = 8192
                 group_size = 16

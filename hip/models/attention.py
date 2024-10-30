@@ -359,8 +359,8 @@ def custom_attention(
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,
                     scan_early_terminate=1,
                     stage_early_terminate=1,
-                    scan_extend_backend='relative' if layer_idx >= 3 else 'streaming',
-                    # scan_extend_backend='dynamic_extend',
+                    # scan_extend_backend='relative' if layer_idx >= 3 else 'streaming',
+                    scan_extend_backend='streaming',
                     sa_extend_backend='dynamic_extend',
                 )
                 

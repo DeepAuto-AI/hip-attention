@@ -53,6 +53,7 @@ def job_passkey(args, model, tokenizer, device):
                     pad_token_id=tokenizer.eos_token_id,
                 )
                 output = output[:, input_ids.shape[1]:]
+                tqdm.write(f'{tokenizer.batch_decode(output)}')
     
         # tqdm(tokenizer.batch_decode(output))
         truth = tokenizer.batch_decode(target_ids)

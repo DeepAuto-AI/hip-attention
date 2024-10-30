@@ -4728,16 +4728,17 @@ def block_sparse_attention_cuda_step(
                         # dynamic extend
                         window = model_context_length // 4
                         
+                        # new_tsrc = tl.where(
+                        #     (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
+                        #     idx_tsrc,
+                        #     ((idx_tsrc - (pos_tdst_min - model_context_length)) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
+                        # )
                         new_tsrc = tl.where(
-                            idx_tsrc >= (pos_tdst_max - window),
+                            (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
                             idx_tsrc,
-                            tl.where(
-                                pos_tdst_max <= model_context_length,
-                                idx_tsrc,
-                                (idx_tsrc * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
-                            )
+                            ((idx_tsrc + window - pos_tdst_min) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + pos_tdst_min - window
                         )
-                        new_tsrc = tl.maximum(0, new_tsrc)
+                        new_tsrc = tl.maximum(pos_tdst_max - model_context_length, new_tsrc)
                     else:
                         raise Exception()
                 else:
