@@ -331,9 +331,9 @@ def custom_attention(
                     args=HiPAttentionArgs11(
                         position_ids=position_ids,
                         
-                        mask_k=512,
+                        mask_k=256,
                         block_size_q=32 if IS_GEMMA else 64,
-                        block_stride_q=2 if IS_GEMMA else 4,
+                        block_stride_q=2 if IS_GEMMA else 1,
                         block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
                         block_stride_k=1 if IS_GEMMA else 1,
                         
@@ -347,14 +347,15 @@ def custom_attention(
                         
                         logit_softcap=attn_logit_softcapping,
                     ),
-                    second_stage_k=2048 if is_dense else 1024,
+                    second_stage_k=1024 if is_dense else 1024,
                     stages=[
                         # (128, 32768),
                         # (64, 16384),
-                        (4, 64, 32768 if is_dense else 16384),
-                        (2, 8, 8192 if is_dense else 4096),
+                        (1, 64, 32768 if is_dense else 16384),
+                        (1, 8, 8192 if is_dense else 4096),
                     ],
-                    scan_stride=1,
+                    scan_stride=2,
+                    stage_stride=2,
                     scan_block_stride_q=-1,
                     model_context_length=model_context_length,
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,

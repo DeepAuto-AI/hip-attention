@@ -439,12 +439,12 @@ def chunk_controllable_sampling_mask_cuda(
     
     pid = tl.program_id(0).to(tl.int64)
     
-    idx_head = pid % HEAD
-    pid = pid // HEAD
     idx_bdst_scan = pid % BDST_SCAN
     pid = pid // BDST_SCAN
     idx_bchunk = pid % BCHUNK
     pid = pid // BCHUNK
+    idx_head = pid % HEAD
+    pid = pid // HEAD
     idx_bsz = pid
     
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
@@ -1183,6 +1183,7 @@ def dual_stage_quadratic_hip_attention(
     
     scan_stride: int = 1,
     scan_block_stride_q: int = -1,
+    stage_stride: int = 1,
     scan_early_terminate: int = 1,
     stage_early_terminate: int = 1,
     # scan_extend_backend: str = 'dynamic_extend',
@@ -1255,7 +1256,12 @@ def dual_stage_quadratic_hip_attention(
         
         pre_device = torch.cuda.current_device()
         torch.cuda.set_device(q.device)
-        grid = (BSZ * triton.cdiv(chunk_count, BLOCK_CHUNK) * BDST_SCAN * HEAD,)
+        grid = (
+            BSZ *\
+            triton.cdiv(chunk_count, BLOCK_CHUNK) *\
+            BDST_SCAN *\
+            HEAD,
+        )
         chunk_controllable_sampling_mask_cuda[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -1371,9 +1377,11 @@ def dual_stage_quadratic_hip_attention(
             out_scores = out_scores.gather(dim=-1, index=t_indices)
             
             if (i_stage == 0) and (scan_stride > 1):
-                indices_left = indices_left.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
-                indices_right = indices_right.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
-                out_scores = out_scores.repeat_interleave(scan_stride, 1)[:, -BDST:].contiguous()
+                assert stage_stride <= scan_stride
+                assert stage_stride > 0
+                indices_left = indices_left.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
+                indices_right = indices_right.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
+                out_scores = out_scores.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
             
             if DEBUG and DEBUG_RENDER and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 0):
                 out_indices_cpu = indices_left.cpu().numpy()
@@ -1415,7 +1423,7 @@ def dual_stage_quadratic_hip_attention(
             grid = (
                 BSZ *\
                 triton.cdiv(chunk_count, BLOCK_CHUNK) *\
-                triton.cdiv(TDST, BLOCK_SIZE_Q) *\
+                triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), stage_stride) *\
                 HEAD,
             )
             chunk_controllable_sampling_mask_cuda[grid](
@@ -1450,10 +1458,11 @@ def dual_stage_quadratic_hip_attention(
                 EXTEND_BACKEND=scan_extend_backend,
                 NEED_APPLY_ROPE=args.need_apply_rope,
                 TERMINATE_SIZE=stage_early_terminate,
-                SCAN_STRIDE=1,
+                SCAN_STRIDE=stage_stride,
             )
             
             if stage_require_recalculate_score:
+                assert stage_stride == 1
                 grid = (
                     BSZ * BDST * HEAD, # SCAN_STRIDE = 1
                 )
@@ -1505,7 +1514,7 @@ def dual_stage_quadratic_hip_attention(
             # print('fuufh', indices_left.shape)
             
             if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
-                out_indices_cpu = indices_left.cpu().numpy()
+                out_indices_cpu = indices_left.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
                 # for i in range(out_indices_cpu.shape[1]):
                 #     for j in range(math.ceil(stage_k / chunk_size)):
@@ -1515,6 +1524,11 @@ def dual_stage_quadratic_hip_attention(
                 render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size)
                 cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
                 print(f'saved dummy_sampled_stage_{i_stage}.png')
+        
+        if (stage_stride > 1):
+            indices_left = indices_left.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous()
+            indices_right = indices_right.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous()
+            out_scores = out_scores.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous()
         
         # print('ffddffead', indices_left.shape, chunk_size, stages)
         assert (second_stage_k % chunk_size) == 0
@@ -1622,7 +1636,7 @@ def main_debug():
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
     num_samples = int(os.getenv('NUM_SAMPLES', '100'))
     batch_size = int(os.getenv('BATCH_SIZE', '1'))
-    mask_only = False
+    mask_only = int(os.getenv('MASK_ONLY', '0')) == '1'
     
     assert seq_dups > 0
     
@@ -1662,9 +1676,9 @@ def main_debug():
     dual_stage_kwargs = dict(
         q=q, k=k, v=v,
         args=HiPAttentionArgs(
-            mask_k=512,
+            mask_k=256,
             block_size_q=64,
-            block_stride_q=4,
+            block_stride_q=1,
             block_size_k=64, # BLOCK_CHUNK
             block_stride_k=1,
             sliding_window_size=1024 if not is_decode else 512,
@@ -1678,10 +1692,11 @@ def main_debug():
         ),
         second_stage_k=1024 if (not is_decode) else 1024,
         stages=[
-            (4, 64, 16384),
-            (2, 8, 4096),
+            (1, 64, 16384),
+            (1, 8, 4096),
         ],
-        scan_stride=1,
+        scan_stride=2,
+        stage_stride=2,
         block_sparse_block_size_q=block_size,
         model_context_length=131072,
         scan_early_terminate=1,
@@ -1690,7 +1705,9 @@ def main_debug():
     )
     
     hip_kwargs = dict(
-        q=q, k=k, v=v,
+        q=q,
+        k=k,
+        v=v,
         args=HiPAttentionArgs(
             mask_k=512,
             block_size_q=64,
