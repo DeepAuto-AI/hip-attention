@@ -4793,6 +4793,29 @@ def block_sparse_attention_cuda_step(
                     other=0.0,
                 ).to(keys.dtype)
                 
+                if EXCLUDE_SLIDING_WINDOW:
+                    if EXTEND_BACKEND == 'dynamic_extend':
+                        streaming_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        streaming_tsrc = tl.maximum(0, streaming_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k + 1)
+                        
+                        cos_zero = tl.load(
+                            COS +\
+                                streaming_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                                (tl.arange(0, HID) % (HID // 2))[:, None] * stride_cos_hid,
+                            # mask=mask_tsrc[None, :],
+                            # other=0.0,
+                        ).to(keys.dtype)
+                        sin_zero = tl.load(
+                            SIN +\
+                                streaming_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                                (tl.arange(0, HID) % (HID // 2))[:, None] * stride_sin_hid,
+                            # mask=mask_tsrc[None, :],
+                            # other=0.0,
+                        ).to(keys.dtype)
+                        
+                        cos_new = (cos_zero * 0.75 + cos_new * 0.25).to(cos_new.dtype)
+                        sin_new = (sin_zero * 0.75 + sin_new * 0.25).to(sin_new.dtype)
+                
                 # rope_theta = 500000.0
                 # inv_freqs = ((tl.arange(0, HID) * 2) % HID) 
                 # 1.0 / tl.extra.cuda.libdevice.fast_powf(
