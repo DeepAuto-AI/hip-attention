@@ -498,11 +498,11 @@ class LlamaCustomAttention(LlamaAttention):
         if self.attention_method == 'hip':
             force_extend = True
             need_apply_rope = True
-            model_context_length = 32768
+            model_context_length = 131072
         else:
             force_extend = False
             need_apply_rope = False
-            model_context_length = 32768
+            model_context_length = 131072
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -621,8 +621,8 @@ class LlamaCustomAttention(LlamaAttention):
                 tree_enable_flash=self.tree_enable_flash,
                 tree_enable_sparq=self.tree_enable_sparq,
                 tree_use_sliding_window=self.tree_use_sliding_window,
-                tree_sink_token_size=512,
-                tree_sliding_window_size=8192,
+                tree_sink_token_size=256,
+                tree_sliding_window_size=2048,
 
                 # Context averaging parameters
                 tree_using_context_avg=False,

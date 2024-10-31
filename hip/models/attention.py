@@ -325,12 +325,13 @@ def custom_attention(
     
                 # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype, need_apply_rope)
                 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
+                is_dense = layer_idx < 3
                 attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
                     q, k, v,
                     args=HiPAttentionArgs11(
                         position_ids=position_ids,
                         
-                        mask_k=128,
+                        mask_k=512,
                         block_size_q=32 if IS_GEMMA else 64,
                         block_stride_q=2 if IS_GEMMA else 4,
                         block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
@@ -346,12 +347,12 @@ def custom_attention(
                         
                         logit_softcap=attn_logit_softcapping,
                     ),
-                    second_stage_k=2048,
+                    second_stage_k=2048 if is_dense else 1024,
                     stages=[
                         # (128, 32768),
                         # (64, 16384),
-                        (1, 32, 32768),
-                        (1, 1, 8192),
+                        (4, 64, 32768 if is_dense else 16384),
+                        (2, 8, 8192 if is_dense else 4096),
                     ],
                     scan_stride=1,
                     scan_block_stride_q=-1,
@@ -359,8 +360,7 @@ def custom_attention(
                     block_sparse_block_size_q=32 if IS_GEMMA else 64,
                     scan_early_terminate=1,
                     stage_early_terminate=1,
-                    # scan_extend_backend='relative' if layer_idx >= 3 else 'streaming',
-                    scan_extend_backend='streaming',
+                    scan_extend_backend='dynamic_extend' if layer_idx < 1 else 'relative',
                     sa_extend_backend='dynamic_extend',
                 )
                 

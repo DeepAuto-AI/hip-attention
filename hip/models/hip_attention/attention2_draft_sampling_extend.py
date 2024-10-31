@@ -1662,9 +1662,9 @@ def main_debug():
     dual_stage_kwargs = dict(
         q=q, k=k, v=v,
         args=HiPAttentionArgs(
-            mask_k=128,
+            mask_k=512,
             block_size_q=64,
-            block_stride_q=1,
+            block_stride_q=4,
             block_size_k=64, # BLOCK_CHUNK
             block_stride_k=1,
             sliding_window_size=1024 if not is_decode else 512,
@@ -1676,14 +1676,14 @@ def main_debug():
             rope_sin=sin,
             need_apply_rope=True,
         ),
-        second_stage_k=2048 if (not is_decode) else 1024,
+        second_stage_k=1024 if (not is_decode) else 1024,
         stages=[
-            (1, 32, 32768),
-            (1, 1, 8192),
+            (4, 64, 16384),
+            (2, 8, 4096),
         ],
         scan_stride=1,
         block_sparse_block_size_q=block_size,
-        model_context_length=64000,
+        model_context_length=131072,
         scan_early_terminate=1,
         stage_early_terminate=1,
         mask_only=mask_only,
