@@ -369,6 +369,13 @@ def custom_attention(
                             stage_stride=1,
                             block_chunk=64,
                         ),
+                        # EvalScoreStage(
+                        #     stage_block_stride_q=1,
+                        #     stage_chunk_size=32,
+                        #     stage_k=16384,
+                        #     stage_stride=1,
+                        #     block_chunk=64,
+                        # ),
                         # NopStage(
                         #     stage_block_stride_q=1,
                         #     stage_chunk_size=8,
@@ -382,6 +389,7 @@ def custom_attention(
                     scan_early_terminate=1,
                     stage_early_terminate=1,
                     scan_extend_backend='streaming',
+                    sa_extend_backend='dynamic_extend',
                     mask_only=mask_only,
                 )
                 

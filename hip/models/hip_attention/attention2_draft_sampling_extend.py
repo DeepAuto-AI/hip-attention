@@ -1181,9 +1181,9 @@ def calculate_chunk_score(
                 )
                 scores_reduced = tl.reshape(
                     scores_reduced,
-                    BLOCK_SIZE_Q,
+                    BLOCK_SIZE_Q // BLOCK_STRIDE_Q,
                     BLOCK_CHUNK,
-                    BLOCK_SIZE_K,
+                    BLOCK_SIZE_K // BLOCK_STRIDE_K,
                 )
                 scores_reduced = tl.max(
                     scores_reduced,
@@ -1782,7 +1782,7 @@ def main_debug():
     dual_stage_kwargs = dict(
         q=q, k=k, v=v,
         args=HiPAttentionArgs(
-            mask_k=256,
+            mask_k=128,
             block_size_q=64,
             block_stride_q=1,
             block_size_k=64, # BLOCK_CHUNK
@@ -1801,16 +1801,45 @@ def main_debug():
             ScanStage(
                 stage_block_stride_q=1,
                 stage_chunk_size=32,
-                stage_k=65536,
+                stage_k=32768,
+                stage_stride=8,
+            ),
+            EvalScoreStage(
+                stage_block_stride_q=2,
+                stage_chunk_size=32,
+                stage_k=16384,
+                stage_stride=4,
+                block_chunk=64,
+            ),
+            
+            ScanStage(
+                stage_block_stride_q=4,
+                stage_chunk_size=2,
+                stage_k=8192,
                 stage_stride=4,
             ),
             EvalScoreStage(
-                stage_block_stride_q=1,
-                stage_chunk_size=32,
-                stage_k=32768,
+                stage_block_stride_q=4,
+                stage_chunk_size=2,
+                stage_k=2048,
                 stage_stride=1,
                 block_chunk=64,
             ),
+            
+            # ScanStage(
+            #     stage_block_stride_q=1,
+            #     stage_chunk_size=1,
+            #     stage_k=8192,
+            #     stage_stride=1,
+            # ),
+            
+            # EvalScoreStage(
+            #     stage_block_stride_q=1,
+            #     stage_chunk_size=32,
+            #     stage_k=16384,
+            #     stage_stride=1,
+            #     block_chunk=64,
+            # ),
             # NopStage(
             #     stage_block_stride_q=1,
             #     stage_chunk_size=8,
@@ -1818,7 +1847,7 @@ def main_debug():
             #     stage_stride=1,
             # )
         ],
-        scan_stride=4,
+        scan_stride=8,
         block_sparse_block_size_q=block_size,
         model_context_length=131072,
         scan_early_terminate=1,
