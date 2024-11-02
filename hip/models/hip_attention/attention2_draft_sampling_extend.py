@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import math
 import os
 
@@ -21,6 +22,39 @@ import triton.language as tl
 import numpy as np
 import cv2
 import numba
+
+@dataclass
+class Stage:
+    stage_block_stride_q: int
+    stage_chunk_size: int
+    stage_k: int
+    stage_stride: int
+    
+    require_realign_index: bool = False
+    require_reset_score: bool = False
+    require_post_sort: bool = False
+
+@dataclass
+class NopStage(Stage):
+    pass
+
+@dataclass
+class EvalScoreStage(Stage):
+    block_chunk: int = 64
+    require_reset_score: bool = True
+    require_post_sort: bool = True
+
+@dataclass
+class ScanStage(Stage):
+    require_realign_index: bool = True
+    require_reset_score: bool = True
+    require_post_sort: bool = True
+
+@dataclass
+class EnsembleScoreStage(Stage):
+    reduce_method: str = 'sum'
+    require_reset_score: bool = True
+    require_post_sort: bool = True
 
 @numba.njit(parallel=True)
 def render_plot(
@@ -947,6 +981,7 @@ def calculate_chunk_score(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_STRIDE_K: tl.constexpr,
     SCAN_STRIDE: tl.constexpr,
+    BLOCK_CHUNK: tl.constexpr,
     REDUCE: tl.constexpr = 'max',
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -1033,14 +1068,18 @@ def calculate_chunk_score(
         
         queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
     
-    for idx_chunk in range(N_CHUNK):
+    for idx_chunk_start in range(0, N_CHUNK, BLOCK_CHUNK):
     # for idx_chunk in range(tl.cdiv(pos_tdst_max, max_chunk_size)):
+        idx_chunk = tl.arange(0, BLOCK_CHUNK) + idx_chunk_start
+        mask_chunk = idx_chunk < N_CHUNK
         idx_tsrc_left = tl.load(
             INDICES_LEFT +\
                 idx_bsz * stride_indices_left_bsz +\
                 idx_bdst_scan * stride_indices_left_bdst +\
                 idx_head * stride_indices_left_head +\
                 idx_chunk * stride_indices_left_chunk,
+            mask=mask_chunk,
+            other=987654321,
         ).to(tl.int64)
         
         idx_tsrc_right = tl.load(
@@ -1049,12 +1088,15 @@ def calculate_chunk_score(
                 idx_bdst_scan * stride_indices_right_bdst +\
                 idx_head * stride_indices_right_head +\
                 idx_chunk * stride_indices_right_chunk,
+            mask=mask_chunk,
+            other=987654321,
         ).to(tl.int64)
         
-        if idx_tsrc_left <= pos_tdst_max:
+        if tl.min(idx_tsrc_left) <= pos_tdst_max:
             idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
             idx_tsrc_left = tl.maximum(0, idx_tsrc_center - BLOCK_SIZE_K // 2)
-            idx_tsrc = tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K) * BLOCK_STRIDE_K + idx_tsrc_left
+            idx_tsrc = idx_tsrc_left[:, None] + tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K)[None, :] * BLOCK_STRIDE_K
+            idx_tsrc = tl.ravel(idx_tsrc)
             mask_tsrc = idx_tsrc <= (tl.max(pos_tdst) - sliding_window_size)
             
             keys = load_keys_with_rope(
@@ -1132,17 +1174,31 @@ def calculate_chunk_score(
             ).to(queries.dtype)
             
             if REDUCE == 'max':
-                scores_reduced = tl.max(tl.where(
+                scores_reduced = tl.where(
                     mask_tdst[:, None] & mask_tsrc[None, :],
                     scores,
                     -32000.0
-                ))
-            elif REDUCE == 'mean':
-                scores_reduced = tl.sum(tl.where(
-                    mask_tdst[:, None] & mask_tsrc[None, :],
-                    scores,
-                    0
-                )) / tl.sum((mask_tdst[:, None] & mask_tsrc[None, :]).to(tl.int32))
+                )
+                scores_reduced = tl.reshape(
+                    scores_reduced,
+                    BLOCK_SIZE_Q,
+                    BLOCK_CHUNK,
+                    BLOCK_SIZE_K,
+                )
+                scores_reduced = tl.max(
+                    scores_reduced,
+                    axis=0
+                )
+                scores_reduced = tl.max(
+                    scores_reduced,
+                    axis=-1
+                )
+            # elif REDUCE == 'mean':
+            #     scores_reduced = tl.sum(tl.where(
+            #         mask_tdst[:, None] & mask_tsrc[None, :],
+            #         scores,
+            #         0
+            #     )) / tl.sum((mask_tdst[:, None] & mask_tsrc[None, :]).to(tl.int32))
             else:
                 raise Exception()
             
@@ -1153,6 +1209,7 @@ def calculate_chunk_score(
                     idx_head * stride_out_scores_head +\
                     idx_chunk * stride_out_scores_chunk,
                 value=scores_reduced,
+                mask=mask_chunk,
             )
         else:
             tl.store(
@@ -1162,6 +1219,7 @@ def calculate_chunk_score(
                     idx_head * stride_out_scores_head +\
                     idx_chunk * stride_out_scores_chunk,
                 value=-32000.0,
+                mask=mask_chunk,
             )
 
 def dual_stage_quadratic_hip_attention(
@@ -1170,12 +1228,21 @@ def dual_stage_quadratic_hip_attention(
     v: Optional[Tensor], 
     args: HiPAttentionArgs,
     second_stage_k: int = 1024,
-    stages = [
-        (256, 8192),
-        (128, 4096),
-        (64, 2048),
+    stages: List[Stage] = [
+        ScanStage(
+            stage_block_stride_q=1,
+            stage_chunk_size=32,
+            stage_stride=1,
+            stage_k=32768,
+        ),
+        ScanStage(
+            stage_block_stride_q=1,
+            stage_chunk_size=8,
+            stage_stride=1,
+            stage_k=8192,
+        ),
     ],
-    model_context_length = 16384,
+    model_context_length = 131072,
     
     # kernel args,
     mask_only = False,
@@ -1183,12 +1250,11 @@ def dual_stage_quadratic_hip_attention(
     
     scan_stride: int = 1,
     scan_block_stride_q: int = -1,
-    stage_stride: int = 1,
     scan_early_terminate: int = 1,
     stage_early_terminate: int = 1,
     # scan_extend_backend: str = 'dynamic_extend',
     scan_extend_backend: str = 'relative',
-    sa_extend_backend: str = 'dynamic_extend',
+    sa_extend_backend: str = 'streaming',
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
     DEBUG_HEAD = -2
@@ -1348,7 +1414,7 @@ def dual_stage_quadratic_hip_attention(
         torch.cuda.set_device(pre_device)
         
         if (len(stages) > 0):
-            first_stage_bk = stages[0][2] // chunk_size
+            first_stage_bk = stages[0].stage_k // chunk_size
             out_scores = out_scores[..., :indices_left.shape[-1]]
             _, t_indices = out_scores.topk(k=min(out_scores.shape[-1], first_stage_bk), dim=-1, sorted=False)
             indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
@@ -1361,27 +1427,39 @@ def dual_stage_quadratic_hip_attention(
         
         # print('fif88', indices_left.shape, chunk_size)
         
-        for i_stage, (stage_block_stride_q, stage_chunk_size, stage_k) in enumerate(stages):
+        stage_stride = scan_stride
+        
+        for i_stage, stage_info in enumerate(stages):
             # if stage_chunk_size > chunk_size: continue
             # if stage_k > TSRC: continue
             
+            stage_block_stride_q = stage_info.stage_block_stride_q
+            stage_chunk_size = stage_info.stage_chunk_size
+            stage_k = stage_info.stage_k
+            
             assert (stage_k % chunk_size) == 0, f'{stage_k} % {chunk_size}'
             indices_left = indices_left[..., :stage_k // chunk_size]
-            indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
-            indices_right = (indices_left + chunk_size)
+            require_align = stage_info.require_realign_index
+            if require_align:
+                indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
+                indices_right = (indices_left + chunk_size)
+            else:
+                indices_right = indices_right[..., :stage_k // chunk_size]
             out_scores = out_scores[..., :stage_k // chunk_size]
-            out_scores.fill_(-32000.0)
+            if stage_info.require_reset_score:
+                out_scores.fill_(-32000.0)
             
             indices_left, t_indices = indices_left.sort(dim=-1)
             indices_right = indices_right.gather(dim=-1, index=t_indices)
             out_scores = out_scores.gather(dim=-1, index=t_indices)
             
-            if (i_stage == 0) and (scan_stride > 1):
-                assert stage_stride <= scan_stride
+            if stage_stride != stage_info.stage_stride:
+                assert stage_info.stage_stride < stage_stride
                 assert stage_stride > 0
-                indices_left = indices_left.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
-                indices_right = indices_right.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
-                out_scores = out_scores.repeat_interleave(scan_stride // stage_stride, 1)[:, -BDST:].contiguous()
+                indices_left = indices_left.repeat_interleave(stage_stride // stage_info.stage_stride, 1)[:, -BDST:].contiguous()
+                indices_right = indices_right.repeat_interleave(stage_stride // stage_info.stage_stride, 1)[:, -BDST:].contiguous()
+                out_scores = out_scores.repeat_interleave(stage_stride // stage_info.stage_stride, 1)[:, -BDST:].contiguous()
+                stage_stride = stage_info.stage_stride
             
             if DEBUG and DEBUG_RENDER and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 0):
                 out_indices_cpu = indices_left.cpu().numpy()
@@ -1389,21 +1467,6 @@ def dual_stage_quadratic_hip_attention(
                 render_plot_sampled(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_CHUNK, chunk_count, TDST, args.sink_token_size)
                 cv2.imwrite('dummy_sampled.png', debug * 255)
                 print('saved dummy_sampled.png')
-                
-                # debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-                # for i in range(out_indices_cpu.shape[1]):
-                #     t_chunk_size = triton.cdiv(TDST, chunk_count * BLOCK_CHUNK)
-                #     # print(i, t_chunk_size)
-                #     for j in range(max(
-                #         0,
-                #         math.ceil(out_indices_cpu.shape[-1] * (second_stage_k / TDST))
-                #     )):
-                #         if j >= out_indices_cpu.shape[-1]: continue
-                #         t = (out_indices_cpu[0, i, DEBUG_HEAD, j] - args.sink_token_size) // BLOCK_CHUNK + args.sink_token_size // BLOCK_CHUNK
-                #         t = t // t_chunk_size * t_chunk_size
-                #         debug[i, t:t+t_chunk_size] = 1
-                # cv2.imwrite('dummy_sampled_cut.png', debug * 255)
-                # print('saved dummy_sampled_cut.png')
             
             assert (chunk_size % stage_chunk_size) == 0
             splits = chunk_size // stage_chunk_size
@@ -1420,52 +1483,97 @@ def dual_stage_quadratic_hip_attention(
             
             pre_device = torch.cuda.current_device()
             torch.cuda.set_device(q.device)
-            grid = (
-                BSZ *\
-                triton.cdiv(chunk_count, BLOCK_CHUNK) *\
-                triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), stage_stride) *\
-                HEAD,
-            )
-            chunk_controllable_sampling_mask_cuda[grid](
-                q, *q.stride(),
-                k, *args.safe_stride(k, 4),
-                position_ids, *position_ids.stride(),
             
-                *args.args_paged_kv_cache(),
-                *args.args_offload_cache(True),
-                
-                indices_left, *indices_left.stride(),
-                indices_right, *indices_right.stride(),
-                out_scores, *out_scores.stride(),
-                args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-                args.rope_sin, *args.safe_stride(args.rope_sin, 2),
-                
-                chunk_count,
-                MAX_TSRC,
-                TDST,
-                HEAD,
-                args.sliding_window_size,
-                args.sink_token_size,
-                # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                model_context_length,
-                
-                BLOCK_HID=q.shape[-1],
-                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                STRIDE_Q=stage_block_stride_q,
-                BLOCK_CHUNK=BLOCK_CHUNK,
-                HEAD_GROUP=HEAD // HEAD_KV,
-                USING_EXTEND=args.using_extend,
-                EXTEND_BACKEND=scan_extend_backend,
-                NEED_APPLY_ROPE=args.need_apply_rope,
-                TERMINATE_SIZE=stage_early_terminate,
-                SCAN_STRIDE=stage_stride,
-            )
-            
-            if stage_require_recalculate_score:
-                assert stage_stride == 1
+            if isinstance(stage_info, ScanStage):
                 grid = (
-                    BSZ * BDST * HEAD, # SCAN_STRIDE = 1
+                    BSZ *\
+                    triton.cdiv(chunk_count, BLOCK_CHUNK) *\
+                    triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), stage_stride) *\
+                    HEAD,
                 )
+                chunk_controllable_sampling_mask_cuda[grid](
+                    q, *q.stride(),
+                    k, *args.safe_stride(k, 4),
+                    position_ids, *position_ids.stride(),
+                
+                    *args.args_paged_kv_cache(),
+                    *args.args_offload_cache(True),
+                    
+                    indices_left, *indices_left.stride(),
+                    indices_right, *indices_right.stride(),
+                    out_scores, *out_scores.stride(),
+                    args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                    args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                    
+                    chunk_count,
+                    MAX_TSRC,
+                    TDST,
+                    HEAD,
+                    args.sliding_window_size,
+                    args.sink_token_size,
+                    # model_context_length if (not scan_extend_backend == 'streaming') else 0,
+                    model_context_length,
+                    
+                    BLOCK_HID=q.shape[-1],
+                    BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                    STRIDE_Q=stage_block_stride_q,
+                    BLOCK_CHUNK=BLOCK_CHUNK,
+                    HEAD_GROUP=HEAD // HEAD_KV,
+                    USING_EXTEND=args.using_extend,
+                    EXTEND_BACKEND=scan_extend_backend,
+                    NEED_APPLY_ROPE=args.need_apply_rope,
+                    TERMINATE_SIZE=stage_early_terminate,
+                    SCAN_STRIDE=stage_stride,
+                )
+                
+                if stage_require_recalculate_score:
+                    assert stage_stride == 1
+                    grid = (
+                        BSZ * BDST * HEAD, # SCAN_STRIDE = 1
+                    )
+                    calculate_chunk_score[grid](
+                        q, *q.stride(),
+                        k, *args.safe_stride(k, 4),
+                        position_ids, *position_ids.stride(),
+                        args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                        args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                        
+                        *args.args_paged_kv_cache(),
+                        *args.args_offload_cache(True),
+                        
+                        indices_left, *indices_left.stride(),
+                        indices_right, *indices_right.stride(),
+                        out_scores, *out_scores.stride(),
+                        
+                        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
+                        model_context_length,
+                        args.sliding_window_size,
+                        args.sink_token_size,
+                        chunk_size,
+                        
+                        TDST,
+                        BDST,
+                        BDST, #SCAN STRIDE == 1
+                        HEAD,
+                        chunk_count,
+                        HEAD // HEAD_KV,
+                        
+                        USING_EXTEND=args.using_extend,
+                        NEED_APPLY_ROPE=args.need_apply_rope,
+                        EXTEND_BACKEND=scan_extend_backend,
+                        BLOCK_HID=q.shape[-1],
+                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                        BLOCK_STRIDE_Q=stage_block_stride_q,
+                        BLOCK_SIZE_K=stage_early_terminate,
+                        BLOCK_STRIDE_K=args.block_stride_k,
+                        SCAN_STRIDE=1,
+                    )
+            elif isinstance(stage_info, EvalScoreStage):
+                grid = (
+                    BSZ * 
+                    triton.cdiv(BDST, stage_info.stage_stride) * 
+                    HEAD, # SCAN_STRIDE = 1
+                )                
                 calculate_chunk_score[grid](
                     q, *q.stride(),
                     k, *args.safe_stride(k, 4),
@@ -1488,7 +1596,7 @@ def dual_stage_quadratic_hip_attention(
                     
                     TDST,
                     BDST,
-                    BDST, #SCAN STRIDE == 1
+                    triton.cdiv(BDST, stage_info.stage_stride), #SCAN STRIDE == 1
                     HEAD,
                     chunk_count,
                     HEAD // HEAD_KV,
@@ -1501,26 +1609,26 @@ def dual_stage_quadratic_hip_attention(
                     BLOCK_STRIDE_Q=stage_block_stride_q,
                     BLOCK_SIZE_K=stage_early_terminate,
                     BLOCK_STRIDE_K=args.block_stride_k,
-                    SCAN_STRIDE=1,
-                    
-                    # num_warps=2,
-                )
-            
+                    SCAN_STRIDE=stage_info.stage_stride,
+                    BLOCK_CHUNK=stage_info.block_chunk,
+                )                
+            elif isinstance(stage_info, EnsembleScoreStage):
+                raise Exception()
+            elif isinstance(stage_info, NopStage):
+                pass
+            else:
+                raise Exception()
+
             torch.cuda.set_device(pre_device)
-            
-            _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-            indices_left = indices_left.gather(dim=-1, index=t_indices)
-            indices_right = indices_right.gather(dim=-1, index=t_indices)
-            # print('fuufh', indices_left.shape)
+
+            if stage_info.require_post_sort:
+                _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
+                indices_left = indices_left.gather(dim=-1, index=t_indices)
+                indices_right = indices_right.gather(dim=-1, index=t_indices)
             
             if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
                 out_indices_cpu = indices_left.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-                # for i in range(out_indices_cpu.shape[1]):
-                #     for j in range(math.ceil(stage_k / chunk_size)):
-                #         if j >= out_indices_cpu.shape[-1]: continue
-                #         t = out_indices_cpu[0, i, 7, j] // BLOCK_SIZE_Q
-                #         debug[i, t:t+triton.cdiv(chunk_size, BLOCK_SIZE_Q)] = 1
                 render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size)
                 cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
                 print(f'saved dummy_sampled_stage_{i_stage}.png')
@@ -1530,13 +1638,11 @@ def dual_stage_quadratic_hip_attention(
             indices_right = indices_right.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous()
             out_scores = out_scores.repeat_interleave(stage_stride, 1)[:, -BDST:].contiguous()
         
-        # print('ffddffead', indices_left.shape, chunk_size, stages)
         assert (second_stage_k % chunk_size) == 0
         if DEBUG:
             print('indices_left', indices_left[0, -1])
             print('out_scores', out_scores[0, -1], second_stage_k, indices_left.shape, chunk_size)
         indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
-        # print('ffdad', indices.shape, second_stage_k, chunk_size, stages)
         
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
             out_indices_cpu = indices.cpu().numpy()
@@ -1586,7 +1692,7 @@ def dual_stage_quadratic_hip_attention(
     else:
         args = args.clone()
         args.sliding_window_size += args.mask_k + max(BLOCK_SIZE_Q, BLOCK_CHUNK)
-        args.block_size_k = stages[-1][1]
+        args.block_size_k = stages[-1].stage_chunk_size
         args.mask_k = second_stage_k
         args.using_extend = args.using_extend and True
         
@@ -1692,15 +1798,32 @@ def main_debug():
         ),
         second_stage_k=1024 if (not is_decode) else 1024,
         stages=[
-            (1, 64, 16384),
-            (1, 8, 4096),
+            ScanStage(
+                stage_block_stride_q=1,
+                stage_chunk_size=32,
+                stage_k=65536,
+                stage_stride=4,
+            ),
+            EvalScoreStage(
+                stage_block_stride_q=1,
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+                block_chunk=64,
+            ),
+            # NopStage(
+            #     stage_block_stride_q=1,
+            #     stage_chunk_size=8,
+            #     stage_k=8192,
+            #     stage_stride=1,
+            # )
         ],
-        scan_stride=2,
-        stage_stride=2,
+        scan_stride=4,
         block_sparse_block_size_q=block_size,
         model_context_length=131072,
         scan_early_terminate=1,
         stage_early_terminate=1,
+        scan_extend_backend='streaming',
         mask_only=mask_only,
     )
     
