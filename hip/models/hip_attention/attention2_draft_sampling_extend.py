@@ -1785,7 +1785,7 @@ def main_debug():
         q=q, k=k, v=v,
         args=HiPAttentionArgs(
             mask_k=256,
-            block_size_q=32,
+            block_size_q=64,
             block_stride_q=1,
             block_size_k=64, # BLOCK_CHUNK
             block_stride_k=1,
@@ -1798,21 +1798,28 @@ def main_debug():
             rope_sin=sin,
             need_apply_rope=True,
         ),
-        second_stage_k=2048 if (not is_decode) else 1024,
+        second_stage_k=1024 if (not is_decode) else 1024,
         stages=[
             ScanStage(
                 stage_block_stride_q=1,
                 stage_chunk_size=32,
                 stage_k=32768,
-                stage_stride=4,
+                stage_stride=2,
             ),
             EvalScoreStage(
                 stage_block_stride_q=1,
                 stage_chunk_size=32,
-                stage_k=32768,
+                stage_k=16384,
                 stage_stride=1,
                 block_chunk=64,
             ),
+            ScanStage(
+                stage_block_stride_q=4,
+                stage_chunk_size=1,
+                stage_k=4096,
+                stage_stride=1,
+                stage_extend_backend='streaming',
+            )
             # ScanStage(
             #     stage_block_stride_q=1,
             #     stage_chunk_size=8,
@@ -1849,11 +1856,11 @@ def main_debug():
             # )
         ],
         scan_stride=4,
-        block_sparse_block_size_q=32,
+        block_sparse_block_size_q=64,
         model_context_length=131072,
         scan_early_terminate=1,
         stage_early_terminate=1,
-        scan_extend_backend='relative',
+        scan_extend_backend='dynamic_extend',
         mask_only=mask_only,
     )
     
