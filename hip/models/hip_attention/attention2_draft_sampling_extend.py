@@ -41,6 +41,7 @@ class NopStage(Stage):
 @dataclass
 class EvalScoreStage(Stage):
     block_chunk: int = 64
+    stage_extend_backend: Optional[str] = None
     require_reset_score: bool = True
     require_post_sort: bool = True
 
@@ -226,8 +227,10 @@ def load_keys_with_rope(
                 new_tsrc = tl.where(
                     (idx_tsrc >= (real_pos_tdst_max - window)) | (real_pos_tdst_max <= model_context_length),
                     idx_tsrc,
-                    ((idx_tsrc + window - real_pos_tdst_min) * ((model_context_length - window) / (real_pos_tdst_min - window))).to(tl.int32) + real_pos_tdst_min - window
+                    # idx_tsrc * 0 + real_pos_tdst_max,
+                    ((idx_tsrc.to(tl.float32) - (real_pos_tdst_min - window)) * ((model_context_length - window) / (real_pos_tdst_min - window)).to(tl.float32)).to(tl.int32) + (real_pos_tdst_min - window)
                 )
+                # new_tsrc = idx_tsrc * 0 + real_pos_tdst_max
                 new_tsrc = tl.maximum(real_pos_tdst_max - model_context_length, new_tsrc)
             elif EXTEND_BACKEND == 'self_extend':
                 window = 8192
@@ -553,11 +556,6 @@ def chunk_controllable_sampling_mask_cuda(
         if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
             old_tdst = pos_tdst
             if EXTEND_BACKEND == 'dynamic_extend':
-                # new_tdst = tl.minimum(pos_tdst, model_context_length - 1)
-                # new_tdst = tl.where(mask_tdst, new_tdst, old_tdst)
-                # new_tdst = old_tdst // 16
-                
-                # new_tdst = tl.maximum(idx_tdst, CHUNK_COUNT + 4)
                 new_tdst = pos_tdst
             elif EXTEND_BACKEND == 'self_extend':
                 new_tdst = pos_tdst
@@ -1576,6 +1574,10 @@ def dual_stage_quadratic_hip_attention(
                         SCAN_STRIDE=1,
                     )
             elif isinstance(stage_info, EvalScoreStage):
+                extend_backend = scan_extend_backend \
+                    if stage_info.stage_extend_backend is None else\
+                        stage_info.stage_extend_backend
+                
                 grid = (
                     BSZ * 
                     triton.cdiv(BDST, stage_info.stage_stride) * 
@@ -1610,7 +1612,7 @@ def dual_stage_quadratic_hip_attention(
                     
                     USING_EXTEND=args.using_extend,
                     NEED_APPLY_ROPE=args.need_apply_rope,
-                    EXTEND_BACKEND=scan_extend_backend,
+                    EXTEND_BACKEND=extend_backend,
                     BLOCK_HID=q.shape[-1],
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                     BLOCK_STRIDE_Q=stage_block_stride_q,
@@ -1810,6 +1812,7 @@ def main_debug():
                 stage_chunk_size=32,
                 stage_k=32768,
                 stage_stride=2,
+                stage_extend_backend='streaming',
             ),
             EvalScoreStage(
                 stage_block_stride_q=1,
@@ -1817,6 +1820,7 @@ def main_debug():
                 stage_k=16384,
                 stage_stride=1,
                 block_chunk=64,
+                stage_extend_backend='streaming',
             ),
             ScanStage(
                 stage_block_stride_q=4,
@@ -1825,44 +1829,10 @@ def main_debug():
                 stage_stride=1,
                 stage_extend_backend='streaming',
             )
-            # ScanStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=8,
-            #     stage_k=4096,
-            #     stage_stride=1,
-            # ),
-            # EvalScoreStage(
-            #     stage_block_stride_q=2,
-            #     stage_chunk_size=2,
-            #     stage_k=4096,
-            #     stage_stride=1,
-            #     block_chunk=64,
-            # ),
-            
-            # ScanStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=1,
-            #     stage_k=8192,
-            #     stage_stride=1,
-            # ),
-            
-            # EvalScoreStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=32,
-            #     stage_k=16384,
-            #     stage_stride=1,
-            #     block_chunk=64,
-            # ),
-            # NopStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=8,
-            #     stage_k=8192,
-            #     stage_stride=1,
-            # )
         ],
         scan_stride=4,
         block_sparse_block_size_q=64,
-        model_context_length=131072,
+        model_context_length=65536,
         scan_early_terminate=1,
         stage_early_terminate=1,
         scan_extend_backend='dynamic_extend',
