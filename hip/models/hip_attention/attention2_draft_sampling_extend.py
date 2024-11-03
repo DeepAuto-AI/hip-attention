@@ -46,6 +46,7 @@ class EvalScoreStage(Stage):
 
 @dataclass
 class ScanStage(Stage):
+    stage_extend_backend: Optional[str] = None
     require_realign_index: bool = True
     require_reset_score: bool = True
     require_post_sort: bool = True
@@ -1487,6 +1488,10 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(q.device)
             
             if isinstance(stage_info, ScanStage):
+                extend_backend = scan_extend_backend\
+                    if stage_info.stage_extend_backend is None else \
+                        stage_info.stage_extend_backend
+                
                 grid = (
                     BSZ *\
                     triton.cdiv(chunk_count, BLOCK_CHUNK) *\
@@ -1522,7 +1527,7 @@ def dual_stage_quadratic_hip_attention(
                     BLOCK_CHUNK=BLOCK_CHUNK,
                     HEAD_GROUP=HEAD // HEAD_KV,
                     USING_EXTEND=args.using_extend,
-                    EXTEND_BACKEND=scan_extend_backend,
+                    EXTEND_BACKEND=extend_backend,
                     NEED_APPLY_ROPE=args.need_apply_rope,
                     TERMINATE_SIZE=stage_early_terminate,
                     SCAN_STRIDE=stage_stride,
@@ -1562,7 +1567,7 @@ def dual_stage_quadratic_hip_attention(
                         
                         USING_EXTEND=args.using_extend,
                         NEED_APPLY_ROPE=args.need_apply_rope,
-                        EXTEND_BACKEND=scan_extend_backend,
+                        EXTEND_BACKEND=extend_backend,
                         BLOCK_HID=q.shape[-1],
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         BLOCK_STRIDE_Q=stage_block_stride_q,
