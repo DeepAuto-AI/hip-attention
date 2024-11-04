@@ -45,11 +45,11 @@ def job_passkey(args, model, tokenizer, device):
                 output = model.generate(
                     input_ids, 
                     max_new_tokens=20,
-                    min_new_tokens=20,
+                    min_new_tokens=5,
                     do_sample=False, 
                     num_beams=1,
                     attention_mask=None,
-                    pad_token_id=tokenizer.eos_token_id,
+                    # pad_token_id=tokenizer.eos_token_id,
                 )
                 output = output[:, input_ids.shape[1]:]
                 tqdm.write(f'{tokenizer.batch_decode(output)}')

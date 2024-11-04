@@ -345,8 +345,8 @@ def custom_attention(
                         block_stride_q=1,
                         block_size_k=64, # BLOCK_CHUNK
                         block_stride_k=1,
-                        sliding_window_size=1024 if not is_decode else 512,
-                        sink_token_size=256 if not is_decode else 256,
+                        sliding_window_size=1024,
+                        sink_token_size=256,
                         # position_ids=position_ids,
                         
                         using_extend=True,
@@ -354,13 +354,15 @@ def custom_attention(
                         rope_sin=sin,
                         need_apply_rope=True,
                     ),
-                    second_stage_k=1024 if (not is_decode) else 1024,
+                    second_stage_k=4*1024,
+                    low_percent = 0.9 if layer_idx >= 3 else 0.25,
+                    low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
                             stage_block_stride_q=1,
                             stage_chunk_size=32,
-                            stage_k=65536,
-                            stage_stride=4,
+                            stage_k=32768,
+                            stage_stride=2,
                         ),
                         EvalScoreStage(
                             stage_block_stride_q=1,
@@ -369,27 +371,21 @@ def custom_attention(
                             stage_stride=1,
                             block_chunk=64,
                         ),
-                        # EvalScoreStage(
-                        #     stage_block_stride_q=1,
-                        #     stage_chunk_size=32,
-                        #     stage_k=16384,
-                        #     stage_stride=1,
-                        #     block_chunk=64,
-                        # ),
-                        # NopStage(
-                        #     stage_block_stride_q=1,
-                        #     stage_chunk_size=8,
-                        #     stage_k=8192,
-                        #     stage_stride=1,
-                        # )
+                        ScanStage(
+                            stage_block_stride_q=1,
+                            stage_chunk_size=8,
+                            stage_k=8192,
+                            stage_stride=1,
+                            # stage_extend_backend='streaming',
+                        ),
                     ],
                     scan_stride=4,
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
                     scan_early_terminate=1,
                     stage_early_terminate=1,
-                    scan_extend_backend='streaming',
-                    sa_extend_backend='dynamic_extend',
+                    scan_extend_backend='dynamic_extend' if layer_idx < 3 else 'relative',
+                    sa_extend_backend='streaming',
                     mask_only=mask_only,
                 )
                 

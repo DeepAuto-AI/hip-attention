@@ -14,6 +14,9 @@ from hip.models.hip_attention.attention2_draft_prefetch import (
     adjust_rope,
     load_tokens,
 )
+# from hip.models.hip_attention.new_block_sparse import (
+#     block_sparse_attention
+# )
 import torch
 from torch import Tensor
 from typing import List, Dict, Optional, Tuple
@@ -1256,9 +1259,11 @@ def dual_stage_quadratic_hip_attention(
     # scan_extend_backend: str = 'dynamic_extend',
     scan_extend_backend: str = 'relative',
     sa_extend_backend: str = 'streaming',
+    low_percent: float = 0.0,
+    low_k_ratio: float = 1.0,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
-    DEBUG_HEAD = -2
+    DEBUG_HEAD = -4
     global DEBUG
     
     BSZ, TDST, HEAD, HID = q.shape
@@ -1659,10 +1664,6 @@ def dual_stage_quadratic_hip_attention(
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
             cv2.imwrite('dummy_sampled_final.png', debug * 255)
             print('saved dummy_sampled_final.png')
-            try:
-                input('>>>')
-            except EOFError:
-                pass
         
         args = args.clone()
         args.sliding_window_size += args.mask_k + max(BLOCK_SIZE_Q, BLOCK_CHUNK)
@@ -1673,17 +1674,75 @@ def dual_stage_quadratic_hip_attention(
         # print('ff', indices.shape)
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
         
-        indices, _ = indices.sort(dim=-1)
+        indices, t_sort_1 = indices.sort(dim=-1)
         indices = indices // args.block_size_k * args.block_size_k
         
         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
         indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-        indices = indices.sort(dim=-1).values
+        indices, t_sort_2 = indices.sort(dim=-1)
         active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
         ks = active_mask.int().sum(-1)
         ks_count = ks.unsqueeze(-1)
         ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
         ks_start_end[:, :, -1] = ks
+        
+        if (low_percent > 0) and (low_k_ratio < 1):
+            scores = out_scores[..., :second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
+            scores = scores.gather(dim=-1, index=t_sort_1)
+            scores = scores.gather(dim=-1, index=t_sort_2)
+            scores = torch.where(active_mask, scores, -32000.0)
+            
+            masked_scores = torch.where(scores > -16000.0, scores, 0)
+            scores_std, scores_mean = torch.std_mean(masked_scores, dim=-1)
+            
+            # TODO: TEST SENSITIVITY
+            
+            dim_to_lower = 1
+            values_to_sort = scores_std
+            
+            _, lowk = values_to_sort.topk(k=int(scores_mean.shape[dim_to_lower] * low_percent), dim=dim_to_lower, largest=False, sorted=False)
+            # print(lowk[:, -1])
+            lowk = lowk[:, :, None].expand(-1, -1, scores.shape[-1])
+            _, t_sort_score = torch.topk(scores.gather(dim=dim_to_lower, index=lowk), dim=-1, k=int(scores.shape[-1] * (1 - low_k_ratio)), largest=False)
+            # print(t_sort_score.shape)
+            N, BDST = scores_mean.shape
+            indices.scatter_(
+                dim=dim_to_lower,
+                index=lowk,
+                src=indices\
+                    .gather(dim=dim_to_lower, index=lowk)\
+                    .scatter(dim=-1, index=t_sort_score, value=987654321),
+            )
+            indices, t_sort_2 = indices.sort(dim=-1)
+            active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+            # print(indices[1, -1, :])
+            # print(active_mask[1, -1, :])
+            ks = active_mask.int().sum(-1)
+            ks_count = ks.unsqueeze(-1)
+            ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
+            ks_start_end[:, :, -1] = ks
+        
+        if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+            scores = out_scores[..., :second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
+            scores = scores.gather(dim=-1, index=t_sort_1)
+            scores = scores.gather(dim=-1, index=t_sort_2)
+            scores = torch.where(active_mask, scores, -32000.0)
+            
+            masked_scores = torch.where(scores > -16000.0, scores, 0)
+            scores_std, scores_mean = torch.std_mean(masked_scores, dim=-1)
+            
+            plt.clf()
+            plt.plot(scores_std[:10, :].float().cpu().numpy().T)
+            plt.savefig('dummy_stat_std.png')
+            
+            plt.clf()
+            plt.plot(scores_mean[:10, :].float().cpu().numpy().T)
+            plt.savefig('dummy_stat_mean.png')
+            
+            try:
+                input('>>>')
+            except EOFError:
+                pass
         
         if  (
                 (block_sparse_block_size_q is not None) and\
@@ -1805,37 +1864,36 @@ def main_debug():
             rope_sin=sin,
             need_apply_rope=True,
         ),
-        second_stage_k=1024 if (not is_decode) else 1024,
+        second_stage_k=4*1024,
+        low_percent = 0.9,
+        low_k_ratio = 0.25,
         stages=[
             ScanStage(
                 stage_block_stride_q=1,
                 stage_chunk_size=32,
                 stage_k=32768,
                 stage_stride=2,
-                stage_extend_backend='streaming',
             ),
             EvalScoreStage(
-                stage_block_stride_q=1,
+                stage_block_stride_q=2,
                 stage_chunk_size=32,
-                stage_k=16384,
+                stage_k=32768,
                 stage_stride=1,
                 block_chunk=64,
-                stage_extend_backend='streaming',
             ),
             ScanStage(
-                stage_block_stride_q=4,
-                stage_chunk_size=1,
-                stage_k=4096,
+                stage_block_stride_q=2,
+                stage_chunk_size=8,
+                stage_k=8192,
                 stage_stride=1,
                 stage_extend_backend='streaming',
-            )
+            ),
         ],
         scan_stride=4,
         block_sparse_block_size_q=64,
         model_context_length=65536,
         scan_early_terminate=1,
         stage_early_terminate=1,
-        scan_extend_backend='dynamic_extend',
         mask_only=mask_only,
     )
     

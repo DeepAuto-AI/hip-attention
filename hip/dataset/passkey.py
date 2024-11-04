@@ -8,20 +8,23 @@ import tqdm
 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
 
 if not IS_GEMMA:
-    PREFIX = """<|start_header_id|>system<|end_header_id|>
+    PREFIX = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 Cutting Knowledge Date: December 2023
 Today Date: 26 Jul 2024
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
-There is a pass key hidden inside a lot of irrelevant text. Find the pass key and memorize it. I will quiz you about the the pass key.
+There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
 
 """
     FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
-    QUERY = """\n So now, I will ask the question. What is the five digit pass key?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+    QUERY = """
+In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
-Sure! I surely remember the five digits pass key. The pass key is $"""
+"""
+# Sure! I surely remember the five digits pass key. The pass key is $"""
 else:
     PREFIX = """<start_of_turn>user
 
@@ -29,14 +32,15 @@ There is a pass key hidden inside a lot of irrelevant text. Find the pass key an
 
 """
     FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
-    QUERY = """\n So now, I will ask the question. What is the five digit pass key?
+    QUERY = """\n So now, I will ask the question. What is the five digit pass key? Answer only 5 digit passkey.
 <end_of_turn>
 <start_of_turn>assistant
 
-Sure! I surely remember the five digits pass key. The pass key is $"""
+"""
+# Sure! I surely remember the five digits pass key. The given pass key is **$"""
 
 def interpolate_passkey(k):
-    keyline = f"HERE IS THE PASS KEY! The pass key is ${k}$. ${k}$ is the pass key. **the pass key is ${k}$** LOOK BEHIND FOR PASS KEY"
+    keyline = f"HERE IS THE SECRET KEYWORD! The secret keyword is ${k}$. ${k}$ is the secret keyword. **the secret keyword is ${k}$** LOOK BEHIND FOR SECRET KEYWORD"
     return f"""
 
 === NOW IMPORTANT INFORMATION STARTS ===
@@ -154,8 +158,7 @@ class Passkey(Dataset):
             raise IndexError("Index out of range")
 
         inputs = self.inputs[idx * self.batch_size:(idx + 1) * self.batch_size]
-        targets = self.targets[idx * self.batch_size:(idx + 1) *
-                               self.batch_size]
+        targets = self.targets[idx * self.batch_size:(idx + 1) * self.batch_size]
 
         return torch.cat(inputs, dim=0), torch.cat(targets, dim=0)
 
