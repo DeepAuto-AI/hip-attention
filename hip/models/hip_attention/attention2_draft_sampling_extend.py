@@ -1897,13 +1897,13 @@ def main_debug():
         dim_to_lower = 'seq',
         stages=[
             ScanStage(
-                stage_block_stride_q=1,
+                stage_block_stride_q=4,
                 stage_chunk_size=32,
                 stage_k=16384,
                 stage_stride=1,
             ),
             ScanStage(
-                stage_block_stride_q=1,
+                stage_block_stride_q=4,
                 stage_chunk_size=8,
                 stage_k=8192,
                 stage_stride=1,
