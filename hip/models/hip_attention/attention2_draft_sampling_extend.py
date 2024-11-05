@@ -1891,10 +1891,14 @@ def main_debug():
             rope_sin=sin,
             need_apply_rope=True,
         ),
-        second_stage_k = 4*1024,
-        low_percent = 0.75,
-        low_k_ratio = 0.25,
-        dim_to_lower = 'seq',
+        
+        second_stage_k = 2*1024,
+        
+        # second_stage_k = 4*1024,
+        # low_percent = 0.75,
+        # low_k_ratio = 0.25,
+        # dim_to_lower = 'seq',
+        
         stages=[
             ScanStage(
                 stage_block_stride_q=4,
@@ -1930,7 +1934,7 @@ def main_debug():
             # ),
         ],
         scan_stride=1,
-        block_sparse_block_size_q=64,
+        block_sparse_block_size_q=block_size,
         model_context_length=65536,
         scan_early_terminate=1,
         stage_early_terminate=1,
