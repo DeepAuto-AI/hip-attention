@@ -97,6 +97,17 @@ def render_plot_sampled(
             t = t // t_chunk_size * t_chunk_size
             debug[i, t:t+t_chunk_size] = 1
 
+@numba.njit(parallel=True)
+def render_plot_ks(
+    indices, ks, debug, DEBUG_HEAD, BLOCK_SIZE_Q
+):
+    for i in numba.prange(indices.shape[1]):
+        k = ks[DEBUG_HEAD, i]
+        for j in range(indices.shape[-1]):
+            if j >= k: continue
+            t = indices[DEBUG_HEAD, i, j] // BLOCK_SIZE_Q
+            debug[i, t:t+1] = 1
+
 DEBUG = (os.getenv('HIP_DEBUG', '0') == '1')
 DEBUG_RENDER = (os.getenv('HIP_DEBUG_RENDER', '1') == '1')
 
@@ -1692,17 +1703,21 @@ def dual_stage_quadratic_hip_attention(
             scores = scores.gather(dim=-1, index=t_sort_2)
             scores = torch.where(active_mask, scores, -32000.0)
             
-            masked_scores = torch.where(scores > -16000.0, scores, 0)
+            # masked_scores = torch.where(scores > -16000.0, scores, 0)
+            masked_scores = torch.softmax(scores, dim=-1)
             scores_std, scores_mean = torch.std_mean(masked_scores, dim=-1)
             
             # TODO: TEST SENSITIVITY
             
-            dim_to_lower = 1
-            values_to_sort = scores_std
+            dim_to_lower = 0
+            values_to_sort = scores_std.mean(dim=1)
             
             _, lowk = values_to_sort.topk(k=int(scores_mean.shape[dim_to_lower] * low_percent), dim=dim_to_lower, largest=False, sorted=False)
             # print(lowk[:, -1])
-            lowk = lowk[:, :, None].expand(-1, -1, scores.shape[-1])
+            if lowk.ndim == 2:
+                lowk = lowk[:, :, None].expand(-1, -1, scores.shape[-1])
+            if lowk.ndim == 1:
+                lowk = lowk[:, None, None].expand(-1, scores.shape[-2], scores.shape[-1])
             _, t_sort_score = torch.topk(scores.gather(dim=dim_to_lower, index=lowk), dim=-1, k=int(scores.shape[-1] * (1 - low_k_ratio)), largest=False)
             # print(t_sort_score.shape)
             N, BDST = scores_mean.shape
@@ -1722,23 +1737,25 @@ def dual_stage_quadratic_hip_attention(
             ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
             ks_start_end[:, :, -1] = ks
         
+            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+                indices_cpu = indices.cpu().numpy()
+                ks_cpu = ks.cpu().numpy()
+                debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
+                render_plot_ks(indices_cpu, ks_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
+                cv2.imwrite('dummy_sampled_final_lowk.png', debug * 255)
+                print('saved dummy_sampled_final_lowk.png', DEBUG_HEAD)
+                
+                print(ks[:, -1])
+                
+                plt.clf()
+                plt.plot(scores_std[:3, :].float().cpu().numpy().T)
+                plt.ylim(0, 0.01)
+                plt.savefig('dummy_stat_std.png')
+                plt.clf()
+                plt.plot(scores_mean[:3, :].float().cpu().numpy().T)
+                plt.savefig('dummy_stat_mean.png')
+        
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
-            scores = out_scores[..., :second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
-            scores = scores.gather(dim=-1, index=t_sort_1)
-            scores = scores.gather(dim=-1, index=t_sort_2)
-            scores = torch.where(active_mask, scores, -32000.0)
-            
-            masked_scores = torch.where(scores > -16000.0, scores, 0)
-            scores_std, scores_mean = torch.std_mean(masked_scores, dim=-1)
-            
-            plt.clf()
-            plt.plot(scores_std[:10, :].float().cpu().numpy().T)
-            plt.savefig('dummy_stat_std.png')
-            
-            plt.clf()
-            plt.plot(scores_mean[:10, :].float().cpu().numpy().T)
-            plt.savefig('dummy_stat_mean.png')
-            
             try:
                 input('>>>')
             except EOFError:

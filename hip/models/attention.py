@@ -354,8 +354,8 @@ def custom_attention(
                         rope_sin=sin,
                         need_apply_rope=True,
                     ),
-                    second_stage_k=4*1024,
-                    low_percent = 0.9 if layer_idx >= 3 else 0.25,
+                    second_stage_k=2*1024,
+                    low_percent = 0.75 if layer_idx >= 3 else 0.25,
                     low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
