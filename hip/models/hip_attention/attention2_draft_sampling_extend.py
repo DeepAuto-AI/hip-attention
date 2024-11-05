@@ -19,7 +19,7 @@ from hip.models.hip_attention.attention2_draft_prefetch import (
 # )
 import torch
 from torch import Tensor
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Literal, Optional, Tuple
 import triton
 import triton.language as tl
 import numpy as np
@@ -1272,6 +1272,7 @@ def dual_stage_quadratic_hip_attention(
     sa_extend_backend: str = 'streaming',
     low_percent: float = 0.0,
     low_k_ratio: float = 1.0,
+    dim_to_lower: Literal['head', 'seq'] = 1,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
     DEBUG_HEAD = -4
@@ -1709,8 +1710,14 @@ def dual_stage_quadratic_hip_attention(
             
             # TODO: TEST SENSITIVITY
             
-            dim_to_lower = 0
-            values_to_sort = scores_std.mean(dim=1)
+            if dim_to_lower == 'head':
+                dim_to_lower = 0
+                values_to_sort = scores_std.mean(dim=1)
+            elif dim_to_lower == 'seq':
+                dim_to_lower = 1
+                values_to_sort = scores_std
+            else:
+                raise Exception()
             
             _, lowk = values_to_sort.topk(k=int(scores_mean.shape[dim_to_lower] * low_percent), dim=dim_to_lower, largest=False, sorted=False)
             # print(lowk[:, -1])
@@ -1749,11 +1756,14 @@ def dual_stage_quadratic_hip_attention(
                 
                 plt.clf()
                 plt.plot(scores_std[:3, :].float().cpu().numpy().T)
-                plt.ylim(0, 0.01)
+                # plt.ylim(0, 0.01)
                 plt.savefig('dummy_stat_std.png')
                 plt.clf()
                 plt.plot(scores_mean[:3, :].float().cpu().numpy().T)
                 plt.savefig('dummy_stat_mean.png')
+                plt.clf()
+                plt.plot(ks[DEBUG_HEAD, :].float().cpu().numpy())
+                plt.savefig('dummy_stat_ks.png')
         
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
             try:
