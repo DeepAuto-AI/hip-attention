@@ -308,8 +308,8 @@ OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch -
 
 ```
 @misc{lee2024_hip_attention,
-      title={HiP Attention: Sparse Sub-Quadratic Attention with Hierarchical Attention Pruning}, 
-      author={Heejun Lee and Geon Park and Youngwan Lee and Jina Kim and Wonyoung Jeong and Myeongjae Jeon and Sung Ju Hwang},
+      title={A Training-free Sub-quadratic Cost Transformer Model Serving Framework With Hierarchically Pruned Attention}, 
+      author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyoung Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
       year={2024},
       eprint={2406.09827},
       archivePrefix={arXiv},
