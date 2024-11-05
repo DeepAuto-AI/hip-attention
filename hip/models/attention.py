@@ -298,6 +298,7 @@ def custom_attention(
                 from hip.models.hip_attention.attention2_draft_sampling_extend import (
                     ScanStage,
                     EvalScoreStage,
+                    NopStage,
                 )
                 
                 q = q.permute(0, 2, 1, 3)
@@ -342,7 +343,7 @@ def custom_attention(
                     args=HiPAttentionArgs(
                         mask_k=256,
                         block_size_q=64,
-                        block_stride_q=1,
+                        block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
                         block_stride_k=1,
                         sliding_window_size=1024,
@@ -355,31 +356,17 @@ def custom_attention(
                         need_apply_rope=True,
                     ),
                     second_stage_k=2*1024,
-                    low_percent = 0.75 if layer_idx >= 3 else 0.25,
-                    low_k_ratio = 0.25,
+                    # low_percent = 0.75 if layer_idx >= 3 else 0.25,
+                    # low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
-                            stage_block_stride_q=1,
-                            stage_chunk_size=32,
-                            stage_k=32768,
-                            stage_stride=2,
-                        ),
-                        EvalScoreStage(
-                            stage_block_stride_q=1,
+                            stage_block_stride_q=4,
                             stage_chunk_size=32,
                             stage_k=32768,
                             stage_stride=1,
-                            block_chunk=64,
-                        ),
-                        ScanStage(
-                            stage_block_stride_q=1,
-                            stage_chunk_size=8,
-                            stage_k=8192,
-                            stage_stride=1,
-                            # stage_extend_backend='streaming',
                         ),
                     ],
-                    scan_stride=4,
+                    scan_stride=1,
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
                     scan_early_terminate=1,

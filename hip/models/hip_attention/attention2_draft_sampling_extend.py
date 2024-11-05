@@ -39,7 +39,9 @@ class Stage:
 
 @dataclass
 class NopStage(Stage):
-    pass
+    require_realign_index: bool = True
+    require_reset_score: bool = False
+    require_post_sort: bool = True
 
 @dataclass
 class EvalScoreStage(Stage):
@@ -1892,7 +1894,7 @@ def main_debug():
             need_apply_rope=True,
         ),
         
-        second_stage_k = 2*1024,
+        second_stage_k = 8*1024,
         
         # second_stage_k = 4*1024,
         # low_percent = 0.75,
@@ -1900,37 +1902,54 @@ def main_debug():
         # dim_to_lower = 'seq',
         
         stages=[
+            # scan only, not works well with passkey
+            # 2k 285.0835266113281 / 250.62643432617188
+            # 4k 406.68475341796875 / 382.8095703125
+            # 8k 651.84619140625 / 635.4847412109375
+            # NopStage(
+            #     stage_block_stride_q=1,
+            #     stage_chunk_size=32,
+            #     stage_k=32768,
+            #     stage_stride=1,
+            # ),
+            
+            # low res
+            # 437.83636474609375 / 350.52752685546875
+            # ScanStage(
+            #     stage_block_stride_q=4,
+            #     stage_chunk_size=32,
+            #     stage_k=32768,
+            #     stage_stride=1,
+            # ),
+            
+            # mid res
+            # 646.99853515625 / 531.7759399414062
             ScanStage(
                 stage_block_stride_q=4,
                 stage_chunk_size=32,
-                stage_k=16384,
+                stage_k=32768,
                 stage_stride=1,
             ),
             ScanStage(
-                stage_block_stride_q=4,
+                stage_block_stride_q=1,
                 stage_chunk_size=8,
                 stage_k=8192,
                 stage_stride=1,
             ),
+            
+            # high res
+            # 1181.5772705078125 / 1002.6430053710938
             # ScanStage(
             #     stage_block_stride_q=1,
             #     stage_chunk_size=32,
             #     stage_k=32768,
-            #     stage_stride=2,
-            # ),
-            # EvalScoreStage(
-            #     stage_block_stride_q=2,
-            #     stage_chunk_size=32,
-            #     stage_k=32768,
             #     stage_stride=1,
-            #     block_chunk=64,
             # ),
             # ScanStage(
-            #     stage_block_stride_q=2,
-            #     stage_chunk_size=8,
+            #     stage_block_stride_q=1,
+            #     stage_chunk_size=1,
             #     stage_k=8192,
             #     stage_stride=1,
-            #     stage_extend_backend='streaming',
             # ),
         ],
         scan_stride=1,
