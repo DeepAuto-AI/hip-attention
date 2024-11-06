@@ -1878,54 +1878,33 @@ def main_debug():
     
     is_decode = q.shape[1] == 1
     
-    dual_stage_kwargs = dict(
-        q=q, k=k, v=v,
-        args=HiPAttentionArgs(
-            mask_k=256,
-            block_size_q=64,
-            block_stride_q=4,
-            block_size_k=64, # BLOCK_CHUNK
-            block_stride_k=1,
-            sliding_window_size=1024 if not is_decode else 512,
-            sink_token_size=256 if not is_decode else 256,
-            # position_ids=position_ids,
-            
-            using_extend=True,
-            rope_cos=cos,
-            rope_sin=sin,
-            need_apply_rope=True,
-        ),
-        
-        second_stage_k = 8*1024,
-        
-        # second_stage_k = 4*1024,
-        # low_percent = 0.75,
-        # low_k_ratio = 0.25,
-        # dim_to_lower = 'seq',
-        
-        stages=[
-            # scan only, not works well with passkey
-            # 2k 285.0835266113281 / 250.62643432617188
-            # 4k 406.68475341796875 / 382.8095703125
-            # 8k 651.84619140625 / 635.4847412109375
-            # NopStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=32,
-            #     stage_k=32768,
-            #     stage_stride=1,
-            # ),
-            
-            # low res
-            # 437.83636474609375 / 350.52752685546875
-            # ScanStage(
-            #     stage_block_stride_q=4,
-            #     stage_chunk_size=32,
-            #     stage_k=32768,
-            #     stage_stride=1,
-            # ),
-            
-            # mid res
-            # 646.99853515625 / 531.7759399414062
+    preset = os.getenv('HIP_PRESET', 'mid')
+    config_mask_k = {
+        'high': 64,
+        'mid': 256,
+        'low': 256,
+    }[preset]
+    config_bsq = {
+        'high': 1,
+        'mid': 4,
+        'low': 4,
+    }[preset]
+    config_stage = {
+        'high': [
+            ScanStage(
+                stage_block_stride_q=1,
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_stride_q=1,
+                stage_chunk_size=1,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ],
+        'mid': [
             ScanStage(
                 stage_block_stride_q=4,
                 stage_chunk_size=32,
@@ -1938,27 +1917,53 @@ def main_debug():
                 stage_k=8192,
                 stage_stride=1,
             ),
-            
-            # high res
-            # 1181.5772705078125 / 1002.6430053710938
-            # ScanStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=32,
-            #     stage_k=32768,
-            #     stage_stride=1,
-            # ),
-            # ScanStage(
-            #     stage_block_stride_q=1,
-            #     stage_chunk_size=1,
-            #     stage_k=8192,
-            #     stage_stride=1,
-            # ),
         ],
+        'low': [
+            ScanStage(
+                stage_block_stride_q=4,
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+        ]
+    }[preset]
+    config_second_k = {
+        'high': 2048,
+        'mid': 2048,
+        'low': 2048,
+    }[preset]
+    config_sa_extend_backend = {
+        'high': 'streaming', 
+        'mid': 'streaming',
+        'low': 'streaming',
+    }[preset]
+    
+    dual_stage_kwargs = dict(
+        q=q, k=k, v=v,
+        args=HiPAttentionArgs(
+            mask_k=config_mask_k,
+            block_size_q=64,
+            block_stride_q=config_bsq,
+            block_size_k=64, # BLOCK_CHUNK
+            block_stride_k=1,
+            sliding_window_size=1024 if not is_decode else 512,
+            sink_token_size=256 if not is_decode else 256,
+            # position_ids=position_ids,
+            
+            using_extend=True,
+            rope_cos=cos,
+            rope_sin=sin,
+            need_apply_rope=True,
+        ),
+        second_stage_k = config_second_k,
+        stages=config_stage,
         scan_stride=1,
         block_sparse_block_size_q=block_size,
         model_context_length=65536,
         scan_early_terminate=1,
         stage_early_terminate=1,
+        scan_extend_backend='relative',
+        sa_extend_backend=config_sa_extend_backend,
         mask_only=mask_only,
     )
     
