@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import math
 import os
+import time
 
 from matplotlib import pyplot as plt
 from hip.models.hip_attention.attention2_draft_prefetch import (
@@ -1771,6 +1772,7 @@ def dual_stage_quadratic_hip_attention(
             try:
                 input('>>>')
             except EOFError:
+                time.sleep(1)
                 pass
         
         if  (
