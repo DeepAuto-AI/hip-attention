@@ -589,6 +589,26 @@ class LlamaCustomAttention(LlamaAttention):
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
+        sink_token = key_states[:, :, :4, :].clone()
+        # if (self.layer_idx < 3) or (self.layer_idx > 20):
+        #     pass
+        # else:
+        #     value_states[:, :, :1, :].fill_(0)
+        
+        DEBUG_KEYS = False
+        if DEBUG_KEYS:
+            other = key_states[0, 0]
+            sink = sink_token[0, 0]
+            other = other / torch.norm(other, dim=-1, keepdim=True)
+            sink = sink / torch.norm(sink, dim=-1, keepdim=True)
+            score = sink @ other.T[:, :100]
+            import matplotlib.pyplot as plt
+            plt.clf()
+            plt.imshow(score.cpu().float().numpy())
+            plt.colorbar()
+            plt.savefig('dummy_debug_keys.png')
+            input('>>>')
+
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
@@ -703,6 +723,11 @@ class LlamaCustomAttention(LlamaAttention):
                 model_context_length=model_context_length,
                 layer_idx=self.layer_idx,
             )
+
+        # if (self.layer_idx < 3) or (self.layer_idx > 20):
+        #     pass
+        # else:
+        #     attn_output = attn_output + sink_token.mean(dim=-2, keepdim=True).repeat_interleave(3, 1) * 0.535
 
         if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -1650,9 +1675,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             if labels is not None:
                 from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
                 
+                first_skip = 0
                 # Shift so that tokens < n predict n
-                shift_states = hidden_states[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
+                shift_states = hidden_states[..., first_skip:-1, :].contiguous()
+                shift_labels = labels[..., first_skip+1:].contiguous()
                 # Flatten the tokens
                 shift_states = shift_states.view(-1, shift_states.shape[-1])
                 shift_labels = shift_labels.view(-1)
