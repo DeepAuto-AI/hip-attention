@@ -371,7 +371,7 @@ def custom_attention(
                     model_context_length=model_context_length,
                     scan_early_terminate=1,
                     stage_early_terminate=1,
-                    scan_extend_backend='dynamic_extend' if layer_idx < 3 else 'relative',
+                    scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
                     sa_extend_backend='streaming',
                     mask_only=mask_only,
                 )
