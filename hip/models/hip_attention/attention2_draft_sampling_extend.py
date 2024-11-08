@@ -1022,6 +1022,7 @@ def calculate_chunk_score(
     idx_tdst = idx_bdst_scan * SCAN_STRIDE * BLOCK_SIZE_Q + (BDST * BLOCK_SIZE_Q - BDST_SCAN * SCAN_STRIDE * BLOCK_SIZE_Q) + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
     idx_hid = tl.arange(0, BLOCK_HID)
+    mask_hid = idx_hid < BLOCK_HID
     
     pos_tdst = tl.load(
         POS +\
@@ -1175,6 +1176,7 @@ def calculate_chunk_score(
                 idx_chunk,
                 mask_tsrc,
                 mask_tdst,
+                mask_hid,
                 
                 pos_tdst_min,
                 model_context_length,

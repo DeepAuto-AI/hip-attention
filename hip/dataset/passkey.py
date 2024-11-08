@@ -6,8 +6,9 @@ import numpy as np
 import tqdm
 
 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
+IS_EXAONE = os.getenv('IS_EXAONE', '0') == '1'
 
-if not IS_GEMMA:
+if (not IS_GEMMA) and (not IS_EXAONE):
     PREFIX = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 Cutting Knowledge Date: December 2023
@@ -24,8 +25,20 @@ In previous text, you have seen the secret keyword. You had to remember that sec
 <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
-# Sure! I surely remember the five digits pass key. The pass key is $"""
-else:
+elif IS_EXAONE:
+    PREFIX = """[BOS][|system|][|endofturn|]
+[|user|]
+
+There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
+
+"""
+    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    QUERY = """
+In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
+[|endofturn|]
+[|assistant|]
+"""
+elif IS_GEMMA:
     PREFIX = """<start_of_turn>user
 
 There is a pass key hidden inside a lot of irrelevant text. Find the pass key and memorize it. I will quiz you about the the pass key.
@@ -37,7 +50,8 @@ There is a pass key hidden inside a lot of irrelevant text. Find the pass key an
 <start_of_turn>assistant
 
 """
-# Sure! I surely remember the five digits pass key. The given pass key is **$"""
+else:
+    raise Exception()
 
 def interpolate_passkey(k):
     keyline = f"HERE IS THE SECRET KEYWORD! The secret keyword is ${k}$. ${k}$ is the secret keyword. **the secret keyword is ${k}$** LOOK BEHIND FOR SECRET KEYWORD"
