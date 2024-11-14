@@ -1724,18 +1724,18 @@ def dual_stage_quadratic_hip_attention(
             scores = scores.gather(dim=-1, index=t_sort_2)
             scores = torch.where(active_mask, scores, -32000.0)
             
-            # masked_scores = torch.where(scores > -16000.0, scores, 0)
-            masked_scores = torch.softmax(scores, dim=-1)
+            masked_scores = torch.where(scores > -16000.0, scores, 0)
+            # masked_scores = torch.softmax(scores, dim=-1)
             scores_std, scores_mean = torch.std_mean(masked_scores, dim=-1)
             
             # TODO: TEST SENSITIVITY
             
             if dim_to_lower == 'head':
                 dim_to_lower = 0
-                values_to_sort = scores_std.mean(dim=1)
+                values_to_sort = (scores_std).mean(dim=1)
             elif dim_to_lower == 'seq':
                 dim_to_lower = 1
-                values_to_sort = scores_std
+                values_to_sort = (scores_std)
             else:
                 raise Exception()
             
