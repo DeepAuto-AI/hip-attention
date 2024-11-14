@@ -5970,8 +5970,9 @@ def block_sparse_attention(
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
     
-    BLOCK_BK = 32 // args.block_size_k
-    BLOCK_BK = max(1, min(32, BLOCK_BK))
+    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '32'))
+    BLOCK_BK = max_block_size // args.block_size_k
+    BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
         BLOCK_BK = int(os.environ['SA_BLOCK_BK'])
     

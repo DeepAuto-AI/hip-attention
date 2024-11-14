@@ -13,6 +13,7 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers.models.auto import AutoTokenizer
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.utils import seed, get_bench
+from hip.models.sglang_model import SglangModel
 
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):
@@ -57,7 +58,9 @@ def job_stream(args, model, tokenizer, device):
         t = time.time()
         elapsed = 0
         try:
-            if isinstance(model, LLM):
+            if isinstance(model, SglangModel):
+                output_texts = [model.generate(input_text=input_text, max_tokens=args.max_tokens)]
+            elif isinstance(model, LLM):
                 prompts = [input_text, ]
                 sampling_params = SamplingParams(
                     n=args.batch_size,
