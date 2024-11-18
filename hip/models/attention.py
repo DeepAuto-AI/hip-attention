@@ -62,6 +62,7 @@ def custom_attention(
     model_sliding_window=None,
     model_context_length=131072,
     layer_idx=10,
+    extend_stages=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -381,7 +382,7 @@ def custom_attention(
                             stage_k=8192,
                             stage_stride=1,
                         ),
-                    ],
+                    ] if extend_stages is None else extend_stages,
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
                     scan_extend_backend='streaming' if layer_idx < 3 else 'relative',

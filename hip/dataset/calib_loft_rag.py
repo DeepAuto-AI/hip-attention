@@ -2723,8 +2723,6 @@ where did the dewey decimal system come from
 
 < Assistant's turn >
 
-Draft Answer: ['Unknown']
-Verification: ... You have to fill verification your self ...
 Final Answer: ['Melvil Dewey']
 
 ====== Example 2 ======
@@ -2737,8 +2735,6 @@ where did the titanic sink at what ocean
 
 < Assistant's turn >
 
-Draft Answer: ['North Atlantic Ocean', 'Pacific Ocean']
-Verification: ... You have to fill verification your self ...
 Final Answer: ['North Atlantic Ocean']
 
 ====== Example 3 ======
@@ -2751,8 +2747,6 @@ where does the edinburgh fringe festival take place
 
 < Assistant's turn >
 
-Draft Answer: ['in Edinburgh, England']
-Verification: ... You have to fill verification your self ...
 Final Answer: ['in Edinburgh, Scotland']
 
 ====== Example 4 ======
@@ -2765,8 +2759,6 @@ who headed the 7th central pay commission of india
 
 < Assistant's turn >
 
-Draft Answer: ['Mathur']
-Verification: ... You have to fill verification your self ...
 Final Answer: ['Justice A.K Mathur']
 
 ====== Example 5 ======
@@ -2779,8 +2771,6 @@ what was the code name of the us program to develop an atomic bomb
 
 < Assistant's turn >
 
-Draft Answer: ['New york city']
-Verification: ... You have to fill verification your self ...
 Final Answer: ['Development of Substitute Materials', 'Manhattan', 'The Manhattan Project']
 
 -------------------------------------------------------------------------------
@@ -2795,10 +2785,6 @@ Before answer query, please read following rules.
 - If there is no perfect answer output the closest one (you can just guess). 
 - Do not give an empty final answer.
 - Please be concise when you write the final answer.
-- Write anything before "Final Answer:" to help me understand how you answer.
-- Write "Draft Answer:" then think about draft answer.
-- **Verify your draft answer before write final answer.** If you are just write final answer without verification, then I will fire you.
-- Verification should be clear and detailed. You have to give me evidences and reasonings.
 - Look provided relavent documents if you want.
 - Provide exact date as much as you can.
 - The answer must be detailed and clear.

@@ -436,6 +436,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
+        self.tree_extend_stages = None
 
         self.tree_reformer = self.tree_performer = None
 
@@ -668,6 +669,7 @@ class LlamaCustomAttention(LlamaAttention):
                 model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
                 layer_idx=self.layer_idx,
+                extend_stages=self.tree_extend_stages,
             )
         else:
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -722,6 +724,7 @@ class LlamaCustomAttention(LlamaAttention):
                 model_sliding_window=None if (not force_extend) else 131072,
                 model_context_length=model_context_length,
                 layer_idx=self.layer_idx,
+                extend_stages=self.tree_extend_stages,
             )
 
         # if (self.layer_idx < 3) or (self.layer_idx > 20):

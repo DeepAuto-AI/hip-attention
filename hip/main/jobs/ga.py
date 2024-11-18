@@ -1,3 +1,6 @@
+import copy
+import math
+import random
 import torch, transformers
 from typing import List, Tuple, Dict, Optional
 import tqdm
@@ -10,7 +13,7 @@ def load_loft_rag_chat_corpus() -> List[str]:
     lines = []
     for qa in rag_qa_pairs:
         for answer in qa["answers"]:
-            lines.append((f'{prefix} {qa["query_text"]}', answer))
+            lines.append((f'{prefix} {qa["query_text"]}', f'Final Answer: [\'{answer}\']'))
     return lines
 
 def format_chat_corpus(args, corpus: List[str]) -> List[str]:
@@ -53,21 +56,247 @@ def tokenizing_and_find_shared_prompt_on_corpus(
     return shared_prompt, corpus
 
 @torch.inference_mode
+def evaluate_corpus(model, shared_output, corpus: List[torch.Tensor]):
+    loss_sum = 0
+    for input_ids in corpus:
+        input_ids = input_ids.to(model.device, non_blocking=True)
+        output = model(
+            input_ids=input_ids.unsqueeze(0),
+            labels=input_ids,
+            past_key_values=shared_output.past_key_values
+        )
+        loss_sum += output.loss
+        torch.cuda.synchronize()
+    ppl = math.exp(loss_sum.item() / len(corpus))
+    return ppl
+
+from hip.models.hip_attention.attention2_draft_sampling_extend import ScanStage
+
+@torch.inference_mode
 def job_ga(
     args, 
     model, 
     tokenizer: transformers.LlamaTokenizer,
     device, 
 ):
-    corpus = load_loft_rag_chat_corpus()[:20]
+    seed = [
+        [
+            ScanStage(
+                stage_block_size_q=512,
+                stage_block_stride_q=8,
+                stage_chunk_size=64,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=256,
+                stage_block_stride_q=4,
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=128,
+                stage_block_stride_q=1,
+                stage_chunk_size=2,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ] for _ in range(model.config.num_hidden_layers)
+    ]
+    
+    def mutate_inner(p):
+        p = copy.deepcopy(p)
+        
+        stage_job = random.choice([
+            'pass', 
+            'swap_layer', 
+            'swap_stage',
+            'copy_stage',
+            'drop_stage',
+        ])
+        if stage_job == 'pass':
+            pass
+        elif stage_job == 'swap_layer':
+            a = random.randint(0, len(p) - 1)
+            b = random.randint(0, len(p) - 1)
+            layer_a = p[a]
+            layer_b = p[b]
+            p[a] = layer_b
+            p[b] = layer_a
+        elif stage_job == 'swap_stage':
+            target_layer = random.randint(0, len(p) - 1)
+            layer = p[target_layer]
+            if len(layer) > 2:
+                a = random.randint(1, len(layer) - 1)
+                b = random.randint(1, len(layer) - 1)
+                stage_a = layer[a]
+                stage_b = layer[b]
+                layer[a] = stage_b
+                layer[b] = stage_a
+        elif stage_job == 'copy_stage':
+            target_layer = random.randint(0, len(p) - 1)
+            layer = p[target_layer] # type: list
+            if len(layer) > 2:
+                a = random.randint(1, len(layer) - 1)
+                stage = layer[a]
+                layer.insert(a, copy.deepcopy(stage))
+        elif stage_job == 'drop_stage':
+            target_layer = random.randint(0, len(p) - 1)
+            layer = p[target_layer]
+            if len(layer) > 2:
+                layer.pop(-1)
+        else:
+            raise Exception()
+
+        num_param_jobs = random.randint(0, 10)
+        for _ in range(num_param_jobs):
+            param_job = random.choice([
+                'pass', 
+                'block_size_q', 
+                'block_stride_q', 
+                'chunk_size', 
+                'k', 
+                'stride'
+            ])
+            target_layer = random.randint(0, len(p) - 1)
+            layer = p[target_layer]
+            target_stage = random.randint(0, len(layer) - 1)
+            stage = layer[target_stage]
+            
+            if param_job == 'pass':
+                pass
+            elif param_job == 'block_size_q':
+                if random.random() > 0.5:
+                    stage.stage_block_size_q *= 2
+                else:
+                    stage.stage_block_size_q //= 2
+            elif param_job == 'block_stride_q':
+                if random.random() > 0.5:
+                    stage.stage_block_stride_q *= 2
+                else:
+                    stage.stage_block_stride_q //= 2
+            elif param_job == 'k':
+                if stage.stage_k is not None:
+                    if random.random() > 0.5:
+                        stage.stage_k *= 2
+                    else:
+                        stage.stage_k //= 2
+            elif param_job == 'chunk_size':
+                if random.random() > 0.5:
+                    stage.stage_chunk_size *= 2
+                else:
+                    stage.stage_chunk_size //= 2
+            elif param_job == 'stride':
+                if random.random() > 0.5:
+                    stage.stage_stride *= 2
+                else:
+                    stage.stage_stride //= 2
+            else:
+                raise Exception()
+        return p
+
+    def validate(p):
+        assert len(p) == model.config.num_hidden_layers, 'layer count must match'
+        for layer in p:
+            assert len(layer) >= 2, 'too small'
+            assert len(layer) < 5, 'too large'
+            assert layer[0].stage_k == None, 'first quadratic'
+            
+            stage_block_size_q = 987654321
+            stage_stride = 987654321
+            stage_k = 987654321
+            stage_chunk_size = 987654321
+            
+            for stage in layer:
+                assert (stage.stage_k is None) or (stage.stage_k > 0)
+                assert stage.stage_stride > 0
+                assert stage.stage_block_size_q > 0
+                assert stage.stage_block_stride_q > 0
+                assert stage.stage_chunk_size > 0
+                assert (stage.stage_k is None) or (stage.stage_k <= 131072)
+                assert stage.stage_stride <= 16
+                assert stage.stage_block_size_q <= 512
+                assert stage.stage_block_stride_q <= 16
+                assert stage.stage_chunk_size <= 512
+                assert (stage.stage_block_size_q // stage.stage_block_stride_q) >= 16
+                
+                assert (stage.stage_k is None) or (stage.stage_k <= stage_k)
+                assert stage.stage_stride <= stage_stride
+                assert stage.stage_block_size_q <= stage_block_size_q
+                assert stage.stage_chunk_size <= stage_chunk_size
+                
+                stage_block_size_q = stage.stage_block_size_q
+                stage_stride = stage.stage_stride
+                stage_chunk_size = stage.stage_chunk_size
+                if stage.stage_k is not None:
+                    stage_k = stage.stage_k
+
+    def mutate(p):
+        while True:
+            try:
+                p1 = mutate_inner(p)
+                validate(p1)
+                return p1
+            except AssertionError as ex:
+                # print(ex)
+                pass
+    
+    def crossover(p1, p2):
+        assert len(p1) == len(p2)
+        pt = random.randint(0, len(p1))
+        
+        p1_top = p1[:pt]
+        p1_bot = p2[pt:]
+        
+        p2_top = p1[pt:]
+        p2_bot = p2[:pt]
+        
+        p1_new = copy.deepcopy(p1_top) + copy.deepcopy(p1_bot)
+        p2_new = copy.deepcopy(p2_top) + copy.deepcopy(p2_bot)
+        assert len(p1_new) == len(p1)
+        assert len(p2_new) == len(p2)
+        
+        return p1_new, p2_new
+
+    def apply_setting(model, setting):
+        i = 0
+        for m in model.modules():
+            if hasattr(m, 'tree_extend_stages'):
+                m.tree_extend_stages = setting[i]
+                i += 1
+
+    def evaluate_population(population, model, shared_output, corpus):
+        scores = []
+        for p in tqdm.tqdm(population, desc='eval', leave=False, dynamic_ncols=True):
+            apply_setting(p)
+            ppl = evaluate_corpus(model, shared_output, corpus)
+            print(ppl)
+            scores.append(ppl)
+        return scores
+
+    # prepare shared prompt
+    corpus = load_loft_rag_chat_corpus()[:10]
     corpus = format_chat_corpus(args, corpus)
     shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
         tokenizer, corpus
     )
     
-    output = model(
+    shared_output = model(
         input_ids=shared_prompt.unsqueeze(0),
         use_cache=True
     )
     
-    torch.cuda.synchronize()
+    # run GA
+    num_population = 20
+    
+    population = [seed]
+    for _ in range(num_population):
+        t = copy.deepcopy(seed)
+        for _ in range(10):
+            t = mutate(t)
+        population.append(t)
+    
+    while True:
+        scores = evaluate_population(population, model, shared_output, corpus)
+        print(scores)
