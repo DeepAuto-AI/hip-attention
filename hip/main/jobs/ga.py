@@ -338,7 +338,7 @@ def job_ga(
     )
     
     shared_output = model(
-        input_ids=shared_prompt.unsqueeze(0),
+        input_ids=shared_prompt.to(model.device).unsqueeze(0),
         use_cache=True
     )
     
@@ -422,7 +422,7 @@ def job_ga(
         apply_setting(model, population[0])
         
         shared_output = model(
-            input_ids=shared_prompt.unsqueeze(0),
+            input_ids=shared_prompt.to(model.device).unsqueeze(0),
             use_cache=True
         )
         current_generation += 1
