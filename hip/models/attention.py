@@ -105,6 +105,7 @@ def custom_attention(
     is_prompt = (N, T, HID) == (_N, _T, _HID)
     assert (H % _H) == 0
     H_KV = _H
+    last_cumsum = attn_sparsity_loss = None
 
     if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
@@ -341,9 +342,9 @@ def custom_attention(
                 dual_stage_kwargs = dict(
                     q=q, k=k, v=v,
                     args=HiPAttentionArgs(
-                        mask_k=256,
-                        block_size_q=64,
-                        block_stride_q=4,
+                        # mask_k=256,
+                        # block_size_q=64,
+                        # block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
                         block_stride_k=1,
                         sliding_window_size=1024,
@@ -360,17 +361,29 @@ def custom_attention(
                     # low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
+                            stage_block_size_q=512,
+                            stage_block_stride_q=8,
+                            stage_chunk_size=64,
+                            stage_k=None,
+                            stage_stride=1,
+                        ),
+                        ScanStage(
+                            stage_block_size_q=256,
                             stage_block_stride_q=4,
                             stage_chunk_size=32,
                             stage_k=32768,
                             stage_stride=1,
                         ),
+                        ScanStage(
+                            stage_block_size_q=128,
+                            stage_block_stride_q=1,
+                            stage_chunk_size=2,
+                            stage_k=8192,
+                            stage_stride=1,
+                        ),
                     ],
-                    scan_stride=1,
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
-                    scan_early_terminate=1,
-                    stage_early_terminate=1,
                     scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
                     sa_extend_backend='streaming',
                     mask_only=mask_only,
@@ -574,6 +587,18 @@ def custom_attention(
             q, k, v, causal=True, scale=1.0
         )
 
+    elif attention_method == 'skewed':
+        from hip.models.skewed_attention import skewed_attention
+        attn_output = skewed_attention(
+            query_states, 
+            key_states, 
+            value_states, 
+            rope_cos, 
+            rope_sin, 
+            sm_scaler, 
+            layer_idx
+        )
+    
     else:
         raise Exception(attention_method)
 

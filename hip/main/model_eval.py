@@ -22,6 +22,7 @@ from hip.main.jobs.stream import job_stream
 from hip.main.jobs.stream_demo import job_stream_demo
 from hip.main.jobs.greedy_replace import job_greedy_replace
 from hip.main.jobs.passkey import job_passkey
+from hip.main.jobs.ga import job_ga
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from hip.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
@@ -310,7 +311,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'ga']
     
     model, tokenizer, device = load_model(args)
 
@@ -332,6 +333,8 @@ def main():
         job_greedy_replace(args, model, tokenizer, device)
     elif args.job == 'passkey':
         job_passkey(args, model, tokenizer, device)
+    elif args.job == 'ga':
+        job_ga(args, model, tokenizer, device)
     else:
         raise Exception()
 

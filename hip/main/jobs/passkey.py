@@ -21,10 +21,10 @@ def job_passkey(args, model, tokenizer, device):
     accuracy = {}
     
     for j, (input_ids, target_ids) in enumerate(tqdm(dataset, dynamic_ncols=True, leave=False)):
-        input_ids = input_ids.cuda()
-        target_ids = target_ids.cuda()
-        
         if isinstance(model, LLM):
+            input_ids = input_ids.cuda()
+            target_ids = target_ids.cuda()
+            
             prompts = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
             sampling_params = SamplingParams(
                 n=1,
@@ -41,6 +41,9 @@ def job_passkey(args, model, tokenizer, device):
             input_text = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
             output = [model.generate(input_text=input_text, max_tokens=20)]
         else:
+            input_ids = input_ids.cuda()
+            target_ids = target_ids.cuda()
+            
             with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
                 output = model.generate(
                     input_ids, 
