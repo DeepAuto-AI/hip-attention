@@ -380,7 +380,9 @@ def job_ga(
         chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN, pypareto.MaxMin.MIN,)).as_chain()
         best_scores = chain.split_by_pareto(values)
         
+        os.makedirs('./saves/pareto', exist_ok=True)
         plt.clf()
+        plt.title(f'Gen {current_generation}')
         for line in best_scores:
             plt.plot(
                 list(map(lambda x: x[0], sorted(line, key=lambda x:x[0]))), 
@@ -389,6 +391,8 @@ def job_ga(
         plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s')
         plt.grid()
         plt.savefig('dummy_pareto.png')
+        if (current_generation % 10) == 0:
+            plt.savefig(f'./saves/pareto/dummy_pareto_{current_generation}.png')
         
         best_scores = sum(best_scores, [])[:num_population]
         best_args = []
@@ -399,7 +403,6 @@ def job_ga(
         scores = np.array(scores, dtype=object)[np.array(best_args)].tolist()
         # print(population[0])
         scores = list(map(tuple, scores))
-        os.makedirs('./saves/pareto', exist_ok=True)
         with open('./saves/pareto/population.json', 'w') as f:
             import dataclasses, json
 
