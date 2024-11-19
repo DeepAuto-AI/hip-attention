@@ -226,6 +226,7 @@ def job_ga(
                 assert stage.stage_block_stride_q <= 16
                 assert stage.stage_chunk_size <= 512
                 assert (stage.stage_block_size_q // stage.stage_block_stride_q) >= 16
+                assert (stage.stage_k is None) or ((stage.stage_k % stage.stage_chunk_size) == 0)
                 
                 assert (stage.stage_k is None) or (stage.stage_k <= stage_k)
                 assert stage.stage_stride <= stage_stride
