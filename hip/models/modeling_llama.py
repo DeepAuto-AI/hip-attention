@@ -1709,6 +1709,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             if labels is not None:
                 logits = logits.float()
                 # Shift so that tokens < n predict n
+                if num_logits_to_keep > 0:
+                    labels = labels[..., -num_logits_to_keep:]
+                
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens

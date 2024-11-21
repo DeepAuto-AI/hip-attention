@@ -65,11 +65,13 @@ def evaluate_corpus(model, shared_output, corpus: List[torch.Tensor]):
     loss_sum = 0
     for input_ids in corpus:
         input_ids = input_ids.to(model.device, non_blocking=True)
-        output = model(
-            input_ids=input_ids.unsqueeze(0),
-            labels=input_ids,
-            past_key_values=copy.deepcopy(shared_output.past_key_values)
-        )
+        with torch.autocast('cuda', torch.bfloat16):
+            output = model(
+                input_ids=input_ids.unsqueeze(0),
+                labels=input_ids,
+                past_key_values=copy.deepcopy(shared_output.past_key_values),
+                num_logits_to_keep=10,
+            )
         loss_sum += output.loss
         torch.cuda.synchronize()
     ppl = math.exp(loss_sum.item() / len(corpus))
@@ -273,46 +275,54 @@ def job_ga(
                 m.tree_extend_stages = setting[i]
                 i += 1
 
+    latency_cache = {}
+    
     def evaluate_latency(model, stages):
-        device = model.device
-        HEAD = 32
-        HEAD_KV = 8
-        TDST = 8192
-        TSRC = 131072
-        HID = 128
-        q = torch.zeros((1, TDST, HEAD, HID), dtype=torch.bfloat16, device=device)
-        k = torch.zeros((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
-        v = torch.zeros((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
-        latency_sum = 0
-        latency_count = 0
-        for i in range(6):
-            if i == 2:
-                latency_sum = latency_count = 0
-            start = torch.cuda.Event(True)
-            end = torch.cuda.Event(True)
-            
-            start.record()
-            dual_stage_quadratic_hip_attention(
-                q, k, v, 
-                args=HiPAttentionArgs11(
-                    block_size_k=64,
-                    block_stride_k=1,
-                    sliding_window_size=1024,
-                    sink_token_size=256,
-                ),
-                second_stage_k=2048,
-                stages=stages,
-                block_sparse_block_size_q=64,
-                model_context_length=131072,
-                scan_extend_backend='relative',
-                sa_extend_backend='streaming',
-            )
-            end.record()
-            
-            end.synchronize()
-            latency_sum += start.elapsed_time(end)
-            latency_count += 1
-        return latency_sum / latency_count
+        hash_id = hash(str(stages))
+        if hash_id in latency_cache:
+            return latency_cache[hash_id]
+        else:
+            device = model.device
+            HEAD = 32
+            HEAD_KV = 8
+            TDST = 8192
+            TSRC = 131072
+            HID = 128
+            q = torch.empty((1, TDST, HEAD, HID), dtype=torch.bfloat16, device=device)
+            k = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
+            v = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
+            latency_sum = 0
+            latency_count = 0
+            for i in range(10):
+                if i == 2:
+                    latency_sum = latency_count = 0
+                start = torch.cuda.Event(True)
+                end = torch.cuda.Event(True)
+                
+                start.record()
+                dual_stage_quadratic_hip_attention(
+                    q, k, v, 
+                    args=HiPAttentionArgs11(
+                        block_size_k=64,
+                        block_stride_k=1,
+                        sliding_window_size=1024,
+                        sink_token_size=256,
+                    ),
+                    second_stage_k=2048,
+                    stages=stages,
+                    block_sparse_block_size_q=64,
+                    model_context_length=131072,
+                    scan_extend_backend='relative',
+                    sa_extend_backend='streaming',
+                )
+                end.record()
+                
+                end.synchronize()
+                latency_sum += start.elapsed_time(end)
+                latency_count += 1
+            latency = latency_sum / latency_count
+            latency_cache[hash_id] = latency
+            return latency
     
     def evaluate_population(population, model, shared_output, corpus):
         scores = []
@@ -329,7 +339,7 @@ def job_ga(
 
     # settings
     num_population = 25
-    num_corpus = 50
+    num_corpus = 10
     
     # prepare shared prompt
     corpus = load_loft_rag_chat_corpus()[:num_corpus]
@@ -404,6 +414,10 @@ def job_ga(
         scores = np.array(scores, dtype=object)[np.array(best_args)].tolist()
         # print(population[0])
         scores = list(map(tuple, scores))
+        
+        best_idx = np.argmin(np.array(scores, dtype=np.float32)[:, 1]).item()
+        apply_setting(model, population[best_idx])
+        
         with open('./saves/pareto/population.json', 'w') as f:
             import dataclasses, json
 
@@ -417,10 +431,9 @@ def job_ga(
                 'generation': current_generation,
                 'population': population, 
                 'scores': scores, 
+                'best_idx': best_idx,
             }, f, indent=2, cls=EnhancedJSONEncoder)
-        print(scores[0])
-        
-        apply_setting(model, population[0])
+        print(scores[best_idx])
         
         shared_output = model(
             input_ids=shared_prompt.to(model.device).unsqueeze(0),
