@@ -11,8 +11,13 @@ import tqdm
 import triton
 import json
 from hip.dataset.calib_loft_rag import (
-    prefix,
+    rag_prefix,
     rag_qa_pairs,
+)
+from hip.dataset.calib_loft_retrieval import (
+    retrieval_prefix,
+    retrieval_qa_pairs,
+    retrieval_pid_to_id,
 )
 from hip import HiPAttentionArgs11
 import matplotlib.pyplot as plt
@@ -21,7 +26,16 @@ def load_loft_rag_chat_corpus() -> List[str]:
     lines = []
     for qa in rag_qa_pairs:
         for answer in qa["answers"]:
-            lines.append((f'{prefix} {qa["query_text"]}', f'Final Answer: [\'{answer}\']'))
+            lines.append((f'{rag_prefix} {qa["query_text"]}', f'Final Answer: [\'{answer}\']'))
+    return lines
+
+def load_loft_retrieval_chat_corpus() -> List[str]:
+    lines = []
+    for qa in retrieval_qa_pairs:
+        for answer in qa["answers"]:
+            pid = answer[0]
+            doi = retrieval_pid_to_id[pid]
+            lines.append((f'{retrieval_prefix} {qa["query_text"]}', f'Final Answer: [\'{doi}\']'))
     return lines
 
 def format_chat_corpus(args, corpus: List[str]) -> List[str]:
@@ -45,7 +59,8 @@ Today Date: 26 Jul 2024
 
 def tokenizing_and_find_shared_prompt_on_corpus(
     tokenizer: transformers.LlamaTokenizer, 
-    corpus: List[str]
+    corpus: List[str],
+    shared_prompt_max_len: int = 999999999,
 ):
     count = len(corpus)
     iterator = map(lambda line: (tokenizer.encode(line[0], add_special_tokens=False), tokenizer.encode(line[1], add_special_tokens=False)), corpus)
@@ -60,6 +75,7 @@ def tokenizing_and_find_shared_prompt_on_corpus(
                     shared_prompt = shared_prompt[:i]
                     break
         corpus.append([input_ids, output_ids])
+    shared_prompt = shared_prompt[:shared_prompt_max_len]
     corpus = list(map(lambda ids: (torch.tensor(ids[0][len(shared_prompt):]), torch.tensor(ids[1])), corpus))
     shared_prompt = torch.tensor(shared_prompt)
     return shared_prompt, corpus
@@ -85,7 +101,7 @@ def evaluate_corpus(stream: torch.cuda.Stream, model, shared_output, corpus: Lis
                 return 99999999
         state = output.past_key_values
         
-        stream.synchronize()
+        # stream.synchronize()
         
         logits = []
         step_size = output_ids.shape[-1]
@@ -98,14 +114,14 @@ def evaluate_corpus(stream: torch.cuda.Stream, model, shared_output, corpus: Lis
                 )
                 state = output.past_key_values
                 logits.append(output.logits.view(-1, output.logits.shape[-1]))
-            stream.synchronize()
+            # stream.synchronize()
         
         with torch.cuda.stream(stream):
             logits = torch.cat(logits, dim=0)
             loss_sum += torch.nn.functional.cross_entropy(logits[:-1], output_ids[1:])
         loss_count += 1
         
-        stream.synchronize()
+        # stream.synchronize()
     ppl = math.exp(loss_sum.item() / loss_count)
     return ppl
 
@@ -403,7 +419,6 @@ def job_ga(
         for tid in range(1, n_threads):
             models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid), shared_output[tid]))
         
-        lock = threading.Lock()
         def thread_main(tid, args, jobs):
             stream, model, shared_output = args
             for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False):
@@ -413,7 +428,7 @@ def job_ga(
                 with torch.cuda.stream(stream):
                     apply_setting(model, job)
                     ppl = evaluate_corpus(stream, model, shared_output, corpus)
-                stream.synchronize()
+                # stream.synchronize()
                 results.append((jid, ppl))
         
         torch.cuda.synchronize()
@@ -443,13 +458,14 @@ def job_ga(
 
     # settings
     num_population = 25
-    num_corpus = 200
+    num_corpus = 2
     
     # prepare shared prompt
-    corpus = load_loft_rag_chat_corpus()[:num_corpus]
+    # corpus = load_loft_rag_chat_corpus()[:num_corpus]
+    corpus = load_loft_retrieval_chat_corpus()[:num_corpus]
     corpus = format_chat_corpus(args, corpus)
     shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
-        tokenizer, corpus
+        tokenizer, corpus, shared_prompt_max_len=1024
     )
     
     print('shared prompt size', shared_prompt.shape)
@@ -490,9 +506,9 @@ def job_ga(
             # more elites
             p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
             p1, p2 = crossover(p1, p2)
-            for _ in range(random.randint(0, 10)):
+            for _ in range(random.randint(0, 3)):
                 p1 = mutate(p1)
-            for _ in range(random.randint(0, 10)):
+            for _ in range(random.randint(0, 3)):
                 p2 = mutate(p2)
             new_populations.append(p1)
             new_populations.append(p2)
@@ -552,7 +568,7 @@ def job_ga(
                 'scores': scores, 
                 'best_idx': best_idx,
             }, f, indent=2, cls=EnhancedJSONEncoder)
-        print(scores[best_idx])
+        print('gen', current_generation, scores[best_idx])
         
         apply_setting(model, population[best_idx])
         del shared_output

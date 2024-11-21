@@ -2883,7 +2883,7 @@ rag_qa_pairs = r"""{"qid": "test1032", "query_text": "when did season 4 of glee 
 {"qid": "test971", "query_text": "where was the remake of dirty dancing filmed", "metadata": {"qrels": [["doc34207", 1]]}, "answers": ["Hendersonville, North Carolina", "Hendersonville", "High Hampton Inn in Cashiers", "western North Carolina"]}
 {"qid": "test999", "query_text": "where did huntington's disease get its name", "metadata": {"qrels": [["doc35283", 1]]}, "answers": ["the physician George Huntington", "George Huntington"]}"""
 
-prefix = "\n".join(filter(lambda x: not x.startswith('@@@@'), prefix.split('\n')))
+rag_prefix = "\n".join(filter(lambda x: not x.startswith('@@@@'), prefix.split('\n')))
 rag_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split('\n')))
 
 # with open('./dummy.txt', 'w') as f:
