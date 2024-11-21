@@ -1847,6 +1847,8 @@ def dual_stage_quadratic_hip_attention(
         ks_count = cached_metadata.ks_count
         ks_start_end = cached_metadata.ks_start_end
     
+    args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
+    
     context = block_sparse_attention(
         q=q, 
         k=k, 
@@ -1959,6 +1961,8 @@ def main_debug():
         q = q.expand(batch_size, -1, -1, -1)
         k = k.expand(batch_size, -1, -1, -1)
         v = v.expand(batch_size, -1, -1, -1)
+        q_pca = q
+        k_pca = k
     
     from flash_attn import flash_attn_func, flash_attn_with_kvcache
     
