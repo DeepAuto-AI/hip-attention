@@ -1462,7 +1462,8 @@ class LlamaModel(LlamaPreTrainedModel):
             hidden_states = layer_outputs[0]
             
             if hidden_states.shape[1] >= 4096:
-                torch.cuda.synchronize()
+                torch.cuda.current_stream().synchronize()
+                # torch.cuda.synchronize()
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]

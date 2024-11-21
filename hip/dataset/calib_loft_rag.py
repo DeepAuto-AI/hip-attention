@@ -2779,45 +2779,38 @@ Final Answer: ['Development of Substitute Materials', 'Manhattan', 'The Manhatta
 
 Now you have to answer my query. 
 
-Before answer query, please read following rules.
-- Print out the answer of the query. 
-- Format the answers into a list.
-- If there is no perfect answer output the closest one (you can just guess). 
-- Do not give an empty final answer.
-- Please be concise when you write the final answer.
-- Look provided relavent documents if you want.
-- Provide exact date as much as you can.
-- The answer must be detailed and clear.
-
 query:
 """
 
-rag_qa_pairs = r"""{"qid": "test1018", "query_text": "when does monday night raw come on hulu", "metadata": {"qrels": [["doc35916", 1]]}, "answers": ["the following day"]}
-{"qid": "test103", "query_text": "who did puerto rico belong to before the u.s", "metadata": {"qrels": [["doc3528", 1]]}, "answers": ["Spain", "Taíno", "indigenous Taíno people"]}
-{"qid": "test1032", "query_text": "when did season 4 of glee come out", "metadata": {"qrels": [["doc36245", 1]]}, "answers": ["September 13, 2012"]}
-{"qid": "test1041", "query_text": "what is the genus of a bald eagle", "metadata": {"qrels": [["doc36467", 1]]}, "answers": ["Haliaeetus"]}
+rag_qa_pairs = r"""{"qid": "test1032", "query_text": "when did season 4 of glee come out", "metadata": {"qrels": [["doc36245", 1]]}, "answers": ["September 13, 2012"]}
 {"qid": "test1062", "query_text": "when does boomer find out she a cylon", "metadata": {"qrels": [["doc36987", 1]]}, "answers": ["Kobol's Last Gleaming"]}
-{"qid": "test1065", "query_text": "what is the female lion called in lion king", "metadata": {"qrels": [["doc37055", 1]]}, "answers": ["Nala"]}
 {"qid": "test1087", "query_text": "who plays the woodsman in over the garden wall", "metadata": {"qrels": [["doc37964", 1]]}, "answers": ["Christopher Lloyd"]}
 {"qid": "test1136", "query_text": "who introduced the first chrismas tree to the uk", "metadata": {"qrels": [["doc40236", 1]]}, "answers": ["Charlotte of Mecklenburg-Strelitz"]}
+{"qid": "test1187", "query_text": "how many players on the line of scrimmage in american football", "metadata": {"qrels": [["doc42023", 1]]}, "answers": ["at least seven", "at least seven players", "seven", "7"]}
+{"qid": "test2964", "query_text": "how many seasons of the rugrats are there", "metadata": {"qrels": [["doc101357", 1]]}, "answers": ["9", "9 seasons"]}
+{"qid": "test352", "query_text": "how many national parks are present in india", "metadata": {"qrels": [["doc13434", 1]]}, "answers": ["103"]}
+{"qid": "test1575", "query_text": "vikram samvat calender is official in which country", "metadata": {"qrels": [["doc56225", 1]]}, "answers": ["Nepal"]}
+{"qid": "test1322", "query_text": "where does prime rib come from on a cow", "metadata": {"qrels": [["doc46823", 1]]}, "answers": ["the primal rib"]}
+{"qid": "test1305", "query_text": "where does the sun hit the us first", "metadata": {"qrels": [["doc46266", 1]]}, "answers": ["the summit of Cadillac Mountain"]}
+{"qid": "test103", "query_text": "who did puerto rico belong to before the u.s", "metadata": {"qrels": [["doc3528", 1]]}, "answers": ["Spain", "Taíno", "indigenous Taíno people"]}
+{"qid": "test2747", "query_text": "when was the last time unc did not make the ncaa tournament", "metadata": {"qrels": [["doc94595", 1]]}, "answers": ["2003"]}
+{"qid": "test1041", "query_text": "what is the genus of a bald eagle", "metadata": {"qrels": [["doc36467", 1]]}, "answers": ["Haliaeetus"]}
+{"qid": "test1065", "query_text": "what is the female lion called in lion king", "metadata": {"qrels": [["doc37055", 1]]}, "answers": ["Nala"]}
 {"qid": "test1156", "query_text": "who played cruella de vil in 101 dalmatians", "metadata": {"qrels": [["doc41039", 1]]}, "answers": ["Glenn Close"]}
 {"qid": "test1172", "query_text": "who sang the song i wanna be sedated", "metadata": {"qrels": [["doc41558", 1]]}, "answers": ["the Ramones", "Joey Romones"]}
-{"qid": "test1187", "query_text": "how many players on the line of scrimmage in american football", "metadata": {"qrels": [["doc42023", 1]]}, "answers": ["at least seven", "at least seven players", "seven", "7"]}
 {"qid": "test1208", "query_text": "when did the tv show the waltons first air", "metadata": {"qrels": [["doc43104", 1]]}, "answers": ["September 1972", "September 14, 1972"]}
 {"qid": "test1223", "query_text": "who is emma dating in once upon a time", "metadata": {"qrels": [["doc43580", 1]]}, "answers": ["Hook"]}
 {"qid": "test1283", "query_text": "when was the last time giants won superbowl", "metadata": {"qrels": [["doc45373", 1]]}, "answers": ["2012"]}
-{"qid": "test1305", "query_text": "where does the sun hit the us first", "metadata": {"qrels": [["doc46266", 1]]}, "answers": ["the summit of Cadillac Mountain"]}
 {"qid": "test1314", "query_text": "who is the authority or governing body of mca", "metadata": {"qrels": [["doc46476", 1]]}, "answers": ["Indian government"]}
-{"qid": "test1322", "query_text": "where does prime rib come from on a cow", "metadata": {"qrels": [["doc46823", 1]]}, "answers": ["the primal rib"]}
 {"qid": "test1325", "query_text": "who plays joker in batman the dark knight", "metadata": {"qrels": [["doc46886", 1]]}, "answers": ["Ledger"]}
-{"qid": "test1331", "query_text": "what is the common name for gravitational force", "metadata": {"qrels": [["doc47145", 1]]}, "answers": ["Gravity", "Gravity, or gravitation"]}
 {"qid": "test137", "query_text": "fast and furious 7 red car abu dhabi", "metadata": {"qrels": [["doc5160", 1]]}, "answers": ["The Lykan Hypersport"]}
+{"qid": "test1331", "query_text": "what is the common name for gravitational force", "metadata": {"qrels": [["doc47145", 1]]}, "answers": ["Gravity", "Gravity, or gravitation"]}
 {"qid": "test1380", "query_text": "who played the original steve mcgarrett on hawaii five-o", "metadata": {"qrels": [["doc48941", 1]]}, "answers": ["Jack Lord", "John Joseph Patrick Ryan"]}
 {"qid": "test1434", "query_text": "is aluminium a ferrous or non ferrous metal", "metadata": {"qrels": [["doc51029", 1]]}, "answers": ["non-ferrous"]}
 {"qid": "test1439", "query_text": "who has a ring of power in lotr", "metadata": {"qrels": [["doc51161", 1]]}, "answers": ["Sauron"]}
 {"qid": "test1459", "query_text": "the era of the great mughals began with the accession of", "metadata": {"qrels": [["doc52008", 1]]}, "answers": ["Akbar the Great", "Babur"]}
 {"qid": "test1464", "query_text": "when did hyderabad became a part of india", "metadata": {"qrels": [["doc52200", 1]]}, "answers": ["24 November 1949", "1949"]}
-{"qid": "test1575", "query_text": "vikram samvat calender is official in which country", "metadata": {"qrels": [["doc56225", 1]]}, "answers": ["Nepal"]}
+{"qid": "test1018", "query_text": "when does monday night raw come on hulu", "metadata": {"qrels": [["doc35916", 1]]}, "answers": ["the following day"]}
 {"qid": "test1579", "query_text": "who won the oscar for best picture in 1976", "metadata": {"qrels": [["doc56276", 1]]}, "answers": ["Rocky"]}
 {"qid": "test1609", "query_text": "where is the protien made in the cell", "metadata": {"qrels": [["doc56986", 1]]}, "answers": ["cell nucleus", "in the cell nucleus"]}
 {"qid": "test1661", "query_text": "what is the tigers name in life of pi", "metadata": {"qrels": [["doc58701", 1]]}, "answers": ["Richard Parker"]}
@@ -2842,13 +2835,11 @@ rag_qa_pairs = r"""{"qid": "test1018", "query_text": "when does monday night raw
 {"qid": "test2655", "query_text": "what was hawaii's primary export to the united states", "metadata": {"qrels": [["doc91034", 1]]}, "answers": ["coffee", "honey", "livestock", "macadamia nuts", "pineapple", "sugarcane"]}
 {"qid": "test269", "query_text": "what type of government did the ming dynasty have", "metadata": {"qrels": [["doc10019", 1]]}, "answers": ["imperial rule", "imperial"]}
 {"qid": "test2745", "query_text": "what is the filename extension used for all java source files", "metadata": {"qrels": [["doc94476", 1]]}, "answers": [".java"]}
-{"qid": "test2747", "query_text": "when was the last time unc did not make the ncaa tournament", "metadata": {"qrels": [["doc94595", 1]]}, "answers": ["2003"]}
 {"qid": "test2759", "query_text": "different ways to spell corey for a boy", "metadata": {"qrels": [["doc94996", 1]]}, "answers": ["Coire", "Corey", "Corie", "Correy", "Corrie", "Cory", "Khouri", "Kori", "Kory"]}
 {"qid": "test2786", "query_text": "what percentage of the population is naturally blonde", "metadata": {"qrels": [["doc95660", 1]]}, "answers": ["2%"]}
 {"qid": "test2809", "query_text": "who plays poppy in the beat goes on", "metadata": {"qrels": [["doc96520", 1]]}, "answers": ["Amanda Leighton"]}
 {"qid": "test2852", "query_text": "a town in west yorkshire on the river aire home to a rugby league team", "metadata": {"qrels": [["doc97666", 1]]}, "answers": ["Castleford"]}
 {"qid": "test2870", "query_text": "what is alpha centauri's approximate distance from earth", "metadata": {"qrels": [["doc98149", 1]]}, "answers": ["4.37 light-years"]}
-{"qid": "test2964", "query_text": "how many seasons of the rugrats are there", "metadata": {"qrels": [["doc101357", 1]]}, "answers": ["9", "9 seasons"]}
 {"qid": "test297", "query_text": "what is the democracy of the united states", "metadata": {"qrels": [["doc11181", 1]]}, "answers": ["federal republic"]}
 {"qid": "test2970", "query_text": "when did cristiano ronaldo go to manchester united", "metadata": {"qrels": [["doc101768", 1]]}, "answers": ["2003", "at age 18 in 2003"]}
 {"qid": "test2971", "query_text": "when did the nfl adopt a salary cap", "metadata": {"qrels": [["doc101868", 1]]}, "answers": ["1994", "1994 season", "for the 1994 season", "the 1994 season"]}
@@ -2866,7 +2857,6 @@ rag_qa_pairs = r"""{"qid": "test1018", "query_text": "when does monday night raw
 {"qid": "test3322", "query_text": "which layer of the osi model handles physical addressing", "metadata": {"qrels": [["doc113413", 1]]}, "answers": ["physical layer or layer 1", "data link layer", "layer 2"]}
 {"qid": "test3332", "query_text": "roman god of the underworld also called orcus or pluto", "metadata": {"qrels": [["doc113775", 1]]}, "answers": ["Dis Pater"]}
 {"qid": "test3333", "query_text": "who is regarded as the founder of psychoanalysis", "metadata": {"qrels": [["doc113858", 1]]}, "answers": ["Austrian neurologist Sigmund Freud", "Sigmund Freud"]}
-{"qid": "test352", "query_text": "how many national parks are present in india", "metadata": {"qrels": [["doc13434", 1]]}, "answers": ["103"]}
 {"qid": "test359", "query_text": "when did they start 3 pointers in basketball", "metadata": {"qrels": [["doc13785", 1]]}, "answers": ["1945", "1961", "1967", "1979"]}
 {"qid": "test376", "query_text": "what type of legal system is used in the uk", "metadata": {"qrels": [["doc14159", 1]]}, "answers": ["English law", "Northern Ireland law", "Scots law"]}
 {"qid": "test435", "query_text": "how many customers does edf have in the uk", "metadata": {"qrels": [["doc16130", 1]]}, "answers": ["5.7 million", "5.7 million customer accounts"]}
@@ -2895,3 +2885,6 @@ rag_qa_pairs = r"""{"qid": "test1018", "query_text": "when does monday night raw
 
 prefix = "\n".join(filter(lambda x: not x.startswith('@@@@'), prefix.split('\n')))
 rag_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split('\n')))
+
+# with open('./dummy.txt', 'w') as f:
+#     f.write(prefix)
