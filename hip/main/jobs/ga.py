@@ -9,6 +9,7 @@ import torch, transformers
 from typing import List, Tuple, Dict, Optional
 import tqdm
 import triton
+import wandb
 import json
 from hip.dataset.calib_loft_rag import (
     rag_prefix,
@@ -26,7 +27,7 @@ def load_loft_rag_chat_corpus() -> List[str]:
     lines = []
     for qa in rag_qa_pairs:
         for answer in qa["answers"]:
-            lines.append((f'{rag_prefix} {qa["query_text"]}', f'Final Answer: [\'{answer}\']'))
+            lines.append((f'{rag_prefix}{qa["query_text"]}', f'{answer}'))
     return lines
 
 def load_loft_retrieval_chat_corpus() -> List[str]:
@@ -35,7 +36,7 @@ def load_loft_retrieval_chat_corpus() -> List[str]:
         for answer in qa["answers"]:
             pid = answer[0]
             doi = retrieval_pid_to_id[pid]
-            lines.append((f'{retrieval_prefix} {qa["query_text"]}', f'Final Answer: [\'{doi}\']'))
+            lines.append((f'{retrieval_prefix}{qa["query_text"]}', f'{doi}'))
     return lines
 
 def format_chat_corpus(args, corpus: List[str]) -> List[str]:
@@ -49,10 +50,8 @@ Today Date: 26 Jul 2024
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
-{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-"""
-            ret.append((updated, output + '<|eot_id|>'))
+{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
+            ret.append((updated, '\n\n' + output + '<|eot_id|>'))
         return ret
     else:
         raise Exception()
@@ -81,7 +80,14 @@ def tokenizing_and_find_shared_prompt_on_corpus(
     return shared_prompt, corpus
 
 @torch.inference_mode
-def evaluate_corpus(stream: torch.cuda.Stream, model, shared_output, corpus: List[torch.Tensor]):
+def evaluate_corpus(stream: torch.cuda.Stream, model, tokenizer: transformers.LlamaTokenizer, shared_prompt, corpus: List[torch.Tensor]):
+    with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
+        shared_output = model(
+            input_ids=shared_prompt.unsqueeze(0),
+            use_cache=True,
+            num_logits_to_keep=1,
+        )
+    
     loss_sum = 0
     loss_count = 0
     for input_ids, output_ids in corpus:
@@ -118,12 +124,24 @@ def evaluate_corpus(stream: torch.cuda.Stream, model, shared_output, corpus: Lis
         
         with torch.cuda.stream(stream):
             logits = torch.cat(logits, dim=0)
-            loss_sum += torch.nn.functional.cross_entropy(logits[:-1], output_ids[1:])
-        loss_count += 1
+            
+            loss_ce = torch.nn.functional.cross_entropy(logits[:-1], output_ids[1:])
+            
+            probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
+            probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
+            seq_probs = probs.cumprod(0)[-1]
+            loss_probs = -torch.log(seq_probs)
+            
+            if stream.device_index == 0:
+                tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+            
+            loss_sum += loss_ce + loss_probs
+            loss_count += 1
         
-        # stream.synchronize()
-    ppl = math.exp(loss_sum.item() / loss_count)
-    return ppl
+        stream.synchronize()
+    # ppl = math.exp(loss_sum.item() / loss_count)
+    loss = loss_sum.item() / loss_count
+    return loss
 
 from hip.models.hip_attention.attention2_draft_sampling_extend import ScanStage, dual_stage_quadratic_hip_attention
 
@@ -139,6 +157,8 @@ def job_ga(
     seed = [
         {
             'second_stage_k': 2048,
+            'sliding_window_size': 1024,
+            'sink_token_size': 256,
             'sa_extend_backend': 'streaming',
             'stages': [
                 ScanStage(
@@ -214,6 +234,8 @@ def job_ga(
         for _ in range(num_param_jobs):
             param_job = random.choice([
                 'pass', 
+                'sliding_window_size',
+                'sink_token_size',
                 'sa_extend_backend',
                 'stage_extend_backend',
                 'second_stage_k',
@@ -230,6 +252,16 @@ def job_ga(
             
             if param_job == 'pass':
                 pass
+            elif param_job == 'sliding_window_size':
+                if random.random() > 0.5:
+                    p[target_layer]['sliding_window_size'] *= 2
+                else:
+                    p[target_layer]['sliding_window_size'] //= 2
+            elif param_job == 'sink_token_size':
+                if random.random() > 0.5:
+                    p[target_layer]['sink_token_size'] *= 2
+                else:
+                    p[target_layer]['sink_token_size'] //= 2
             elif param_job == 'sa_extend_backend':
                 p[target_layer]['sa_extend_backend'] = random.choice(['streaming', 'dynamic_extend'])
             elif param_job == 'stage_extend_backend':
@@ -275,7 +307,11 @@ def job_ga(
             layer_meta = layer
             layer = layer['stages']
             assert layer_meta['second_stage_k'] > 0
-            assert layer_meta['second_stage_k'] <= 32768
+            assert layer_meta['second_stage_k'] <= 65536
+            assert layer_meta['sliding_window_size'] >= 64
+            assert layer_meta['sliding_window_size'] < 1024*1024
+            assert layer_meta['sink_token_size'] >= 4
+            assert layer_meta['sink_token_size'] < 1024*1024
             assert len(layer) >= 2, 'too small'
             assert len(layer) <= 7, 'too large'
             assert layer[0].stage_k == None, 'first quadratic'
@@ -376,8 +412,8 @@ def job_ga(
                     args=HiPAttentionArgs11(
                         block_size_k=64,
                         block_stride_k=1,
-                        sliding_window_size=1024,
-                        sink_token_size=256,
+                        sliding_window_size=stages['sliding_window_size'],
+                        sink_token_size=stages['sink_token_size'],
                     ),
                     second_stage_k=stages['second_stage_k'],
                     stages=stages['stages'],
@@ -396,12 +432,12 @@ def job_ga(
             latency_cache[hash_id] = latency
             return latency
     
-    def evaluate_population(population, model, shared_output, corpus):
+    def evaluate_population(population, model, shared_prompt, corpus):
         torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
         
-        ret = evaluate_population_inner(population, model, shared_output, corpus)
+        ret = evaluate_population_inner(population, model, shared_prompt, corpus)
         
         torch.cuda.synchronize()
         gc.collect()
@@ -409,25 +445,25 @@ def job_ga(
         
         return ret
     
-    def evaluate_population_inner(population, model, shared_output, corpus):
+    def evaluate_population_inner(population, model, shared_prompt, corpus):
         import threading, queue
         
         n_threads = torch.cuda.device_count()
         jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
         results = []
-        models = [(torch.cuda.Stream(device=0), model, shared_output[0])]
+        models = [(torch.cuda.Stream(device=0), model, shared_prompt.to(0, non_blocking=True))]
         for tid in range(1, n_threads):
-            models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid), shared_output[tid]))
+            models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid), shared_prompt.to(tid, non_blocking=True)))
         
         def thread_main(tid, args, jobs):
-            stream, model, shared_output = args
+            stream, model, shared_prompt = args
             for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False):
                 # with lock:
                 #     torch.set_default_device(tid)
                 #     torch.cuda.set_device(tid)
                 with torch.cuda.stream(stream):
                     apply_setting(model, job)
-                    ppl = evaluate_corpus(stream, model, shared_output, corpus)
+                    ppl = evaluate_corpus(stream, model, tokenizer, shared_prompt, corpus)
                 # stream.synchronize()
                 results.append((jid, ppl))
         
@@ -457,34 +493,35 @@ def job_ga(
         return scores
 
     # settings
-    num_population = 25
-    num_corpus = 2
+    num_population = 20
+    num_corpus = 4
     
     # prepare shared prompt
-    # corpus = load_loft_rag_chat_corpus()[:num_corpus]
-    corpus = load_loft_retrieval_chat_corpus()[:num_corpus]
+    corpus_rag = load_loft_rag_chat_corpus()[:num_corpus // 2]
+    corpus_ret = load_loft_retrieval_chat_corpus()[:num_corpus // 2]
+    corpus = corpus_rag + corpus_ret
     corpus = format_chat_corpus(args, corpus)
     shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
-        tokenizer, corpus, shared_prompt_max_len=1024
+        tokenizer, corpus
     )
     
     print('shared prompt size', shared_prompt.shape)
-    def update_shared_output():
-        outputs = []
-        for i in range(torch.cuda.device_count()):
-            torch.cuda.synchronize()
-            _model = copy.deepcopy(model).to(i)
-            torch.cuda.synchronize()
-            torch.set_default_device(i)
-            torch.cuda.set_device(i)
-            o = _model(
-                input_ids=shared_prompt.to(i).unsqueeze(0),
-                use_cache=True
-            )
-            torch.cuda.synchronize()
-            outputs.append(o)
-        return outputs
-    shared_output = update_shared_output()
+    # def update_shared_output():
+    #     outputs = []
+    #     for i in range(torch.cuda.device_count()):
+    #         torch.cuda.synchronize()
+    #         _model = copy.deepcopy(model).to(i)
+    #         torch.cuda.synchronize()
+    #         torch.set_default_device(i)
+    #         torch.cuda.set_device(i)
+    #         o = _model(
+    #             input_ids=shared_prompt.to(i).unsqueeze(0),
+    #             use_cache=True
+    #         )
+    #         torch.cuda.synchronize()
+    #         outputs.append(o)
+    #     return outputs
+    # shared_output = update_shared_output()
     
     # run GA
     population = [seed]
@@ -493,9 +530,17 @@ def job_ga(
         for _ in range(10):
             t = mutate(t)
         population.append(t)
-    scores = evaluate_population(population, model, shared_output, corpus)
+    scores = evaluate_population(population, model, shared_prompt, corpus)
     seed_score = copy.deepcopy(scores[0])
     print('seed', seed_score)
+    
+    run = wandb.init(
+        project="hip-ga",
+        config={
+            "num_population": num_population,
+            "num_corpus": num_corpus,
+        },
+    )
     
     current_generation = 0
     
@@ -504,7 +549,8 @@ def job_ga(
         population = list(map(lambda x:x[1], sorted(zip(scores, population), key=lambda x:x[0][1])))
         for _ in range(num_population):
             # more elites
-            p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
+            # p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
+            p1, p2 = random.sample(population, counts=[1, ] * len(population), k=2)
             p1, p2 = crossover(p1, p2)
             for _ in range(random.randint(0, 3)):
                 p1 = mutate(p1)
@@ -512,7 +558,7 @@ def job_ga(
                 p2 = mutate(p2)
             new_populations.append(p1)
             new_populations.append(p2)
-        new_scores = evaluate_population(new_populations, model, shared_output, corpus)
+        new_scores = evaluate_population(new_populations, model, shared_prompt, corpus)
         # print(min(map(lambda x:x[1], scores)), min(map(lambda x:x[1], new_scores)), new_scores)
         
         population = population + new_populations
@@ -568,13 +614,32 @@ def job_ga(
                 'scores': scores, 
                 'best_idx': best_idx,
             }, f, indent=2, cls=EnhancedJSONEncoder)
-        print('gen', current_generation, scores[best_idx])
+        print('=====> gen', current_generation, scores[best_idx], '<=====')
+        
+        latencies = list(map(lambda x: [x[0]], scores))
+        losses = list(map(lambda x: [x[1]], scores))
+        
+        latency_table = wandb.Table(data=latencies, columns=["latency"])
+        latency_hist = wandb.plot.histogram(latency_table, "latency")
+        
+        loss_table = wandb.Table(data=losses, columns=["loss"])
+        loss_hist = wandb.plot.histogram(loss_table, "loss")
+        
+        best_latency, best_loss = scores[best_idx]
+        avg_loss = np.mean(np.array(losses)).item()
+        
+        wandb.log({
+            "ga/best_latency": best_latency, 
+            "ga/best_loss": best_loss,
+            "ga/avg_loss": avg_loss,
+            "ga/generation": current_generation,
+            "ga/loss_hist": loss_hist,
+            "ga/latency_hist": latency_hist,
+        }, step=current_generation, commit=True)
         
         apply_setting(model, population[best_idx])
-        del shared_output
         torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
-        shared_output = update_shared_output()
         
         current_generation += 1

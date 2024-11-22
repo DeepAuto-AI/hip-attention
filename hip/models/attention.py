@@ -354,8 +354,8 @@ def custom_attention(
                         # block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
                         block_stride_k=k_group_size,
-                        sliding_window_size=1024,
-                        sink_token_size=256,
+                        sliding_window_size=1024 if extend_stages is None else extend_stages['sliding_window_size'],
+                        sink_token_size=256 if extend_stages is None else extend_stages['sink_token_size'],
                         # position_ids=position_ids,
                         
                         using_extend=True,

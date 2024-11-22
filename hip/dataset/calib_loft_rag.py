@@ -4,14 +4,9 @@ prefix = r"""
 @@@@@ CHUNK (user, text/plain) @@@@@
 You are a helpful assistant.
 
+You will be given a list of documents. You need to read carefully and understand all of them.
+
 @@@@@ CHUNK (user, text/plain) @@@@@
-
-Your final answer should be a list of answers, in the following format:
-Final Answer: ['answer1', 'answer2', ...]
-If there is only one answer, it should be in the format:
-Final Answer: ['answer1']
-
-If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 -------------------------------------------------------------------------------
 - From now, I will provide relavant documents. Please read carefully. Feel free to reference the document during answering question.
@@ -664,9 +659,14 @@ ID: 213 | TITLE: First Indochina War | CONTENT: On November 14, 1951, the French
 @@@@@ CHUNK (user, text/plain) @@@@@
 ID: 214 | TITLE: Luminosity | CONTENT: Imagine a point source of light of luminosity 
 
-L{\displaystyle L}
 
-that radiates equally in all directions. A hollow sphere centered on the point would have its entire interior surface illuminated. As the radius increases, the surface area will also increase, and the constant luminosity has more surface area to illuminate, leading to a decrease in observed brightness. | END ID: 214
+
+L
+
+
+{\displaystyle L}
+
+ that radiates equally in all directions. A hollow sphere centered on the point would have its entire interior surface illuminated. As the radius increases, the surface area will also increase, and the constant luminosity has more surface area to illuminate, leading to a decrease in observed brightness. | END ID: 214
 
 @@@@@ CHUNK (user, text/plain) @@@@@
 ID: 215 | TITLE: The Book of Five Rings | CONTENT: "Flowing Water Cut" technique refers to if you come into a fight with an enemy of a similar level to you in swordsmanship. When attacking fast, Musashi notes that you will always be at stalemate, so like Stagnant water, you must cut as slowly as possible with your long sword. At the beginning of this technique you and your opponent will be searching for an opening within each other's defense. When your opponent either tries to push off your sword, or to hasten back as to disengage it, you must first expand your whole body and your mind. By moving your body first and then that of your sword, you will be able to strike powerfully and broadly with a movement that seems to reflect the natural flow of water. Ease and confidence will be attained when this technique is continuously practiced upon. | END ID: 215
@@ -1326,19 +1326,82 @@ ID: 432 | TITLE: Jason Paige | CONTENT: Jason Paige (born January 6, 1969) is an
 ID: 433 | TITLE: Artificial ventilation | CONTENT: The 1856 works of English physician and physiologist Marshall Hall recommended against using any type of bellows/positive pressure ventilation, views that held sway for several decades.[13] A common method of external manual manipulation, introduced in 1858, was the "Silvester Method" invented by Dr. Henry Robert Silvester in which a patient is laid on their back and their arms are raised above their head to aid inhalation and then pressed against their chest to aid exhalation. | END ID: 433
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 434 | TITLE: Hubble's law | CONTENT: where Di{\displaystyle D_{i}}
+ID: 434 | TITLE: Hubble's law | CONTENT: where 
 
-is the distance at which a galaxy is first measured at and 
 
-t{\displaystyle t}
 
-is the time since said measurement, thus the velocity of a galaxy can be expressed as 
 
-v=D−Dit{\displaystyle v={\frac {D-D_{i}}{t}}}
+D
+
+i
+
+
+
+
+{\displaystyle D_{i}}
+
+ is the distance at which a galaxy is first measured at and 
+
+
+
+t
+
+
+{\displaystyle t}
+
+ is the time since said measurement, thus the velocity of a galaxy can be expressed as 
+
+
+
+v
+=
+
+
+
+D
+−
+
+D
+
+i
+
+
+
+t
+
+
+
+
+{\displaystyle v={\frac {D-D_{i}}{t}}}
 
 . Solving the integral subsequently yields 
 
-D=eH0t⋅Di{\displaystyle D=e^{H_{0}t}\cdot D_{i}} 
+
+
+D
+=
+
+e
+
+
+H
+
+0
+
+
+t
+
+
+⋅
+
+D
+
+i
+
+
+
+
+{\displaystyle D=e^{H_{0}t}\cdot D_{i}}
 
 , with the implication that the comoving distance between two galaxies increases exponentially as time goes on. This lines up with current observations, however; it has not been shown for derivatives of distance above acceleration. | END ID: 434
 
@@ -2716,68 +2779,69 @@ ID: 882 | TITLE: Interstellar medium | CONTENT: In the series of investigations,
 ====== Example 1 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. Then format the answers into a list.
+What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 query: 
 where did the dewey decimal system come from
 
 < Assistant's turn >
 
-Final Answer: ['Melvil Dewey']
+Melvil Dewey
 
 ====== Example 2 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. Then format the answers into a list.
+What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 query: 
 where did the titanic sink at what ocean
 
 < Assistant's turn >
 
-Final Answer: ['North Atlantic Ocean']
+North Atlantic Ocean
 
 ====== Example 3 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. Then format the answers into a list.
+What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 query: 
 where does the edinburgh fringe festival take place
 
 < Assistant's turn >
 
-Final Answer: ['in Edinburgh, Scotland']
+in Edinburgh, Scotland
 
 ====== Example 4 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. Then format the answers into a list.
+What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 query: 
 who headed the 7th central pay commission of india
 
 < Assistant's turn >
 
-Final Answer: ['Justice A.K Mathur']
+Justice A.K Mathur
 
 ====== Example 5 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. Then format the answers into a list.
+What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 query: 
 what was the code name of the us program to develop an atomic bomb
 
 < Assistant's turn >
 
-Final Answer: ['Development of Substitute Materials', 'Manhattan', 'The Manhattan Project']
+Development of Substitute Materials
 
 -------------------------------------------------------------------------------
 - From now, let's start talk.
 -------------------------------------------------------------------------------
 
-Now you have to answer my query. 
+What is the answer of the query? Print out the answer of the query. 
+If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query:
 """

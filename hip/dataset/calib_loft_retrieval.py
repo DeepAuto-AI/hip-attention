@@ -4,16 +4,9 @@ prefix = r"""
 @@@@@ CHUNK (user, text/plain) @@@@@
 You are a helpful assistant.
 
-You will be given a list of documents. You need to read carefully and understand all of them. Then you will be given a query, and your goal is to find all documents from the list that can help answer the query. Print out the ID and TITLE of each document.
+You will be given a list of documents. You need to read carefully and understand all of them.
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-
-Your final answer should be a list of IDs, in the following format:
-Final Answer: [id1, id2, ...]
-If there is only one ID, it should be in the format:
-Final Answer: [id1]
-
-If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 -------------------------------------------------------------------------------
 - From now, I will provide relavant documents. Please read carefully. Feel free to reference the document during answering question.
@@ -2786,7 +2779,7 @@ ID: 882 | TITLE: Interstellar medium | CONTENT: In the series of investigations,
 ====== Example 1 ======
 < User's turn >
 
-Which document is most relevant to answer the query? Print out the TITLE and ID of the document. Then format the IDs into a list.
+Which document is most relevant to answer the query? 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query: 
@@ -2794,12 +2787,12 @@ where did the dewey decimal system come from
 
 < Assistant's turn >
 
-Final Answer: ['199']
+199
 
 ====== Example 2 ======
 < User's turn >
 
-Which document is most relevant to answer the query? Print out the TITLE and ID of the document. Then format the IDs into a list.
+Which document is most relevant to answer the query? 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query: 
@@ -2807,12 +2800,12 @@ where did the titanic sink at what ocean
 
 < Assistant's turn >
 
-Final Answer: ['627']
+627
 
 ====== Example 3 ======
 < User's turn >
 
-Which document is most relevant to answer the query? Print out the TITLE and ID of the document. Then format the IDs into a list.
+Which document is most relevant to answer the query? 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query: 
@@ -2820,12 +2813,12 @@ where does the edinburgh fringe festival take place
 
 < Assistant's turn >
 
-Final Answer: ['278']
+278
 
 ====== Example 4 ======
 < User's turn >
 
-Which document is most relevant to answer the query? Print out the TITLE and ID of the document. Then format the IDs into a list.
+Which document is most relevant to answer the query? 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query: 
@@ -2833,12 +2826,12 @@ who headed the 7th central pay commission of india
 
 < Assistant's turn >
 
-Final Answer: ['542']
+542
 
 ====== Example 5 ======
 < User's turn >
 
-Which document is most relevant to answer the query? Print out the TITLE and ID of the document. Then format the IDs into a list.
+Which document is most relevant to answer the query? 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query: 
@@ -2846,7 +2839,7 @@ what was the code name of the us program to develop an atomic bomb
 
 < Assistant's turn >
 
-Final Answer: ['559']
+559
 
 -------------------------------------------------------------------------------
 - From now, let's start talk.
@@ -2854,14 +2847,8 @@ Final Answer: ['559']
 
 Now you have to answer my query. 
 
-Before answer query, please read following rules.
-- At the last you have to put the line that starts with "Final Answer:".
-- **Final answer must be number, DO NOT PUT ANY OTHER THING (e.g., title)**
-- Then format the IDs into a list.
-- If there is no perfect answer output the closest one. 
-- **Do not give an empty final answer.**
-
 Which document is most relevant to answer the query? 
+If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query:
 """
