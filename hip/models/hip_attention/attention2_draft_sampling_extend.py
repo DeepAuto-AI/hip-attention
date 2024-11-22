@@ -649,7 +649,7 @@ def chunk_controllable_sampling_mask_cuda(
         queries_sum += queries_iter
         queries_counter += mask_tdst_iter.to(tl.int32)
     
-    queries = ((queries_sum / queries_counter[:, None]) * mask_tdst[:, None]).to(Q.dtype.element_ty)
+    queries = ((queries_sum / (queries_counter[:, None] + 1e-12)) * mask_tdst[:, None]).to(Q.dtype.element_ty)
     
     while (max_chunk_size >= TERMINATE_SIZE):
         max_chunk_size /= 2.0
