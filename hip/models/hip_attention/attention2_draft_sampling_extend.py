@@ -1284,20 +1284,20 @@ def dual_stage_quadratic_hip_attention(
     low_k_ratio: float = 1.0,
     dim_to_lower: Literal['head', 'seq'] = 1,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
-    q_pca: Optional[torch.Tensor] = None,
-    k_pca: Optional[torch.Tensor] = None,
+    q_mask: Optional[torch.Tensor] = None,
+    k_mask: Optional[torch.Tensor] = None,
     idx_pca_hid_q: Optional[torch.Tensor] = None,
     idx_pca_hid_k: Optional[torch.Tensor] = None,
 ):
     DEBUG_HEAD = -1
     global DEBUG
     
-    if q_pca is None:
-        q_pca = q
-    if k_pca is None:
-        k_pca = k
+    if q_mask is None:
+        q_mask = q
+    if k_mask is None:
+        k_mask = k
     
-    BLOCK_HID = q_pca.shape[-1]
+    BLOCK_HID = q_mask.shape[-1]
     
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -1528,7 +1528,7 @@ def dual_stage_quadratic_hip_attention(
                 assert (chunk_size % stage_chunk_size) == 0
                 splits = chunk_size // stage_chunk_size
                 chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
-                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q_pca.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
+                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q_mask.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
                 indices_left = indices_left.flatten(-2, -1)
                 indices_right = indices_right[..., None] - (((splits - 1) - torch.arange(0, splits, device=q.device)[None, None, None, None, :]) * chunk_sizes[..., None]).floor().long()
                 indices_right = indices_right.flatten(-2, -1)
@@ -1557,8 +1557,8 @@ def dual_stage_quadratic_hip_attention(
                     HEAD,
                 )
                 chunk_controllable_sampling_mask_cuda[grid](
-                    q_pca, *q_pca.stride(),
-                    k_pca, *args.safe_stride(k_pca, 4),
+                    q_mask, *q_mask.stride(),
+                    k_mask, *args.safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
                 
                     *args.args_paged_kv_cache(),
@@ -1591,48 +1591,48 @@ def dual_stage_quadratic_hip_attention(
                     SCAN_STRIDE=STAGE_STRIDE,
                 )
                 
-                if stage_require_recalculate_score:
-                    assert STAGE_STRIDE == 1
-                    grid = (
-                        BSZ * BDST * HEAD, # SCAN_STRIDE = 1
-                    )
-                    calculate_chunk_score[grid](
-                        q_pca, *q_pca.stride(),
-                        k_pca, *args.safe_stride(k_pca, 4),
-                        position_ids, *position_ids.stride(),
-                        args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-                        args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                # if stage_require_recalculate_score:
+                #     assert STAGE_STRIDE == 1
+                #     grid = (
+                #         BSZ * BDST * HEAD, # SCAN_STRIDE = 1
+                #     )
+                #     calculate_chunk_score[grid](
+                #         q_mask, *q_mask.stride(),
+                #         k_mask, *args.safe_stride(k_mask, 4),
+                #         position_ids, *position_ids.stride(),
+                #         args.rope_cos, *args.safe_stride(args.rope_cos, 2),
+                #         args.rope_sin, *args.safe_stride(args.rope_sin, 2),
                         
-                        *args.args_paged_kv_cache(),
-                        *args.args_offload_cache(True),
+                #         *args.args_paged_kv_cache(),
+                #         *args.args_offload_cache(True),
                         
-                        indices_left, *indices_left.stride(),
-                        indices_right, *indices_right.stride(),
-                        out_scores, *out_scores.stride(),
+                #         indices_left, *indices_left.stride(),
+                #         indices_right, *indices_right.stride(),
+                #         out_scores, *out_scores.stride(),
                         
-                        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                        model_context_length,
-                        args.sliding_window_size,
-                        args.sink_token_size,
-                        chunk_size,
+                #         # model_context_length if (not scan_extend_backend == 'streaming') else 0,
+                #         model_context_length,
+                #         args.sliding_window_size,
+                #         args.sink_token_size,
+                #         chunk_size,
                         
-                        TDST,
-                        BDST,
-                        BDST, #SCAN STRIDE == 1
-                        HEAD,
-                        chunk_count,
-                        HEAD // HEAD_KV,
+                #         TDST,
+                #         BDST,
+                #         BDST, #SCAN STRIDE == 1
+                #         HEAD,
+                #         chunk_count,
+                #         HEAD // HEAD_KV,
                         
-                        USING_EXTEND=args.using_extend,
-                        NEED_APPLY_ROPE=args.need_apply_rope,
-                        EXTEND_BACKEND=extend_backend,
-                        BLOCK_HID=BLOCK_HID,
-                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                        BLOCK_STRIDE_Q=stage_block_stride_q,
-                        BLOCK_SIZE_K=stage_early_terminate,
-                        BLOCK_STRIDE_K=args.block_stride_k,
-                        SCAN_STRIDE=1,
-                    )
+                #         USING_EXTEND=args.using_extend,
+                #         NEED_APPLY_ROPE=args.need_apply_rope,
+                #         EXTEND_BACKEND=extend_backend,
+                #         BLOCK_HID=BLOCK_HID,
+                #         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                #         BLOCK_STRIDE_Q=stage_block_stride_q,
+                #         BLOCK_SIZE_K=stage_early_terminate,
+                #         BLOCK_STRIDE_K=args.block_stride_k,
+                #         SCAN_STRIDE=1,
+                #     )
             elif isinstance(stage_info, EvalScoreStage):
                 extend_backend = scan_extend_backend \
                     if stage_info.stage_extend_backend is None else\
@@ -1644,8 +1644,8 @@ def dual_stage_quadratic_hip_attention(
                     HEAD, # SCAN_STRIDE = 1
                 )                
                 calculate_chunk_score[grid](
-                    q_pca, *q_pca.stride(),
-                    k_pca, *args.safe_stride(k_pca, 4),
+                    q_mask, *q_mask.stride(),
+                    k_mask, *args.safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
                     args.rope_cos, *args.safe_stride(args.rope_cos, 2),
                     args.rope_sin, *args.safe_stride(args.rope_sin, 2),
@@ -1890,6 +1890,7 @@ def main_debug():
     num_samples = int(os.getenv('NUM_SAMPLES', '100'))
     batch_size = int(os.getenv('BATCH_SIZE', '1'))
     mask_only = int(os.getenv('MASK_ONLY', '0')) == '1'
+    k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
     
     assert seq_dups > 0
     
@@ -1912,8 +1913,8 @@ def main_debug():
         cos = cos.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
         sin = sin.repeat(seq_dups, 1)#.to(torch.float8_e5m2)
     
-    q_pca = q
-    k_pca = k
+    q_mask = q
+    k_mask = k
     idx_pca_hid_q = None
     idx_pca_hid_k = None
     
@@ -1956,17 +1957,22 @@ def main_debug():
         return q, k, idx_hid_queries, idx_hid_keys
     # q_pca, k_pca, idx_pca_hid_q, idx_pca_hid_k = pca(q, k)
     
+    k_mask = k
+    _N, _T, _H, _D = k.shape
+    tk = k_mask.view(_N, _T // k_group_size, k_group_size, _H, _D)
+    k_mask = (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values).expand(_N, _T // k_group_size, k_group_size, _H, _D).contiguous().view(*k.shape)
+    
     if batch_size > 1:
         q = q[:, :1, :, :].contiguous()
         q = q.expand(batch_size, -1, -1, -1)
         k = k.expand(batch_size, -1, -1, -1)
         v = v.expand(batch_size, -1, -1, -1)
-        q_pca = q
-        k_pca = k
+        q_mask = q
+        k_mask = k
     
     from flash_attn import flash_attn_func, flash_attn_with_kvcache
     
-    print(q.shape, k.shape, v.shape, q_pca.shape, k_pca.shape)
+    print(q.shape, k.shape, v.shape, q_mask.shape, k_mask.shape)
     
     print('-' * 20)
     
@@ -2052,8 +2058,8 @@ def main_debug():
         q=q,
         k=k,
         v=v,
-        q_pca=q_pca,
-        k_pca=k_pca,
+        q_mask=q_mask,
+        k_mask=k_mask,
         idx_pca_hid_q=idx_pca_hid_q,
         idx_pca_hid_k=idx_pca_hid_k,
         args=HiPAttentionArgs(
@@ -2080,6 +2086,7 @@ def main_debug():
         # stage_early_terminate=1,
         scan_extend_backend='relative',
         sa_extend_backend=config_sa_extend_backend,
+        stage_early_terminate=k_group_size,
         mask_only=mask_only,
     )
     

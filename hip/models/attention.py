@@ -340,6 +340,12 @@ def custom_attention(
                 block_size = 64
                 HiPAttentionArgs = HiPAttentionArgs11
                 
+                k_mask = k
+                k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
+                _N, _T, _H, _D = k.shape
+                tk = k_mask.view(_N, _T // k_group_size, k_group_size, _H, _D)
+                k_mask = (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values).expand(_N, _T // k_group_size, k_group_size, _H, _D).contiguous().view(*k.shape)
+                
                 dual_stage_kwargs = dict(
                     q=q, k=k, v=v,
                     args=HiPAttentionArgs(
@@ -347,7 +353,7 @@ def custom_attention(
                         # block_size_q=64,
                         # block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
-                        block_stride_k=1,
+                        block_stride_k=k_group_size,
                         sliding_window_size=1024,
                         sink_token_size=256,
                         # position_ids=position_ids,
@@ -362,23 +368,23 @@ def custom_attention(
                     # low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
-                            stage_block_size_q=512,
-                            stage_block_stride_q=8,
-                            stage_chunk_size=64,
+                            stage_block_size_q=64,
+                            stage_block_stride_q=4,
+                            stage_chunk_size=128,
                             stage_k=None,
                             stage_stride=1,
                         ),
                         ScanStage(
-                            stage_block_size_q=256,
+                            stage_block_size_q=64,
                             stage_block_stride_q=4,
                             stage_chunk_size=32,
                             stage_k=32768,
                             stage_stride=1,
                         ),
                         ScanStage(
-                            stage_block_size_q=128,
+                            stage_block_size_q=64,
                             stage_block_stride_q=1,
-                            stage_chunk_size=2,
+                            stage_chunk_size=8,
                             stage_k=8192,
                             stage_stride=1,
                         ),
@@ -387,7 +393,10 @@ def custom_attention(
                     model_context_length=model_context_length,
                     scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
                     sa_extend_backend='streaming',
+                    stage_early_terminate=k_group_size,
                     mask_only=mask_only,
+                    q_mask=q,
+                    k_mask=k_mask,
                 )
                 
                 attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
