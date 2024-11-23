@@ -6,6 +6,7 @@ import os
 import random
 import numpy as np
 import torch, transformers
+from transformers import AutoTokenizer
 from typing import List, Tuple, Dict, Optional
 import dataclasses, json
 import tqdm
@@ -24,20 +25,65 @@ from hip.dataset.calib_loft_retrieval import (
 from hip import HiPAttentionArgs11
 import matplotlib.pyplot as plt
 
-def load_loft_rag_chat_corpus() -> List[str]:
+def load_loft_rag_chat_corpus() -> List[Tuple[str, str]]:
     lines = []
     for qa in rag_qa_pairs:
         for answer in qa["answers"][:1]:
             lines.append((f'{rag_prefix}{qa["query_text"]}', f'{answer}'))
     return lines
 
-def load_loft_retrieval_chat_corpus() -> List[str]:
+def load_loft_retrieval_chat_corpus() -> List[Tuple[str, str]]:
     lines = []
     for qa in retrieval_qa_pairs:
         for answer in qa["answers"][:1]:
             pid = answer[0]
             doi = retrieval_pid_to_id[pid]
             lines.append((f'{retrieval_prefix}{qa["query_text"]}', f'{doi}'))
+    return lines
+
+from datasets import load_dataset, Value, Sequence, Features
+
+def load_infinite_bench_subset(split: str, tokenizer, seq_len: int, count: int):
+    ft = Features({
+        "id": Value("int64"), 
+        "context": Value("string"), 
+        "input": Value("string"), 
+        "answer": Sequence(Value("string")), 
+        "options": Sequence(Value("string"))
+    })
+    dataset = load_dataset("xinrongzhang2022/InfiniteBench", features=ft)
+    
+    lines = []
+    for idx in range(min(count, len(dataset[split]))):
+        entry = dataset[split][random.randint(0, len(dataset[split]) - 1)]
+        context = f"""You are a helpful assistant.
+
+Please read given text careful and answer user\'s query after it.
+
+------------------------------------------------------
+- From here, document is started.
+------------------------------------------------------
+
+{entry["context"]}
+
+------------------------------------------------------
+- The document is ended. Now, please answer user's query.
+------------------------------------------------------
+
+"""
+        context_ids = tokenizer.encode(context, add_special_tokens=False)
+        if len(context_ids) > seq_len:
+            context_ids = context_ids[:seq_len // 2] + context_ids[-(seq_len // 2):]
+        context = tokenizer.decode(context_ids)
+        context = context + f"""
+
+Before you start, here is rules that you have to follow.
+- Please be concise.
+- Only answer that I asked. Do not put any words except the answer. For example, if I ask some values or passkey, just answer only passkey and values.
+{entry["input"]}
+Now, answer my question: {entry["input"]}"""
+        lines.append((context, entry['answer'][0]))
+    
     return lines
 
 def format_chat_corpus(args, corpus: List[str]) -> List[str]:
@@ -81,17 +127,19 @@ def tokenizing_and_find_shared_prompt_on_corpus(
     return shared_prompt, corpus
 
 @torch.inference_mode
-def evaluate_corpus(stream: torch.cuda.Stream, model, tokenizer: transformers.LlamaTokenizer, shared_prompt, corpus: List[torch.Tensor]):
+def evaluate_corpus(stream: torch.cuda.Stream, model, tokenizer: transformers.LlamaTokenizer, shared_prompt, corpus: List["TextCorpus"]):
     with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
         shared_output = model(
-            input_ids=shared_prompt.unsqueeze(0),
+            input_ids=shared_prompt.to(stream.device, non_blocking=True).unsqueeze(0),
             use_cache=True,
             num_logits_to_keep=1,
         )
     
     loss_sum = 0
     loss_count = 0
-    for input_ids, output_ids in corpus:
+    for line in corpus:
+        input_ids = line.input_ids
+        output_ids = line.output_ids
         input_ids = input_ids.to(stream.device, non_blocking=True)
         output_ids = output_ids.to(stream.device, non_blocking=True)
         state = copy.deepcopy(shared_output.past_key_values)
@@ -126,25 +174,62 @@ def evaluate_corpus(stream: torch.cuda.Stream, model, tokenizer: transformers.Ll
         with torch.cuda.stream(stream):
             logits = torch.cat(logits, dim=0)
             
-            loss_ce = torch.nn.functional.cross_entropy(logits[:-1], output_ids[1:])
+            loss_ce = torch.nn.functional.cross_entropy(logits[:-1].to(torch.float32), output_ids[1:])
             
-            probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
-            probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
-            seq_probs = probs.cumprod(0)[-1]
-            loss_probs = -torch.log(seq_probs)
+            # probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
+            # probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
+            # seq_probs = probs.cumprod(0)[-1]
+            # loss_probs = -torch.log(seq_probs)
             
             if stream.device_index == 0:
-                tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+                # tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+                tqdm.tqdm.write(f'{loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
             
-            loss_sum += loss_ce + loss_probs
+            loss_sum += loss_ce
             loss_count += 1
         
         stream.synchronize()
-    # ppl = math.exp(loss_sum.item() / loss_count)
-    loss = loss_sum.item() / loss_count
+    loss = math.exp(loss_sum.item() / loss_count)
+    # loss = loss_sum.item() / loss_count
     return loss
 
-from hip.models.hip_attention.attention2_draft_sampling_extend import ScanStage, dual_stage_quadratic_hip_attention
+@dataclasses.dataclass
+class TextCorpus:
+    input_ids: torch.Tensor
+    output_ids: torch.Tensor
+
+class TextDataset:
+    shared_input_ids: torch.Tensor
+    corpus: List[TextCorpus]
+    
+    def __repr__(self):
+        return f'TextDataset(shared_input_ids={self.shared_input_ids.shape}, corpus=TextCorpus[{len(self.corpus)}])'
+
+    @staticmethod
+    def from_corpus(args, tokenizer, corpus):
+        ds = TextDataset()
+        
+        corpus = format_chat_corpus(args, corpus)
+        shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
+            tokenizer, corpus
+        )
+        
+        ds.shared_input_ids = shared_prompt
+        ds.corpus = []
+        for input_ids, output_ids in corpus:
+            ds.corpus.append(
+                TextCorpus(
+                    input_ids=input_ids,
+                    output_ids=output_ids,
+                )
+            )
+        
+        return ds
+
+from hip.models.hip_attention.attention2_draft_sampling_extend import (
+    ScanStage, 
+    dual_stage_quadratic_hip_attention
+)
 
 @torch.inference_mode
 def job_ga(
@@ -433,12 +518,12 @@ def job_ga(
             latency_cache[hash_id] = latency
             return latency
     
-    def evaluate_population(population, model, shared_prompt, corpus):
+    def evaluate_population(population, model, evaluate_ds: List[TextDataset]):
         torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
         
-        ret = evaluate_population_inner(population, model, shared_prompt, corpus)
+        ret = evaluate_population_inner(population, model, evaluate_ds)
         
         torch.cuda.synchronize()
         gc.collect()
@@ -446,25 +531,29 @@ def job_ga(
         
         return ret
     
-    def evaluate_population_inner(population, model, shared_prompt, corpus):
+    def evaluate_population_inner(population, model, evaluate_ds: List[TextDataset]):
         import threading, queue
         
         n_threads = torch.cuda.device_count()
         jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
         results = []
-        models = [(torch.cuda.Stream(device=0), model, shared_prompt.to(0, non_blocking=True))]
+        models = [(torch.cuda.Stream(device=0), model)]
         for tid in range(1, n_threads):
-            models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid), shared_prompt.to(tid, non_blocking=True)))
+            models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid)))
         
         def thread_main(tid, args, jobs):
-            stream, model, shared_prompt = args
+            stream, model = args
             for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False):
                 # with lock:
                 #     torch.set_default_device(tid)
                 #     torch.cuda.set_device(tid)
                 with torch.cuda.stream(stream):
                     apply_setting(model, job)
-                    ppl = evaluate_corpus(stream, model, tokenizer, shared_prompt, corpus)
+                    ppls = []
+                    for ds in evaluate_ds:
+                        ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus)
+                        ppls.append(ppl)
+                    ppl = sum(ppls) / len(ppls)
                 # stream.synchronize()
                 results.append((jid, ppl))
         
@@ -495,20 +584,40 @@ def job_ga(
 
     # settings
     num_population = 25
-    num_corpus = 20
     
     # prepare shared prompt
+    # num_corpus = 20
     # corpus_rag = load_loft_rag_chat_corpus()[:num_corpus // 2]
     # corpus_ret = load_loft_retrieval_chat_corpus()[:num_corpus // 2]
     # corpus = corpus_rag + corpus_ret
     # corpus = load_loft_rag_chat_corpus()[:num_corpus]
-    corpus = load_loft_retrieval_chat_corpus()[:num_corpus]
-    corpus = format_chat_corpus(args, corpus)
-    shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
-        tokenizer, corpus
-    )
+    # corpus = load_loft_retrieval_chat_corpus()[:num_corpus]
+    # corpus = format_chat_corpus(args, corpus)
+    # shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
+    #     tokenizer, corpus
+    # )
     
-    print('shared prompt size', shared_prompt.shape)
+    evaluate_ds = [
+        TextDataset.from_corpus(
+            args, tokenizer, 
+            load_loft_retrieval_chat_corpus()[:10] +\
+            load_loft_rag_chat_corpus()[:5],
+        ),
+        TextDataset.from_corpus(
+            args, tokenizer, 
+            load_infinite_bench_subset('passkey', tokenizer, 3276800, 5),
+        ),
+        TextDataset.from_corpus(
+            args, tokenizer, 
+            load_infinite_bench_subset('kv_retrieval', tokenizer, 3276800, 15),
+        ),
+        TextDataset.from_corpus(
+            args, tokenizer, 
+            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 3276800, 5),
+        ),
+    ]
+    
+    print('shared prompt size', evaluate_ds)
     
     # run GA
     population = [seed]
@@ -517,7 +626,7 @@ def job_ga(
         for _ in range(10):
             t = mutate(t)
         population.append(t)
-    scores = evaluate_population(population, model, shared_prompt, corpus)
+    scores = evaluate_population(population, model, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
     print('seed', seed_score)
     
@@ -525,7 +634,7 @@ def job_ga(
         project="hip-ga",
         config={
             "num_population": num_population,
-            "num_corpus": num_corpus,
+            "corpus_setting": f"{evaluate_ds}",
         },
     )
     
@@ -545,7 +654,7 @@ def job_ga(
                 p2 = mutate(p2)
             new_populations.append(p1)
             new_populations.append(p2)
-        new_scores = evaluate_population(new_populations, model, shared_prompt, corpus)
+        new_scores = evaluate_population(new_populations, model, evaluate_ds)
         # print(min(map(lambda x:x[1], scores)), min(map(lambda x:x[1], new_scores)), new_scores)
         
         population = population + new_populations
