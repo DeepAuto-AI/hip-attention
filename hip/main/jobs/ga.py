@@ -7,6 +7,7 @@ import random
 import numpy as np
 import torch, transformers
 from typing import List, Tuple, Dict, Optional
+import dataclasses, json
 import tqdm
 import triton
 import wandb
@@ -26,14 +27,14 @@ import matplotlib.pyplot as plt
 def load_loft_rag_chat_corpus() -> List[str]:
     lines = []
     for qa in rag_qa_pairs:
-        for answer in qa["answers"]:
+        for answer in qa["answers"][:1]:
             lines.append((f'{rag_prefix}{qa["query_text"]}', f'{answer}'))
     return lines
 
 def load_loft_retrieval_chat_corpus() -> List[str]:
     lines = []
     for qa in retrieval_qa_pairs:
-        for answer in qa["answers"]:
+        for answer in qa["answers"][:1]:
             pid = answer[0]
             doi = retrieval_pid_to_id[pid]
             lines.append((f'{retrieval_prefix}{qa["query_text"]}', f'{doi}'))
@@ -493,35 +494,21 @@ def job_ga(
         return scores
 
     # settings
-    num_population = 20
-    num_corpus = 4
+    num_population = 25
+    num_corpus = 20
     
     # prepare shared prompt
-    corpus_rag = load_loft_rag_chat_corpus()[:num_corpus // 2]
-    corpus_ret = load_loft_retrieval_chat_corpus()[:num_corpus // 2]
-    corpus = corpus_rag + corpus_ret
+    # corpus_rag = load_loft_rag_chat_corpus()[:num_corpus // 2]
+    # corpus_ret = load_loft_retrieval_chat_corpus()[:num_corpus // 2]
+    # corpus = corpus_rag + corpus_ret
+    # corpus = load_loft_rag_chat_corpus()[:num_corpus]
+    corpus = load_loft_retrieval_chat_corpus()[:num_corpus]
     corpus = format_chat_corpus(args, corpus)
     shared_prompt, corpus = tokenizing_and_find_shared_prompt_on_corpus(
         tokenizer, corpus
     )
     
     print('shared prompt size', shared_prompt.shape)
-    # def update_shared_output():
-    #     outputs = []
-    #     for i in range(torch.cuda.device_count()):
-    #         torch.cuda.synchronize()
-    #         _model = copy.deepcopy(model).to(i)
-    #         torch.cuda.synchronize()
-    #         torch.set_default_device(i)
-    #         torch.cuda.set_device(i)
-    #         o = _model(
-    #             input_ids=shared_prompt.to(i).unsqueeze(0),
-    #             use_cache=True
-    #         )
-    #         torch.cuda.synchronize()
-    #         outputs.append(o)
-    #     return outputs
-    # shared_output = update_shared_output()
     
     # run GA
     population = [seed]
@@ -552,9 +539,9 @@ def job_ga(
             # p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
             p1, p2 = random.sample(population, counts=[1, ] * len(population), k=2)
             p1, p2 = crossover(p1, p2)
-            for _ in range(random.randint(0, 3)):
+            for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
                 p1 = mutate(p1)
-            for _ in range(random.randint(0, 3)):
+            for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
                 p2 = mutate(p2)
             new_populations.append(p1)
             new_populations.append(p2)
@@ -569,28 +556,31 @@ def job_ga(
         
         # pareto front
         import pypareto
-        values = scores
-        chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN, pypareto.MaxMin.MIN,)).as_chain()
-        best_scores = chain.split_by_pareto(values)
+        values = list(map(lambda x: (x[1],), scores))
+        chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN,)).as_chain()
+        best_values = chain.split_by_pareto(values)
         
+        best_values = sum(best_values, [])[:num_population]
+        best_args = []
+        best_scores = []
+        for b in best_values:
+            best_args.append(values.index(b))
+            best_scores.append(scores[values.index(b)])
+            
+        print(best_scores)
         os.makedirs('./saves/pareto', exist_ok=True)
         plt.clf()
         plt.title(f'Gen {current_generation}')
-        for line in best_scores:
-            plt.plot(
-                list(map(lambda x: x[0], sorted(line, key=lambda x:x[0]))), 
-                list(map(lambda x: x[1], sorted(line, key=lambda x:x[0])))
-            )
+        # for line in best_scores:
+        plt.scatter(
+            list(map(lambda x: x[0], sorted(best_scores, key=lambda x:x[0]))), 
+            list(map(lambda x: x[1], sorted(best_scores, key=lambda x:x[0])))
+        )
         plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s')
         plt.grid()
         plt.savefig('dummy_pareto.png')
         if (current_generation % 10) == 0:
             plt.savefig(f'./saves/pareto/dummy_pareto_{current_generation}.png')
-        
-        best_scores = sum(best_scores, [])[:num_population]
-        best_args = []
-        for b in best_scores:
-            best_args.append(scores.index(b))
         
         population = np.array(population, dtype=object)[np.array(best_args)].tolist()
         scores = np.array(scores, dtype=object)[np.array(best_args)].tolist()
@@ -599,21 +589,25 @@ def job_ga(
         
         best_idx = np.argmin(np.array(scores, dtype=np.float32)[:, 1]).item()
         
+        json_data = {
+            'generation': current_generation,
+            'population': population, 
+            'scores': scores, 
+            'best_idx': best_idx,
+        }
+        
+        class EnhancedJSONEncoder(json.JSONEncoder):
+            def default(self, o):
+                if dataclasses.is_dataclass(o):
+                    return dataclasses.asdict(o)
+                return super().default(o)
+        
         with open('./saves/pareto/population.json', 'w') as f:
-            import dataclasses, json
-
-            class EnhancedJSONEncoder(json.JSONEncoder):
-                def default(self, o):
-                    if dataclasses.is_dataclass(o):
-                        return dataclasses.asdict(o)
-                    return super().default(o)
-            
-            json.dump({
-                'generation': current_generation,
-                'population': population, 
-                'scores': scores, 
-                'best_idx': best_idx,
-            }, f, indent=2, cls=EnhancedJSONEncoder)
+            json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
+        
+        if ((current_generation % 10) == 0):
+            with open(f'./saves/pareto/population_gen{current_generation}.json', 'w') as f:
+               json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
         print('=====> gen', current_generation, scores[best_idx], '<=====')
         
         latencies = list(map(lambda x: [x[0]], scores))

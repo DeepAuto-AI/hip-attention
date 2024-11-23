@@ -2843,6 +2843,10 @@ Development of Substitute Materials
 What is the answer of the query? Print out the answer of the query. 
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
+Here is some rules you have to follow, before answer.
+- DO NOT SAY ANYTHING ELSE, EXCEPT ANSWER.
+- Please be concise.
+
 query:
 """
 
