@@ -1,11 +1,14 @@
 import os
+import warnings
 import torch
+import nvtx
 
 from hip.models.hip_attention.attention1_gpu import flash_attention
 from hip.models.hip_attention.attention1_block_gpu import hip_attention
 from hip.models.attn_l1_loss import compute_attn_lp_loss_triton
 
 
+@nvtx.annotate('custom_attention')
 def custom_attention(
     query_states, key_states, value_states,
     attention_mask, causal_mask,
@@ -19,15 +22,18 @@ def custom_attention(
     # hip parameters
     tree_k=512, 
     tree_block_size_q=32, 
+    tree_block_stride_q=2, 
     tree_block_size_k=2,
+    tree_block_stride_k=1,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
-    tree_sampling_method='first',
+    tree_sampling_method='last',
 
     # Latency optimization tweaks
     tree_enable_flash=False, 
     tree_enable_sparq=False, 
     tree_use_sliding_window=True,
+    tree_sliding_window_size=256,
 
     # Context averaging parameters
     tree_using_context_avg=False, 
@@ -40,6 +46,7 @@ def custom_attention(
     rope_cos=None, 
     rope_sin=None, 
     position_ids=None,
+    self_extend_group_size=4,
 
     # Attention sparsity loss
     output_attn_sparsity_loss=False, 
@@ -47,6 +54,10 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
+    
+    sm_scaler=None,
+    attn_logit_softcapping=None,
+    model_sliding_window=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -79,56 +90,77 @@ def custom_attention(
     @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
     @return: Attention output, last cumsum, attention sparsity loss
     """
+    if sm_scaler is None:
+        sm_scaler = 1 / (query_states.shape[-1] ** 0.5)
     attn_sparsity_loss = None
+    if model_sliding_window is not None:
+        assert isinstance(model_sliding_window, int)
+    
+    N, H, T, HID = query_states.shape
+    _N, _H, _T, _HID = key_states.shape
+    is_prompt = (N, T, HID) == (_N, _T, _HID)
+    assert (H % _H) == 0
+    H_KV = _H
 
-    if attention_method in ['none', 'spda', 'fa2']:
+    if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda":
+        if query_states.device.type == "cuda" and attention_method == 'sdpa':
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        if causal_mask is not None:
-            from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
-            
-            if query_states.shape == key_states.shape:
-                if attention_method in ['none', 'fa2']:
-                    attn_output = flash_attn_func(
-                        q=query_states.permute(0, 2, 1, 3),
-                        k=key_states.permute(0, 2, 1, 3),
-                        v=value_states.permute(0, 2, 1, 3),
-                        softmax_scale=None,
-                        causal=True,
-                    ).permute(0, 2, 1, 3)
-                elif attention_method in ['spda']:
+        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
+        
+        if is_prompt:
+            if attention_method in ['none', 'fa2']:
+                # assert causal_mask is None, causal_mask.shape
+                if causal_mask is not None:
+                    warnings.warn(f'causal mask provided. this is useless {causal_mask.shape}')
+                attn_output = flash_attn_func(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k=key_states.permute(0, 2, 1, 3),
+                    v=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=sm_scaler,
+                    causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
+                ).permute(0, 2, 1, 3)
+            elif attention_method in ['spda']:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                     attn_output = torch.nn.functional.scaled_dot_product_attention(
                         query_states,
                         key_states,
                         value_states,
                         attn_mask=causal_mask,
+                        is_causal=causal_mask is None,
                         dropout_p=attention_dropout,
                     )
-                else:
-                    raise Exception()
             else:
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states,
-                    key_states,
-                    value_states,
-                    attn_mask=causal_mask,
-                    dropout_p=attention_dropout,
-                )
+                raise Exception()
         else:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=attention_mask,
-                dropout_p=attention_dropout,
-                # The q_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case q_len == 1.
-                is_causal=attention_mask is None and query_states.shape[-2] > 1,
-            )
+            if attention_method in ['none', 'fa2']:
+                attn_output = flash_attn_with_kvcache(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k_cache=key_states.permute(0, 2, 1, 3),
+                    v_cache=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=sm_scaler,
+                    causal=True,
+                    softcap=attn_logit_softcapping,
+                    window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
+                ).permute(0, 2, 1, 3)
+            elif attention_method in ['sdpa']:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=causal_mask,
+                        is_causal=causal_mask is None,
+                        dropout_p=attention_dropout,
+                    )
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -169,8 +201,18 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
+    elif attention_method == 'dynamic_sparse_flash_attention':
+        from hip.models.dynamic_sparse_flash_attention import attention_fn as dynamic_sparse_flash
+        q = query_states  # / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+        
+        attn_output = dynamic_sparse_flash(
+            q[:, :, :, :128], k[:, :, :, :128], v[:, :, :, :128], nb_hash=16, attention_dropout=0
+        )
+
     elif attention_method == 'hip' or attention_method == 'hip' or attention_method == 'tree':
-        q = query_states / (query_states.shape[-1] ** 0.5)
+        q = query_states * sm_scaler
         k = key_states
         v = value_states
 
@@ -189,23 +231,19 @@ def custom_attention(
                 attend_lengths=selection.expand(N, select_n)
             ).mean(-1)
 
-        q = q.reshape(N * H, TDST, HID)  # .contiguous()
-        k = k.reshape(N * H, TSRC, HID)  # .contiguous()
-        v = v.reshape(N * H, TSRC, HID)  # .contiguous()
-
         LAST_DENSE_QUERIES = tree_last_dense_queries
 
         if LAST_DENSE_QUERIES == 0:
             LAST_DENSE_QUERIES = None
         if isinstance(LAST_DENSE_QUERIES, int):
             assert LAST_DENSE_QUERIES < 0
+            # prevent dense queries
         else:
             assert LAST_DENSE_QUERIES == None
 
         current_query_index = TSRC - TDST
         attn_outputs = []
 
-        q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
             if os.getenv('HIP_LEGACY', '0') == '1':
                 # maximum_ks = torch.where(
@@ -213,6 +251,11 @@ def custom_attention(
                 #     512,
                 #     128
                 # ).to(torch.int32)
+                
+                q = q.reshape(N * H, TDST, HID)  # .contiguous()
+                k = k.reshape(N * H_KV, TSRC, HID)  # .contiguous()
+                v = v.reshape(N * H_KV, TSRC, HID)  # .contiguous()
+                q_hip = q[:, :, :]
                 
                 attn_output_hip, _ = hip_attention(
                     q_hip,
@@ -236,7 +279,10 @@ def custom_attention(
                 )
             else:
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
-                from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
+                from hip import hip_attention_11, HiPAttentionArgs11
                 
                 # attn_output_hip, _ = hip_attention_draft_cpu(
                 #     q_hip,
@@ -258,50 +304,80 @@ def custom_attention(
                 #     topk_head_group_size=1,
                 # )
                 
-                attn_output_hip, _ = hip_attention_draft(
-                    q_hip,
-                    k[:, :LAST_DENSE_QUERIES, :],
-                    v[:, :LAST_DENSE_QUERIES, :],
-                    
-                    mask_k=tree_k,
-                    
-                    block_size_q=tree_block_size_q,
-                    block_stride_q=2,
-                    block_size_k=tree_block_size_k,
-                    block_size_k_group=1,
-                    
-                    sliding_window_size=128,
-                    sink_token_size=16,
-                    
-                    using_extend=False,
-                    rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                    rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                    self_extend_neighboor_window=1024,
-                    self_extend_group_size=4,
-                    
-                    topk_head_group_size=1,
-                    sample_method='first',
-                    branch_method='half',
-                    
-                    # this may good or not, but definatly great with self-extend
-                    traverse_from_last_step=False,
-                    step_size=64,
-                    num_samples=1,
-                    chunk_size=None,
-                    # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
-                    num_unions=1,
-                    
-                    score_head_group_size=1,
-                    
-                    using_sparq=False,
-                    sparq_hid=32,
+                q = q.permute(0, 2, 1, 3)
+                k = k.permute(0, 2, 1, 3)
+                v = v.permute(0, 2, 1, 3)
+                
+                # q = q.reshape(N * H, TDST, HID)
+                # k = k.reshape(N * H, TSRC, HID)
+                # v = v.reshape(N * H, TSRC, HID)
+                
+                if q.shape == k.shape:
+                    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                else:
+                    q_quant = q
+                    k_quant = k
+                
+                # print(q.shape, k.shape, v.shape, rope_cos.shape, rope_sin.shape, position_ids)
+                
+                attn_output_hip, _ = hip_attention_11(
+                    q, k, v,
+                    args=HiPAttentionArgs11(
+                        position_ids=position_ids + 1,
+                        mask_k=tree_k,
+                        
+                        block_size_q=tree_block_size_q,
+                        block_stride_q=tree_block_stride_q,
+                        block_size_k=tree_block_size_k,
+                        block_stride_k=tree_block_stride_k,
+                        # block_stride_k=1,
+                        block_size_k_group=1,
+                        
+                        sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', f'{tree_sliding_window_size}')),
+                        sink_token_size=16,
+                        
+                        using_extend=tree_rope_method == 'self_extend',
+                        rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
+                        rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
+                        self_extend_neighboor_window=1024,
+                        self_extend_group_size=self_extend_group_size,
+                        
+                        topk_head_group_size=1,
+                        sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
+                        branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
+                        
+                        # this may good or not, but definatly great with self-extend
+                        traverse_from_last_step=False,
+                        step_size=None,
+                        num_samples=1,
+                        # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
+                        chunk_size=None,
+                        # BUG: union has bug now...
+                        num_unions=1,
+                        
+                        score_head_group_size=1,
+                        
+                        using_sparq=False,
+                        sparq_hid=32,
+                        
+                        low_res_sample_scale=1,
+                        low_res_oversample_rate=1,
+                        low_res_oversample_block_stride_k=max(1, tree_block_size_k // 2) * 4,
+                        
+                        q_quant=q_quant,
+                        k_quant=k_quant,
+                        
+                        logit_softcap=attn_logit_softcapping,
+                    )
                 )
+                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
             torch.save({
-                'q': q_hip,
-                'k': k[:, :LAST_DENSE_QUERIES, :],
-                'v': v[:, :LAST_DENSE_QUERIES, :],
+                'q': q,
+                'k': k,
+                'v': v,
                 'mask_k': tree_k,
                 'block_size_q': tree_block_size_q,
                 'block_size_k': tree_block_size_k,
@@ -360,6 +436,8 @@ def custom_attention(
         from hip.models.sink_attention.sink_attention import sink_attention
         
         q = query_states # / (query_states.shape[-1] ** 0.5)
+        if sm_scaler is not None:
+            q = q * (query_states.shape[-1] ** 0.5) * sm_scaler
         k = key_states
         v = value_states
 
@@ -375,7 +453,7 @@ def custom_attention(
             q, k, v, 
             rope_cos.squeeze(0), 
             rope_sin.squeeze(0), 
-            num_sink=4, 
+            num_sink=4,
             window_size=tree_k,
         )
 
@@ -402,3 +480,4 @@ def custom_attention(
         raise Exception(attention_method)
 
     return attn_output, last_cumsum, attn_sparsity_loss
+

@@ -52,14 +52,15 @@ def job_stream(args, model, tokenizer, device):
         
         inputs = tokenizer([input_text, ] * args.batch_size, return_tensors='pt').to(device)
         print('input_ids', len(input_text), inputs.input_ids.shape)
-        print(inputs)
+        # print(inputs)
 
         t = time.time()
         elapsed = 0
         try:
             if isinstance(model, LLM):
-                prompts = [input_text, ] * args.batch_size
+                prompts = [input_text, ]
                 sampling_params = SamplingParams(
+                    n=args.batch_size,
                     temperature=0.7,
                     top_p=0.9,
                     top_k=1000,
@@ -76,29 +77,69 @@ def job_stream(args, model, tokenizer, device):
                 elapsed = time.time() - t
                 
                 n_generated = 0
+                output_texts = []
                 for output in outputs:
-                    generated_text = output.outputs[0].text
+                    for item in output.outputs:
+                        output_texts.append(item.text)
+                for generated_text in output_texts:
                     n_tokens = len(tokenizer([generated_text]).input_ids[0])
                     n_generated += n_tokens
-                    if len(outputs) > 1:
-                        print(generated_text.replace('\n', '\\n')[:300] + ' [...]', n_tokens)
+                    if len(output_texts) > 1:
+                        print(generated_text.replace('\n', '\\n')[:200] + ' [...]', n_tokens)
                     else:
                         print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
             else:
-                streamer = BatchedStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
-                
-                with torch.no_grad():
-                    model.generate(
-                        **inputs, 
-                        streamer=streamer, 
-                        do_sample=True,
-                        max_new_tokens=256,
-                        temperature=0.7,
-                        top_p=0.9,
-                        top_k=10,
-                        repetition_penalty=1.0,
-                    )
+                without_cache = os.environ.get('STREAM_WITHOUT_CACHE', '0') == '1'
+                if without_cache:
+                    last_output_text = ""
+                    with torch.no_grad():
+                        import triton
+                        target_index = inputs['input_ids'].shape[-1] - 1
+                        padded_inputs = torch.zeros(
+                            (triton.next_power_of_2(inputs['input_ids'].shape[-1] + 256), ), 
+                            dtype=torch.long, 
+                            device=inputs['input_ids'].device
+                        )
+                        padded_inputs[:inputs['input_ids'].shape[-1]] = inputs['input_ids'][0]
+                        output = model(
+                            use_cache=False, 
+                            output_logits=True, 
+                            num_logits_to_keep=-target_index, 
+                            input_ids=padded_inputs.unsqueeze(0)
+                        )
+                        output_tokens = [output.logits[0, -1, :].topk(k=1).indices]
+                        for i in range(256):
+                            target_index += 1
+                            padded_inputs[
+                                inputs['input_ids'].shape[-1]:
+                                inputs['input_ids'].shape[-1] + len(output_tokens)
+                            ] = torch.cat(output_tokens)
+                            output = model(
+                                input_ids = padded_inputs.unsqueeze(0),
+                                use_cache=False,
+                                output_logits=True,
+                                num_logits_to_keep=-target_index,
+                            )
+                            output_tokens += [output.logits[0, -1, :].topk(k=1).indices]
+                            new_output_text = tokenizer.batch_decode(torch.cat(output_tokens).cpu().unsqueeze(0), skip_special_tokens=False)[0]
+                            print(new_output_text[len(last_output_text):], end='', flush=True)
+                            last_output_text = new_output_text
+                            # print(output_tokens[-1], )
+                else:
+                    streamer = BatchedStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
+                    
+                    with torch.no_grad():
+                        model.generate(
+                            **inputs, 
+                            streamer=streamer, 
+                            do_sample=True,
+                            max_new_tokens=256,
+                            temperature=0.7,
+                            top_p=0.9,
+                            top_k=10,
+                            repetition_penalty=1.0,
+                        )
         except KeyboardInterrupt:
             traceback.print_exc()
             print('Interrupted')

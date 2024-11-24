@@ -5271,3 +5271,5 @@ Than this of Juliet and her Romeo.
  [_Exeunt._]
 
 ### Response:
+
+Here is 500 word summary of given story. Summary: 

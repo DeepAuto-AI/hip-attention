@@ -134,6 +134,7 @@ def _attention_scores_compute(
     # calc dot product.
     score = tl.sum(query.to(tl.float32) * key.to(tl.float32))
     score = score * (1 / tl.sqrt(HID.to(tl.float32)))
+    # score = tl.extra.cuda.libdevice.tanh(score / 50.0) * 50.0 # gemma2
     score = tl.where(idx_tsrc <= tdst, score, float('-inf'))
     
     # output
@@ -338,18 +339,18 @@ class AttentionScoreFunc(Function):
                 
                 BLOCK_HID,
                 
-                num_warps=2,
+                num_warps=1,
                 num_stages=1,
             )
         except RuntimeError as ex:
             print(
-                N, TDST, TSRC, HID, BLOCK_HID, num_sink, window_size, _device,
-                q.shape, q.dtype, q.is_contiguous(), q.device,
-                k.shape, k.dtype, k.is_contiguous(), k.device,
-                cos.shape, cos.dtype, cos.is_contiguous(), cos.device,
-                sin.shape, sin.dtype, sin.is_contiguous(), sin.device,
-                indices.shape, indices.dtype, indices.is_contiguous(), indices.device,
-                values.shape, values.dtype, values.is_contiguous(), values.device,
+                N, TDST, TSRC, HID, BLOCK_HID, num_sink, window_size, _device, '\n',
+                q.shape, q.dtype, q.is_contiguous(), q.device,'\n',
+                k.shape, k.dtype, k.is_contiguous(), k.device,'\n',
+                cos.shape, cos.dtype, cos.is_contiguous(), cos.device,'\n',
+                sin.shape, sin.dtype, sin.is_contiguous(), sin.device,'\n',
+                indices.shape, indices.dtype, indices.is_contiguous(), indices.device,'\n',
+                values.shape, values.dtype, values.is_contiguous(), values.device,'\n',
             )
             raise Exception() from ex
         torch.cuda.set_device(_device)
@@ -614,7 +615,29 @@ def sink_attention(
     num_sink: int = 4,
     window_size: int = 512,
     BENCHMARK: bool = False,
-):  
+):
+    chunk_tdst = 4096
+    if q.shape[1] > chunk_tdst:
+        contexts = torch.empty_like(q)
+        for i_start_tdst in range(0, q.shape[1], chunk_tdst):
+            i_end_tdst = min(i_start_tdst + chunk_tdst, q.shape[1])
+            t = sink_attention(
+                q=q[:, i_start_tdst:i_end_tdst],
+                k=k[:, :i_end_tdst],
+                v=v[:, :i_end_tdst],
+                cos=cos,
+                sin=sin,
+                num_sink=num_sink,
+                window_size=window_size,
+                BENCHMARK=BENCHMARK
+            )
+            contexts.index_copy_(
+                index=torch.arange(i_start_tdst, i_end_tdst, device=t.device), 
+                source=t, 
+                dim=1
+            )
+        return contexts
+    
     if BENCHMARK:
         event_scores_start = torch.cuda.Event(enable_timing=True)
         event_scores_end = torch.cuda.Event(enable_timing=True)
