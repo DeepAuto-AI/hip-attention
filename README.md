@@ -255,7 +255,7 @@ python eval.py --method streaming_llm --k 512 --modl qwen2-7b-chat-32k
 
 ### RULER
 
-Check the codebase in [gmlwns2000/LongBench-hip](https://github.com/gmlwns2000/RULER-hip)
+Check the codebase in [gmlwns2000/RULER-hip](https://github.com/gmlwns2000/RULER-hip)
 
 ```bash
 SERVER_PORT=5782 BATCH_SIZE=1 SA_BLOCK_SIZE=64 HIP_DISABLE_AUTOTUNE=1 CUDA_VISIBLE_DEVICES=5 GPUS=1 VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=1024 HIP_NSINK=128 HIP_K=2048 HIP_USING_SNAP_KV=1 HIP_SNAP_KV_VERT_K=2048 HIP_SNAP_KV_DIAG_K=1024 HIP_BK_AFTER_MASK=16 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=1 ./run.sh llama3.1-8b-chat-6 synthetic
