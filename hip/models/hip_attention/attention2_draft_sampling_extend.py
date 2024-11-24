@@ -1317,7 +1317,7 @@ def dual_stage_quadratic_hip_attention(
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
     BLOCK_CHUNK = args.block_size_k
-    chunk_size = args.mask_k
+    chunk_size = stages[0].stage_chunk_size
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     args = args.clone()
@@ -1691,7 +1691,16 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
-                _, t_indices = out_scores[..., :indices_left.shape[-1]].sort(dim=-1, descending=True, stable=False)
+                if (i_stage < (len(stages) - 1)):
+                    # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
+                    next_stage_k = (stages[i_stage + 1].stage_k // stages[i_stage].stage_chunk_size)
+                    next_stage_k = min(next_stage_k, indices_left.shape[-1])
+                    _, t_indices = out_scores[..., :indices_left.shape[-1]].topk(
+                        k=next_stage_k,
+                        dim=-1, sorted=False, largest=True, 
+                    )
+                else:
+                    _, t_indices = out_scores[..., :indices_left.shape[-1]].sort(dim=-1, descending=True, stable=False)
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
             
@@ -2005,23 +2014,23 @@ def main_debug():
         ],
         'mid': [
             ScanStage(
-                stage_block_size_q=256,
+                stage_block_size_q=64,
                 stage_block_stride_q=4,
-                stage_chunk_size=16,
+                stage_chunk_size=256,
                 stage_k=None,
                 stage_stride=1,
             ),
             ScanStage(
-                stage_block_size_q=128,
-                stage_block_stride_q=2,
-                stage_chunk_size=4,
+                stage_block_size_q=64,
+                stage_block_stride_q=4,
+                stage_chunk_size=32,
                 stage_k=32768,
                 stage_stride=1,
             ),
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
-                stage_chunk_size=1,
+                stage_chunk_size=8,
                 stage_k=8192,
                 stage_stride=1,
             ),
@@ -2041,17 +2050,42 @@ def main_debug():
                 stage_k=32768,
                 stage_stride=1,
             ),
-        ]
+        ],
+        'debug': [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=4,
+                stage_chunk_size=16,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=4,
+                stage_k=512,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=1,
+                stage_k=256,
+                stage_stride=1,
+            ),
+        ],
     }[preset]
     config_second_k = {
         'high': 4096,
         'mid': 2048,
         'low': 2048,
+        'debug': 128,
     }[preset]
     config_sa_extend_backend = {
         'high': 'streaming', 
         'mid': 'streaming',
         'low': 'streaming',
+        'debug': 'streaming',
     }[preset]
     
     dual_stage_kwargs = dict(
@@ -2069,8 +2103,8 @@ def main_debug():
             # block_stride_q=config_bsq,
             block_size_k=64, # BLOCK_CHUNK
             block_stride_k=1,
-            sliding_window_size=1024 if not is_decode else 1024,
-            sink_token_size=256 if not is_decode else 256,
+            sliding_window_size=128 if preset == 'debug' else 1024,
+            sink_token_size=64 if preset == 'debug' else 256,
             # position_ids=position_ids,
             
             using_extend=True,
@@ -2081,10 +2115,10 @@ def main_debug():
         second_stage_k = config_second_k,
         stages=config_stage,
         block_sparse_block_size_q=block_size,
-        model_context_length=131072,
+        model_context_length=512,
         # scan_early_terminate=1,
         # stage_early_terminate=1,
-        scan_extend_backend='relative',
+        # scan_extend_backend='relative',
         sa_extend_backend=config_sa_extend_backend,
         stage_early_terminate=k_group_size,
         mask_only=mask_only,

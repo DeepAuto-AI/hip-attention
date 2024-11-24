@@ -27,17 +27,14 @@ In previous text, you have seen the secret keyword. You had to remember that sec
 """
 elif IS_EXAONE:
     PREFIX = """[BOS][|system|][|endofturn|]
-[|user|]
-
+[|user|]You are a helpful assistant. 
 There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
 
 """
     FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
     QUERY = """
-In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
-[|endofturn|]
-[|assistant|]
-"""
+In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.[|endofturn|]
+[|assistant|]"""
 elif IS_GEMMA:
     PREFIX = """<start_of_turn>user
 
