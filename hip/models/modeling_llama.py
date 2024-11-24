@@ -614,7 +614,7 @@ class LlamaCustomAttention(LlamaAttention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-        if force_extend and (self.layer_idx in self.tree_dense_layers):
+        if force_extend and (self.layer_idx in self.tree_dense_layers) and (self.tree_extend_stages is None):
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
                 query_states=query_states, 
                 key_states=key_states, 
@@ -681,7 +681,7 @@ class LlamaCustomAttention(LlamaAttention):
                 attention_dropout=self.attention_dropout if self.training else 0.0,
 
                 # Attention method
-                attention_method='fa2' if (self.layer_idx in self.tree_dense_layers) else self.attention_method,
+                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
                 tree_reformer=self.tree_reformer,
                 tree_performer=self.tree_performer,
 
