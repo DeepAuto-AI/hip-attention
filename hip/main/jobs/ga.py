@@ -1,6 +1,7 @@
 import copy
 import gc
 import math
+import threading
 import time
 import os
 import random
@@ -8,7 +9,7 @@ import traceback
 import numpy as np
 import torch, transformers
 from transformers import AutoTokenizer
-from typing import List, Tuple, Dict, Optional
+from typing import List, Literal, Tuple, Dict, Optional
 import dataclasses, json
 import tqdm
 import triton
@@ -123,76 +124,141 @@ def tokenizing_and_find_shared_prompt_on_corpus(
                     break
         corpus.append([input_ids, output_ids])
     shared_prompt = shared_prompt[:shared_prompt_max_len]
-    corpus = list(map(lambda ids: (torch.tensor(ids[0][len(shared_prompt):]), torch.tensor(ids[1])), corpus))
+    corpus = list(map(lambda ids: (torch.tensor(ids[0][len(shared_prompt):], dtype=torch.int64), torch.tensor(ids[1], dtype=torch.int64)), corpus))
     shared_prompt = torch.tensor(shared_prompt)
     return shared_prompt, corpus
 
+STORAGE_LOCK = threading.Lock()
+STORAGE = {}
+
 @torch.inference_mode
-def evaluate_corpus(stream: torch.cuda.Stream, model, tokenizer: transformers.LlamaTokenizer, shared_prompt, corpus: List["TextCorpus"]):
-    with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
-        shared_output = model(
-            input_ids=shared_prompt.to(stream.device, non_blocking=True).unsqueeze(0),
-            use_cache=True,
-            num_logits_to_keep=1,
-        )
-    
-    loss_sum = 0
-    loss_count = 0
-    for line in corpus:
-        input_ids = line.input_ids
-        output_ids = line.output_ids
-        input_ids = input_ids.to(stream.device, non_blocking=True)
-        output_ids = output_ids.to(stream.device, non_blocking=True)
-        state = copy.deepcopy(shared_output.past_key_values)
+def evaluate_corpus(
+    stream: torch.cuda.Stream, 
+    model: torch.nn.Module, 
+    tokenizer: transformers.LlamaTokenizer, 
+    shared_prompt: torch.Tensor, 
+    corpus: List["TextCorpus"],
+    evaluate_method: Literal['kd', 'output'] = 'kd'
+):
+    if evaluate_method == 'kd':
+        samples = []
+        for line in corpus:
+            samples.append(torch.cat([shared_prompt, line.input_ids, line.output_ids]))
         
-        with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
-            try:
-                output = model(
-                    input_ids=input_ids.unsqueeze(0),
-                    past_key_values=state,
-                    num_logits_to_keep=1,
-                )
-            except triton.runtime.errors.OutOfResources as ex:
-                print(ex)
-                return 99999999
-        state = output.past_key_values
+        def set_method(method: str):
+            for m in model.modules():
+                if hasattr(m, 'attention_method'):
+                    m.attention_method = method
         
-        # stream.synchronize()
-        
-        logits = []
-        step_size = output_ids.shape[-1]
-        for i in range(0, output_ids.shape[-1], step_size):
+        loss_sum = 0
+        loss_count = 0
+        for i_sample, sample in enumerate(samples):
             with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
-                output = model(
-                    input_ids=output_ids[i: i+step_size].unsqueeze(0),
-                    past_key_values=state,
-                    num_logits_to_keep=step_size,
+                set_method('fa2')
+                logit_truth = None
+                hash_id = hash(str(sample.numpy().tolist())) % 1000000000
+                with STORAGE_LOCK:
+                    if hash_id in STORAGE:
+                        logit_truth = STORAGE[hash_id].to(stream.device)
+                if logit_truth is None:
+                    output_truth = model(
+                        input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
+                        use_cache=False,
+                        num_logits_to_keep=16384,
+                    )
+                    logit_truth = output_truth.logits.view(-1, output_truth.logits.shape[-1])
+                    with STORAGE_LOCK:
+                        STORAGE[hash_id] = logit_truth.cpu()
+                else:
+                    assert isinstance(logit_truth, torch.Tensor)
+                    assert logit_truth.device == stream.device
+                
+                set_method('hip')
+                output_student = model(
+                    input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
+                    use_cache=False,
+                    num_logits_to_keep=16384,
                 )
-                state = output.past_key_values
-                logits.append(output.logits.view(-1, output.logits.shape[-1]))
+                logit_student = output_student.logits.view(-1, output_student.logits.shape[-1])
+                
+                
+                loss = torch.nn.functional.kl_div(
+                    input=logit_student.float().log_softmax(dim=-1),
+                    target=logit_truth.float().softmax(dim=-1),
+                    reduction='batchmean'
+                )
+                if stream.device_index == 0:
+                    tqdm.tqdm.write(f'({i_sample}) L: {loss.item():.6f}')
+                loss_sum += loss
+                loss_count += 1
+        loss = loss_sum.item() / loss_count
+        return loss
+    elif evaluate_method == 'output':
+        with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
+            shared_output = model(
+                input_ids=shared_prompt.to(stream.device, non_blocking=True).unsqueeze(0),
+                use_cache=True,
+                num_logits_to_keep=1,
+            )
+        
+        loss_sum = 0
+        loss_count = 0
+        for line in corpus:
+            input_ids = line.input_ids
+            output_ids = line.output_ids
+            input_ids = input_ids.to(stream.device, non_blocking=True)
+            output_ids = output_ids.to(stream.device, non_blocking=True)
+            state = copy.deepcopy(shared_output.past_key_values)
+            
+            with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
+                try:
+                    output = model(
+                        input_ids=input_ids.unsqueeze(0),
+                        past_key_values=state,
+                        num_logits_to_keep=1,
+                    )
+                except triton.runtime.errors.OutOfResources as ex:
+                    print(ex)
+                    return 99999999
+            state = output.past_key_values
+            
             # stream.synchronize()
-        
-        with torch.cuda.stream(stream):
-            logits = torch.cat(logits, dim=0)
             
-            loss_ce = torch.nn.functional.cross_entropy(logits[:-1].to(torch.float32), output_ids[1:])
+            logits = []
+            step_size = output_ids.shape[-1]
+            for i in range(0, output_ids.shape[-1], step_size):
+                with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
+                    output = model(
+                        input_ids=output_ids[i: i+step_size].unsqueeze(0),
+                        past_key_values=state,
+                        num_logits_to_keep=step_size,
+                    )
+                    state = output.past_key_values
+                    logits.append(output.logits.view(-1, output.logits.shape[-1]))
+                # stream.synchronize()
             
-            # probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
-            # probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
-            # seq_probs = probs.cumprod(0)[-1]
-            # loss_probs = -torch.log(seq_probs)
+            with torch.cuda.stream(stream):
+                logits = torch.cat(logits, dim=0)
+                
+                loss_ce = torch.nn.functional.cross_entropy(logits[:-1].to(torch.float32), output_ids[1:])
+                
+                # probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
+                # probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
+                # seq_probs = probs.cumprod(0)[-1]
+                # loss_probs = -torch.log(seq_probs)
+                
+                if stream.device_index == 0:
+                    # tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+                    tqdm.tqdm.write(f'{loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+                
+                loss_sum += loss_ce
+                loss_count += 1
             
-            if stream.device_index == 0:
-                # tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
-                tqdm.tqdm.write(f'{loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
-            
-            loss_sum += loss_ce
-            loss_count += 1
-        
-        stream.synchronize()
-    loss = math.exp(loss_sum.item() / loss_count)
-    # loss = loss_sum.item() / loss_count
-    return loss
+            stream.synchronize()
+        loss = math.exp(loss_sum.item() / loss_count)
+        return loss
+    else:
+        raise Exception(evaluate_method)
 
 @dataclasses.dataclass
 class TextCorpus:
@@ -215,9 +281,13 @@ class TextDataset:
             tokenizer, corpus
         )
         
+        assert shared_prompt.dtype == torch.int64
+        
         ds.shared_input_ids = shared_prompt
         ds.corpus = []
         for input_ids, output_ids in corpus:
+            assert input_ids.dtype == torch.int64, input_ids.shape
+            assert output_ids.dtype == torch.int64
             ds.corpus.append(
                 TextCorpus(
                     input_ids=input_ids,
@@ -426,11 +496,11 @@ def job_ga(
             layer_meta = layer
             layer = layer['stages']
             assert layer_meta['second_stage_k'] > 0
-            assert layer_meta['second_stage_k'] <= 65536
+            assert layer_meta['second_stage_k'] <= 8192 # we have to restrict this to prevent full dense attention...
             assert layer_meta['sliding_window_size'] >= 64
-            assert layer_meta['sliding_window_size'] < 1024*1024
+            assert layer_meta['sliding_window_size'] <= 8192
             assert layer_meta['sink_token_size'] >= 4
-            assert layer_meta['sink_token_size'] < 1024*1024
+            assert layer_meta['sink_token_size'] <= 8192
             assert len(layer) >= 2, 'too small'
             assert len(layer) <= 7, 'too large'
             assert layer[0].stage_k == None, 'first quadratic'
@@ -496,24 +566,25 @@ def job_ga(
         return p1_new, p2_new
 
     def apply_setting(model, setting):
-        # i = 0
         for m in model.modules():
             if hasattr(m, 'tree_extend_stages'):
                 idx = m.layer_idx
-                # print(i, idx)
-                if len(setting) == 2:
-                    if idx < 4:
-                        m.tree_extend_stages = setting[0]
-                    else:
-                        m.tree_extend_stages = setting[1]
+                if setting is None:
+                    m.attention_method = 'fa2'
                 else:
-                    m.tree_extend_stages = setting[idx]
-                # i += 1
+                    m.attention_method = 'hip'
+                    if len(setting) == 2:
+                        if idx < 4:
+                            m.tree_extend_stages = setting[0]
+                        else:
+                            m.tree_extend_stages = setting[1]
+                    else:
+                        m.tree_extend_stages = setting[idx]
 
     latency_cache = {}
     
     def evaluate_latency(model, stages):
-        hash_id = hash(str(stages))
+        hash_id = str(stages)
         if hash_id in latency_cache:
             return latency_cache[hash_id]
         else:
@@ -556,9 +627,22 @@ def job_ga(
                 latency_sum += start.elapsed_time(end)
                 latency_count += 1
             latency = latency_sum / latency_count
-            # latency = max(latency, 35)
             latency_cache[hash_id] = latency
             return latency
+    
+    def evaluate_latency_of_candidate(model, p):
+        latency_sum = 0
+        latency_count = 0
+        if len(p) == 2:
+            latency_sum += evaluate_latency(model, p[0]) * 4
+            latency_count += 4
+            latency_sum += evaluate_latency(model, p[1]) * 28
+            latency_count += 28
+        else:
+            for stage in p:
+                latency_sum += evaluate_latency(model, stage)
+                latency_count += 1
+        return latency_sum / latency_count
     
     def evaluate_population(population, model, evaluate_ds: List[TextDataset]):
         torch.cuda.synchronize()
@@ -621,15 +705,9 @@ def job_ga(
         latencies = []
         for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
             apply_setting(model, p)
-            latency_sum = 0
-            latency_count = 0
-            for stage in p:
-                latency_sum += evaluate_latency(model, stage)
-                latency_count += 1
-            latencies.append(latency_sum / latency_count)
-        
+            latency = evaluate_latency_of_candidate(model, p)
+            latencies.append(latency)
         scores = list(zip(latencies, ppls))
-        
         return scores
 
     # settings
@@ -648,11 +726,15 @@ def job_ga(
     # )
     
     evaluate_ds = [
-        TextDataset.from_corpus(
-            args, tokenizer, 
-            load_loft_retrieval_chat_corpus()[:5] +\
-            load_loft_rag_chat_corpus()[:20],
-        ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer, 
+        #     load_loft_retrieval_chat_corpus()[:1] +\
+        #     load_loft_rag_chat_corpus()[:1],
+        # ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer, 
+        #     load_loft_rag_chat_corpus()[:1],
+        # ),
         # TextDataset.from_corpus(
         #     args, tokenizer, 
         #     load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
@@ -663,7 +745,7 @@ def job_ga(
         # ),
         TextDataset.from_corpus(
             args, tokenizer, 
-            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 131072, 10),
+            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 1),
         ),
     ]
     
@@ -678,6 +760,7 @@ def job_ga(
         population.append(t)
     scores = evaluate_population(population, model, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
+    seed_latency, seed_loss = seed_score
     print('seed', seed_score)
     
     run = wandb.init(
@@ -702,21 +785,36 @@ def job_ga(
                 p1 = mutate(p1)
             for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
                 p2 = mutate(p2)
-            new_populations.append(p1)
-            new_populations.append(p2)
+            
+            p1_latency = evaluate_latency_of_candidate(model, p1)
+            p2_latency = evaluate_latency_of_candidate(model, p2)
+            if p1_latency < (seed_latency * 2):
+                new_populations.append(p1)
+            if p2_latency < (seed_latency * 2):
+                new_populations.append(p2)
         new_scores = evaluate_population(new_populations, model, evaluate_ds)
-        # print(min(map(lambda x:x[1], scores)), min(map(lambda x:x[1], new_scores)), new_scores)
         
         population = population + new_populations
         scores = scores + new_scores
+        
+        # kill way too slow candidates
+        survived_populations = []
+        survived_scores = []
+        for p, s in zip(population, scores):
+            if s[0] <= (seed_score[0] * 2):
+                survived_populations.append(p)
+                survived_scores.append(s)
+        # print(f'{len(new_scores) - len(survived_scores)} candidates are killed')
+        population = survived_populations
+        scores = survived_scores
         
         # just check scores
         # best_args = list(map(lambda x: x[0], list(sorted(zip(range(len(scores)), scores), key=lambda x: x[1][1], reverse=False))[:num_population]))
         
         # pareto front
         import pypareto
-        values = list(map(lambda x: (x[1],), scores))
-        chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN,)).as_chain()
+        values = list(map(lambda x: (x[0], x[1],), scores))
+        chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN, pypareto.MaxMin.MIN,)).as_chain()
         best_values = chain.split_by_pareto(values)
         
         best_values = sum(best_values, [])[:num_population]
@@ -733,26 +831,36 @@ def job_ga(
         # for line in best_scores:
         plt.scatter(
             list(map(lambda x: x[0], sorted(best_scores, key=lambda x:x[0]))), 
-            list(map(lambda x: x[1], sorted(best_scores, key=lambda x:x[0])))
+            list(map(lambda x: x[1], sorted(best_scores, key=lambda x:x[0]))),
+            label='population',
         )
-        plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s')
-        plt.grid()
-        plt.savefig('dummy_pareto.png')
-        if (current_generation % 10) == 0:
-            plt.savefig(f'./saves/pareto/dummy_pareto_{current_generation}.png')
+        plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s', label='seed')
         
         population = np.array(population, dtype=object)[np.array(best_args)].tolist()
         scores = np.array(scores, dtype=object)[np.array(best_args)].tolist()
         # print(population[0])
         scores = list(map(tuple, scores))
         
-        best_idx = np.argmin(np.array(scores, dtype=np.float32)[:, 1]).item()
+        s = np.array(scores, dtype=np.float32)
+        seed_latency = seed_score[0]
+        
+        s_cand = np.argsort(np.abs(s[:, 0] - seed_latency))[:5]
+        s_cand_loss = np.argsort(s[s_cand, 1])[0]
+        best_idx = s_cand[s_cand_loss].item()
+        
+        plt.scatter(x=[scores[best_idx][0], ], y=[scores[best_idx][1], ], marker='s', label='best')
+        plt.legend()
+        plt.grid()
+        plt.savefig('dummy_pareto.png')
+        if (current_generation % 1) == 0:
+            plt.savefig(f'./saves/pareto/dummy_pareto_{current_generation}.png')
         
         json_data = {
             'generation': current_generation,
-            'population': population, 
-            'scores': scores, 
             'best_idx': best_idx,
+            'best_candidate': population[best_idx],
+            'scores': scores, 
+            'population': population, 
         }
         
         class EnhancedJSONEncoder(json.JSONEncoder):
@@ -764,7 +872,7 @@ def job_ga(
         with open('./saves/pareto/population.json', 'w') as f:
             json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
         
-        if ((current_generation % 10) == 0):
+        if ((current_generation % 1) == 0):
             with open(f'./saves/pareto/population_gen{current_generation}.json', 'w') as f:
                json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
         print('=====> gen', current_generation, scores[best_idx], '<=====')
