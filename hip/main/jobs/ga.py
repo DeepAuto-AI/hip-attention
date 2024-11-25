@@ -4,6 +4,7 @@ import math
 import time
 import os
 import random
+import traceback
 import numpy as np
 import torch, transformers
 from transformers import AutoTokenizer
@@ -240,6 +241,38 @@ def job_ga(
 ):
     model.eval()
     
+    # seed = [
+    #     {
+    #         'second_stage_k': 2048,
+    #         'sliding_window_size': 1024,
+    #         'sink_token_size': 256,
+    #         'sa_extend_backend': 'streaming',
+    #         'stages': [
+    #             ScanStage(
+    #                 stage_block_size_q=64,
+    #                 stage_block_stride_q=4,
+    #                 stage_chunk_size=256,
+    #                 stage_k=None,
+    #                 stage_stride=1,
+    #             ),
+    #             ScanStage(
+    #                 stage_block_size_q=64,
+    #                 stage_block_stride_q=4,
+    #                 stage_chunk_size=32,
+    #                 stage_k=32768,
+    #                 stage_stride=1,
+    #             ),
+    #             ScanStage(
+    #                 stage_block_size_q=64,
+    #                 stage_block_stride_q=1,
+    #                 stage_chunk_size=8,
+    #                 stage_k=8192,
+    #                 stage_stride=1,
+    #             ),
+    #         ]
+    #     } for _ in range(model.config.num_hidden_layers)
+    # ]
+    
     seed = [
         {
             'second_stage_k': 2048,
@@ -269,7 +302,7 @@ def job_ga(
                     stage_stride=1,
                 ),
             ]
-        } for _ in range(model.config.num_hidden_layers)
+        } for _ in range(2)
     ]
     
     def mutate_inner(p):
@@ -388,7 +421,7 @@ def job_ga(
         return p
 
     def validate(p):
-        assert len(p) == model.config.num_hidden_layers, 'layer count must match'
+        assert len(p) in [2, model.config.num_hidden_layers], 'layer count must match'
         for layer in p:
             layer_meta = layer
             layer = layer['stages']
@@ -402,6 +435,7 @@ def job_ga(
             assert len(layer) <= 7, 'too large'
             assert layer[0].stage_k == None, 'first quadratic'
             assert layer[-1].stage_chunk_size <= 32, 'too large k'
+            assert layer[-1].stage_chunk_size > 0, 'too large k'
             assert (layer_meta['second_stage_k'] % layer[-1].stage_chunk_size) == 0
             
             stage_block_size_q = 987654321
@@ -462,11 +496,19 @@ def job_ga(
         return p1_new, p2_new
 
     def apply_setting(model, setting):
-        i = 0
+        # i = 0
         for m in model.modules():
             if hasattr(m, 'tree_extend_stages'):
-                m.tree_extend_stages = setting[i]
-                i += 1
+                idx = m.layer_idx
+                # print(i, idx)
+                if len(setting) == 2:
+                    if idx < 4:
+                        m.tree_extend_stages = setting[0]
+                    else:
+                        m.tree_extend_stages = setting[1]
+                else:
+                    m.tree_extend_stages = setting[idx]
+                # i += 1
 
     latency_cache = {}
     
@@ -544,18 +586,26 @@ def job_ga(
         def thread_main(tid, args, jobs):
             stream, model = args
             for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False):
-                # with lock:
-                #     torch.set_default_device(tid)
-                #     torch.cuda.set_device(tid)
-                with torch.cuda.stream(stream):
-                    apply_setting(model, job)
-                    ppls = []
-                    for ds in evaluate_ds:
-                        ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus)
-                        ppls.append(ppl)
-                    ppl = sum(ppls) / len(ppls)
-                # stream.synchronize()
-                results.append((jid, ppl))
+                try:
+                    # with lock:
+                    #     torch.set_default_device(tid)
+                    #     torch.cuda.set_device(tid)
+                    with torch.cuda.stream(stream):
+                        apply_setting(model, job)
+                        ppls = []
+                        for ds in evaluate_ds:
+                            ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus)
+                            ppls.append(ppl)
+                        ppl = sum(ppls) / len(ppls)
+                    # stream.synchronize()
+                    results.append((jid, ppl))
+                except Exception as ex:
+                    torch.cuda.synchronize()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    traceback.print_exc()
+                    print(ex)
+                    results.append((jid, 999999999999))
         
         torch.cuda.synchronize()
         threads = [threading.Thread(target=thread_main, args=(tid, models[tid], jobs[tid]), daemon=True) for tid in range(n_threads)]
@@ -600,20 +650,20 @@ def job_ga(
     evaluate_ds = [
         TextDataset.from_corpus(
             args, tokenizer, 
-            load_loft_retrieval_chat_corpus()[:10] +\
-            load_loft_rag_chat_corpus()[:5],
+            load_loft_retrieval_chat_corpus()[:5] +\
+            load_loft_rag_chat_corpus()[:20],
         ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer, 
+        #     load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
+        # ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer, 
+        #     load_infinite_bench_subset('kv_retrieval', tokenizer, 131072, 2),
+        # ),
         TextDataset.from_corpus(
             args, tokenizer, 
-            load_infinite_bench_subset('passkey', tokenizer, 3276800, 5),
-        ),
-        TextDataset.from_corpus(
-            args, tokenizer, 
-            load_infinite_bench_subset('kv_retrieval', tokenizer, 3276800, 15),
-        ),
-        TextDataset.from_corpus(
-            args, tokenizer, 
-            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 3276800, 5),
+            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 131072, 10),
         ),
     ]
     
