@@ -1,6 +1,7 @@
 import copy
 import gc
 import math
+import threading
 import time
 import os
 import random
@@ -127,6 +128,9 @@ def tokenizing_and_find_shared_prompt_on_corpus(
     shared_prompt = torch.tensor(shared_prompt)
     return shared_prompt, corpus
 
+STORAGE_LOCK = threading.Lock()
+STORAGE = {}
+
 @torch.inference_mode
 def evaluate_corpus(
     stream: torch.cuda.Stream, 
@@ -151,20 +155,32 @@ def evaluate_corpus(
         for i_sample, sample in enumerate(samples):
             with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
                 set_method('fa2')
-                output_truth = model(
-                    input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
-                    use_cache=False,
-                    num_logits_to_keep=8192,
-                )
+                logit_truth = None
+                hash_id = hash(str(sample.numpy().tolist())) % 1000000000
+                with STORAGE_LOCK:
+                    if hash_id in STORAGE:
+                        logit_truth = STORAGE[hash_id].to(stream.device)
+                if logit_truth is None:
+                    output_truth = model(
+                        input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
+                        use_cache=False,
+                        num_logits_to_keep=16384,
+                    )
+                    logit_truth = output_truth.logits.view(-1, output_truth.logits.shape[-1])
+                    with STORAGE_LOCK:
+                        STORAGE[hash_id] = logit_truth.cpu()
+                else:
+                    assert isinstance(logit_truth, torch.Tensor)
+                    assert logit_truth.device == stream.device
+                
                 set_method('hip')
                 output_student = model(
                     input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
                     use_cache=False,
-                    num_logits_to_keep=8192,
+                    num_logits_to_keep=16384,
                 )
-                
-                logit_truth = output_truth.logits.view(-1, output_truth.logits.shape[-1])
                 logit_student = output_student.logits.view(-1, output_student.logits.shape[-1])
+                
                 
                 loss = torch.nn.functional.kl_div(
                     input=logit_student.float().log_softmax(dim=-1),
@@ -480,11 +496,11 @@ def job_ga(
             layer_meta = layer
             layer = layer['stages']
             assert layer_meta['second_stage_k'] > 0
-            assert layer_meta['second_stage_k'] <= 65536
+            assert layer_meta['second_stage_k'] <= 8192 # we have to restrict this to prevent full dense attention...
             assert layer_meta['sliding_window_size'] >= 64
-            assert layer_meta['sliding_window_size'] < 1024*1024
+            assert layer_meta['sliding_window_size'] <= 8192
             assert layer_meta['sink_token_size'] >= 4
-            assert layer_meta['sink_token_size'] < 1024*1024
+            assert layer_meta['sink_token_size'] <= 8192
             assert len(layer) >= 2, 'too small'
             assert len(layer) <= 7, 'too large'
             assert layer[0].stage_k == None, 'first quadratic'
@@ -568,7 +584,7 @@ def job_ga(
     latency_cache = {}
     
     def evaluate_latency(model, stages):
-        hash_id = hash(str(stages))
+        hash_id = str(stages)
         if hash_id in latency_cache:
             return latency_cache[hash_id]
         else:
@@ -611,9 +627,22 @@ def job_ga(
                 latency_sum += start.elapsed_time(end)
                 latency_count += 1
             latency = latency_sum / latency_count
-            # latency = max(latency, 35)
             latency_cache[hash_id] = latency
             return latency
+    
+    def evaluate_latency_of_candidate(model, p):
+        latency_sum = 0
+        latency_count = 0
+        if len(p) == 2:
+            latency_sum += evaluate_latency(model, p[0]) * 4
+            latency_count += 4
+            latency_sum += evaluate_latency(model, p[1]) * 28
+            latency_count += 28
+        else:
+            for stage in p:
+                latency_sum += evaluate_latency(model, stage)
+                latency_count += 1
+        return latency_sum / latency_count
     
     def evaluate_population(population, model, evaluate_ds: List[TextDataset]):
         torch.cuda.synchronize()
@@ -676,15 +705,9 @@ def job_ga(
         latencies = []
         for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
             apply_setting(model, p)
-            latency_sum = 0
-            latency_count = 0
-            for stage in p:
-                latency_sum += evaluate_latency(model, stage)
-                latency_count += 1
-            latencies.append(latency_sum / latency_count)
-        
+            latency = evaluate_latency_of_candidate(model, p)
+            latencies.append(latency)
         scores = list(zip(latencies, ppls))
-        
         return scores
 
     # settings
@@ -722,7 +745,7 @@ def job_ga(
         # ),
         TextDataset.from_corpus(
             args, tokenizer, 
-            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 5),
+            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 1),
         ),
     ]
     
@@ -737,6 +760,7 @@ def job_ga(
         population.append(t)
     scores = evaluate_population(population, model, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
+    seed_latency, seed_loss = seed_score
     print('seed', seed_score)
     
     run = wandb.init(
@@ -761,23 +785,28 @@ def job_ga(
                 p1 = mutate(p1)
             for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
                 p2 = mutate(p2)
-            new_populations.append(p1)
-            new_populations.append(p2)
+            
+            p1_latency = evaluate_latency_of_candidate(model, p1)
+            p2_latency = evaluate_latency_of_candidate(model, p2)
+            if p1_latency < (seed_latency * 2):
+                new_populations.append(p1)
+            if p2_latency < (seed_latency * 2):
+                new_populations.append(p2)
         new_scores = evaluate_population(new_populations, model, evaluate_ds)
+        
+        population = population + new_populations
+        scores = scores + new_scores
         
         # kill way too slow candidates
         survived_populations = []
         survived_scores = []
-        for p, s in zip(new_populations, new_scores):
+        for p, s in zip(population, scores):
             if s[0] <= (seed_score[0] * 2):
                 survived_populations.append(p)
                 survived_scores.append(s)
-        print(f'{len(survived_scores) - len(new_scores)} candidates are killed')
-        new_populations = survived_populations
-        new_scores = survived_scores
-        
-        population = population + new_populations
-        scores = scores + new_scores
+        # print(f'{len(new_scores) - len(survived_scores)} candidates are killed')
+        population = survived_populations
+        scores = survived_scores
         
         # just check scores
         # best_args = list(map(lambda x: x[0], list(sorted(zip(range(len(scores)), scores), key=lambda x: x[1][1], reverse=False))[:num_population]))
