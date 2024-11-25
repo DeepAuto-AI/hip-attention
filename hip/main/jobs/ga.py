@@ -722,7 +722,7 @@ def job_ga(
         # ),
         TextDataset.from_corpus(
             args, tokenizer, 
-            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 16384, 1),
+            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 5),
         ),
     ]
     
@@ -802,9 +802,10 @@ def job_ga(
         # for line in best_scores:
         plt.scatter(
             list(map(lambda x: x[0], sorted(best_scores, key=lambda x:x[0]))), 
-            list(map(lambda x: x[1], sorted(best_scores, key=lambda x:x[0])))
+            list(map(lambda x: x[1], sorted(best_scores, key=lambda x:x[0]))),
+            label='population',
         )
-        plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s')
+        plt.scatter(x=[seed_score[0]], y=[seed_score[1]], marker='s', label='seed')
         
         population = np.array(population, dtype=object)[np.array(best_args)].tolist()
         scores = np.array(scores, dtype=object)[np.array(best_args)].tolist()
@@ -818,17 +819,19 @@ def job_ga(
         s_cand_loss = np.argsort(s[s_cand, 1])[0]
         best_idx = s_cand[s_cand_loss].item()
         
-        plt.scatter(x=[scores[best_idx][0], ], y=[scores[best_idx][1], ], marker='s')
+        plt.scatter(x=[scores[best_idx][0], ], y=[scores[best_idx][1], ], marker='s', label='best')
+        plt.legend()
         plt.grid()
         plt.savefig('dummy_pareto.png')
-        if (current_generation % 10) == 0:
+        if (current_generation % 1) == 0:
             plt.savefig(f'./saves/pareto/dummy_pareto_{current_generation}.png')
         
         json_data = {
             'generation': current_generation,
-            'population': population, 
-            'scores': scores, 
             'best_idx': best_idx,
+            'best_candidate': population[best_idx],
+            'scores': scores, 
+            'population': population, 
         }
         
         class EnhancedJSONEncoder(json.JSONEncoder):
@@ -840,7 +843,7 @@ def job_ga(
         with open('./saves/pareto/population.json', 'w') as f:
             json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
         
-        if ((current_generation % 10) == 0):
+        if ((current_generation % 1) == 0):
             with open(f'./saves/pareto/population_gen{current_generation}.json', 'w') as f:
                json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
         print('=====> gen', current_generation, scores[best_idx], '<=====')
