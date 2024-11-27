@@ -307,6 +307,76 @@ def custom_attention(
                 k = k.permute(0, 2, 1, 3)
                 v = v.permute(0, 2, 1, 3)
                 
+                null = None
+                true = True
+                
+                # extend_stages = [
+                #     {
+                #         "second_stage_k": 4096,
+                #         "sliding_window_size": 1024,
+                #         "sink_token_size": 256,
+                #         "sa_extend_backend": "dynamic_extend",
+                #         "stages": [
+                #         {
+                #             "stage_block_size_q": 128,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 512,
+                #             "stage_k": null,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": "streaming"
+                #         },
+                #         {
+                #             "stage_block_size_q": 64,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 32,
+                #             "stage_k": 16384,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": null
+                #         }
+                #         ]
+                #     },
+                #     {
+                #         "second_stage_k": 16384,
+                #         "sliding_window_size": 2048,
+                #         "sink_token_size": 256,
+                #         "sa_extend_backend": "dynamic_extend",
+                #         "stages": [
+                #         {
+                #             "stage_block_size_q": 256,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 256,
+                #             "stage_k": null,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": "streaming"
+                #         },
+                #         {
+                #             "stage_block_size_q": 256,
+                #             "stage_block_stride_q": 2,
+                #             "stage_chunk_size": 16,
+                #             "stage_k": 32768,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": null
+                #         }
+                #         ]
+                #     }
+                # ][0 if layer_idx < 4 else 1]
+                
+                if extend_stages and isinstance(extend_stages['stages'][0], dict):
+                    for i in range(len(extend_stages['stages'])):
+                        extend_stages['stages'][i] = ScanStage(**extend_stages['stages'][i])
+                
                 # if q.shape == k.shape:
                 #     q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
                 #     k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]

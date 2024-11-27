@@ -1972,7 +1972,7 @@ def main_debug():
     k_mask = (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values).expand(_N, _T // k_group_size, k_group_size, _H, _D).contiguous().view(*k.shape)
     
     if batch_size > 1:
-        q = q[:, :1, :, :].contiguous()
+        q = q[:, -512:, :, :].contiguous()
         q = q.expand(batch_size, -1, -1, -1)
         k = k.expand(batch_size, -1, -1, -1)
         v = v.expand(batch_size, -1, -1, -1)
@@ -2183,6 +2183,8 @@ def main_debug():
     
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
+    if os.getenv('DEBUG', '0') == '1':
+        input('>>>')
     
     dual_stage_kwargs['args'].using_extend = False
     dual_stage_kwargs['args'].need_apply_rope = False
