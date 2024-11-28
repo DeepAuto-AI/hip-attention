@@ -752,12 +752,14 @@ def job_ga(
     print('shared prompt size', evaluate_ds)
     
     # run GA
+    load_population = os.getenv('LOAD_POPULATION', '0') == '1'
     population = [seed]
-    for _ in range(num_population):
-        t = copy.deepcopy(seed)
-        for _ in range(10):
-            t = mutate(t)
-        population.append(t)
+    if not load_population:
+        for _ in range(num_population):
+            t = copy.deepcopy(seed)
+            for _ in range(10):
+                t = mutate(t)
+            population.append(t)
     scores = evaluate_population(population, model, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
     seed_latency, seed_loss = seed_score
@@ -765,7 +767,7 @@ def job_ga(
     print(scores)
     print('seed', seed_score)
     
-    if os.getenv('LOAD_POPULATION', '0') == '1':
+    if load_population:
         # {
         #     'generation': current_generation,
         #     'best_idx': best_idx,
@@ -778,15 +780,16 @@ def job_ga(
             state = json.load(f)
         population = state['population']
         for p in population:
-            for i in range(p['stages']):
-                ss = p['stages'][i]
-                p['stages'][i] = ScanStage(
-                    stage_block_size_q=ss['stage_block_size_q'],
-                    stage_block_stride_q=ss['stage_block_stride_q'],
-                    stage_chunk_size=ss['stage_chunk_size'],
-                    stage_k=ss['stage_k'],
-                    stage_stride=ss['stage_stride'],
-                )
+            for l in p:
+                for i in range(len(l['stages'])):
+                    ss = l['stages'][i]
+                    l['stages'][i] = ScanStage(
+                        stage_block_size_q=ss['stage_block_size_q'],
+                        stage_block_stride_q=ss['stage_block_stride_q'],
+                        stage_chunk_size=ss['stage_chunk_size'],
+                        stage_k=ss['stage_k'],
+                        stage_stride=ss['stage_stride'],
+                    )
         scores = state['scores']
     
     run = wandb.init(
