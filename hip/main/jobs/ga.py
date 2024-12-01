@@ -224,6 +224,10 @@ def evaluate_corpus(
                 except triton.runtime.errors.OutOfResources as ex:
                     print(ex)
                     return 99999999
+                except RuntimeError as ex:
+                    traceback.print_exc()
+                    print(ex)
+                    return 99999999
             state = output.past_key_values
             
             # stream.synchronize()

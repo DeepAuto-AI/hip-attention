@@ -307,9 +307,9 @@ def load_model(args):
 
 
 def main():
-    seed()
-    
     args = eval_args()
+    
+    seed(seed=args.seed)
     
     assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'ga']
     

@@ -46,6 +46,8 @@ class ArgsType:
     dataset: str = 'wikitext'
     
     endpoint: str = 'http://localhost:30000/'
+    
+    seed: int = 42
 
 def eval_args(
     default_model = 'llama3.1_8b',
@@ -82,6 +84,7 @@ def eval_args(
     parser.add_argument('--overwrite', default=ArgsType.overwrite, action='store_true')
     parser.add_argument('--dataset', default=ArgsType.dataset, type=str)
     parser.add_argument('--endpoint', default=ArgsType.endpoint, type=str)
+    parser.add_argument('--seed', type=int, default=ArgsType.seed)
     args = parser.parse_args()
     print(args)
     return args
