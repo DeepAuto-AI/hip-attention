@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import math
 import os
 import time
+import cv2
 
 from matplotlib import pyplot as plt
 from hip.models.hip_attention.attention2_draft_prefetch import (
@@ -1245,6 +1246,116 @@ def calculate_chunk_score(
                 mask=mask_chunk,
             )
 
+@triton.jit
+def compute_v_cos(
+    V,
+    stride_v_bsz,
+    stride_v_tsrc,
+    stride_v_head_kv,
+    strdie_v_hid,
+    
+    INDICES, 
+    stride_indices_bsz, 
+    stride_indices_bdst, 
+    stride_indices_head, 
+    strdie_indices_k,
+    
+    OUT_SCORES,
+    stride_out_scores_bsz,
+    stride_out_scores_bdst, 
+    stride_out_scores_head,
+    stride_out_scores_k,
+    
+    TDST,
+    TSRC,
+    HEAD,
+    KS,
+    
+    HEAD_GROUP: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    
+    idx_head = pid % HEAD
+    pid = pid // HEAD
+    
+    idx_bk = pid % tl.cdiv(KS, GROUP_K)
+    idx_k = idx_bk * GROUP_K + tl.arange(0, GROUP_K)
+    mask_k = idx_k < KS
+    pid = pid // tl.cdiv(KS, GROUP_K)
+    
+    idx_bdst = pid % tl.cdiv(TDST, BLOCK_SIZE_Q)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    mask_tdst = idx_tdst < TDST
+    idx_bsz = pid // tl.cdiv(TDST, BLOCK_SIZE_Q)
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    
+    indices = tl.load(
+        INDICES +\
+            idx_bsz * stride_indices_bsz +\
+            idx_bdst * stride_indices_bdst +\
+            idx_head * stride_indices_head +\
+            idx_k * strdie_indices_k,
+        mask=mask_k,
+        other=TSRC,
+    )
+    
+    idx_tsrc = tl.ravel(indices[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+    mask_tsrc = (idx_tsrc < TSRC) & (idx_tsrc >= 0)
+    
+    values_tdst = tl.load(
+        V +\
+            idx_bsz * stride_v_bsz+\
+            idx_tdst[:, None] * stride_v_tsrc+\
+            (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+            idx_hid[None, :] * strdie_v_hid,
+        mask=mask_tdst[:, None],
+        other=0,
+    )
+    values_tdst = (
+        tl.sum(values_tdst.to(tl.float32), axis=0) /\
+        tl.sum(mask_tdst.to(tl.int32)).to(tl.float32)
+    ).to(values_tdst.dtype)
+    
+    values_tsrc = tl.load(
+        V +\
+            idx_bsz * stride_v_bsz +\
+            idx_tsrc[:, None] * stride_v_tsrc +\
+            (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+            idx_hid[None, :] * strdie_v_hid,
+        mask=mask_tsrc[:, None],
+        other=0,
+    )
+    
+    values_tdst_norm = tl.sqrt(tl.sum(values_tdst * values_tdst))
+    values_tsrc_norm = tl.sqrt(tl.sum(values_tsrc * values_tsrc, axis=-1))
+    
+    normalized_values_tdst = values_tdst / values_tdst_norm[None]
+    normalized_values_tsrc = values_tsrc / values_tsrc_norm[:, None]
+    
+    cos_sim_scores = tl.sum(normalized_values_tdst[None, :] * normalized_values_tsrc, axis=-1)
+    cos_sim_scores = ((cos_sim_scores + 1) * 0.5).to(tl.float32)
+    cos_sim_scores = cos_sim_scores * cos_sim_scores * cos_sim_scores
+    
+    scores = tl.reshape(cos_sim_scores, (GROUP_K, BLOCK_SIZE_K))
+    # scores = tl.reshape(values_tsrc_norm, (GROUP_K, BLOCK_SIZE_K))
+    mask_scores = tl.reshape(mask_tsrc, (GROUP_K, BLOCK_SIZE_K))
+    scores = tl.sum(scores, axis=-1) / tl.sum(mask_scores.to(scores.dtype), axis=-1)
+    
+    tl.store(
+        OUT_SCORES +\
+            idx_bsz * stride_out_scores_bsz +\
+            idx_bdst * stride_out_scores_bdst +\
+            idx_head * stride_out_scores_head +\
+            idx_k * stride_out_scores_k,
+        value=scores,
+        mask=mask_k,
+    )
+
 def dual_stage_quadratic_hip_attention(
     q: Tensor, 
     k: Optional[Tensor], 
@@ -1691,6 +1802,48 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
+                apply_v_cos = (os.getenv('APPLY_V_COS', '0') == '1')
+                if apply_v_cos:
+                    v_scores = torch.zeros_like(out_scores)
+                    V_BLOCK_SIZE_K = 4
+                    V_GROUP_K = 64 // V_BLOCK_SIZE_K
+                    grid = (
+                        v_scores.shape[0] *\
+                        v_scores.shape[1] *\
+                        v_scores.shape[2] *\
+                        triton.cdiv(v_scores.shape[3], V_GROUP_K),
+                    )
+                    compute_v_cos[grid](
+                        v, *v.stride(),
+                        indices_left, *indices_left.stride(),
+                        v_scores, *v_scores.stride(),
+                        
+                        TDST,
+                        MAX_TSRC,
+                        HEAD,
+                        v_scores.shape[-1],
+                        
+                        HEAD_GROUP=HEAD // HEAD_KV,
+                        GROUP_K=V_GROUP_K,
+                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                        BLOCK_SIZE_K=V_BLOCK_SIZE_K,
+                        BLOCK_HID=v.shape[-1],
+                    )
+                    
+                    if DEBUG and DEBUG_RENDER:
+                        img = v_scores[0, :, DEBUG_HEAD, :].cpu().float().numpy()
+                        plt.clf()
+                        plt.imshow(img)
+                        plt.colorbar()
+                        plt.savefig('dummy_v_scores.png')
+                    
+                    out_scores = out_scores - out_scores.min(dim=-1, keepdim=True).values
+                    out_scores = torch.where(
+                        torch.isnan(v_scores),
+                        out_scores,
+                        out_scores * v_scores
+                    )
+                
                 if (i_stage < (len(stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
                     next_stage_k = (stages[i_stage + 1].stage_k // stages[i_stage].stage_chunk_size)
@@ -1857,6 +2010,30 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
+    
+    if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+        test_v = v[0, :, :, :] # type: torch.Tensor
+        test_v = test_v.square().sum(dim=-1).sqrt().sum(dim=-1)
+        test_v = torch.nn.functional.avg_pool1d(test_v.unsqueeze(0), 11, padding=5).squeeze(0)
+        test_v = test_v.cpu().float().numpy().tolist()
+        plt.figure(figsize=(100, 3))
+        plt.plot(test_v, linewidth=0.5)
+        plt.savefig('dummy_v_norm.png', bbox_inches='tight', pad_inches=0)
+        
+        plt.figure(figsize=(64,1))
+        plt.clf()
+        test_v = v[0, ::1, DEBUG_HEAD, :].to(torch.float32)
+        test_v = test_v / (test_v.square().sum(-1, keepdim=True).sqrt())
+        test_v = -(test_v[-128:, :] @ test_v.T - 1)
+        test_v = test_v.to(torch.float32).cpu().numpy()
+        hm = cv2.normalize(test_v, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        hm = cv2.applyColorMap(hm, cv2.COLORMAP_HOT)
+        cv2.imwrite("dummy_v_matrix.png", hm)
+        plt.figure(figsize=(4,3))
+        
+        # plt.imshow(test_v, interpolation='nearest')
+        # plt.axis('off')
+        # plt.savefig('dummy_v_matrix.png', dpi=1000, bbox_inches='tight', pad_inches=0)
     
     context = block_sparse_attention(
         q=q, 
