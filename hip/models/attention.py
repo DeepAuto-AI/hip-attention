@@ -123,7 +123,7 @@ def custom_attention(
                     v=value_states.permute(0, 2, 1, 3),
                     softmax_scale=sm_scaler,
                     causal=True,
-                    softcap=attn_logit_softcapping,
+                    softcap=attn_logit_softcapping if attn_logit_softcapping is not None else 0,
                     window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['spda']:
@@ -147,7 +147,7 @@ def custom_attention(
                     v_cache=value_states.permute(0, 2, 1, 3),
                     softmax_scale=sm_scaler,
                     causal=True,
-                    softcap=attn_logit_softcapping,
+                    softcap=attn_logit_softcapping if attn_logit_softcapping is not None else 0,
                     window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
             elif attention_method in ['sdpa']:
