@@ -756,6 +756,7 @@ class Qwen2CustomAttention(Qwen2Attention):
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
+        self.tree_extend_stages = None
 
         # self.tree_avgpool_scaler = nn.Sequential(
         #     nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -809,8 +810,16 @@ class Qwen2CustomAttention(Qwen2Attention):
             use_cache: bool = False,
             **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
         bsz, q_len, _ = hidden_states.size()
+        
+        if self.attention_method in ['hip', 'skewed']:
+            force_extend = True
+            need_apply_rope = True
+            model_context_length = 32768
+        else:
+            force_extend = False
+            need_apply_rope = False
+            model_context_length = 32768
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -831,8 +840,10 @@ class Qwen2CustomAttention(Qwen2Attention):
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         
+        cos_all, sin_all = self.rotary_emb(value_states, key_states.shape[-2])
+        
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        if (self.tree_rope_method == 'none'):
+        if (self.tree_rope_method == 'none') and (not force_extend):
             if self.layer_idx in self.tree_dense_layers:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
             else:
@@ -846,8 +857,9 @@ class Qwen2CustomAttention(Qwen2Attention):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        if self.attention_method not in ['hip', 'fa2', 'none', 'skewed']:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
@@ -857,45 +869,101 @@ class Qwen2CustomAttention(Qwen2Attention):
         if past_key_value is not None:
             assert hasattr(past_key_value, "cumsum")
             last_cumsum = past_key_value.get_cumsum(self.layer_idx)
+            
+        if force_extend:
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask, 
+                causal_mask=None,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
 
-        attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
-            query_states=query_states, key_states=key_states, value_states=value_states,
-            attention_mask=attention_mask, causal_mask=None,
-            attention_dropout=self.attention_dropout if self.training else 0.0,
+                # Attention method
+                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
 
-            # Attention method
-            attention_method='none' if self.layer_idx in self.tree_dense_layers else self.attention_method,
-            tree_reformer=self.tree_reformer,
-            tree_performer=self.tree_performer,
+                # hip parameters
+                tree_k=mask_k,
+                tree_block_size_q=self.tree_block_size_q,
+                tree_block_stride_q=self.tree_block_stride_q, 
+                tree_block_size_k=self.tree_block_size_k,
+                tree_block_stride_k=self.tree_block_stride_k, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
 
-            # hip parameters
-            tree_k=mask_k,
-            tree_block_size_q=self.tree_block_size_q, tree_block_size_k=self.tree_block_size_k,
-            tree_dense_queries=self.tree_dense_queries,
-            tree_last_dense_queries=self.tree_last_dense_queries,
-            tree_sampling_method=self.tree_sampling_method,
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
 
-            # Latency optimization tweaks
-            tree_enable_flash=self.tree_enable_flash,
-            tree_enable_sparq=self.tree_enable_sparq,
-            tree_use_sliding_window=self.tree_use_sliding_window,
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
 
-            # Context averaging parameters
-            tree_using_context_avg=self.tree_using_context_avg,
-            tree_avgpool_scaler=self.tree_avgpool_scaler,
-            last_cumsum=last_cumsum,
-            hidden_states=hidden_states,
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                need_apply_rope=need_apply_rope,
+                rope_cos=cos_all,
+                rope_sin=sin_all,
+                position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
 
-            # RoPE parameters
-            tree_rope_method=self.tree_rope_method,
-            rope_cos=cos,
-            rope_sin=sin,
-            position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=None,
+                
+                sm_scaler=1 / math.sqrt(self.head_dim),
+                model_sliding_window=None if (not force_extend) else 131072,
+                model_context_length=model_context_length,
+                layer_idx=self.layer_idx,
+                extend_stages=self.tree_extend_stages,
+            )
+        else:
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, key_states=key_states, value_states=value_states,
+                attention_mask=attention_mask, causal_mask=None,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
 
-            # Attention sparsity loss
-            output_attn_sparsity_loss=output_attn_sparsity_loss,
-            tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-        )
+                # Attention method
+                attention_method='none' if self.layer_idx in self.tree_dense_layers else self.attention_method,
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
+
+                # hip parameters
+                tree_k=mask_k,
+                tree_block_size_q=self.tree_block_size_q, tree_block_size_k=self.tree_block_size_k,
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
+
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+
+                # Context averaging parameters
+                tree_using_context_avg=self.tree_using_context_avg,
+                tree_avgpool_scaler=self.tree_avgpool_scaler,
+                last_cumsum=last_cumsum,
+                hidden_states=hidden_states,
+
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method,
+                rope_cos=cos,
+                rope_sin=sin,
+                position_ids=position_ids.repeat_interleave(self.num_heads, 0),
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+            )
 
         if last_cumsum is not None:
             past_key_value.update_cumsum(last_cumsum. layer_idx)
@@ -1381,6 +1449,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         output_attn_sparsity_loss: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        num_logits_to_keep: int = 0,
+        output_logits = False,
     ) -> Union[Tuple, CausalLMOutputWithPastAndL1]:
         r"""
         Args:
@@ -1428,22 +1498,73 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             return_dict=return_dict,
         )
 
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
+        # hidden_states = outputs[0]
+        # logits = self.lm_head(hidden_states)
+        # logits = logits.float()
 
         loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+        hidden_states = outputs[0]
+        if not self.training and not output_logits and past_key_values is None and num_logits_to_keep == 0:
+            # NOTE: to avoid stroing of logits, which is useless for measuring PPL
+            if labels is not None:
+                from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
+                
+                first_skip = 0
+                # Shift so that tokens < n predict n
+                shift_states = hidden_states[..., first_skip:-1, :].contiguous()
+                shift_labels = labels[..., first_skip+1:].contiguous()
+                # Flatten the tokens
+                shift_states = shift_states.view(-1, shift_states.shape[-1])
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_states.device)
+                
+                loss = memory_efficient_llm_ce(
+                    shift_states,
+                    self.lm_head.weight,
+                    shift_labels,
+                )
+            logits = None
+        else:
+            if self.config.pretraining_tp > 1:
+                lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+                logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+                logits = torch.cat(logits, dim=-1)
+            else:
+                if num_logits_to_keep >= 0:
+                    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+                else:
+                    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:-num_logits_to_keep+1, :])
+
+            loss = None
+            if labels is not None:
+                logits = logits.float()
+                # Shift so that tokens < n predict n
+                if num_logits_to_keep > 0:
+                    labels = labels[..., -num_logits_to_keep:]
+                
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+
+        # loss = None
+        # if labels is not None:
+        #     # Shift so that tokens < n predict n
+        #     shift_logits = logits[..., :-1, :].contiguous()
+        #     shift_labels = labels[..., 1:].contiguous()
+        #     # Flatten the tokens
+        #     loss_fct = CrossEntropyLoss()
+        #     shift_logits = shift_logits.view(-1, self.config.vocab_size)
+        #     shift_labels = shift_labels.view(-1)
+        #     # Enable model parallelism
+        #     shift_labels = shift_labels.to(shift_logits.device)
+        #     loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]

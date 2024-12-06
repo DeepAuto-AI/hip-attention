@@ -81,7 +81,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
             input_ids = encodings[:, begin_loc:end_loc].to(device)
-            input_ids[:, 0] = tokenizer.bos_token_id
+            if tokenizer.bos_token_id is not None:
+                input_ids[:, 0] = tokenizer.bos_token_id
             target_ids = input_ids.clone()
             target_ids[:, :-trg_len] = -100
 
