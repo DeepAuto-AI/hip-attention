@@ -1252,19 +1252,61 @@ def compute_v_cos(
     stride_v_bsz,
     stride_v_tsrc,
     stride_v_head_kv,
-    strdie_v_hid,
-    
+    stride_v_hid,
     INDICES, 
     stride_indices_bsz, 
     stride_indices_bdst, 
     stride_indices_head, 
     strdie_indices_k,
+    POS,
+    stride_pos_bsz,
+    stride_pos_tdst,
     
     OUT_SCORES,
     stride_out_scores_bsz,
     stride_out_scores_bdst, 
     stride_out_scores_head,
     stride_out_scores_k,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page, 
+    stride_v_cache_offset, 
+    stride_v_cache_kv_head, 
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
     
     TDST,
     TSRC,
@@ -1294,6 +1336,16 @@ def compute_v_cos(
     
     idx_hid = tl.arange(0, BLOCK_HID)
     
+    pos_tdst = tl.load(
+        POS + \
+            idx_bsz * stride_pos_bsz +\
+            idx_tdst * stride_pos_tdst,
+        mask=mask_tdst,
+        other=0,
+    )
+    mask_tdst = mask_tdst & (pos_tdst < TSRC)
+    pos_tdst_max = tl.max(pos_tdst)
+    
     indices = tl.load(
         INDICES +\
             idx_bsz * stride_indices_bsz +\
@@ -1301,35 +1353,139 @@ def compute_v_cos(
             idx_head * stride_indices_head +\
             idx_k * strdie_indices_k,
         mask=mask_k,
-        other=TSRC,
+        other=pos_tdst_max,
     )
     
     idx_tsrc = tl.ravel(indices[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-    mask_tsrc = (idx_tsrc < TSRC) & (idx_tsrc >= 0)
+    mask_tsrc = (idx_tsrc < pos_tdst_max) & (idx_tsrc >= 0)
     
-    values_tdst = tl.load(
-        V +\
-            idx_bsz * stride_v_bsz+\
-            idx_tdst[:, None] * stride_v_tsrc+\
-            (idx_head // HEAD_GROUP) * stride_v_head_kv +\
-            idx_hid[None, :] * strdie_v_hid,
-        mask=mask_tdst[:, None],
-        other=0,
-    )
+    # values_tdst = tl.load(
+    #     V +\
+    #         idx_bsz * stride_v_bsz+\
+    #         idx_tdst[:, None] * stride_v_tsrc+\
+    #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+    #         idx_hid[None, :] * strdie_v_hid,
+    #     mask=mask_tdst[:, None],
+    #     other=0,
+    # )
+    
+    tl.static_assert(not USING_OFFLOAD_CACHE)
+    values_tdst = load_tokens(
+        V, 
+        stride_v_bsz,
+        stride_v_tsrc,
+        stride_v_head_kv,
+        stride_v_hid,
+        
+        USING_PAGES,
+        PAGE_SIZE,
+        V_CACHE,
+        stride_v_cache_page,
+        stride_v_cache_offset,
+        stride_v_cache_kv_head,
+        stride_v_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_b,
+        
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        True,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
+        
+        idx_bsz,
+        pos_tdst[:, None],
+        idx_head // HEAD_GROUP,
+        idx_hid[None, :],
+        
+        mask_tdst[:, None],
+        
+        GROUP_K * BLOCK_SIZE_K,
+    ).to(tl.bfloat16)
+    
     values_tdst = (
         tl.sum(values_tdst.to(tl.float32), axis=0) /\
         tl.sum(mask_tdst.to(tl.int32)).to(tl.float32)
     ).to(values_tdst.dtype)
     
-    values_tsrc = tl.load(
-        V +\
-            idx_bsz * stride_v_bsz +\
-            idx_tsrc[:, None] * stride_v_tsrc +\
-            (idx_head // HEAD_GROUP) * stride_v_head_kv +\
-            idx_hid[None, :] * strdie_v_hid,
-        mask=mask_tsrc[:, None],
-        other=0,
-    )
+    # values_tsrc = tl.load(
+    #     V +\
+    #         idx_bsz * stride_v_bsz +\
+    #         idx_tsrc[:, None] * stride_v_tsrc +\
+    #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+    #         idx_hid[None, :] * strdie_v_hid,
+    #     mask=mask_tsrc[:, None],
+    #     other=0,
+    # )
+    
+    values_tsrc = load_tokens(
+        V, 
+        stride_v_bsz,
+        stride_v_tsrc,
+        stride_v_head_kv,
+        stride_v_hid,
+        
+        USING_PAGES,
+        PAGE_SIZE,
+        V_CACHE,
+        stride_v_cache_page,
+        stride_v_cache_offset,
+        stride_v_cache_kv_head,
+        stride_v_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_b,
+        
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        True,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
+        
+        idx_bsz,
+        idx_tsrc[:, None],
+        idx_head // HEAD_GROUP,
+        idx_hid[None, :],
+        
+        mask_tsrc[:, None],
+        
+        GROUP_K * BLOCK_SIZE_K,
+    ).to(tl.bfloat16)
     
     values_tdst_norm = tl.sqrt(tl.sum(values_tdst * values_tdst))
     values_tsrc_norm = tl.sqrt(tl.sum(values_tsrc * values_tsrc, axis=-1))
@@ -1811,23 +1967,28 @@ def dual_stage_quadratic_hip_attention(
                         v_scores.shape[0] *\
                         v_scores.shape[1] *\
                         v_scores.shape[2] *\
-                        triton.cdiv(v_scores.shape[3], V_GROUP_K),
+                        triton.cdiv(indices_left.shape[3], V_GROUP_K),
                     )
                     compute_v_cos[grid](
-                        v, *v.stride(),
+                        v, *args.safe_stride(v, 4),
                         indices_left, *indices_left.stride(),
+                        position_ids, *position_ids.stride(),
+                        
                         v_scores, *v_scores.stride(),
+                        
+                        *args.args_paged_kv_cache(),
+                        *args.args_offload_cache(is_masking=True),
                         
                         TDST,
                         MAX_TSRC,
                         HEAD,
-                        v_scores.shape[-1],
+                        indices_left.shape[3],
                         
                         HEAD_GROUP=HEAD // HEAD_KV,
                         GROUP_K=V_GROUP_K,
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         BLOCK_SIZE_K=V_BLOCK_SIZE_K,
-                        BLOCK_HID=v.shape[-1],
+                        BLOCK_HID=q.shape[-1],
                     )
                     
                     if DEBUG and DEBUG_RENDER:
