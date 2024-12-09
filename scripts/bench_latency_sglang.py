@@ -47,8 +47,8 @@ def run_sample(seq_len: int, batch_size: int, envs: dict):
 seq_lens = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
 batch_sizes = [1, 2, 4, 8, 16, 32]
 
-seq_lens = [256]
-batch_size = [1, 8, 32]
+# seq_lens = [256]
+# batch_size = [1, 8, 32]
 
 parent_envs = os.environ.copy()
 parent_envs.update({
@@ -60,15 +60,17 @@ test_envs = {
     'HIP G3E': {
         'SRT_ATTENTION_BACKEND': 'HIP_ATTN',
         'HIP_EXTEND': '1',
-        'EXTEND_LEN': '512',
+        'EXTEND_LEN': '600',
     },
     'HIP G2': {
         'SRT_ATTENTION_BACKEND': 'HIP_ATTN',
         'HIP_EXTEND': '0',
         'HIP_K': '1024',
+        'EXTEND_LEN': '600',
     },
     'SRT': {
         'SRT_ATTENTION_BACKEND': 'SRT',
+        'EXTEND_LEN': '600',
     },
 }
 
