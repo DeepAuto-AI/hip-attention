@@ -17,12 +17,16 @@ reset_result()
 def run_sample(seq_len: int, batch_size: int, envs: dict):
     reset_result()
     envs['SRT_MAX_BATCH'] = str(batch_size)
+
+    seq_len = seq_len * 1024
+    current_chunked_prefill_size = min(seq_len, chunked_prefill_size)
+
     subprocess.call(
         (
-            f"python -m sglang.bench_latency --model-path {model} "
-            f"--batch {batch_size} --input-len {seq_len * 1024} --output-len {256} --tp-size {n_gpus} "
-            f"--mem-fraction-static 0.7 --enable-p2p-check --chunked-prefill-size {chunked_prefill_size} "
-            f"--max-prefill-tokens {chunked_prefill_size} --result-filename {output_file}"
+            f"python -m sglang.bench_latency --model-path {model} --context-length {seq_len + 1024} "
+            f"--batch {batch_size} --input-len {seq_len} --output-len {256} --tp-size {n_gpus} "
+            f"--mem-fraction-static 0.7 --enable-p2p-check --chunked-prefill-size {current_chunked_prefill_size} "
+            f"--max-prefill-tokens {current_chunked_prefill_size} --result-filename {output_file}"
         ).split(), 
         env=envs, 
         # stdout=subprocess.DEVNULL, 
@@ -41,10 +45,10 @@ def run_sample(seq_len: int, batch_size: int, envs: dict):
         return None, None
 
 seq_lens = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
-batch_sizes = [1, 8, 32]
+batch_sizes = [1, 2, 4, 8, 16, 32]
 
-# seq_lens = [1, 64, 256]
-# batch_size = [1, 8, 32]
+seq_lens = [256]
+batch_size = [1, 8, 32]
 
 parent_envs = os.environ.copy()
 parent_envs.update({
@@ -110,7 +114,7 @@ os.makedirs('saves/bench_latency_sglang', exist_ok=True)
 
 json_path = 'saves/bench_latency_sglang/result.json' 
 with open(json_path, 'w') as f:
-    json.dump(results, f)
+    json.dump(results, f, indent=2)
 
 csv_path = 'saves/bench_latency_sglang/result.csv'
 lines = []
