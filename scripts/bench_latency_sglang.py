@@ -25,8 +25,8 @@ def run_sample(seq_len: int, batch_size: int, envs: dict):
             f"--max-prefill-tokens {chunked_prefill_size} --result-filename {output_file}"
         ).split(), 
         env=envs, 
-        stdout=subprocess.DEVNULL, 
-        stderr=subprocess.DEVNULL,
+        # stdout=subprocess.DEVNULL, 
+        # stderr=subprocess.DEVNULL,
     )
     if os.path.exists(output_file):
         with open(output_file, 'r') as f:
@@ -43,8 +43,8 @@ def run_sample(seq_len: int, batch_size: int, envs: dict):
 seq_lens = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
 batch_sizes = [1, 8, 32]
 
-seq_lens = [1, 64, 256]
-batch_size = [1, 8, 32]
+# seq_lens = [1, 64, 256]
+# batch_size = [1, 8, 32]
 
 parent_envs = os.environ.copy()
 parent_envs.update({
@@ -95,9 +95,9 @@ for test_exp_name, test_exp_update in test_envs.items():
             row_prefill.append(prefill_throughput)
             row_decode.append(decode_throughput)
             print(
-                f'[exp={test_exp_name}, batch_size={batch_size}, seq_len={seq_len}] '
+                f'\033[92m>>> [exp={test_exp_name}, batch_size={batch_size}, seq_len={seq_len}] '
                 f'prefill={(prefill_throughput if prefill_throughput is not None else 0.0):.2f}, '
-                f'decode={(decode_throughput if decode_throughput is not None else 0.0):.2f}'
+                f'decode={(decode_throughput if decode_throughput is not None else 0.0):.2f}\033[0m'
             )
         data_prefill.append(row_prefill)
         data_decode.append(row_decode)
@@ -113,7 +113,18 @@ with open(json_path, 'w') as f:
     json.dump(results, f)
 
 csv_path = 'saves/bench_latency_sglang/result.csv'
+lines = []
 for exp_name in test_envs.keys():
-    print(",".join([exp_name, 'prefill', f'{chunked_prefill_size}'] + list(map(lambda x: str(x), results[exp_name]['prefill'][0]))))
+    lines.append(
+        ",".join([exp_name, 'prefill', f'{chunked_prefill_size}'] + list(map(lambda x: str(x), results[exp_name]['prefill'][0]))).replace('None', '')
+    )
     for i, bsz in enumerate(batch_sizes):
-        print(",".join([exp_name, 'decode', f'{bsz}'] + list(map(lambda x: str(x), results[exp_name]['decode'][i]))))
+        lines.append(
+            ",".join([exp_name, 'decode', f'{bsz}'] + list(map(lambda x: str(x), results[exp_name]['decode'][i]))).replace('None', '')
+        )
+
+csv = "\n".join(lines) + '\n'
+with open(csv_path, 'w') as f:
+    f.write(csv)
+print('='*80)
+print(csv, end='')
