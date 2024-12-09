@@ -16,6 +16,7 @@ reset_result()
 
 def run_sample(seq_len: int, batch_size: int, envs: dict):
     reset_result()
+    envs['SRT_MAX_BATCH'] = str(batch_size)
     subprocess.call(
         (
             f"python -m sglang.bench_latency --model-path {model} "
@@ -93,10 +94,26 @@ for test_exp_name, test_exp_update in test_envs.items():
             )
             row_prefill.append(prefill_throughput)
             row_decode.append(decode_throughput)
-            print(f'[exp={test_exp_name}, batch_size={batch_size}, seq_len={seq_len}] prefill={prefill_throughput:.2f}, decode={decode_throughput:.2f}')
+            print(
+                f'[exp={test_exp_name}, batch_size={batch_size}, seq_len={seq_len}] '
+                f'prefill={(prefill_throughput if prefill_throughput is not None else 0.0):.2f}, '
+                f'decode={(decode_throughput if decode_throughput is not None else 0.0):.2f}'
+            )
         data_prefill.append(row_prefill)
         data_decode.append(row_decode)
     results[test_exp_name] = {
         'prefill': data_prefill,
         'decode': data_decode,
     }
+
+os.makedirs('saves/bench_latency_sglang', exist_ok=True)
+
+json_path = 'saves/bench_latency_sglang/result.json' 
+with open(json_path, 'w') as f:
+    json.dump(results, f)
+
+csv_path = 'saves/bench_latency_sglang/result.csv'
+for exp_name in test_envs.keys():
+    print(",".join([exp_name, 'prefill', f'{chunked_prefill_size}'] + list(map(lambda x: str(x), results[exp_name]['prefill'][0]))))
+    for i, bsz in enumerate(batch_sizes):
+        print(",".join([exp_name, 'decode', f'{bsz}'] + list(map(lambda x: str(x), results[exp_name]['decode'][i]))))
