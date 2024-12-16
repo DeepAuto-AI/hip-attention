@@ -1990,8 +1990,9 @@ def dual_stage_quadratic_hip_attention(
             if stage_info.require_post_sort:
                 apply_v_dot = (os.getenv('APPLY_V_DOT', '0') == '1')
                 # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
+                apply_v_dot = apply_v_dot and (i_stage != 0)
                 if apply_v_dot:
-                    v_scores = torch.zeros_like(out_scores)
+                    v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
                     V_BLOCK_SIZE_K = 8
                     V_BLOCK_STRIDE_Q = 1
                     V_BLOCK_STRIDE_K = 1
@@ -2027,6 +2028,8 @@ def dual_stage_quadratic_hip_attention(
                         BLOCK_HID=q.shape[-1],
                     )
                     
+                    if out_scores.dtype != torch.float32:
+                        out_scores = out_scores.to(torch.float32)
                     out_scores = out_scores - out_scores.min(dim=-1, keepdim=True).values
 
                     # print(indices_left[0, -1, DEBUG_HEAD, :])
