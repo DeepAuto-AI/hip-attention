@@ -6,7 +6,7 @@ import torch
 n_gpus = torch.cuda.device_count()
 model = 'meta-llama/Meta-Llama-3.1-8B-Instruct'
 output_file = 'cache/sglang/result.json'
-chunked_prefill_size = 8192
+chunked_prefill_size = int(os.getenv('CHUNK_SIZE', '8192'))
 
 def reset_result():
     os.makedirs('cache/sglang', exist_ok=True)
