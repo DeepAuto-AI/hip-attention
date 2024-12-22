@@ -56,6 +56,7 @@ MODELS = {
     'gemma2_9b': 'google/gemma-2-9b',
     'gemma2_2b_it': 'google/gemma-2-2b-it',
     'gemma2_9b_it': 'google/gemma-2-9b-it',
+    'exaone3.5_7.8b_instruct': 'LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct',
 }
 
 OBSOLATED_VLLM_MODELS = {
