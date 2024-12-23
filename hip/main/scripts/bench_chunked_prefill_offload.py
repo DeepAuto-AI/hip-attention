@@ -173,10 +173,30 @@ def bench_offload(seq_len: int, chunk_size: int):
             ls.append(time.time() - t)
     return sum(ls) / len(ls) * 1000
 
+def bench_mlp(seq_len: int, chunk_size: int):
+    x = torch.zeros((chunk_size, 32 * 128), dtype=torch.bfloat16, device=0)
+    w1 = torch.zeros((32 * 128 * 4, 32 * 128), dtype=torch.bfloat16, device=0)
+    w2 = torch.zeros((32 * 128, 32 * 128 * 4), dtype=torch.bfloat16, device=0)
+    
+    ls = []
+    for i in tqdm.tqdm(range(SAMPLE_SIZE), dynamic_ncols=True, leave=False):
+        torch.cuda.synchronize()
+        t = time.time()
+        
+        y = torch.nn.functional.linear(x, w1)
+        z = torch.nn.functional.linear(y, w2)
+        assert x.shape == z.shape
+        
+        torch.cuda.synchronize()
+        if i > 3:
+            ls.append(time.time() - t)
+    return sum(ls) / len(ls) * 1000
+
 ls_hip_step = []
 ls_hip = []
 ls_fa2 = []
 ls_offload = []
+ls_mlp = []
 
 chunk_size = 32
 seq_lens = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -184,24 +204,22 @@ seq_lens = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
 for seq_len in seq_lens:
     seq_len = seq_len * 1024
     cs = min(chunk_size, seq_len) * 1024
-    latency_hip_step = bench_hip_chunked(seq_len, cs, 2048)
-    latency_hip = bench_hip(seq_len, cs)
-    latency_fa2 = bench_fa2(seq_len, cs)
-    latency_offload = bench_offload(seq_len, cs)
-    ls_hip_step.append(latency_hip_step)
-    ls_hip.append(latency_hip)
-    ls_fa2.append(latency_fa2)
-    ls_offload.append(latency_offload)
+    ls_hip_step.append(bench_hip_chunked(seq_len, cs, 64))
+    ls_hip.append(bench_hip(seq_len, cs))
+    ls_fa2.append(bench_fa2(seq_len, cs))
+    ls_offload.append(bench_offload(seq_len, cs))
+    ls_mlp.append(bench_mlp(seq_len, cs))
     print(seq_len, 'done')
 
 import matplotlib.pyplot as plt
 
 plt.clf()
 
-plt.plot(seq_lens, ls_hip_step, label='hip step')
+# plt.plot(seq_lens, ls_hip_step, label='hip step')
 plt.plot(seq_lens, ls_hip, label='hip')
-plt.plot(seq_lens, ls_fa2, label='fa2')
+# plt.plot(seq_lens, ls_fa2, label='fa2')
 plt.plot(seq_lens, ls_offload, label='copy (PCIe)')
+plt.plot(seq_lens, ls_mlp, label='mlp')
 
 plt.grid()
 plt.legend()
