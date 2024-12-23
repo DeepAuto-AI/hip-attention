@@ -15,7 +15,12 @@ ops = load(
     ],
 )
 
-def tensor_from_pointer(ptr: int, shape: Tuple[int], dtype: torch.dtype, device_index):
+def tensor_from_pointer(
+    ptr: int, 
+    shape: Tuple[int], 
+    dtype: torch.dtype, 
+    device_index: int
+) -> torch.Tensor:
     if dtype == torch.float16:
         elem_size = 16
     elif dtype == torch.bfloat16:
