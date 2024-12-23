@@ -1325,6 +1325,8 @@ def compute_v_cos(
     GROUP_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
     BLOCK_HID: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -1338,7 +1340,7 @@ def compute_v_cos(
     pid = pid // tl.cdiv(KS, GROUP_K)
     
     idx_bdst = pid % tl.cdiv(TDST, BLOCK_SIZE_Q)
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     mask_tdst = idx_tdst < TDST
     idx_bsz = pid // tl.cdiv(TDST, BLOCK_SIZE_Q)
     
@@ -1352,7 +1354,7 @@ def compute_v_cos(
         other=0,
     )
     mask_tdst = mask_tdst & (pos_tdst < TSRC)
-    pos_tdst_max = tl.max(pos_tdst)
+    seq_len = tl.max(pos_tdst)# + 1
     
     indices = tl.load(
         INDICES +\
@@ -1361,12 +1363,12 @@ def compute_v_cos(
             idx_head * stride_indices_head +\
             idx_k * strdie_indices_k,
         mask=mask_k,
-        other=pos_tdst_max,
+        other=seq_len + 2 * BLOCK_SIZE_K,
     )
     indices = indices // BLOCK_SIZE_K * BLOCK_SIZE_K
     
     idx_tsrc = tl.ravel(indices[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
-    mask_tsrc = (idx_tsrc < pos_tdst_max) & (idx_tsrc >= 0)
+    mask_tsrc = (idx_tsrc < seq_len) & (idx_tsrc >= 0)
     
     # values_tdst = tl.load(
     #     V +\
@@ -1427,13 +1429,13 @@ def compute_v_cos(
         
         mask_tdst[:, None],
         
-        GROUP_K * BLOCK_SIZE_K,
+        BLOCK_SIZE_Q // BLOCK_STRIDE_Q,
     ).to(tl.bfloat16)
     
     # values_tdst = (
-    #     tl.sum(values_tdst.to(tl.float32), axis=0) /\
-    #     tl.sum(mask_tdst.to(tl.int32)).to(tl.float32)
-    # ).to(values_tdst.dtype)
+    #     tl.sum(values_tdst, axis=0) /\
+    #     tl.sum(mask_tdst.to(tl.int32))
+    # )
     
     # values_tsrc = tl.load(
     #     V +\
@@ -1495,6 +1497,11 @@ def compute_v_cos(
         
         GROUP_K * BLOCK_SIZE_K,
     ).to(tl.bfloat16)
+
+    # values_tsrc = (
+    #     tl.sum(tl.reshape(values_tsrc, [GROUP_K, BLOCK_SIZE_K, BLOCK_HID]), axis=1) /\
+    #     tl.sum(tl.reshape(mask_tsrc.to(tl.int32), [GROUP_K, BLOCK_SIZE_K, 1]), axis=1)
+    # )
     
     values_tdst_norm = tl.sqrt(tl.sum(values_tdst.to(tl.float32) * values_tdst.to(tl.float32), axis=-1))
     values_tsrc_norm = tl.sqrt(tl.sum(values_tsrc.to(tl.float32) * values_tsrc.to(tl.float32), axis=-1))
@@ -1504,14 +1511,15 @@ def compute_v_cos(
     # normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
     # normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
     
+    # - 
     # cos_sim_scores = tl.sum(normalized_values_tdst[None, :] * normalized_values_tsrc, axis=-1)
     cos_sim_scores = tl.dot(normalized_values_tdst, tl.trans(normalized_values_tsrc, 1, 0))
     # cos_sim_scores = ((cos_sim_scores + 1) * 0.5).to(tl.float32)
     cos_sim_scores = cos_sim_scores# * cos_sim_scores * cos_sim_scores
     
-    scores = tl.reshape(cos_sim_scores, (BLOCK_SIZE_Q, GROUP_K, BLOCK_SIZE_K))
+    scores = tl.reshape(cos_sim_scores, (BLOCK_SIZE_Q // BLOCK_STRIDE_Q, GROUP_K, BLOCK_SIZE_K))
     # scores = tl.reshape(values_tsrc_norm, (GROUP_K, BLOCK_SIZE_K))
-    mask_scores = tl.reshape(mask_tdst[:, None] & mask_tsrc[None, :], (BLOCK_SIZE_Q, GROUP_K, BLOCK_SIZE_K))
+    mask_scores = tl.reshape(mask_tdst[:, None] & mask_tsrc[None, :], (BLOCK_SIZE_Q // BLOCK_STRIDE_Q, GROUP_K, BLOCK_SIZE_K))
     scores = scores * mask_scores
     
     # reduce-mean
@@ -1519,6 +1527,9 @@ def compute_v_cos(
     scores = tl.sum(scores, axis=-1)
     mask_scores = tl.sum(mask_scores.to(scores.dtype), axis=0)
     scores = tl.sum(scores, axis=0) / tl.maximum(mask_scores, 1e-20)
+    # - 
+
+    # scores = tl.sum(values_tdst[None, :] * values_tsrc, axis=1)
     
     # reduce max
     # scores = tl.max(tl.max(scores, axis=-1), axis=0)
@@ -1526,6 +1537,8 @@ def compute_v_cos(
     # norm reduce-mean
     # scores = tl.reshape(values_tsrc_norm, (GROUP_K, BLOCK_SIZE_K))
     # scores = tl.sum(scores, axis=-1) / tl.maximum(tl.sum(tl.reshape(mask_tsrc, (GROUP_K, BLOCK_SIZE_K)), axis=-1), 1e-20)
+
+    # scores = tl.sum(values_tdst[None, :] * values_tsrc)
     
     tl.store(
         OUT_SCORES +\
@@ -1983,11 +1996,16 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
-                apply_v_cos = (os.getenv('APPLY_V_COS', '0') == '1')
-                if apply_v_cos:
-                    v_scores = torch.zeros_like(out_scores)
+                apply_v_dot = (os.getenv('APPLY_V_DOT', '0') == '1')
+                # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
+                apply_v_dot = apply_v_dot and (i_stage != 0)
+                if apply_v_dot:
+                    v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
                     V_BLOCK_SIZE_K = 8
+                    V_BLOCK_STRIDE_Q = 1
+                    V_BLOCK_STRIDE_K = 1
                     V_GROUP_K = 64 // V_BLOCK_SIZE_K
+                    # V_GROUP_K = indices_left.shape[3]
                     grid = (
                         v_scores.shape[0] *\
                         v_scores.shape[1] *\
@@ -2013,9 +2031,13 @@ def dual_stage_quadratic_hip_attention(
                         GROUP_K=V_GROUP_K,
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         BLOCK_SIZE_K=V_BLOCK_SIZE_K,
+                        BLOCK_STRIDE_Q=V_BLOCK_STRIDE_Q,
+                        BLOCK_STRIDE_K=V_BLOCK_STRIDE_K,
                         BLOCK_HID=q.shape[-1],
                     )
                     
+                    if out_scores.dtype != torch.float32:
+                        out_scores = out_scores.to(torch.float32)
                     out_scores = out_scores - out_scores.min(dim=-1, keepdim=True).values
 
                     # print(indices_left[0, -1, DEBUG_HEAD, :])
@@ -2037,7 +2059,7 @@ def dual_stage_quadratic_hip_attention(
 
                     # out_scores = out_scores * v_scores
 
-                    out_scores = out_scores + v_scores * 0.8 #* out_scores.view(-1).std()
+                    out_scores = out_scores + v_scores * 0.8
                 
                 if (i_stage < (len(stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
@@ -2402,7 +2424,7 @@ def main_debug():
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
-                stage_chunk_size=8,
+                stage_chunk_size=16,
                 stage_k=8192,
                 stage_stride=1,
             ),

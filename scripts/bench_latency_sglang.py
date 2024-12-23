@@ -6,7 +6,7 @@ import torch
 n_gpus = torch.cuda.device_count()
 model = 'meta-llama/Meta-Llama-3.1-8B-Instruct'
 output_file = 'cache/sglang/result.json'
-chunked_prefill_size = 8192
+chunked_prefill_size = int(os.getenv('CHUNK_SIZE', '8192'))
 
 def reset_result():
     os.makedirs('cache/sglang', exist_ok=True)
@@ -17,12 +17,16 @@ reset_result()
 def run_sample(seq_len: int, batch_size: int, envs: dict):
     reset_result()
     envs['SRT_MAX_BATCH'] = str(batch_size)
+
+    seq_len = seq_len * 1024
+    current_chunked_prefill_size = min(seq_len, chunked_prefill_size)
+
     subprocess.call(
         (
-            f"python -m sglang.bench_latency --model-path {model} "
-            f"--batch {batch_size} --input-len {seq_len * 1024} --output-len {256} --tp-size {n_gpus} "
-            f"--mem-fraction-static 0.7 --enable-p2p-check --chunked-prefill-size {chunked_prefill_size} "
-            f"--max-prefill-tokens {chunked_prefill_size} --result-filename {output_file}"
+            f"python -m sglang.bench_latency --model-path {model} --context-length {seq_len + 1024} "
+            f"--batch {batch_size} --input-len {seq_len} --output-len {256} --tp-size {n_gpus} "
+            f"--mem-fraction-static 0.7 --enable-p2p-check --chunked-prefill-size {current_chunked_prefill_size} "
+            f"--max-prefill-tokens {current_chunked_prefill_size} --result-filename {output_file}"
         ).split(), 
         env=envs, 
         # stdout=subprocess.DEVNULL, 
@@ -41,9 +45,9 @@ def run_sample(seq_len: int, batch_size: int, envs: dict):
         return None, None
 
 seq_lens = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
-batch_sizes = [1, 8, 32]
+batch_sizes = [1, 2, 4, 8, 16, 32]
 
-# seq_lens = [1, 64, 256]
+# seq_lens = [256]
 # batch_size = [1, 8, 32]
 
 parent_envs = os.environ.copy()
@@ -56,15 +60,17 @@ test_envs = {
     'HIP G3E': {
         'SRT_ATTENTION_BACKEND': 'HIP_ATTN',
         'HIP_EXTEND': '1',
-        'EXTEND_LEN': '512',
+        'EXTEND_LEN': '600',
     },
     'HIP G2': {
         'SRT_ATTENTION_BACKEND': 'HIP_ATTN',
         'HIP_EXTEND': '0',
         'HIP_K': '1024',
+        'EXTEND_LEN': '600',
     },
     'SRT': {
         'SRT_ATTENTION_BACKEND': 'SRT',
+        'EXTEND_LEN': '600',
     },
 }
 
@@ -110,7 +116,7 @@ os.makedirs('saves/bench_latency_sglang', exist_ok=True)
 
 json_path = 'saves/bench_latency_sglang/result.json' 
 with open(json_path, 'w') as f:
-    json.dump(results, f)
+    json.dump(results, f, indent=2)
 
 csv_path = 'saves/bench_latency_sglang/result.csv'
 lines = []
