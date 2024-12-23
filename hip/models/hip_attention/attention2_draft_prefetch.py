@@ -866,6 +866,8 @@ def load_tokens(
     
     if keys.dtype == tl.uint8:
         keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
+    if keys.dtype == tl.float8e5:
+        keys = keys.to(tl.float16)
     
     return keys
 
@@ -1059,10 +1061,12 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 i_group.to(tl.int64) * stride_q_g +\
                 idx_hid[None, :].to(tl.int64) * stride_q_hid,
             mask = mask_tdst[:, None],
-            other = 0,
+            other = 0.0,
             # cache_modifier='.cs', # TODO: uncomment this (do not uncomment others)
             # eviction_policy='evict_last'
         )
+        if queries.dtype == tl.float8e5:
+            queries = queries.to(tl.float16)
         # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float32)
         
         if queries.dtype == tl.uint8:
@@ -5226,11 +5230,13 @@ def block_sparse_attention_cuda(
             idx_head * stride_q_head +\
             idx_hid[None, :] * stride_q_hid,
         mask=mask_tdst[:, None],
-        other=0,
+        other=0.0,
         # cache_modifier='.cg',
         # eviction_policy='evict_last',
         # volatile=True,
     )
+    if queries.dtype == tl.float8e5:
+        queries = queries.to(tl.float16)
     
     if USING_EXTEND and NEED_APPLY_ROPE:
         rope_tdst = pos_tdst - 1
@@ -5259,11 +5265,13 @@ def block_sparse_attention_cuda(
                 idx_head * stride_q_head +\
                 ((idx_hid + HID // 2) % HID)[None, :] * stride_q_hid,
             mask=mask_tdst[:, None],
-            other=0,
+            other=0.0,
             # cache_modifier='.cg',
             # eviction_policy='evict_last',
             # volatile=True,
         )
+        if queries_rot.dtype == tl.float8e5:
+            queries_rot = queries_rot.to(tl.float16)
         
         cos_new = tl.load(
             COS +\

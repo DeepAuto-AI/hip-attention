@@ -577,8 +577,10 @@ def chunk_controllable_sampling_mask_cuda(
                 idx_head * stride_q_head +\
                 idx_hid[None, :] * stride_q_hid,
             mask=mask_tdst_iter[:, None] & mask_hid[None, :],
-            other=0
+            other=0.0
         )
+        if queries_iter.dtype == tl.float8e5:
+            queries_iter = queries_iter.to(tl.float16)
         
         if USING_EXTEND:
             if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
@@ -603,11 +605,13 @@ def chunk_controllable_sampling_mask_cuda(
                             idx_head * stride_q_head +\
                             ((idx_hid + BLOCK_HID // 2) % BLOCK_HID)[None, :] * stride_q_hid,
                         mask=mask_tdst_iter[:, None],
-                        other=0,
+                        other=0.0,
                         # cache_modifier='.cg',
                         # eviction_policy='evict_last',
                         # volatile=True,
                     )
+                    if queries_rot.dtype == tl.float8e5:
+                        queries_rot = queries_rot.to(tl.float16)
                     
                     cos_new = tl.load(
                         COS +\
@@ -650,7 +654,11 @@ def chunk_controllable_sampling_mask_cuda(
         queries_sum += queries_iter
         queries_counter += mask_tdst_iter.to(tl.int32)
     
-    queries = ((queries_sum / (queries_counter[:, None] + 1e-12)) * mask_tdst[:, None]).to(Q.dtype.element_ty)
+    queries = ((queries_sum / (queries_counter[:, None] + 1e-12)) * mask_tdst[:, None])
+    if Q.dtype.element_ty != tl.float8e5:
+        queries = queries.to(Q.dtype.element_ty)
+    else:
+        queries = queries.to(tl.float16)
     
     while (max_chunk_size >= TERMINATE_SIZE):
         max_chunk_size /= 2.0
