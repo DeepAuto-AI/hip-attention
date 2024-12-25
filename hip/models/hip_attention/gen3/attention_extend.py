@@ -344,7 +344,7 @@ def load_keys_with_rope(
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
                         (idx_hid % (BLOCK_HID // 2))[:, None] * stride_cos_hid,
                     mask=mask_tsrc_active[None, :],
-                    other0.0,
+                    other=0.0,
                 ).to(keys_left.dtype)
                 sin_new = tl.load(
                     SIN +\
