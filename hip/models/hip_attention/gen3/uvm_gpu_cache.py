@@ -517,9 +517,9 @@ def load_tokens(
                 other=0.0,
             )
             if keys_cached.dtype == tl.uint8:
-                keys_cached = keys_cached.to(tl.float8e5, bitcast=True).to(tl.float16)
+                keys_cached = keys_cached.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
             if keys_cached.dtype == tl.float8e5:
-                keys_cached = keys_cached.to(tl.float16)
+                keys_cached = keys_cached.to(tl.bfloat16)
             
             mask_keys = mask_keys & (~mask_slot_cache_hit)
         
@@ -533,9 +533,9 @@ def load_tokens(
             other=0.0,
         )
         if keys.dtype == tl.uint8:
-            keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
+            keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
         if keys.dtype == tl.float8e5:
-            keys = keys.to(tl.float16)
+            keys = keys.to(tl.bfloat16)
         
         if USING_OFFLOAD_CACHE:
             keys = tl.where(
@@ -554,8 +554,8 @@ def load_tokens(
             )
     
     if keys.dtype == tl.uint8:
-        keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
+        keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
     if keys.dtype == tl.float8e5:
-        keys = keys.to(tl.float16)
+        keys = keys.to(tl.bfloat16)
     
     return keys
