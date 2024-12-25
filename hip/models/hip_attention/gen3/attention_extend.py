@@ -209,7 +209,8 @@ def load_keys_with_rope(
         idx_head_kv,
         idx_hid[:, None],
         
-        mask_tsrc_active[None, :] & mask_hid[:, None],
+        mask_tsrc_active[None, :], # & mask_hid[:, None],
+        # mask_tsrc_active[None, :] & mask_hid[:, None],
         
         BLOCK_CHUNK,
         BLOCK_HID,
@@ -1542,10 +1543,14 @@ def dual_stage_quadratic_hip_attention(
     DEBUG_HEAD = -1
     global DEBUG
     
-    if q_mask is None:
+    if args.q_mask is None:
         q_mask = q
-    if k_mask is None:
+    else:
+        q_mask = args.q_mask
+    if args.k_mask is None:
         k_mask = k
+    else:
+        k_mask = args.k_mask
     
     BLOCK_HID = q_mask.shape[-1]
     
@@ -1555,9 +1560,13 @@ def dual_stage_quadratic_hip_attention(
         assert v.shape == k.shape
         MAX_TSRC = TSRC
     else:
-        MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
-        MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
-        HEAD_KV = args.k_cache.shape[-2]
+        # MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
+        # MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
+        MAX_TSRC = args.extend_context_length
+        if args.k_cache is not None:
+            HEAD_KV = args.k_cache.shape[-2]
+        else:
+            HEAD_KV = args.offload_cache.k_uvm.bank_cpu.shape[-2]
         TSRC = MAX_TSRC
     
     assert len(args.stages) > 0
@@ -1676,7 +1685,7 @@ def dual_stage_quadratic_hip_attention(
                 out_scores = out_scores.repeat_interleave(splits, -1)
             else:
                 assert stage_info.stage_k is None, 'first stage always quadratic'
-                assert isinstance(stage_info, ScanStage), 'frist stage always scan'
+                assert isinstance(stage_info, ScanStage), f'frist stage always scan {stage_info}'
                 STAGE_STRIDE = stage_info.stage_stride
             
             
@@ -1794,11 +1803,11 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
-                raise Exception() # TODO: handle new args
                 apply_v_dot = (os.getenv('APPLY_V_DOT', '0') == '1')
                 # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
                 apply_v_dot = apply_v_dot and (i_stage != 0)
                 if apply_v_dot:
+                    raise Exception() # TODO: handle new args
                     v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
                     V_BLOCK_SIZE_K = 8
                     V_BLOCK_STRIDE_Q = 1
@@ -1904,7 +1913,7 @@ def dual_stage_quadratic_hip_attention(
         
         args = args.clone()
         args.block_size_q = args.stages[-1].stage_block_size_q
-        block_sparse_block_size_q = min(block_sparse_block_size_q, args.block_size_q)
+        block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
         args.sliding_window_size += args.mask_k
         args.block_size_k = chunk_size
         args.mask_k = args.second_stage_k
@@ -2041,6 +2050,7 @@ def dual_stage_quadratic_hip_attention(
         cache_miss_counter=sa_cache_miss_counter,
         EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=args.model_context_length,
+        extend_context_length=args.extend_context_length,
     )
     
     if DEBUG:

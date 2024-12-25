@@ -1,5 +1,7 @@
 import math
+import os
 import cuda
+import cuda.cudart
 import torch
 from torch import Tensor
 from typing import Optional, Tuple, Union
@@ -66,8 +68,8 @@ def format_size_bytes(tensor: Union[Tensor, Union[float, int]]) -> str:
     else:
         return f'{byte_size / (1024 ** 3):.2f} GB'
 
-def debug_print(self, *args):
-    print('[HiPOffloadKVPoolMHA]', *args)
+def debug_print(*args):
+    print(f'[HiPOffloadKVPoolMHA] {" ".join(map(lambda x: str(x), args))}')
 
 ###############################################################################
 #                               Data Structure
@@ -82,6 +84,7 @@ def uvm_note_cpu(tensor: Tensor, prefetch: bool = False):
 class UVMCache:
     bank_cpu: Tensor
     bank_gpu: Tensor
+    metadata: Tensor
     
     def __init__(
         self, 
@@ -96,15 +99,20 @@ class UVMCache:
         self.head_dim = head_dim
         self.dtype = dtype
         self.device = device
+        if self.device.index is None:
+            self.device = torch.get_default_device()
         
-        self.bank_cpu, self.bank_gpu = self.alloc_uvm([max_token_size, head_num, head_dim])
+        self.bank_cpu, self.bank_gpu = self.alloc_uvm(
+            [max_token_size, head_num, head_dim],
+            dtype=self.dtype
+        )
         
         # {
         #     Token Generation: uint32    # Increase one on every overwrite
         # }
         self.metadata = torch.full(
             [max_token_size, 1], 
-            dtype=torch.uint32, 
+            dtype=torch.int32, 
             device=device,
             fill_value=MAX_INT
         )
@@ -183,14 +191,14 @@ class GPUCache:
         """
         self.metadata = torch.full(
             (self.max_cache_token_size, 3),
-            dtype=torch.uint32,
+            dtype=torch.int32,
             device=self.device,
             fill_value=MAX_INT,
         )
         
         self.table = torch.full(
             (self.head_num, self.max_uvm_token_size, 1),
-            dtype=torch.uint32,
+            dtype=torch.int32,
             device=self.device,
             fill_value=MAX_INT,
         )
@@ -199,7 +207,7 @@ class GPUCache:
             sizeof(self.bank) + sizeof(self.metadata) + sizeof(self.table)
         )
         debug_print(
-            f'[GPUCache] bank={format_size_bytes(self.bank)}, '
+            f'GPUCache: bank={format_size_bytes(self.bank)}, '
             f'metadata={format_size_bytes(self.metadata)}, '
             f'table={format_size_bytes(self.table)}, '
             f'total={format_size_bytes(self.allocated_gpu_bytes)}'
@@ -303,11 +311,11 @@ class HiPOffloadCache:
             self.v_uvm.bank_gpu[table] = cache_v
         
         self.k_uvm.metadata.index_put_(
-            indices=table, 
+            indices=(table, ), 
             values=torch.index_select(self.k_uvm.metadata, index=table_gpu, dim=0) + 1
         )
         self.v_uvm.metadata.index_put_(
-            indices=table, 
+            indices=(table, ), 
             values=torch.index_select(self.v_uvm.metadata, index=table_gpu, dim=0) + 1
         )
     
@@ -506,8 +514,12 @@ def load_tokens(
                     idx_slots * stride_offload_cache_gpu_bank_token +\
                     idx_hid * stride_offload_cache_gpu_bank_hid,
                 mask=mask_slot_cache_hit,
-                other=0,
+                other=0.0,
             )
+            if keys_cached.dtype == tl.uint8:
+                keys_cached = keys_cached.to(tl.float8e5, bitcast=True).to(tl.float16)
+            if keys_cached.dtype == tl.float8e5:
+                keys_cached = keys_cached.to(tl.float16)
             
             mask_keys = mask_keys & (~mask_slot_cache_hit)
         
@@ -520,6 +532,10 @@ def load_tokens(
             mask=mask_keys,
             other=0.0,
         )
+        if keys.dtype == tl.uint8:
+            keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
+        if keys.dtype == tl.float8e5:
+            keys = keys.to(tl.float16)
         
         if USING_OFFLOAD_CACHE:
             keys = tl.where(

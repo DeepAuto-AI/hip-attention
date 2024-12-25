@@ -27,7 +27,7 @@ def tensor_from_pointer(
         elem_size = 16
     elif dtype == torch.float32:
         elem_size = 32
-    elif dtype == torch.uint8:
+    elif dtype in [torch.uint8, torch.float8_e5m2]:
         elem_size = 8
     else:
         raise NotImplementedError()

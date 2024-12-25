@@ -632,6 +632,8 @@ def block_sparse_attention_cuda(
     BLOCK_BK: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
 ):
+    G: tl.constexpr = 1
+    
     pid_bsz = tl.program_id(2).to(tl.int64)
     pid_bdst = tl.program_id(1).to(tl.int64)
     pid_head = tl.program_id(0).to(tl.int64)
@@ -850,6 +852,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     BLOCK_SIZE_K,
+                    HID,
                 )
                 
                 if USING_EXTEND and NEED_APPLY_ROPE:
@@ -907,6 +910,7 @@ def block_sparse_attention_cuda(
                         mask_tsrc[None, :],
                         
                         BLOCK_SIZE_K,
+                        HID,
                     )
                 else:
                     keys_rot = None
@@ -965,6 +969,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[:, None],
                     
                     BLOCK_SIZE_K,
+                    HID,
                 )
                 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1065,6 +1070,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 
                 BLOCK_SIZE_K,
+                HID,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1122,6 +1128,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     BLOCK_SIZE_K,
+                    HID,
                 )
             else:
                 keys_rot = None
@@ -1180,6 +1187,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[:, None],
                 
                 BLOCK_SIZE_K,
+                HID,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1283,6 +1291,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 
                 BLOCK_SIZE_K,
+                HID,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1340,6 +1349,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     BLOCK_SIZE_K,
+                    HID,
                 )
             else:
                 keys_rot = None
@@ -1398,6 +1408,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[:, None],
                 
                 BLOCK_SIZE_K,
+                HID,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1477,6 +1488,7 @@ def block_sparse_attention(
     
     EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,
     model_context_length: int = 131072,
+    extend_context_length: int = 131072,
 ):  
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -1485,10 +1497,14 @@ def block_sparse_attention(
         MAX_TSRC = TSRC
         MAX_BSRC = BSRC
     else:
-        NUM_PAGE, PAGE_SIZE, KV_HEAD, _ = args.k_cache.shape
+        if args.k_cache is not None:
+            NUM_PAGE, PAGE_SIZE, KV_HEAD, _ = args.k_cache.shape
+        else:
+            KV_HEAD = args.offload_cache.k_uvm.bank_cpu.shape[-2]
         TSRC = None
         BSRC = None
-        MAX_TSRC = NUM_PAGE * PAGE_SIZE
+        # MAX_TSRC = NUM_PAGE * PAGE_SIZE
+        MAX_TSRC = extend_context_length
         MAX_BSRC = cdiv_python(MAX_TSRC, args.block_size_k)
     N = BSZ * HEAD
     # assert q.shape == k.shape
@@ -1533,8 +1549,12 @@ def block_sparse_attention(
         assert k.ndim == 4
         assert v.ndim == 4
     elif args.using_paged_cache:
-        assert args.k_cache.ndim == 4
-        assert args.v_cache.ndim == 4
+        if args.k_cache is not None:
+            assert args.k_cache.ndim == 4
+            assert args.v_cache.ndim == 4
+        else:
+            assert args.offload_cache.k_uvm.bank_cpu.ndim == 3
+            assert args.offload_cache.v_uvm.bank_cpu.ndim == 3
     else:
         raise Exception()
     assert seq_lens.ndim == 2

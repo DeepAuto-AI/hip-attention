@@ -1,10 +1,11 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from torch import Tensor
-from typing import Literal, Optional, List
-from hip.models.hip_attention.gen3.uvm_gpu_cache import (
-    HiPOffloadCache
-)
+from typing import Literal, Optional, List, TYPE_CHECKING
+if TYPE_CHECKING:
+    from hip.models.hip_attention.gen3.uvm_gpu_cache import (
+        HiPOffloadCache
+    )
 
 def safe_stride(x: Optional[Tensor], ndim: int):
     if x is None:
@@ -93,23 +94,26 @@ class HiPAttentionArgs:
     mask_k: int = 512 # no effect, set automatically
     
     second_stage_k: int = 2048
-    stages: List[Stage] = [
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=1,
-            stage_chunk_size=32,
-            stage_stride=1,
-            stage_k=32768,
-        ),
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=1,
-            stage_chunk_size=8,
-            stage_stride=1,
-            stage_k=8192,
-        ),
-    ]
-    model_context_length = 131072
+    stages: List[Stage] = field(
+        default_factory=lambda: [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=32,
+                stage_stride=1,
+                stage_k=32768,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=8,
+                stage_stride=1,
+                stage_k=8192,
+            ),
+        ]
+    )
+    model_context_length: int = 131072
+    extend_context_length: int = 512 * 1024
     
     # kernel args,
     mask_only = False
@@ -134,19 +138,22 @@ class HiPAttentionArgs:
     rope_cos: Optional[Tensor] = None
     rope_sin: Optional[Tensor] = None
     
-    offload_cache: Optional[HiPOffloadCache] = None
+    offload_cache: "Optional[HiPOffloadCache]" = None
     k_cache: Optional[Tensor] = None
     v_cache: Optional[Tensor] = None
     cache_seq_lens: Optional[Tensor] = None
     block_table: Optional[Tensor] = None
     
+    # to support gemma2
+    logit_softcap: Optional[float] = None
+    
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
             self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
             self.rope_sin = self.rope_sin.view(-1, self.rope_sin.shape[-1])
-        if self.q_quant is not None:
-            assert self.q_quant.ndim == 4
-            assert self.k_quant.ndim == 4
+        # if self.q_quant is not None:
+        #     assert self.q_quant.ndim == 4
+        #     assert self.k_quant.ndim == 4
         self.update_flags()
     
     def update_flags(self):
@@ -161,6 +168,8 @@ class HiPAttentionArgs:
                 self.paged_cache_page_count = self.offload_cache.get_page_count()
                 self.paged_cache_page_size = 1
         assert self.paged_cache_page_size in (1, 2, 4, 8, 16, 32)
+        if self.logit_softcap == 0:
+            self.logit_softcap = None
     
     def clone(self):
         self.update_flags()
