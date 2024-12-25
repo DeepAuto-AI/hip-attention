@@ -7,105 +7,19 @@ from torch import Tensor
 from triton import cdiv as cdiv_python
 from typing import Optional, Dict, List, Tuple
 
+from hip.models.hip_attention.attention2_draft_sampling_extend import (
+    adjust_rope
+)
 from hip.models.hip_attention.gen3.attention_metadata import (
+    safe_stride,
     HiPAttentionArgs,
+)
+from hip.models.hip_attention.gen3.uvm_gpu_cache import (
+    load_tokens,
 )
 
 DEFAULT_EXTEND_BACKEND: tl.constexpr = 'streaming'
-
-@triton.jit
-def load_tokens(
-    K, 
-    stride_k_bsz,
-    stride_k_tsrc,
-    stride_k_head,
-    stride_k_hid,
-    
-    # paged attention args template
-    USING_PAGES: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
-    K_CACHE, 
-    stride_k_cache_page, 
-    stride_k_cache_offset, 
-    stride_k_cache_kv_head, 
-    stride_k_cache_hid,
-    BLOCK_TABLE,
-    stride_block_table_bsz,
-    stride_block_table_page,
-    CACHE_SEQ_LENS,
-    stride_cache_seq_lens_b,
-    
-    # TODO: add offload args
-    
-    MASK_ACCESS_COUNTER,
-    stride_mask_access_counter_bsz,
-    stride_mask_access_counter_head_kv,
-    stride_mask_access_counter_tsrc,
-    MASK_CACHE_MISS_COUNTER,
-    stride_mask_cache_miss_counter_bsz,
-    stride_mask_cache_miss_counter_head_kv,
-    stride_mask_cache_miss_counter_tsrc,
-    
-    idx_bsz,
-    idx_tsrc,
-    idx_kv_head,
-    idx_hid,
-    
-    mask_keys,
-    
-    BLOCK_SIZE_K,
-):
-    # DEBUG: to load nothing
-    # mask_keys = mask_keys & False
-    
-    # tl.static_print(OFFLOAD_CACHE_METHOD)
-    
-    if not USING_PAGES:
-        keys = tl.load(
-            K +\
-                idx_bsz.to(tl.int64) * stride_k_bsz +\
-                idx_tsrc.to(tl.int64) * stride_k_tsrc +\
-                idx_kv_head.to(tl.int64) * stride_k_head +\
-                idx_hid.to(tl.int64) * stride_k_hid,
-            mask = mask_keys,
-            other = 0.0,
-            # cache_modifier='.cs', # TODO: uncomment this
-        )   
-    else:
-        seq_len = tl.load(
-            CACHE_SEQ_LENS +\
-                idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
-        )
-        tl.debug_barrier()
-        mask_tsrc = idx_tsrc < seq_len
-        tl.debug_barrier()
-        ptrs = BLOCK_TABLE +\
-            idx_bsz.to(tl.int64) * stride_block_table_bsz + \
-            (idx_tsrc // PAGE_SIZE).to(tl.int64) * stride_block_table_page
-        tl.debug_barrier()
-        idx_page = tl.load(
-            ptrs,
-            mask=mask_tsrc,
-            other=0,
-        )
-        offset_page = idx_tsrc % PAGE_SIZE
-        
-        keys = tl.load(
-            K_CACHE +\
-                idx_page.to(tl.int64) * stride_k_cache_page +\
-                offset_page.to(tl.int64) * stride_k_cache_offset +\
-                idx_kv_head.to(tl.int64) * stride_k_cache_kv_head +\
-                idx_hid.to(tl.int64) * stride_k_cache_hid,
-            mask=mask_keys,
-            other=0.0,
-        )
-    
-    if keys.dtype == tl.uint8:
-        keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
-    if keys.dtype == tl.float8e5:
-        keys = keys.to(tl.float16)
-    
-    return keys
+MAX_INT: tl.constexpr = 2_147_483_647
 
 @triton.jit
 def block_sparse_attention_cuda_step(
@@ -134,8 +48,6 @@ def block_sparse_attention_cuda_step(
     
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
-    extend_window_size,
-    extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     model_context_length,
@@ -151,94 +63,71 @@ def block_sparse_attention_cuda_step(
     
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
 ):
-    # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-    # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
-    # scores := [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
-
-    # keys = tl.load(
-    #     K +\
-    #         (idx_n // KV_REPEAT_INTERLEAVE) * stride_k_n +\
-    #         idx_tsrc[None, :] * stride_k_tsrc +\
-    #         idx_hid[:, None] * stride_k_hid,
-    #     mask = mask_tsrc[None, :] & mask_hid[:, None],
-    #     other = 0,
-    # )
-    
-    # queries_max = tl.maximum(1.0, tl.max(tl.abs(queries)).to(tl.float32))
-    # keys_max = tl.maximum(1.0, tl.max(tl.abs(keys)).to(tl.float32))
-    # queries_scale = (1.0 / queries_max)
-    # keys_scale = (1.0 / keys_max)
-    # qk = tl.dot(
-    #     # (queries * queries_scale).to(queries.dtype),
-    #     # (keys * keys_scale).to(keys.dtype),
-    #     queries, keys,
-    #     allow_tf32=True,
-    # ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
-    
     if USING_EXTEND:
         if EXTEND_BACKEND == 'self_extend':
-            assert COS is not None
-            assert SIN is not None
+            raise Exception()
+            # assert COS is not None
+            # assert SIN is not None
             
-            # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
-            dynamic_group_size = extend_group_size
+            # # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
+            # dynamic_group_size = extend_group_size
             
-            old_tsrc = idx_tsrc
-            mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
-            new_tsrc = tl.where(
-                mask_tsrc_window,
-                old_tsrc,
-                old_tsrc // dynamic_group_size
-            )
+            # old_tsrc = idx_tsrc
+            # mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
+            # new_tsrc = tl.where(
+            #     mask_tsrc_window,
+            #     old_tsrc,
+            #     old_tsrc // dynamic_group_size
+            # )
             
-            keys = keys.trans(1, 0)
-            keys = adjust_rope(
-                keys, 
-                old_tsrc, 
-                new_tsrc, 
-                mask_tsrc,
-                idx_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_TK, 
-                HID,
-                NEED_APPLY_ROPE,
-            )
-            keys = tl.trans(keys, 1, 0)
-            keys = keys * mask_tsrc[None, :]
+            # keys = keys.trans(1, 0)
+            # keys = adjust_rope(
+            #     keys, 
+            #     old_tsrc, 
+            #     new_tsrc, 
+            #     mask_tsrc,
+            #     idx_hid,
+            #     COS, stride_cos_t, stride_cos_hid,
+            #     SIN, stride_sin_t, stride_sin_hid,
+            #     BLOCK_TK, 
+            #     HID,
+            #     NEED_APPLY_ROPE,
+            # )
+            # keys = tl.trans(keys, 1, 0)
+            # keys = keys * mask_tsrc[None, :]
             
-            old_tdst = (pos_tdst - 1)
-            new_tdst = old_tdst // dynamic_group_size
+            # old_tdst = (pos_tdst - 1)
+            # new_tdst = old_tdst // dynamic_group_size
             
-            queries_grouped = adjust_rope(
-                queries, 
-                old_tdst, 
-                new_tdst, 
-                mask_tdst,
-                idx_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                BLOCK_TQ, 
-                HID,
-                NEED_APPLY_ROPE,
-            )
-            queries_grouped = queries_grouped * mask_tdst[:, None]
+            # queries_grouped = adjust_rope(
+            #     queries, 
+            #     old_tdst, 
+            #     new_tdst, 
+            #     mask_tdst,
+            #     idx_hid,
+            #     COS, stride_cos_t, stride_cos_hid,
+            #     SIN, stride_sin_t, stride_sin_hid,
+            #     BLOCK_TQ, 
+            #     HID,
+            #     NEED_APPLY_ROPE,
+            # )
+            # queries_grouped = queries_grouped * mask_tdst[:, None]
             
-            t_window = tl.dot(
-                (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
-                (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
-                allow_tf32=True,
-            )
-            t_grouped = tl.dot(
-                (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
-                (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
-                allow_tf32=True,
-            )
-            qk = tl.where(
-                mask_tsrc_window[None, :],
-                t_window,
-                t_grouped,
-            ).to(tl.float32) * 1.44269504
+            # t_window = tl.dot(
+            #     (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+            #     (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+            #     allow_tf32=True,
+            # )
+            # t_grouped = tl.dot(
+            #     (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+            #     (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
+            #     allow_tf32=True,
+            # )
+            # qk = tl.where(
+            #     mask_tsrc_window[None, :],
+            #     t_window,
+            #     t_grouped,
+            # ).to(tl.float32) * 1.44269504
         elif (EXTEND_BACKEND == 'streaming') or (EXTEND_BACKEND == 'dynamic_extend'):
             pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
             if not NEED_APPLY_ROPE:
@@ -555,12 +444,6 @@ def block_sparse_attention_cuda_step(
             qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
         qk = qk * 1.44269504
     
-    # qk_mask = (
-    #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
-    #     (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-    # )
-    
-    
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
             qk_mask = (
@@ -579,14 +462,6 @@ def block_sparse_attention_cuda_step(
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
     
-    # qk = tl.where(
-    #     qk_mask,
-    #     float('-inf'),
-    #     qk
-    # )
-    
-    # qk += qk_mask * (-1.0e+6)
-    
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
     m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
     qk = qk - m_ij
@@ -594,27 +469,16 @@ def block_sparse_attention_cuda_step(
     p = tl.math.exp2(qk)
     
     p = tl.where(qk_mask, 0, p)
-    # p *= ~qk_mask
     
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
     l_ij = tl.sum(p, axis=1)
     
     # -- update m_i and l_i
     alpha = tl.math.exp2(m_i - m_ij)
-    # tl.device_print('ff', l_ij)
     l_i = (l_i * alpha + l_ij[:, None]).to(l_i.dtype)
     
     # -- update output accumulator --
     acc = acc * alpha.to(acc.dtype)
-    
-    # values = tl.load(
-    #     V +\
-    #         (idx_n // KV_REPEAT_INTERLEAVE) * stride_v_n +\
-    #         idx_tsrc[:, None] * stride_v_tsrc +\
-    #         idx_hid[None, :] * stride_v_hid,
-    #     mask = mask_tsrc[:, None] & mask_hid[None, :],
-    #     other = 0
-    # )
     
     # update acc
     acc += tl.dot(
@@ -697,8 +561,7 @@ def block_sparse_attention_cuda(
     stride_context_head, 
     stride_context_hid,
     
-    HEAD: tl.constexpr, 
-    G: tl.constexpr, 
+    HEAD: tl.constexpr,
     BK: tl.constexpr, 
     MAX_TDST, 
     MAX_TSRC,
@@ -710,8 +573,6 @@ def block_sparse_attention_cuda(
     
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
-    extend_window_size,
-    extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     model_context_length,
@@ -735,30 +596,30 @@ def block_sparse_attention_cuda(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
-    # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
-    OFFLOAD_CACHE_METHOD: tl.constexpr,
-    OFFLOAD_CACHE_BUDGET: tl.constexpr,
-    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
-    OFFLOAD_CACHE_K_TABLES,
-    stride_offload_cache_k_tables_n,
-    stride_offload_cache_k_tables_t,
-    OFFLOAD_CACHE_K_BANKS,
-    stride_offload_cache_k_banks_n,
-    stride_offload_cache_k_banks_page,
-    stride_offload_cache_k_banks_offset,
-    stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_V_TABLES,
-    stride_offload_cache_v_tables_n,
-    stride_offload_cache_v_tables_t,
-    OFFLOAD_CACHE_V_BANKS,
-    stride_offload_cache_v_banks_n,
-    stride_offload_cache_v_banks_page,
-    stride_offload_cache_v_banks_offset,
-    stride_offload_cache_v_banks_hid,
-    OFFLOAD_CACHE_COUNTERS,
-    stride_offload_cache_counters_n,
-    stride_offload_cache_counters_k,
+    OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    OFFLOAD_CACHE_UVM_METADATA,
+    stride_offload_cache_uvm_metadata_token,
+    stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_BANK,
+    stride_offload_cache_gpu_bank_token,
+    stride_offload_cache_gpu_bank_hid,
+    OFFLOAD_CACHE_GPU_METADATA,
+    stride_offload_cache_gpu_metadata_token,
+    stride_offload_cache_gpu_metadata_k,
+    OFFLOAD_CACHE_GPU_TABLE,
+    stride_offload_cache_gpu_table_head_kv,
+    stride_offload_cache_gpu_table_token,
+    strdie_offload_cache_gpu_table_k,
+    
+    ACCESS_COUNTER,
+    stride_access_counter_bsz,
+    stride_access_counter_head_kv,
+    stride_access_counter_tsrc,
+    CACHE_MISS_COUNTER,
+    stride_cache_miss_counter_bsz,
+    stride_cache_miss_counter_head_kv,
+    stride_cache_miss_counter_tsrc,
     
     TDST_NEXT_POWER_OF_2,
     
@@ -778,8 +639,8 @@ def block_sparse_attention_cuda(
     idx_bsz = pid_bsz.to(tl.int64)
     idx_head = pid_head
     idx_n = idx_bsz * HEAD + idx_head
-    idx_b = idx_n // G
-    idx_g = idx_n % G
+    idx_b = idx_n
+    idx_g = 0
     
     idx_bdst = pid_bdst
     if BLOCK_SIZE_Q < 16:
@@ -955,24 +816,32 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
-                    # offload cache args template
                     USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_METHOD,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
+                    OFFLOAD_CACHE_KV_PACKED,
                     False,
-                    OFFLOAD_CACHE_K_TABLES,
-                    stride_offload_cache_k_tables_n,
-                    stride_offload_cache_k_tables_t,
-                    OFFLOAD_CACHE_K_BANKS,
-                    stride_offload_cache_k_banks_n,
-                    stride_offload_cache_k_banks_page,
-                    stride_offload_cache_k_banks_offset,
-                    stride_offload_cache_k_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_BANK,
+                    stride_offload_cache_gpu_bank_token,
+                    stride_offload_cache_gpu_bank_hid,
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    OFFLOAD_CACHE_GPU_TABLE,
+                    stride_offload_cache_gpu_table_head_kv,
+                    stride_offload_cache_gpu_table_token,
+                    strdie_offload_cache_gpu_table_k,
+                    
+                    ACCESS_COUNTER,
+                    stride_access_counter_bsz,
+                    stride_access_counter_head_kv,
+                    stride_access_counter_tsrc,
+                    
+                    CACHE_MISS_COUNTER,
+                    stride_cache_miss_counter_bsz,
+                    stride_cache_miss_counter_head_kv,
+                    stride_cache_miss_counter_tsrc,
                     
                     idx_bsz,
                     idx_tsrc[None, :],
@@ -1004,24 +873,32 @@ def block_sparse_attention_cuda(
                         CACHE_SEQ_LENS,
                         stride_cache_seq_lens_b,
                         
-                        # offload cache args template
                         USING_OFFLOAD_CACHE,
-                        OFFLOAD_CACHE_METHOD,
-                        OFFLOAD_CACHE_BUDGET,
-                        OFFLOAD_CACHE_KV_HEAD,
+                        OFFLOAD_CACHE_KV_PACKED,
                         False,
-                        OFFLOAD_CACHE_K_TABLES,
-                        stride_offload_cache_k_tables_n,
-                        stride_offload_cache_k_tables_t,
-                        OFFLOAD_CACHE_K_BANKS,
-                        stride_offload_cache_k_banks_n,
-                        stride_offload_cache_k_banks_page,
-                        stride_offload_cache_k_banks_offset,
-                        stride_offload_cache_k_banks_hid,
-                        None, 0, 0, 0,
-                        OFFLOAD_CACHE_COUNTERS,
-                        stride_offload_cache_counters_n,
-                        stride_offload_cache_counters_k,
+                        OFFLOAD_CACHE_UVM_METADATA,
+                        stride_offload_cache_uvm_metadata_token,
+                        stride_offload_cache_uvm_metadata_k,
+                        OFFLOAD_CACHE_GPU_BANK,
+                        stride_offload_cache_gpu_bank_token,
+                        stride_offload_cache_gpu_bank_hid,
+                        OFFLOAD_CACHE_GPU_METADATA,
+                        stride_offload_cache_gpu_metadata_token,
+                        stride_offload_cache_gpu_metadata_k,
+                        OFFLOAD_CACHE_GPU_TABLE,
+                        stride_offload_cache_gpu_table_head_kv,
+                        stride_offload_cache_gpu_table_token,
+                        strdie_offload_cache_gpu_table_k,
+                    
+                        ACCESS_COUNTER,
+                        stride_access_counter_bsz,
+                        stride_access_counter_head_kv,
+                        stride_access_counter_tsrc,
+                        
+                        CACHE_MISS_COUNTER,
+                        stride_cache_miss_counter_bsz,
+                        stride_cache_miss_counter_head_kv,
+                        stride_cache_miss_counter_tsrc,
                         
                         idx_bsz,
                         idx_tsrc[None, :],
@@ -1054,24 +931,32 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
-                    # offload cache args template
                     USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_METHOD,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
-                    False,
-                    OFFLOAD_CACHE_V_TABLES,
-                    stride_offload_cache_v_tables_n,
-                    stride_offload_cache_v_tables_t,
-                    OFFLOAD_CACHE_V_BANKS,
-                    stride_offload_cache_v_banks_n,
-                    stride_offload_cache_v_banks_page,
-                    stride_offload_cache_v_banks_offset,
-                    stride_offload_cache_v_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
+                    OFFLOAD_CACHE_KV_PACKED,
+                    True,
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_BANK,
+                    stride_offload_cache_gpu_bank_token,
+                    stride_offload_cache_gpu_bank_hid,
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    OFFLOAD_CACHE_GPU_TABLE,
+                    stride_offload_cache_gpu_table_head_kv,
+                    stride_offload_cache_gpu_table_token,
+                    strdie_offload_cache_gpu_table_k,
+                    
+                    ACCESS_COUNTER,
+                    stride_access_counter_bsz,
+                    stride_access_counter_head_kv,
+                    stride_access_counter_tsrc,
+                    
+                    CACHE_MISS_COUNTER,
+                    stride_cache_miss_counter_bsz,
+                    stride_cache_miss_counter_head_kv,
+                    stride_cache_miss_counter_tsrc,
                     
                     idx_bsz,
                     idx_tsrc[:, None],
@@ -1102,8 +987,6 @@ def block_sparse_attention_cuda(
                     
                     USING_EXTEND,
                     NEED_APPLY_ROPE,
-                    extend_window_size,
-                    extend_group_size,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
                     model_context_length,
@@ -1148,24 +1031,32 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
-                # offload cache args template
                 USING_OFFLOAD_CACHE,
-                OFFLOAD_CACHE_METHOD,
-                OFFLOAD_CACHE_BUDGET,
-                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_KV_PACKED,
                 False,
-                OFFLOAD_CACHE_K_TABLES,
-                stride_offload_cache_k_tables_n,
-                stride_offload_cache_k_tables_t,
-                OFFLOAD_CACHE_K_BANKS,
-                stride_offload_cache_k_banks_n,
-                stride_offload_cache_k_banks_page,
-                stride_offload_cache_k_banks_offset,
-                stride_offload_cache_k_banks_hid,
-                None, 0, 0, 0,
-                OFFLOAD_CACHE_COUNTERS,
-                stride_offload_cache_counters_n,
-                stride_offload_cache_counters_k,
+                OFFLOAD_CACHE_UVM_METADATA,
+                stride_offload_cache_uvm_metadata_token,
+                stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_BANK,
+                stride_offload_cache_gpu_bank_token,
+                stride_offload_cache_gpu_bank_hid,
+                OFFLOAD_CACHE_GPU_METADATA,
+                stride_offload_cache_gpu_metadata_token,
+                stride_offload_cache_gpu_metadata_k,
+                OFFLOAD_CACHE_GPU_TABLE,
+                stride_offload_cache_gpu_table_head_kv,
+                stride_offload_cache_gpu_table_token,
+                strdie_offload_cache_gpu_table_k,
+                    
+                ACCESS_COUNTER,
+                stride_access_counter_bsz,
+                stride_access_counter_head_kv,
+                stride_access_counter_tsrc,
+                
+                CACHE_MISS_COUNTER,
+                stride_cache_miss_counter_bsz,
+                stride_cache_miss_counter_head_kv,
+                stride_cache_miss_counter_tsrc,
                 
                 idx_bsz,
                 idx_tsrc[None, :],
@@ -1197,24 +1088,32 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
-                    # offload cache args template
                     USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_METHOD,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
+                    OFFLOAD_CACHE_KV_PACKED,
                     False,
-                    OFFLOAD_CACHE_K_TABLES,
-                    stride_offload_cache_k_tables_n,
-                    stride_offload_cache_k_tables_t,
-                    OFFLOAD_CACHE_K_BANKS,
-                    stride_offload_cache_k_banks_n,
-                    stride_offload_cache_k_banks_page,
-                    stride_offload_cache_k_banks_offset,
-                    stride_offload_cache_k_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_BANK,
+                    stride_offload_cache_gpu_bank_token,
+                    stride_offload_cache_gpu_bank_hid,
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    OFFLOAD_CACHE_GPU_TABLE,
+                    stride_offload_cache_gpu_table_head_kv,
+                    stride_offload_cache_gpu_table_token,
+                    strdie_offload_cache_gpu_table_k,
+                    
+                    ACCESS_COUNTER,
+                    stride_access_counter_bsz,
+                    stride_access_counter_head_kv,
+                    stride_access_counter_tsrc,
+                    
+                    CACHE_MISS_COUNTER,
+                    stride_cache_miss_counter_bsz,
+                    stride_cache_miss_counter_head_kv,
+                    stride_cache_miss_counter_tsrc,
                     
                     idx_bsz,
                     idx_tsrc[None, :],
@@ -1247,24 +1146,32 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
-                # offload cache args template
                 USING_OFFLOAD_CACHE,
-                OFFLOAD_CACHE_METHOD,
-                OFFLOAD_CACHE_BUDGET,
-                OFFLOAD_CACHE_KV_HEAD,
-                False,
-                OFFLOAD_CACHE_V_TABLES,
-                stride_offload_cache_v_tables_n,
-                stride_offload_cache_v_tables_t,
-                OFFLOAD_CACHE_V_BANKS,
-                stride_offload_cache_v_banks_n,
-                stride_offload_cache_v_banks_page,
-                stride_offload_cache_v_banks_offset,
-                stride_offload_cache_v_banks_hid,
-                None, 0, 0, 0,
-                OFFLOAD_CACHE_COUNTERS,
-                stride_offload_cache_counters_n,
-                stride_offload_cache_counters_k,
+                OFFLOAD_CACHE_KV_PACKED,
+                True,
+                OFFLOAD_CACHE_UVM_METADATA,
+                stride_offload_cache_uvm_metadata_token,
+                stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_BANK,
+                stride_offload_cache_gpu_bank_token,
+                stride_offload_cache_gpu_bank_hid,
+                OFFLOAD_CACHE_GPU_METADATA,
+                stride_offload_cache_gpu_metadata_token,
+                stride_offload_cache_gpu_metadata_k,
+                OFFLOAD_CACHE_GPU_TABLE,
+                stride_offload_cache_gpu_table_head_kv,
+                stride_offload_cache_gpu_table_token,
+                strdie_offload_cache_gpu_table_k,
+                    
+                ACCESS_COUNTER,
+                stride_access_counter_bsz,
+                stride_access_counter_head_kv,
+                stride_access_counter_tsrc,
+                
+                CACHE_MISS_COUNTER,
+                stride_cache_miss_counter_bsz,
+                stride_cache_miss_counter_head_kv,
+                stride_cache_miss_counter_tsrc,
                 
                 idx_bsz,
                 idx_tsrc[:, None],
@@ -1295,8 +1202,6 @@ def block_sparse_attention_cuda(
                 
                 USING_EXTEND,
                 NEED_APPLY_ROPE,
-                extend_window_size,
-                extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
                 model_context_length, 
@@ -1344,24 +1249,32 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
-                # offload cache args template
                 USING_OFFLOAD_CACHE,
-                OFFLOAD_CACHE_METHOD,
-                OFFLOAD_CACHE_BUDGET,
-                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_KV_PACKED,
                 False,
-                OFFLOAD_CACHE_K_TABLES,
-                stride_offload_cache_k_tables_n,
-                stride_offload_cache_k_tables_t,
-                OFFLOAD_CACHE_K_BANKS,
-                stride_offload_cache_k_banks_n,
-                stride_offload_cache_k_banks_page,
-                stride_offload_cache_k_banks_offset,
-                stride_offload_cache_k_banks_hid,
-                None, 0, 0, 0,
-                OFFLOAD_CACHE_COUNTERS,
-                stride_offload_cache_counters_n,
-                stride_offload_cache_counters_k,
+                OFFLOAD_CACHE_UVM_METADATA,
+                stride_offload_cache_uvm_metadata_token,
+                stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_BANK,
+                stride_offload_cache_gpu_bank_token,
+                stride_offload_cache_gpu_bank_hid,
+                OFFLOAD_CACHE_GPU_METADATA,
+                stride_offload_cache_gpu_metadata_token,
+                stride_offload_cache_gpu_metadata_k,
+                OFFLOAD_CACHE_GPU_TABLE,
+                stride_offload_cache_gpu_table_head_kv,
+                stride_offload_cache_gpu_table_token,
+                strdie_offload_cache_gpu_table_k,
+                    
+                ACCESS_COUNTER,
+                stride_access_counter_bsz,
+                stride_access_counter_head_kv,
+                stride_access_counter_tsrc,
+                
+                CACHE_MISS_COUNTER,
+                stride_cache_miss_counter_bsz,
+                stride_cache_miss_counter_head_kv,
+                stride_cache_miss_counter_tsrc,
                 
                 idx_bsz,
                 idx_tsrc[None, :],
@@ -1393,24 +1306,32 @@ def block_sparse_attention_cuda(
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
                     
-                    # offload cache args template
                     USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_METHOD,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
+                    OFFLOAD_CACHE_KV_PACKED,
                     False,
-                    OFFLOAD_CACHE_K_TABLES,
-                    stride_offload_cache_k_tables_n,
-                    stride_offload_cache_k_tables_t,
-                    OFFLOAD_CACHE_K_BANKS,
-                    stride_offload_cache_k_banks_n,
-                    stride_offload_cache_k_banks_page,
-                    stride_offload_cache_k_banks_offset,
-                    stride_offload_cache_k_banks_hid,
-                    None, 0, 0, 0,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_BANK,
+                    stride_offload_cache_gpu_bank_token,
+                    stride_offload_cache_gpu_bank_hid,
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    OFFLOAD_CACHE_GPU_TABLE,
+                    stride_offload_cache_gpu_table_head_kv,
+                    stride_offload_cache_gpu_table_token,
+                    strdie_offload_cache_gpu_table_k,
+                    
+                    ACCESS_COUNTER,
+                    stride_access_counter_bsz,
+                    stride_access_counter_head_kv,
+                    stride_access_counter_tsrc,
+                    
+                    CACHE_MISS_COUNTER,
+                    stride_cache_miss_counter_bsz,
+                    stride_cache_miss_counter_head_kv,
+                    stride_cache_miss_counter_tsrc,
                     
                     idx_bsz,
                     idx_tsrc[None, :],
@@ -1443,24 +1364,32 @@ def block_sparse_attention_cuda(
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
                 
-                # offload cache args template
                 USING_OFFLOAD_CACHE,
-                OFFLOAD_CACHE_METHOD,
-                OFFLOAD_CACHE_BUDGET,
-                OFFLOAD_CACHE_KV_HEAD,
-                False,
-                OFFLOAD_CACHE_V_TABLES,
-                stride_offload_cache_v_tables_n,
-                stride_offload_cache_v_tables_t,
-                OFFLOAD_CACHE_V_BANKS,
-                stride_offload_cache_v_banks_n,
-                stride_offload_cache_v_banks_page,
-                stride_offload_cache_v_banks_offset,
-                stride_offload_cache_v_banks_hid,
-                None, 0, 0, 0,
-                OFFLOAD_CACHE_COUNTERS,
-                stride_offload_cache_counters_n,
-                stride_offload_cache_counters_k,
+                OFFLOAD_CACHE_KV_PACKED,
+                True,
+                OFFLOAD_CACHE_UVM_METADATA,
+                stride_offload_cache_uvm_metadata_token,
+                stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_BANK,
+                stride_offload_cache_gpu_bank_token,
+                stride_offload_cache_gpu_bank_hid,
+                OFFLOAD_CACHE_GPU_METADATA,
+                stride_offload_cache_gpu_metadata_token,
+                stride_offload_cache_gpu_metadata_k,
+                OFFLOAD_CACHE_GPU_TABLE,
+                stride_offload_cache_gpu_table_head_kv,
+                stride_offload_cache_gpu_table_token,
+                strdie_offload_cache_gpu_table_k,
+                    
+                ACCESS_COUNTER,
+                stride_access_counter_bsz,
+                stride_access_counter_head_kv,
+                stride_access_counter_tsrc,
+                
+                CACHE_MISS_COUNTER,
+                stride_cache_miss_counter_bsz,
+                stride_cache_miss_counter_head_kv,
+                stride_cache_miss_counter_tsrc,
                 
                 idx_bsz,
                 idx_tsrc[:, None],
@@ -1491,8 +1420,6 @@ def block_sparse_attention_cuda(
                 
                 USING_EXTEND,
                 NEED_APPLY_ROPE,
-                extend_window_size,
-                extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
                 model_context_length, 
@@ -1545,6 +1472,9 @@ def block_sparse_attention(
     
     args: "HiPAttentionArgs",
     
+    access_counter: Tensor,
+    cache_miss_counter: Tensor,
+    
     EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,
     model_context_length: int = 131072,
 ):  
@@ -1566,9 +1496,8 @@ def block_sparse_attention(
     KV_HEAD_REPEAT = HEAD // KV_HEAD
     assert KV_HEAD_REPEAT * KV_HEAD == HEAD
     
-    G = args.topk_head_group_size
-    B = N // G
-    assert (B * G) == N
+    B = N
+    assert B == N
     BK = indices.shape[-1] #cdiv_python(args.mask_k, args.block_size_k)
     
     context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
@@ -1619,18 +1548,18 @@ def block_sparse_attention(
     #     input()
     
     block_sparse_attention_cuda[grid](
-        q, *args.safe_stride(q, 4),
-        k, *args.safe_stride(k, 4),
-        v, *args.safe_stride(v, 4),
-        seq_lens, *args.safe_stride(seq_lens, 2),
+        q, *safe_stride(q, 4),
+        k, *safe_stride(k, 4),
+        v, *safe_stride(v, 4),
+        seq_lens, *safe_stride(seq_lens, 2),
         
-        indices, *args.safe_stride(indices, 3),
+        indices, *safe_stride(indices, 3),
         
-        ks_start_end, *args.safe_stride(ks_start_end, 3),
+        ks_start_end, *safe_stride(ks_start_end, 3),
         
-        context, *args.safe_stride(context, 4),
+        context, *safe_stride(context, 4),
         
-        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT, 
+        HEAD, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT, 
         
         args.sliding_window_size,
         args.sink_token_size,
@@ -1640,6 +1569,9 @@ def block_sparse_attention(
         model_context_length,
         *args.args_paged_kv_cache(),
         *args.args_offload_cache(is_masking=False),
+        
+        access_counter, *safe_stride(access_counter, 3),
+        cache_miss_counter, *safe_stride(cache_miss_counter, 3),
         
         triton.next_power_of_2(TDST),
         

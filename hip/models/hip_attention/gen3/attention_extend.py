@@ -1,70 +1,40 @@
-from dataclasses import dataclass
 import math
 import os
 import time
 import cv2
-
-from matplotlib import pyplot as plt
-from hip.models.hip_attention.attention2_draft_prefetch import (
-    hip_attention, 
-    masking_iteration_draft,
-    HiPAttentionArgs,
-    HiPAttentionOutputMetadata,
-    load_checkouts,
-    block_sparse_attention,
-    to_dense,
-    adjust_rope,
-    load_tokens,
-)
-# from hip.models.hip_attention.new_block_sparse import (
-#     block_sparse_attention
-# )
 import torch
-from torch import Tensor
-from typing import List, Dict, Literal, Optional, Tuple
-import triton
-import triton.language as tl
-import numpy as np
 import cv2
 import numba
+import triton
+import numpy as np
+import triton.language as tl
+from torch import Tensor
+from typing import List, Dict, Literal, Optional, Tuple
 
-@dataclass
-class Stage:
-    stage_block_size_q: int
-    stage_block_stride_q: int
-    stage_chunk_size: int
-    stage_k: Optional[int]
-    stage_stride: int
-    
-    require_realign_index: bool = False
-    require_reset_score: bool = False
-    require_post_sort: bool = False
-
-@dataclass
-class NopStage(Stage):
-    require_realign_index: bool = True
-    require_reset_score: bool = False
-    require_post_sort: bool = True
-
-@dataclass
-class EvalScoreStage(Stage):
-    block_chunk: int = 64
-    stage_extend_backend: Optional[str] = None
-    require_reset_score: bool = True
-    require_post_sort: bool = True
-
-@dataclass
-class ScanStage(Stage):
-    stage_extend_backend: Optional[str] = None
-    require_realign_index: bool = True
-    require_reset_score: bool = True
-    require_post_sort: bool = True
-
-@dataclass
-class EnsembleScoreStage(Stage):
-    reduce_method: str = 'sum'
-    require_reset_score: bool = True
-    require_post_sort: bool = True
+from matplotlib import pyplot as plt
+from hip.models.hip_attention.attention2_draft_prefetch import \
+    hip_attention as hip_attention_11
+from hip.models.hip_attention.attention2_draft_prefetch import (
+    load_checkouts,
+    adjust_rope,
+)
+from hip.models.hip_attention.gen3.uvm_gpu_cache import (
+    load_tokens,
+)
+from hip.models.hip_attention.gen3.attention_extend_bsa import (
+    block_sparse_attention,
+)
+from hip.models.hip_attention.gen3.attention_metadata import (
+    Stage,
+    NopStage,
+    EvalScoreStage,
+    ScanStage,
+    EnsembleScoreStage,
+    HiPAttentionArgs,
+    HiPAttentionOutputMetadata,
+    HiPAttentionCacheAccessStatistics,
+    safe_stride,
+)
 
 @numba.njit(parallel=True)
 def render_plot(
@@ -141,26 +111,30 @@ def load_keys_with_rope(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
-    # offload cache args template
-    USING_OFFLOAD_CACHE,
-    OFFLOAD_CACHE_METHOD,
-    OFFLOAD_CACHE_BUDGET,
-    OFFLOAD_CACHE_KV_HEAD,
-    OFFLOAD_CACHE_K_TABLES,
-    stride_offload_cache_k_tables_n,
-    stride_offload_cache_k_tables_t,
-    OFFLOAD_CACHE_K_BANKS,
-    stride_offload_cache_k_banks_n,
-    stride_offload_cache_k_banks_page,
-    stride_offload_cache_k_banks_offset,
-    stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_K_BANK_STATS,
-    stride_offload_cache_k_bank_stats_n,
-    stride_offload_cache_k_bank_stats_page,
-    stride_offload_cache_k_bank_stats_k,
-    OFFLOAD_CACHE_COUNTERS,
-    stride_offload_cache_counters_n,
-    stride_offload_cache_counters_k,
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    OFFLOAD_CACHE_UVM_METADATA,
+    stride_offload_cache_uvm_metadata_token,
+    stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_BANK,
+    stride_offload_cache_gpu_bank_token,
+    stride_offload_cache_gpu_bank_hid,
+    OFFLOAD_CACHE_GPU_METADATA,
+    stride_offload_cache_gpu_metadata_token,
+    stride_offload_cache_gpu_metadata_k,
+    OFFLOAD_CACHE_GPU_TABLE,
+    stride_offload_cache_gpu_table_head_kv,
+    stride_offload_cache_gpu_table_token,
+    strdie_offload_cache_gpu_table_k,
+    
+    ACCESS_COUNTER,
+    stride_access_counter_bsz,
+    stride_access_counter_head_kv,
+    stride_access_counter_tsrc,
+    CACHE_MISS_COUNTER,
+    stride_cache_miss_counter_bsz,
+    stride_cache_miss_counter_head_kv,
+    stride_cache_miss_counter_tsrc,
     
     queries,
     
@@ -205,25 +179,30 @@ def load_keys_with_rope(
         stride_cache_seq_lens_b,
         
         USING_OFFLOAD_CACHE,
-        OFFLOAD_CACHE_METHOD,
-        OFFLOAD_CACHE_BUDGET,
-        OFFLOAD_CACHE_KV_HEAD,
-        True,
-        OFFLOAD_CACHE_K_TABLES,
-        stride_offload_cache_k_tables_n,
-        stride_offload_cache_k_tables_t,
-        OFFLOAD_CACHE_K_BANKS,
-        stride_offload_cache_k_banks_n,
-        stride_offload_cache_k_banks_page,
-        stride_offload_cache_k_banks_offset,
-        stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_K_BANK_STATS,
-        stride_offload_cache_k_bank_stats_n,
-        stride_offload_cache_k_bank_stats_page,
-        stride_offload_cache_k_bank_stats_k,
-        OFFLOAD_CACHE_COUNTERS,
-        stride_offload_cache_counters_n,
-        stride_offload_cache_counters_k,
+        OFFLOAD_CACHE_KV_PACKED,
+        False,
+        OFFLOAD_CACHE_UVM_METADATA,
+        stride_offload_cache_uvm_metadata_token,
+        stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_BANK,
+        stride_offload_cache_gpu_bank_token,
+        stride_offload_cache_gpu_bank_hid,
+        OFFLOAD_CACHE_GPU_METADATA,
+        stride_offload_cache_gpu_metadata_token,
+        stride_offload_cache_gpu_metadata_k,
+        OFFLOAD_CACHE_GPU_TABLE,
+        stride_offload_cache_gpu_table_head_kv,
+        stride_offload_cache_gpu_table_token,
+        strdie_offload_cache_gpu_table_k,
+        
+        ACCESS_COUNTER,
+        stride_access_counter_bsz,
+        stride_access_counter_head_kv,
+        stride_access_counter_tsrc,
+        CACHE_MISS_COUNTER,
+        stride_cache_miss_counter_bsz,
+        stride_cache_miss_counter_head_kv,
+        stride_cache_miss_counter_tsrc,
         
         idx_bsz,
         idx_tsrc[None, :],
@@ -233,6 +212,7 @@ def load_keys_with_rope(
         mask_tsrc_active[None, :] & mask_hid[:, None],
         
         BLOCK_CHUNK,
+        BLOCK_HID,
     ).to(queries.dtype)
     
     if USING_EXTEND:
@@ -315,25 +295,30 @@ def load_keys_with_rope(
                     stride_cache_seq_lens_b,
                     
                     USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_METHOD,
-                    OFFLOAD_CACHE_BUDGET,
-                    OFFLOAD_CACHE_KV_HEAD,
-                    True,
-                    OFFLOAD_CACHE_K_TABLES,
-                    stride_offload_cache_k_tables_n,
-                    stride_offload_cache_k_tables_t,
-                    OFFLOAD_CACHE_K_BANKS,
-                    stride_offload_cache_k_banks_n,
-                    stride_offload_cache_k_banks_page,
-                    stride_offload_cache_k_banks_offset,
-                    stride_offload_cache_k_banks_hid,
-                    OFFLOAD_CACHE_K_BANK_STATS,
-                    stride_offload_cache_k_bank_stats_n,
-                    stride_offload_cache_k_bank_stats_page,
-                    stride_offload_cache_k_bank_stats_k,
-                    OFFLOAD_CACHE_COUNTERS,
-                    stride_offload_cache_counters_n,
-                    stride_offload_cache_counters_k,
+                    OFFLOAD_CACHE_KV_PACKED,
+                    False,
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_BANK,
+                    stride_offload_cache_gpu_bank_token,
+                    stride_offload_cache_gpu_bank_hid,
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    OFFLOAD_CACHE_GPU_TABLE,
+                    stride_offload_cache_gpu_table_head_kv,
+                    stride_offload_cache_gpu_table_token,
+                    strdie_offload_cache_gpu_table_k,
+                    
+                    ACCESS_COUNTER,
+                    stride_access_counter_bsz,
+                    stride_access_counter_head_kv,
+                    stride_access_counter_tsrc,
+                    CACHE_MISS_COUNTER,
+                    stride_cache_miss_counter_bsz,
+                    stride_cache_miss_counter_head_kv,
+                    stride_cache_miss_counter_tsrc,
                     
                     idx_bsz,
                     idx_tsrc[None, :],
@@ -343,6 +328,7 @@ def load_keys_with_rope(
                     mask_tsrc_active[None, :],
                     
                     BLOCK_CHUNK,
+                    BLOCK_HID,
                 ).to(queries.dtype)
                 
                 # TODO: multiply -right
@@ -358,7 +344,7 @@ def load_keys_with_rope(
                         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
                         (idx_hid % (BLOCK_HID // 2))[:, None] * stride_cos_hid,
                     mask=mask_tsrc_active[None, :],
-                    other=0.0,
+                    other0.0,
                 ).to(keys_left.dtype)
                 sin_new = tl.load(
                     SIN +\
@@ -369,24 +355,6 @@ def load_keys_with_rope(
                 ).to(keys_left.dtype)
                 
                 keys_left = keys_left * cos_new + keys_left_rot * sin_new
-                # keys_left = keys_left * cos_new + keys_left_rot * sin_new
-                # keys_left = keys_left * keys_left + keys_left * keys_left
-        # else:
-        #     if NEED_APPLY_ROPE:
-        #         keys_left = keys_left.trans(1, 0)
-        #         keys_left = adjust_rope(
-        #             keys_left,
-        #             idx_tsrc,
-        #             idx_tsrc,
-        #             mask_tsrc_active,
-        #             idx_hid,
-        #             COS, stride_cos_t, stride_cos_hid,
-        #             SIN, stride_sin_t, stride_sin_hid,
-        #             BLOCK_CHUNK,
-        #             BLOCK_HID,
-        #             NEED_APPLY_ROPE,
-        #         ).to(keys_left.dtype)
-        #         keys_left = tl.trans(keys_left, 1, 0)
     
     return keys_left
 
@@ -425,26 +393,21 @@ def chunk_controllable_sampling_mask_cuda(
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
     
-    # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
-    OFFLOAD_CACHE_METHOD: tl.constexpr,
-    OFFLOAD_CACHE_BUDGET: tl.constexpr,
-    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
-    OFFLOAD_CACHE_K_TABLES,
-    stride_offload_cache_k_tables_n,
-    stride_offload_cache_k_tables_t,
-    OFFLOAD_CACHE_K_BANKS,
-    stride_offload_cache_k_banks_n,
-    stride_offload_cache_k_banks_page,
-    stride_offload_cache_k_banks_offset,
-    stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_K_BANK_STATS,
-    stride_offload_cache_k_bank_stats_n,
-    stride_offload_cache_k_bank_stats_page,
-    stride_offload_cache_k_bank_stats_k,
-    OFFLOAD_CACHE_COUNTERS,
-    stride_offload_cache_counters_n,
-    stride_offload_cache_counters_k,
+    OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    OFFLOAD_CACHE_UVM_METADATA,
+    stride_offload_cache_uvm_metadata_token,
+    stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_BANK,
+    stride_offload_cache_gpu_bank_token,
+    stride_offload_cache_gpu_bank_hid,
+    OFFLOAD_CACHE_GPU_METADATA,
+    stride_offload_cache_gpu_metadata_token,
+    stride_offload_cache_gpu_metadata_k,
+    OFFLOAD_CACHE_GPU_TABLE,
+    stride_offload_cache_gpu_table_head_kv,
+    stride_offload_cache_gpu_table_token,
+    strdie_offload_cache_gpu_table_k,
     
     INDICES_LEFT, 
     stride_indices_left_bsz, 
@@ -467,9 +430,20 @@ def chunk_controllable_sampling_mask_cuda(
     COS,
     stride_cos_t,
     stride_cos_hid,
+    
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    
+    MASK_ACCESS_COUNTER,
+    stride_mask_access_counter_bsz,
+    stride_mask_access_counter_head_kv,
+    stride_mask_access_counter_tsrc,
+    
+    MASK_CACHE_MISS_COUNTER,
+    stride_mask_cache_miss_counter_bsz,
+    stride_mask_cache_miss_counter_head_kv,
+    stride_mask_cache_miss_counter_tsrc,
     
     CHUNK_COUNT: int,
     MAX_TSRC: int,
@@ -691,26 +665,30 @@ def chunk_controllable_sampling_mask_cuda(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_b,
             
-            # offload cache args template
             USING_OFFLOAD_CACHE,
-            OFFLOAD_CACHE_METHOD,
-            OFFLOAD_CACHE_BUDGET,
-            OFFLOAD_CACHE_KV_HEAD,
-            OFFLOAD_CACHE_K_TABLES,
-            stride_offload_cache_k_tables_n,
-            stride_offload_cache_k_tables_t,
-            OFFLOAD_CACHE_K_BANKS,
-            stride_offload_cache_k_banks_n,
-            stride_offload_cache_k_banks_page,
-            stride_offload_cache_k_banks_offset,
-            stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_K_BANK_STATS,
-            stride_offload_cache_k_bank_stats_n,
-            stride_offload_cache_k_bank_stats_page,
-            stride_offload_cache_k_bank_stats_k,
-            OFFLOAD_CACHE_COUNTERS,
-            stride_offload_cache_counters_n,
-            stride_offload_cache_counters_k,
+            OFFLOAD_CACHE_KV_PACKED,
+            OFFLOAD_CACHE_UVM_METADATA,
+            stride_offload_cache_uvm_metadata_token,
+            stride_offload_cache_uvm_metadata_k,
+            OFFLOAD_CACHE_GPU_BANK,
+            stride_offload_cache_gpu_bank_token,
+            stride_offload_cache_gpu_bank_hid,
+            OFFLOAD_CACHE_GPU_METADATA,
+            stride_offload_cache_gpu_metadata_token,
+            stride_offload_cache_gpu_metadata_k,
+            OFFLOAD_CACHE_GPU_TABLE,
+            stride_offload_cache_gpu_table_head_kv,
+            stride_offload_cache_gpu_table_token,
+            strdie_offload_cache_gpu_table_k,
+            
+            MASK_ACCESS_COUNTER,
+            stride_mask_access_counter_bsz,
+            stride_mask_access_counter_head_kv,
+            stride_mask_access_counter_tsrc,
+            MASK_CACHE_MISS_COUNTER,
+            stride_mask_cache_miss_counter_bsz,
+            stride_mask_cache_miss_counter_head_kv,
+            stride_mask_cache_miss_counter_tsrc,
             
             queries,
             
@@ -778,26 +756,30 @@ def chunk_controllable_sampling_mask_cuda(
             CACHE_SEQ_LENS,
             stride_cache_seq_lens_b,
             
-            # offload cache args template
             USING_OFFLOAD_CACHE,
-            OFFLOAD_CACHE_METHOD,
-            OFFLOAD_CACHE_BUDGET,
-            OFFLOAD_CACHE_KV_HEAD,
-            OFFLOAD_CACHE_K_TABLES,
-            stride_offload_cache_k_tables_n,
-            stride_offload_cache_k_tables_t,
-            OFFLOAD_CACHE_K_BANKS,
-            stride_offload_cache_k_banks_n,
-            stride_offload_cache_k_banks_page,
-            stride_offload_cache_k_banks_offset,
-            stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_K_BANK_STATS,
-            stride_offload_cache_k_bank_stats_n,
-            stride_offload_cache_k_bank_stats_page,
-            stride_offload_cache_k_bank_stats_k,
-            OFFLOAD_CACHE_COUNTERS,
-            stride_offload_cache_counters_n,
-            stride_offload_cache_counters_k,
+            OFFLOAD_CACHE_KV_PACKED,
+            OFFLOAD_CACHE_UVM_METADATA,
+            stride_offload_cache_uvm_metadata_token,
+            stride_offload_cache_uvm_metadata_k,
+            OFFLOAD_CACHE_GPU_BANK,
+            stride_offload_cache_gpu_bank_token,
+            stride_offload_cache_gpu_bank_hid,
+            OFFLOAD_CACHE_GPU_METADATA,
+            stride_offload_cache_gpu_metadata_token,
+            stride_offload_cache_gpu_metadata_k,
+            OFFLOAD_CACHE_GPU_TABLE,
+            stride_offload_cache_gpu_table_head_kv,
+            stride_offload_cache_gpu_table_token,
+            strdie_offload_cache_gpu_table_k,
+            
+            MASK_ACCESS_COUNTER,
+            stride_mask_access_counter_bsz,
+            stride_mask_access_counter_head_kv,
+            stride_mask_access_counter_tsrc,
+            MASK_CACHE_MISS_COUNTER,
+            stride_mask_cache_miss_counter_bsz,
+            stride_mask_cache_miss_counter_head_kv,
+            stride_mask_cache_miss_counter_tsrc,
             
             queries,
             
@@ -1555,44 +1537,7 @@ def dual_stage_quadratic_hip_attention(
     k: Optional[Tensor], 
     v: Optional[Tensor], 
     args: HiPAttentionArgs,
-    second_stage_k: int = 1024,
-    stages: List[Stage] = [
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=1,
-            stage_chunk_size=32,
-            stage_stride=1,
-            stage_k=32768,
-        ),
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=1,
-            stage_chunk_size=8,
-            stage_stride=1,
-            stage_k=8192,
-        ),
-    ],
-    model_context_length = 131072,
-    
-    # kernel args,
-    mask_only = False,
-    block_sparse_block_size_q: Optional[int] = 64,
-    
-    # scan_stride: int = 1,
-    # scan_block_stride_q: int = -1,
-    scan_early_terminate: int = 1,
-    stage_early_terminate: int = 1,
-    # scan_extend_backend: str = 'dynamic_extend',
-    scan_extend_backend: str = 'relative',
-    sa_extend_backend: str = 'streaming',
-    low_percent: float = 0.0,
-    low_k_ratio: float = 1.0,
-    dim_to_lower: Literal['head', 'seq'] = 'head',
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
-    q_mask: Optional[torch.Tensor] = None,
-    k_mask: Optional[torch.Tensor] = None,
-    idx_pca_hid_q: Optional[torch.Tensor] = None,
-    idx_pca_hid_k: Optional[torch.Tensor] = None,
 ):
     DEBUG_HEAD = -1
     global DEBUG
@@ -1614,18 +1559,18 @@ def dual_stage_quadratic_hip_attention(
         MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
         HEAD_KV = args.k_cache.shape[-2]
         TSRC = MAX_TSRC
-        # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
     
-    assert len(stages) > 0
-    STAGE_STRIDE = stages[0].stage_stride
-    BLOCK_SIZE_Q = stages[0].stage_block_size_q
+    assert len(args.stages) > 0
+    STAGE_STRIDE = args.stages[0].stage_stride
+    BLOCK_SIZE_Q = args.stages[0].stage_block_size_q
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
     BLOCK_CHUNK = args.block_size_k
-    chunk_size = stages[0].stage_chunk_size
+    chunk_size = args.stages[0].stage_chunk_size
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     args = args.clone()
+    args.mask_k = args.stages[0].stage_chunk_size
     args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
@@ -1635,10 +1580,17 @@ def dual_stage_quadratic_hip_attention(
         position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[None, :].expand(BSZ, TDST)
     assert position_ids.shape == (BSZ, TDST), position_ids.shape
     
+    if args.using_paged_cache:
+        MAX_PAGE = args.paged_cache_page_count
+    else:
+        MAX_PAGE = MAX_TSRC
+    
+    mask_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
+    mask_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
+    sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
+    sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
+    
     if cached_metadata is None:
-        scan_require_recalculate_score = True and (scan_early_terminate > 1)
-        stage_require_recalculate_score = True and (stage_early_terminate > 1)
-        
         indices_left = torch.zeros(
             (BSZ, BDST_SCAN, HEAD, chunk_count), 
             device=q.device,
@@ -1660,129 +1612,13 @@ def dual_stage_quadratic_hip_attention(
             fill_value=-32000.0
         )
         
-        # print(q.shape, k.shape, args.rope_cos.shape, args.rope_sin.shape, TDST, TSRC)
-        
-        # print('neeeed rope', args.need_apply_rope)
-        
-        # print('8f8fh', indices_left.shape, chunk_size, chunk_count, MAX_TSRC, args.sink_token_size, args.sliding_window_size)
-        
-        # pre_device = torch.cuda.current_device()
-        # torch.cuda.set_device(q.device)
-        # grid = (
-        #     BSZ *\
-        #     triton.cdiv(chunk_count, BLOCK_CHUNK) *\
-        #     BDST_SCAN *\
-        #     HEAD,
-        # )
-        # chunk_controllable_sampling_mask_cuda[grid](
-        #     q_pca, *q_pca.stride(),
-        #     k_pca, *args.safe_stride(k_pca, 4),
-        #     position_ids, *position_ids.stride(),
-            
-        #     *args.args_paged_kv_cache(),
-        #     *args.args_offload_cache(True),
-            
-        #     indices_left, *indices_left.stride(),
-        #     indices_right, *indices_right.stride(),
-        #     out_scores, *out_scores.stride(),
-        #     args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-        #     args.rope_sin, *args.safe_stride(args.rope_sin, 2),
-            
-        #     chunk_count,
-        #     MAX_TSRC,
-        #     TDST,
-        #     HEAD,
-        #     args.sliding_window_size,
-        #     args.sink_token_size,
-        #     # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-        #     model_context_length,
-            
-        #     BLOCK_HID=BLOCK_HID,
-        #     BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-        #     STRIDE_Q=scan_block_stride_q if scan_block_stride_q > 0 else args.block_stride_q,
-        #     BLOCK_CHUNK=BLOCK_CHUNK,
-        #     HEAD_GROUP=HEAD // HEAD_KV,
-        #     USING_EXTEND=args.using_extend,
-        #     EXTEND_BACKEND=scan_extend_backend,
-        #     # EXTEND_BACKEND='relative',
-        #     NEED_APPLY_ROPE=args.need_apply_rope,
-        #     TERMINATE_SIZE=scan_early_terminate,
-        #     SCAN_STRIDE=scan_stride,
-            
-        #     num_warps=4,
-        #     num_stages=2,
-        # )
-        
-        # if scan_require_recalculate_score:
-        #     grid = (
-        #         BSZ * BDST_SCAN * HEAD,
-        #     )
-        #     calculate_chunk_score[grid](
-        #         q_pca, *q_pca.stride(),
-        #         k_pca, *args.safe_stride(k_pca, 4),
-        #         position_ids, *position_ids.stride(),
-        #         args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-        #         args.rope_sin, *args.safe_stride(args.rope_sin, 2),
-                
-        #         *args.args_paged_kv_cache(),
-        #         *args.args_offload_cache(True),
-                
-        #         indices_left, *indices_left.stride(),
-        #         indices_right, *indices_right.stride(),
-        #         out_scores, *out_scores.stride(),
-                
-        #         # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-        #         model_context_length,
-        #         args.sliding_window_size,
-        #         args.sink_token_size,
-        #         chunk_size,
-                
-        #         TDST,
-        #         BDST,
-        #         BDST_SCAN,
-        #         HEAD,
-        #         chunk_count,
-        #         HEAD // HEAD_KV,
-                
-        #         USING_EXTEND=args.using_extend,
-        #         NEED_APPLY_ROPE=args.need_apply_rope,
-        #         EXTEND_BACKEND=scan_extend_backend,
-        #         BLOCK_HID=BLOCK_HID,
-        #         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-        #         BLOCK_STRIDE_Q=args.block_stride_q,
-        #         BLOCK_SIZE_K=scan_early_terminate,
-        #         BLOCK_STRIDE_K=args.block_stride_k,
-        #         SCAN_STRIDE=scan_stride,
-                
-        #         # num_warps=2,
-        #     )
-        
-        # torch.cuda.set_device(pre_device)
-        
-        # if (len(stages) > 0):
-        #     first_stage_bk = stages[0].stage_k // chunk_size
-        #     out_scores = out_scores[..., :indices_left.shape[-1]]
-        #     _, t_indices = out_scores.topk(k=min(out_scores.shape[-1], first_stage_bk), dim=-1, sorted=False)
-        #     indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-        #     indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
-        # else:
-        #     out_scores = out_scores[..., :indices_left.shape[-1]]
-        #     _, t_indices = out_scores.sort(dim=-1, descending=True, stable=False)
-        #     indices_left = indices_left.gather(dim=-1, index=t_indices[..., :indices_left.shape[-1]])
-        #     indices_right = indices_right.gather(dim=-1, index=t_indices[..., :indices_right.shape[-1]])
-        
-        # print('fif88', indices_left.shape, chunk_size)
-        
-        # STAGE_STRIDE = STAGE_STRIDE
-        
-        for i_stage, stage_info in enumerate(stages):
+        for i_stage, stage_info in enumerate(args.stages):
             # if stage_chunk_size > chunk_size: continue
             # if stage_k > TSRC: continue
             
             stage_block_stride_q = stage_info.stage_block_stride_q
             stage_chunk_size = stage_info.stage_chunk_size
             stage_k = stage_info.stage_k
-            is_quadratic = i_stage == 0
             
             if i_stage > 0:
                 assert (stage_k % chunk_size) == 0, f'{stage_k} % {chunk_size}'
@@ -1843,6 +1679,7 @@ def dual_stage_quadratic_hip_attention(
                 assert isinstance(stage_info, ScanStage), 'frist stage always scan'
                 STAGE_STRIDE = stage_info.stage_stride
             
+            
             chunk_size = stage_chunk_size
             chunk_count = indices_left.shape[-1]
             BLOCK_CHUNK = max(16, triton.next_power_of_2(min(chunk_count, BLOCK_CHUNK)))
@@ -1851,7 +1688,7 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(q.device)
             
             if isinstance(stage_info, ScanStage):
-                extend_backend = scan_extend_backend\
+                extend_backend = args.scan_extend_backend\
                     if stage_info.stage_extend_backend is None else \
                         stage_info.stage_extend_backend
                 
@@ -1863,7 +1700,7 @@ def dual_stage_quadratic_hip_attention(
                 )
                 chunk_controllable_sampling_mask_cuda[grid](
                     q_mask, *q_mask.stride(),
-                    k_mask, *args.safe_stride(k_mask, 4),
+                    k_mask, *safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
                 
                     *args.args_paged_kv_cache(),
@@ -1872,8 +1709,11 @@ def dual_stage_quadratic_hip_attention(
                     indices_left, *indices_left.stride(),
                     indices_right, *indices_right.stride(),
                     out_scores, *out_scores.stride(),
-                    args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-                    args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                    args.rope_cos, *safe_stride(args.rope_cos, 2),
+                    args.rope_sin, *safe_stride(args.rope_sin, 2),
+                    
+                    mask_access_counter, *safe_stride(mask_access_counter, 3),
+                    mask_cache_miss_counter, *safe_stride(mask_cache_miss_counter, 3),
                     
                     chunk_count,
                     MAX_TSRC,
@@ -1882,7 +1722,7 @@ def dual_stage_quadratic_hip_attention(
                     args.sliding_window_size,
                     args.sink_token_size,
                     # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                    model_context_length,
+                    args.model_context_length,
                     
                     BLOCK_HID=BLOCK_HID,
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q,
@@ -1892,11 +1732,12 @@ def dual_stage_quadratic_hip_attention(
                     USING_EXTEND=args.using_extend,
                     EXTEND_BACKEND=extend_backend,
                     NEED_APPLY_ROPE=args.need_apply_rope,
-                    TERMINATE_SIZE=stage_early_terminate,
+                    TERMINATE_SIZE=args.stage_early_terminate,
                     SCAN_STRIDE=STAGE_STRIDE,
                 )
             elif isinstance(stage_info, EvalScoreStage):
-                extend_backend = scan_extend_backend \
+                raise Exception() # TODO: handle new args
+                extend_backend = args.scan_extend_backend \
                     if stage_info.stage_extend_backend is None else\
                         stage_info.stage_extend_backend
                 
@@ -1907,10 +1748,10 @@ def dual_stage_quadratic_hip_attention(
                 )                
                 calculate_chunk_score[grid](
                     q_mask, *q_mask.stride(),
-                    k_mask, *args.safe_stride(k_mask, 4),
+                    k_mask, *safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
-                    args.rope_cos, *args.safe_stride(args.rope_cos, 2),
-                    args.rope_sin, *args.safe_stride(args.rope_sin, 2),
+                    args.rope_cos, *safe_stride(args.rope_cos, 2),
+                    args.rope_sin, *safe_stride(args.rope_sin, 2),
                     
                     *args.args_paged_kv_cache(),
                     *args.args_offload_cache(True),
@@ -1920,7 +1761,7 @@ def dual_stage_quadratic_hip_attention(
                     out_scores, *out_scores.stride(),
                     
                     # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                    model_context_length,
+                    args.model_context_length,
                     args.sliding_window_size,
                     args.sink_token_size,
                     chunk_size,
@@ -1938,7 +1779,7 @@ def dual_stage_quadratic_hip_attention(
                     BLOCK_HID=BLOCK_HID,
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                     BLOCK_STRIDE_Q=stage_block_stride_q,
-                    BLOCK_SIZE_K=stage_early_terminate,
+                    BLOCK_SIZE_K=args.stage_early_terminate,
                     BLOCK_STRIDE_K=args.block_stride_k,
                     SCAN_STRIDE=stage_info.stage_stride,
                     BLOCK_CHUNK=stage_info.block_chunk,
@@ -1953,6 +1794,7 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
+                raise Exception() # TODO: handle new args
                 apply_v_dot = (os.getenv('APPLY_V_DOT', '0') == '1')
                 # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
                 apply_v_dot = apply_v_dot and (i_stage != 0)
@@ -1970,7 +1812,7 @@ def dual_stage_quadratic_hip_attention(
                         triton.cdiv(indices_left.shape[3], V_GROUP_K),
                     )
                     compute_v_cos[grid](
-                        v, *args.safe_stride(v, 4),
+                        v, *safe_stride(v, 4),
                         indices_left, *indices_left.stride(),
                         position_ids, *position_ids.stride(),
                         
@@ -2018,9 +1860,9 @@ def dual_stage_quadratic_hip_attention(
 
                     out_scores = out_scores + v_scores * 0.8
                 
-                if (i_stage < (len(stages) - 1)):
+                if (i_stage < (len(args.stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
-                    next_stage_k = (stages[i_stage + 1].stage_k // stages[i_stage].stage_chunk_size)
+                    next_stage_k = (args.stages[i_stage + 1].stage_k // args.stages[i_stage].stage_chunk_size)
                     next_stage_k = min(next_stage_k, indices_left.shape[-1])
                     _, t_indices = out_scores[..., :indices_left.shape[-1]].topk(
                         k=next_stage_k,
@@ -2032,10 +1874,10 @@ def dual_stage_quadratic_hip_attention(
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
             
             if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
-                if (i_stage + 1) < len(stages):
-                    next_stage_k = stages[i_stage + 1].stage_k
+                if (i_stage + 1) < len(args.stages):
+                    next_stage_k = args.stages[i_stage + 1].stage_k
                 else:
-                    next_stage_k = second_stage_k
+                    next_stage_k = args.second_stage_k
                 out_indices_cpu = indices_left.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
                 render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size)
@@ -2047,11 +1889,11 @@ def dual_stage_quadratic_hip_attention(
             indices_right = indices_right.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
             out_scores = out_scores.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
         
-        assert (second_stage_k % chunk_size) == 0
+        assert (args.second_stage_k % chunk_size) == 0
         if DEBUG:
             print('indices_left', indices_left[0, -1])
-            print('out_scores', out_scores[0, -1], second_stage_k, indices_left.shape, chunk_size)
-        indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
+            print('out_scores', out_scores[0, -1], args.second_stage_k, indices_left.shape, chunk_size)
+        indices = indices_left[..., :args.second_stage_k // chunk_size] // chunk_size * chunk_size
         
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
             out_indices_cpu = indices.cpu().numpy()
@@ -2061,11 +1903,11 @@ def dual_stage_quadratic_hip_attention(
             print('saved dummy_sampled_final.png')
         
         args = args.clone()
-        args.block_size_q = stages[-1].stage_block_size_q
+        args.block_size_q = args.stages[-1].stage_block_size_q
         block_sparse_block_size_q = min(block_sparse_block_size_q, args.block_size_q)
         args.sliding_window_size += args.mask_k
         args.block_size_k = chunk_size
-        args.mask_k = second_stage_k
+        args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
         
         # print('ff', indices.shape)
@@ -2083,8 +1925,8 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
         ks_start_end[:, :, -1] = ks
         
-        if (low_percent > 0) and (low_k_ratio < 1):
-            scores = out_scores[..., :second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
+        if (args.low_percent > 0) and (args.low_k_ratio < 1):
+            scores = out_scores[..., :args.second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
             scores = scores.gather(dim=-1, index=t_sort_1)
             scores = scores.gather(dim=-1, index=t_sort_2)
             scores = torch.where(active_mask, scores, -32000.0)
@@ -2104,13 +1946,13 @@ def dual_stage_quadratic_hip_attention(
             else:
                 raise Exception()
             
-            _, lowk = values_to_sort.topk(k=int(scores_mean.shape[dim_to_lower] * low_percent), dim=dim_to_lower, largest=False, sorted=False)
+            _, lowk = values_to_sort.topk(k=int(scores_mean.shape[dim_to_lower] * args.low_percent), dim=dim_to_lower, largest=False, sorted=False)
             # print(lowk[:, -1])
             if lowk.ndim == 2:
                 lowk = lowk[:, :, None].expand(-1, -1, scores.shape[-1])
             if lowk.ndim == 1:
                 lowk = lowk[:, None, None].expand(-1, scores.shape[-2], scores.shape[-1])
-            _, t_sort_score = torch.topk(scores.gather(dim=dim_to_lower, index=lowk), dim=-1, k=int(scores.shape[-1] * (1 - low_k_ratio)), largest=False)
+            _, t_sort_score = torch.topk(scores.gather(dim=dim_to_lower, index=lowk), dim=-1, k=int(scores.shape[-1] * (1 - args.low_k_ratio)), largest=False)
             # print(t_sort_score.shape)
             N, BDST = scores_mean.shape
             indices.scatter_(
@@ -2168,13 +2010,13 @@ def dual_stage_quadratic_hip_attention(
             ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
             args.block_size_q = block_sparse_block_size_q
         
-        if mask_only:
+        if args.mask_only:
             return None, None
     else:
         args = args.clone()
         args.sliding_window_size += args.mask_k
-        args.block_size_k = stages[-1].stage_chunk_size
-        args.mask_k = second_stage_k
+        args.block_size_k = args.stages[-1].stage_chunk_size
+        args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
         
         assert cached_metadata is not None
@@ -2184,30 +2026,6 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
-    
-    # if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
-    #     # test_v = v[0, :, :, :] # type: torch.Tensor
-    #     # test_v = test_v.square().sum(dim=-1).sqrt().sum(dim=-1)
-    #     # test_v = torch.nn.functional.avg_pool1d(test_v.unsqueeze(0), 11, padding=5).squeeze(0)
-    #     # test_v = test_v.cpu().float().numpy().tolist()
-    #     # plt.figure(figsize=(100, 3))
-    #     # plt.plot(test_v, linewidth=0.5)
-    #     # plt.savefig('dummy_v_norm.png', bbox_inches='tight', pad_inches=0)
-        
-    #     # plt.figure(figsize=(64,1))
-    #     # plt.clf()
-    #     # test_v = v[0, ::1, DEBUG_HEAD, :].to(torch.float32)
-    #     # test_v = test_v / (test_v.square().sum(-1, keepdim=True).sqrt())
-    #     # test_v = -(test_v[-128:, :] @ test_v.T - 1)
-    #     # test_v = test_v.to(torch.float32).cpu().numpy()
-    #     # hm = cv2.normalize(test_v, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    #     # hm = cv2.applyColorMap(hm, cv2.COLORMAP_HOT)
-    #     # cv2.imwrite("dummy_v_matrix.png", hm)
-    #     # plt.figure(figsize=(4,3))
-        
-    #     # plt.imshow(test_v, interpolation='nearest')
-    #     # plt.axis('off')
-    #     # plt.savefig('dummy_v_matrix.png', dpi=1000, bbox_inches='tight', pad_inches=0)
     
     context = block_sparse_attention(
         q=q, 
@@ -2219,9 +2037,10 @@ def dual_stage_quadratic_hip_attention(
         ks_count=ks_count,
         ks_start_end=ks_start_end,
         args=args,
-        EXTEND_BACKEND=sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
-        # model_context_length=model_context_length if (not sa_extend_backend == 'streaming') else 0,
-        model_context_length=model_context_length,
+        access_counter=sa_access_counter,
+        cache_miss_counter=sa_cache_miss_counter,
+        EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
+        model_context_length=args.model_context_length,
     )
     
     if DEBUG:
@@ -2234,11 +2053,14 @@ def dual_stage_quadratic_hip_attention(
         ks=ks,
         ks_count=ks_count,
         ks_start_end=ks_start_end,
-        key_access_log=None,
-        key_access_count=None,
-        block_access_log=None,
-        block_access_score=None,
-        block_access_count=None,
+        mask_cache_statistics=HiPAttentionCacheAccessStatistics(
+            access_counter=mask_access_counter,
+            cache_miss_counter=mask_cache_miss_counter,
+        ),
+        sa_cache_statistics=HiPAttentionCacheAccessStatistics(
+            access_counter=sa_access_counter,
+            cache_miss_counter=sa_access_counter,
+        )
     )
 
 def main_debug():
@@ -2576,7 +2398,7 @@ def main_debug():
         end = torch.cuda.Event(True)
          
         start.record()
-        context, metadata = hip_attention(
+        context, metadata = hip_attention_11(
             **hip_1k_kwargs,
             previous_metadata=metadata,
         )
@@ -2599,7 +2421,7 @@ def main_debug():
         end = torch.cuda.Event(True)
          
         start.record()
-        context, metadata = hip_attention(
+        context, metadata = hip_attention_11(
             **hip_512_kwargs,
             previous_metadata=metadata,
         )
