@@ -1347,7 +1347,7 @@ def compute_v_cos(
             idx_head * stride_indices_head +\
             idx_k * strdie_indices_k,
         mask=mask_k,
-        other=seq_len + 2 * BLOCK_SIZE_K,
+        other=seq_len,
     )
     indices = indices // BLOCK_SIZE_K * BLOCK_SIZE_K
     
