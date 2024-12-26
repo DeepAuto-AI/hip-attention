@@ -1580,8 +1580,8 @@ def dual_stage_quadratic_hip_attention(
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     args = args.clone()
-    args.mask_k = args.stages[0].stage_chunk_size
-    args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
+    original_sliding_window_size = args.sliding_window_size
+    args.sliding_window_size = max(0, args.sliding_window_size - args.stages[0].stage_chunk_size * 2)
     
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
         assert args.position_ids is not None
@@ -1914,8 +1914,8 @@ def dual_stage_quadratic_hip_attention(
         
         args = args.clone()
         args.block_size_q = args.stages[-1].stage_block_size_q
-        block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
-        args.sliding_window_size += args.mask_k
+        args.block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
+        args.sliding_window_size = original_sliding_window_size
         args.block_size_k = chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
@@ -2010,21 +2010,21 @@ def dual_stage_quadratic_hip_attention(
                 pass
         
         if  (
-                (block_sparse_block_size_q is not None) and\
-                (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
+                (args.block_sparse_block_size_q is not None) and\
+                (triton.cdiv(TDST, args.block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
             ):
-            assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
-            indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-            ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-            ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-            ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
-            args.block_size_q = block_sparse_block_size_q
+            assert (BLOCK_SIZE_Q % args.block_sparse_block_size_q) == 0
+            indices = indices.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
+            ks = ks.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
+            ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
+            ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
+            args.block_size_q = args.block_sparse_block_size_q
         
         if args.mask_only:
             return None, None
     else:
         args = args.clone()
-        args.sliding_window_size += args.mask_k
+        args.sliding_window_size = original_sliding_window_size
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
