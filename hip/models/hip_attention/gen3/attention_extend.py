@@ -2031,7 +2031,7 @@ def dual_stage_quadratic_hip_attention(
         
         assert cached_metadata is not None
         indices = cached_metadata.indices
-        ks = cached_metadata.indices
+        ks = cached_metadata.ks
         ks_count = cached_metadata.ks_count
         ks_start_end = cached_metadata.ks_start_end
     
@@ -2054,8 +2054,8 @@ def dual_stage_quadratic_hip_attention(
         extend_context_length=args.extend_context_length,
     )
     
-    print(mask_access_counter[0, 0, args.sink_token_size:args.sink_token_size+20])
-    print(sa_access_counter[0, 0, :20])
+    # print(mask_access_counter[0, 0, args.sink_token_size:args.sink_token_size+20])
+    # print(sa_access_counter[0, 0, :20])
     
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)

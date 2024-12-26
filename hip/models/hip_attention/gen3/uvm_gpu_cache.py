@@ -120,7 +120,7 @@ class UVMCache:
         self.allocated_cpu_bytes = sizeof(self.bank_cpu)
         self.allocated_gpu_bytes = sizeof(self.metadata)
         
-        debug_print(f'UVMCache: bank={format_size_bytes(self.bank_cpu)}, metadata={format_size_bytes(self.metadata)}')
+        # debug_print(f'UVMCache: bank={format_size_bytes(self.bank_cpu)}, metadata={format_size_bytes(self.metadata)}')
     
     def alloc_uvm(self, shape, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
         device = self.device
@@ -206,12 +206,12 @@ class GPUCache:
         self.allocated_gpu_bytes = (
             sizeof(self.bank) + sizeof(self.metadata) + sizeof(self.table)
         )
-        debug_print(
-            f'GPUCache: bank={format_size_bytes(self.bank)}, '
-            f'metadata={format_size_bytes(self.metadata)}, '
-            f'table={format_size_bytes(self.table)}, '
-            f'total={format_size_bytes(self.allocated_gpu_bytes)}'
-        )
+        # debug_print(
+        #     f'GPUCache: bank={format_size_bytes(self.bank)}, '
+        #     f'metadata={format_size_bytes(self.metadata)}, '
+        #     f'table={format_size_bytes(self.table)}, '
+        #     f'total={format_size_bytes(self.allocated_gpu_bytes)}'
+        # )
     
     def handle_cache_access(
         self,
@@ -287,8 +287,8 @@ class HiPOffloadCache:
         table = table.cpu()
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
-        k = k.to(device, non_blocking=True)
-        v = v.to(device, non_blocking=True)
+        k = k.to(device, non_blocking=True).unsqueeze(0)
+        v = v.to(device, non_blocking=True).unsqueeze(0)
         return k, v
     
     def set_kv_buffer(

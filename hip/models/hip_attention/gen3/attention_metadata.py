@@ -61,11 +61,13 @@ class HiPAttentionCacheAccessStatistics:
     cache_miss_counter: Tensor
     
     def compute_statistics(self):
+        unique_access_count = self.access_counter.clamp(0, 1).sum()
         access_counts = self.access_counter.sum()
         cache_miss_counts = self.cache_miss_counter.sum()
         cache_hit_ratio = 1 - (cache_miss_counts / access_counts)
         
         return {
+            'unique_access_count': unique_access_count.item(),
             'access_count': access_counts.item(),
             'cache_miss_count': cache_miss_counts.item(),
             'cache_hit_ratio': cache_hit_ratio.item(),
@@ -167,7 +169,7 @@ class HiPAttentionArgs:
             else:
                 self.paged_cache_page_count = self.offload_cache.get_page_count()
                 self.paged_cache_page_size = 1
-        assert self.paged_cache_page_size in (1, 2, 4, 8, 16, 32)
+            assert self.paged_cache_page_size in (1, 2, 4, 8, 16, 32)
         if self.logit_softcap == 0:
             self.logit_softcap = None
     
