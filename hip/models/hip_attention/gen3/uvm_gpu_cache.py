@@ -1,5 +1,6 @@
 import math
 import os
+import time
 import cuda
 import cuda.cudart
 import torch
@@ -149,11 +150,42 @@ class UVMCache:
     def gather_cpu(self, table: Tensor, pin_memory = False) -> Tensor:
         assert table.ndim == 1
         assert table.device == self.bank_cpu.device
-        t = self.bank_cpu[table]
+        
+        t = torch.empty(
+            (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]), 
+            dtype=self.bank_cpu.dtype, 
+            device='cpu'
+        )
+        
+        view_dtype = torch.uint16
+        if self.bank_cpu.dtype in [torch.float32]:
+            view_dtype = torch.uint32
+        elif self.bank_cpu.dtype in [torch.float16, torch.bfloat16]:
+            view_dtype = torch.uint16
+        elif self.bank_cpu.dtype in [torch.uint8, torch.float8_e5m2]:
+            view_dtype = torch.uint8
+        else:
+            raise Exception()
+
+        index_copy(
+            self.bank_cpu.view(dtype=view_dtype).numpy(), 
+            t.view(dtype=view_dtype).numpy(), 
+            table.numpy()
+        )
+        
         if pin_memory:
             t = t.pin_memory()
+        
         return t
-    
+
+import numba
+import numpy as np
+
+@numba.njit(parallel=True, fastmath=True)
+def index_copy(src: np.ndarray, out: np.ndarray, table: np.ndarray):
+    for i in numba.prange(table.shape[0]):
+        out[i] = src[table[i]]
+
 class GPUCache:
     def __init__(
         self, 
@@ -284,11 +316,16 @@ class HiPOffloadCache:
         table: Tensor,
         device: torch.device
     ) -> Tuple[Tensor, Tensor]:
-        table = table.cpu()
+        # t = time.time()
+        table = table.to('cpu', non_blocking=False)
+        # e1 = time.time()
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
-        k = k.to(device, non_blocking=True).unsqueeze(0)
-        v = v.to(device, non_blocking=True).unsqueeze(0)
+        # e2 = time.time()
+        k = k.to(device, non_blocking=False).unsqueeze(0)
+        v = v.to(device, non_blocking=False).unsqueeze(0)
+        # e3 = time.time()
+        # print(e1-t, e2-e1, e3-e2)
         return k, v
     
     def set_kv_buffer(
