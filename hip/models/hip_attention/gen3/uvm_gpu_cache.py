@@ -151,7 +151,7 @@ class UVMCache:
         assert table.ndim == 1
         assert table.device == self.bank_cpu.device
         
-        t = torch.empty(
+        t = torch.zeros(
             (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]), 
             dtype=self.bank_cpu.dtype, 
             device='cpu'
@@ -591,8 +591,8 @@ def load_tokens(
             )
     
     if keys.dtype == tl.uint8:
-        keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
+        keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
     if keys.dtype == tl.float8e5:
-        keys = keys.to(tl.bfloat16)
+        keys = keys.to(tl.float16)
     
     return keys

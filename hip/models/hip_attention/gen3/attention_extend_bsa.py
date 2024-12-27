@@ -706,7 +706,7 @@ def block_sparse_attention_cuda(
         # volatile=True,
     )
     if queries.dtype == tl.float8e5:
-        queries = queries.to(tl.bfloat16)
+        queries = queries.to(tl.float16)
     
     if USING_EXTEND and NEED_APPLY_ROPE:
         rope_tdst = pos_tdst - 1
@@ -741,7 +741,7 @@ def block_sparse_attention_cuda(
             # volatile=True,
         )
         if queries_rot.dtype == tl.float8e5:
-            queries_rot = queries_rot.to(tl.bfloat16)
+            queries_rot = queries_rot.to(tl.float16)
         
         cos_new = tl.load(
             COS +\
