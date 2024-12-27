@@ -1347,7 +1347,7 @@ def compute_v_cos(
             idx_head * stride_indices_head +\
             idx_k * strdie_indices_k,
         mask=mask_k,
-        other=seq_len,
+        other=seq_len + 2* BLOCK_SIZE_K,
     )
     indices = indices // BLOCK_SIZE_K * BLOCK_SIZE_K
     
@@ -1581,7 +1581,8 @@ def dual_stage_quadratic_hip_attention(
     
     args = args.clone()
     original_sliding_window_size = args.sliding_window_size
-    args.sliding_window_size = max(0, args.sliding_window_size - args.stages[0].stage_chunk_size * 2)
+    args.mask_k = args.stages[0].stage_chunk_size
+    args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
         assert args.position_ids is not None
@@ -1915,7 +1916,7 @@ def dual_stage_quadratic_hip_attention(
         args = args.clone()
         args.block_size_q = args.stages[-1].stage_block_size_q
         args.block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
-        args.sliding_window_size = original_sliding_window_size
+        args.sliding_window_size += args.mask_k #original_sliding_window_size
         args.block_size_k = chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
@@ -2024,7 +2025,7 @@ def dual_stage_quadratic_hip_attention(
             return None, None
     else:
         args = args.clone()
-        args.sliding_window_size = original_sliding_window_size
+        args.sliding_window_size += args.mask_k #original_sliding_window_size
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
