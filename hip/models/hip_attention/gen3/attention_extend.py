@@ -1347,7 +1347,7 @@ def compute_v_cos(
             idx_head * stride_indices_head +\
             idx_k * strdie_indices_k,
         mask=mask_k,
-        other=seq_len + 2* BLOCK_SIZE_K,
+        other=seq_len + 2 * BLOCK_SIZE_K,
     )
     indices = indices // BLOCK_SIZE_K * BLOCK_SIZE_K
     
@@ -1580,7 +1580,6 @@ def dual_stage_quadratic_hip_attention(
     chunk_count = triton.cdiv(max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size)
     
     args = args.clone()
-    original_sliding_window_size = args.sliding_window_size
     args.mask_k = args.stages[0].stage_chunk_size
     args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
@@ -1915,8 +1914,8 @@ def dual_stage_quadratic_hip_attention(
         
         args = args.clone()
         args.block_size_q = args.stages[-1].stage_block_size_q
-        args.block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
-        args.sliding_window_size += args.mask_k #original_sliding_window_size
+        block_sparse_block_size_q = min(args.block_sparse_block_size_q, args.block_size_q)
+        args.sliding_window_size += args.mask_k
         args.block_size_k = chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
@@ -2011,21 +2010,21 @@ def dual_stage_quadratic_hip_attention(
                 pass
         
         if  (
-                (args.block_sparse_block_size_q is not None) and\
-                (triton.cdiv(TDST, args.block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
+                (block_sparse_block_size_q is not None) and\
+                (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
             ):
-            assert (BLOCK_SIZE_Q % args.block_sparse_block_size_q) == 0
-            indices = indices.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
-            ks = ks.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
-            ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
-            ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // args.block_sparse_block_size_q, 1)
-            args.block_size_q = args.block_sparse_block_size_q
+            assert (BLOCK_SIZE_Q % block_sparse_block_size_q) == 0
+            indices = indices.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks = ks.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks_count = ks_count.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
+            args.block_size_q = block_sparse_block_size_q
         
         if args.mask_only:
             return None, None
     else:
         args = args.clone()
-        args.sliding_window_size += args.mask_k #original_sliding_window_size
+        args.sliding_window_size += args.mask_k
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
@@ -2054,9 +2053,6 @@ def dual_stage_quadratic_hip_attention(
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
     )
-    
-    # print(mask_access_counter[0, 0, args.sink_token_size:args.sink_token_size+20])
-    # print(sa_access_counter[0, 0, :20])
     
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)
