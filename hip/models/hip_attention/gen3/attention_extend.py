@@ -2067,10 +2067,10 @@ def dual_stage_quadratic_hip_attention(
         mask_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=mask_access_counter,
             cache_miss_counter=mask_cache_miss_counter,
-        ),
+        ) if (cached_metadata is None) else None,
         sa_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=sa_access_counter,
-            cache_miss_counter=sa_access_counter,
+            cache_miss_counter=sa_cache_miss_counter,
         )
     )
 

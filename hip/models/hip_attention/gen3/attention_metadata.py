@@ -1,7 +1,7 @@
 import copy
 from dataclasses import dataclass, field
 from torch import Tensor
-from typing import Literal, Optional, List, TYPE_CHECKING
+from typing import Dict, Literal, Optional, List, TYPE_CHECKING
 if TYPE_CHECKING:
     from hip.models.hip_attention.gen3.uvm_gpu_cache import (
         HiPOffloadCache
@@ -53,6 +53,13 @@ class EnsembleScoreStage(Stage):
     require_reset_score: bool = True
     require_post_sort: bool = True
 
+StatKeys = Literal[
+    'unique_access_count',
+    'access_count',
+    'cache_miss_count',
+    'cache_hit_ratio',
+]
+
 @dataclass
 class HiPAttentionCacheAccessStatistics:
     # [BSZ, HEAD_KV, MAX_TSRC]
@@ -60,17 +67,20 @@ class HiPAttentionCacheAccessStatistics:
     # [BSZ, HEAD_KV, MAX_TSRC]
     cache_miss_counter: Tensor
     
-    def compute_statistics(self):
+    def compute_statistics(self) -> Dict[
+        StatKeys,
+        Tensor,
+    ]:
         unique_access_count = self.access_counter.clamp(0, 1).sum()
         access_counts = self.access_counter.sum()
         cache_miss_counts = self.cache_miss_counter.sum()
         cache_hit_ratio = 1 - (cache_miss_counts / access_counts)
         
         return {
-            'unique_access_count': unique_access_count.item(),
-            'access_count': access_counts.item(),
-            'cache_miss_count': cache_miss_counts.item(),
-            'cache_hit_ratio': cache_hit_ratio.item(),
+            'unique_access_count': unique_access_count,
+            'access_count': access_counts,
+            'cache_miss_count': cache_miss_counts,
+            'cache_hit_ratio': cache_hit_ratio,
         }
 
 @dataclass
@@ -81,8 +91,8 @@ class HiPAttentionOutputMetadata:
     ks_start_end: Tensor
     
     # memory access statistics
-    mask_cache_statistics: HiPAttentionCacheAccessStatistics
-    sa_cache_statistics: HiPAttentionCacheAccessStatistics
+    mask_cache_statistics: Optional[HiPAttentionCacheAccessStatistics]
+    sa_cache_statistics: Optional[HiPAttentionCacheAccessStatistics]
     
 @dataclass
 class HiPAttentionArgs:
