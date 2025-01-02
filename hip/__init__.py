@@ -28,9 +28,13 @@ from hip.models.hip_attention.gen3.attention_metadata \
 from hip.models.hip_attention.gen3.attention_metadata \
     import HiPAttentionCacheAccessStatistics as HiPAttentionCacheAccessStatistics12
 from hip.models.hip_attention.gen3.attention_metadata \
-    import HiPOffloadCache as HiPOffloadCache12
-from hip.models.hip_attention.gen3.attention_metadata \
     import ScanStage as ScanStage12
+from hip.models.hip_attention.gen3.uvm_gpu_cache \
+    import HiPOffloadCache as HiPOffloadCache12
+from hip.models.hip_attention.gen3.uvm_gpu_cache \
+    import GPUCache as GPUCache12
+from hip.models.hip_attention.gen3.uvm_gpu_cache \
+    import UVMCache as UVMCache12
 
 # api
 from hip.models.attention \
@@ -66,8 +70,10 @@ __all__ = [
     'HiPAttentionArgs12',
     'HiPAttentionOutputMetadata12',
     'HiPAttentionCacheAccessStatistics12',
-    'HiPOffloadCache12',
     'ScanStage12',
+    'HiPOffloadCache12',
+    'GPUCache12',
+    'UVMCache12',
     
     # general purpose APIs, up to date for stable API
     'hip_attention',
