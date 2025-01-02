@@ -18,12 +18,27 @@ from hip.models.hip_attention.attention2_draft_prefetch \
 from hip.models.hip_attention.attention2_draft_prefetch \
     import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11
 
+# version 1.2
+from hip.models.hip_attention.gen3.attention_extend \
+    import dual_stage_quadratic_hip_attention as hip_attention_12
+from hip.models.hip_attention.gen3.attention_metadata \
+    import HiPAttentionArgs as HiPAttentionArgs12
+from hip.models.hip_attention.gen3.attention_metadata \
+    import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata12
+from hip.models.hip_attention.gen3.attention_metadata \
+    import HiPAttentionCacheAccessStatistics as HiPAttentionCacheAccessStatistics12
+from hip.models.hip_attention.gen3.attention_metadata \
+    import HiPOffloadCache as HiPOffloadCache12
+from hip.models.hip_attention.gen3.attention_metadata \
+    import ScanStage as ScanStage12
+
 # api
 from hip.models.attention \
     import custom_attention
 from hip.models.modeling_llama \
     import LlamaForCausalLM as HipLlamaForCausalLM
 
+# NOTE: V1.1 is used for main API (for temporary)
 hip_attention = hip_attention_11
 paged_hip_attention = paged_hip_attention_11
 varlen_hip_attention = varlen_hip_attention_11
@@ -45,6 +60,14 @@ __all__ = [
     'paged_varlen_hip_attention_11',
     'HiPAttentionArgs11',
     'HiPAttentionOutputMetadata11',
+
+    # version 1.2
+    'hip_attention_12',
+    'HiPAttentionArgs12',
+    'HiPAttentionOutputMetadata12',
+    'HiPAttentionCacheAccessStatistics12',
+    'HiPOffloadCache12',
+    'ScanStage12',
     
     # general purpose APIs, up to date for stable API
     'hip_attention',
