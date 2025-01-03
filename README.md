@@ -25,6 +25,14 @@ After installation, you can access the `hip` package from any project. `hip` is 
 + | context, metadata = hip_attention(q, k, v)
 ```
 
+## SGlang
+
+```
+SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 POPULATION_FILE=none HIP_EXTEND_CONTEXT_LENGTH=131072 HIP_REFRESH_INTERVAL=4 SRT_DEBUG_DECODE_SPECIAL_TOKENS=1 EXTEND_LEN=512 HIP_EXTEND=1 HIP_DISABLE_AUTOTUNE=1 SRT_ATTENTION_BACKEND=HIP_ATTN SRT_MAX_BATCH=8 python -m sglang.launch_server --model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 --kv-cache-dtype auto --mem-fraction-static 0.6 --tp-size 1 --chunked-prefill-size 8192 --max-prefill-tokens 8192 --context-length 256000 --port 30000 --enable-p2p-check --disable-cuda-graph
+```
+
+The above command requires version 1.2. Set `HIP_EXTEND=0` to use version 1.1.
+
 ## API
 
 ```py
