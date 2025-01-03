@@ -494,7 +494,7 @@ def block_sparse_attention_cuda_step(
     return acc, l_i, m_i
 
 def get_block_sparse_attention_configs():
-    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
+    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '1') == '1'
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         defaults = {
@@ -851,8 +851,11 @@ def block_sparse_attention_cuda(
                     idx_hid[:, None],
                     mask_tsrc[None, :],
                     
+                    HEAD // KV_HEAD_REPEAT,
                     BLOCK_SIZE_K,
                     HID,
+                    
+                    IS_BSA=True,
                 )
                 
                 if USING_EXTEND and NEED_APPLY_ROPE:
@@ -909,8 +912,11 @@ def block_sparse_attention_cuda(
                         ((idx_hid + HID // 2) % HID)[:, None],
                         mask_tsrc[None, :],
                         
+                        HEAD // KV_HEAD_REPEAT,
                         BLOCK_SIZE_K,
                         HID,
+                        
+                        IS_BSA=True,
                     )
                 else:
                     keys_rot = None
@@ -968,8 +974,11 @@ def block_sparse_attention_cuda(
                     idx_hid[None, :],
                     mask_tsrc[:, None],
                     
+                    HEAD // KV_HEAD_REPEAT,
                     BLOCK_SIZE_K,
                     HID,
+                    
+                    IS_BSA=True,
                 )
                 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1069,8 +1078,11 @@ def block_sparse_attention_cuda(
                 idx_hid[:, None],
                 mask_tsrc[None, :],
                 
+                HEAD // KV_HEAD_REPEAT,
                 BLOCK_SIZE_K,
                 HID,
+                
+                IS_BSA=True,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1127,8 +1139,11 @@ def block_sparse_attention_cuda(
                     ((idx_hid + HID // 2) % HID)[:, None],
                     mask_tsrc[None, :],
                     
+                    HEAD // KV_HEAD_REPEAT,
                     BLOCK_SIZE_K,
                     HID,
+                    
+                    IS_BSA=True,
                 )
             else:
                 keys_rot = None
@@ -1186,8 +1201,11 @@ def block_sparse_attention_cuda(
                 idx_hid[None, :],
                 mask_tsrc[:, None],
                 
+                HEAD // KV_HEAD_REPEAT,
                 BLOCK_SIZE_K,
                 HID,
+                
+                IS_BSA=True,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1290,8 +1308,11 @@ def block_sparse_attention_cuda(
                 idx_hid[:, None],
                 mask_tsrc[None, :],
                 
+                HEAD // KV_HEAD_REPEAT,
                 BLOCK_SIZE_K,
                 HID,
+                
+                IS_BSA=True,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1348,8 +1369,11 @@ def block_sparse_attention_cuda(
                     ((idx_hid + HID // 2) % HID)[:, None],
                     mask_tsrc[None, :],
                     
+                    HEAD // KV_HEAD_REPEAT,
                     BLOCK_SIZE_K,
                     HID,
+                    
+                    IS_BSA=True,
                 )
             else:
                 keys_rot = None
@@ -1407,8 +1431,11 @@ def block_sparse_attention_cuda(
                 idx_hid[None, :],
                 mask_tsrc[:, None],
                 
+                HEAD // KV_HEAD_REPEAT,
                 BLOCK_SIZE_K,
                 HID,
+                
+                IS_BSA=True,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(

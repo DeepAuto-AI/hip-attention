@@ -200,8 +200,10 @@ def pad_to_cacheline(nelem: int, dtype: torch.dtype):
     
     assert nelem > 0
 
-    cacheline_size = 128
-    step = cacheline_size // byte_size
+    # in bytes
+    cacheline_size = 32
+    
+    step = max(1, cacheline_size // byte_size)
     return nelem if (nelem % step) == 0 else (
         nelem + step - (nelem % step)
     )
@@ -264,6 +266,9 @@ class GPUCache:
             device=self.device,
             fill_value=MAX_INT,
         )
+        self.metadata[:, 0].fill_(MAX_INT)
+        self.metadata[:, 1].fill_(MAX_INT)
+        self.metadata[:, 2].fill_(MAX_INT)
         self.metadata[:, 3].fill_(0)
         
         # NOTE: this table is way too large to pad... sorry
@@ -325,6 +330,7 @@ class GPUCache:
             self.table, *self.table.stride(),
 
             uvm_page_count,
+            self.k_uvm.bank_cpu.shape[1],
 
             BLOCK_SIZE,
 
@@ -415,11 +421,27 @@ class GPUCache:
 
             qsize,
             self.k_uvm.bank_gpu.shape[0],
+            self.k_uvm.bank_gpu.shape[1],
 
             self.kv_packed,
             BLOCK_SIZE,
             self.k_uvm.bank_gpu.shape[-1]
         )
+    
+    def on_set_kv_cache(
+        self,
+        table: torch.Tensor,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+    ):
+        # NOTE: cache_k, and cache_v might not on GPU (during prefill)
+        # if table is allocated to valid slots, copy tensors to bank
+        # if slot is not valid, unlink the table
+        # NOTE: but for temporary, just unlink table always
+        
+        assert table.device == self.device
+        
+        self.table[:, table, 0].fill_(MAX_INT)
 
 class HiPOffloadCache:
     def __init__(
@@ -500,6 +522,17 @@ class HiPOffloadCache:
             self.k_uvm.bank_gpu[table] = cache_k
             self.v_uvm.bank_gpu[table] = cache_v
         
+        self.mask_k_cache.on_set_kv_cache(
+            table=table_gpu,
+            cache_k=cache_k,
+            cache_v=cache_v,
+        )
+        self.sa_kv_cache.on_set_kv_cache(
+            table=table_gpu,
+            cache_k=cache_k,
+            cache_v=cache_v,
+        )
+        
         self.k_uvm.metadata.index_put_(
             indices=(table, ), 
             values=torch.index_select(self.k_uvm.metadata, index=table_gpu, dim=0) + 1
@@ -523,6 +556,63 @@ class HiPOffloadCache:
 ###############################################################################
 #                               Kernel Function
 ###############################################################################
+
+@triton.jit
+def validate_bank_metadata_slots(
+    UVM_METADATA,
+    stride_uvm_metadata_token, stride_uvm_metadata_k,
+    METADATA,
+    stride_metadata_slot, stride_metadata_k,
+    
+    idx_slot,
+    idx_page, # this is optional. if given, check backref
+    cache_hit,
+    
+    HEAD_KV,
+):
+    back_ref = tl.load(
+        METADATA +\
+            idx_slot * stride_metadata_slot +\
+            0 * stride_metadata_k,
+        mask=cache_hit,
+        other=MAX_INT
+    )
+    
+    if idx_page is not None:
+        cache_hit = ((back_ref // HEAD_KV) == idx_page) & cache_hit
+    else:
+        cache_hit = (back_ref != MAX_INT) & cache_hit
+
+    ref_to_uvm = tl.load(
+        METADATA +\
+            idx_slot * stride_metadata_slot +\
+            1 * stride_metadata_k,
+        mask=cache_hit,
+        other=MAX_INT,
+    ).to(tl.int64)
+    cache_hit = (ref_to_uvm != MAX_INT) & cache_hit
+
+    uvm_token_gen = tl.load(
+        UVM_METADATA +\
+            ref_to_uvm * stride_uvm_metadata_token +\
+            0 * stride_uvm_metadata_k,
+        mask=cache_hit,
+        other=MAX_INT
+    )
+    cache_token_gen = tl.load(
+        METADATA +\
+            idx_slot * stride_metadata_slot +\
+            2 * stride_metadata_k,
+        mask=cache_hit,
+        other=MAX_INT,
+    )
+    cache_hit = (
+        uvm_token_gen != MAX_INT
+    ) & (
+        uvm_token_gen == cache_token_gen
+    ) & cache_hit
+    
+    return cache_hit
 
 @triton.jit
 def load_tokens(
@@ -579,8 +669,11 @@ def load_tokens(
     
     mask_keys,
     
+    HEAD_KV: int,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_HID: tl.constexpr,
+    
+    IS_BSA: tl.constexpr = False,    
 ):
     # DEBUG: to load nothing
     # mask_keys = mask_keys & False
@@ -590,14 +683,24 @@ def load_tokens(
     if not USING_PAGES:
         tl.static_assert(not USING_OFFLOAD_CACHE)
         
-        tl.atomic_add(
-            ACCESS_COUNTER +\
-                idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
-                idx_kv_head * stride_access_counter_head_kv +\
-                idx_tsrc * stride_access_counter_tsrc,
-            mask=mask_keys,
-            val=1
-        )
+        if ACCESS_COUNTER is not None:
+            # tl.atomic_add(
+            #     ACCESS_COUNTER +\
+            #         idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
+            #         idx_kv_head * stride_access_counter_head_kv +\
+            #         idx_tsrc * stride_access_counter_tsrc,
+            #     mask=mask_keys,
+            #     val=1
+            # )
+            
+            tl.store(
+                ACCESS_COUNTER +\
+                    idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
+                    idx_kv_head * stride_access_counter_head_kv +\
+                    idx_tsrc * stride_access_counter_tsrc,
+                mask=mask_keys,
+                value=1
+            )
         
         keys = tl.load(
             K +\
@@ -625,14 +728,24 @@ def load_tokens(
         ).to(tl.int64)
         offset_page = idx_tsrc % PAGE_SIZE
         
-        tl.atomic_add(
-            ACCESS_COUNTER +\
-                idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
-                idx_kv_head * stride_access_counter_head_kv +\
-                idx_page * stride_access_counter_tsrc,
-            mask=mask_keys,
-            val=1
-        )
+        if ACCESS_COUNTER is not None:
+            # tl.atomic_add(
+            #     ACCESS_COUNTER +\
+            #         idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
+            #         idx_kv_head * stride_access_counter_head_kv +\
+            #         idx_page * stride_access_counter_tsrc,
+            #     mask=mask_keys,
+            #     val=1
+            # )
+            
+            tl.store(
+                ACCESS_COUNTER +\
+                    idx_bsz.to(tl.int64) * stride_access_counter_bsz +\
+                    idx_kv_head * stride_access_counter_head_kv +\
+                    idx_page * stride_access_counter_tsrc,
+                mask=mask_keys,
+                value=1
+            )
         
         if USING_OFFLOAD_CACHE:
             tl.static_assert(PAGE_SIZE == 1)
@@ -640,56 +753,79 @@ def load_tokens(
             
             idx_slots = tl.load(
                 OFFLOAD_CACHE_GPU_TABLE +\
+                    idx_kv_head.to(tl.int64) * stride_offload_cache_gpu_table_head_kv +\
                     idx_page * stride_offload_cache_gpu_table_token +\
-                    idx_kv_head * stride_offload_cache_gpu_table_head_kv +\
                     0 * strdie_offload_cache_gpu_table_k,
                 mask=mask_keys,
                 other=MAX_INT,
             )
             idx_slot_has_reference_to_bank = idx_slots != MAX_INT
             
-            slot_metadata_backref_to_table = tl.load(
-                OFFLOAD_CACHE_GPU_METADATA +\
-                    idx_slots * stride_offload_cache_gpu_metadata_token +\
-                    0 * stride_offload_cache_gpu_metadata_k,
-                mask=idx_slot_has_reference_to_bank,
-                other=MAX_INT,
-            )
-            idx_slot_is_valid_link = (
-                slot_metadata_backref_to_table == idx_page
-            ) & idx_slot_has_reference_to_bank
+            ALWAYS_VALIDATE_LINK: tl.constexpr = True
             
-            slot_metadata_ref_to_uvm = tl.load(
-                OFFLOAD_CACHE_GPU_METADATA +\
-                    idx_slots * stride_offload_cache_gpu_metadata_token +\
-                    1 * stride_offload_cache_gpu_metadata_k,
-                mask=idx_slot_is_valid_link,
-                other=MAX_INT,
-            )
-            slot_metadata_token_gen = tl.load(
-                OFFLOAD_CACHE_GPU_METADATA +\
-                    idx_slots * stride_offload_cache_gpu_metadata_token +\
-                    2 * stride_offload_cache_gpu_metadata_k,
-                mask=idx_slot_is_valid_link,
-                other=MAX_INT,
-            )
-            idx_slot_is_valid_link = (
-                slot_metadata_ref_to_uvm != MAX_INT
-            ) & idx_slot_is_valid_link
-            
-            uvm_metadata_token_gen = tl.load(
-                OFFLOAD_CACHE_UVM_METADATA +\
-                    slot_metadata_ref_to_uvm * stride_offload_cache_uvm_metadata_token +\
-                    0 * stride_offload_cache_uvm_metadata_k,
-                mask=idx_slot_is_valid_link,
-                other=MAX_INT
-            )
-            
-            mask_slot_cache_hit = (
-                uvm_metadata_token_gen != MAX_INT
-            ) & (
-                uvm_metadata_token_gen == slot_metadata_token_gen
-            ) & idx_slot_is_valid_link
+            if ALWAYS_VALIDATE_LINK:
+                # slot_metadata_backref_to_table = tl.load(
+                #     OFFLOAD_CACHE_GPU_METADATA +\
+                #         idx_slots * stride_offload_cache_gpu_metadata_token +\
+                #         0 * stride_offload_cache_gpu_metadata_k,
+                #     mask=idx_slot_has_reference_to_bank,
+                #     other=MAX_INT,
+                # )
+                # idx_slot_is_valid_link = (
+                #     (slot_metadata_backref_to_table // HEAD_KV) == idx_page
+                # ) & idx_slot_has_reference_to_bank
+                
+                # slot_metadata_ref_to_uvm = tl.load(
+                #     OFFLOAD_CACHE_GPU_METADATA +\
+                #         idx_slots * stride_offload_cache_gpu_metadata_token +\
+                #         1 * stride_offload_cache_gpu_metadata_k,
+                #     mask=idx_slot_is_valid_link,
+                #     other=MAX_INT,
+                # )
+                # slot_metadata_token_gen = tl.load(
+                #     OFFLOAD_CACHE_GPU_METADATA +\
+                #         idx_slots * stride_offload_cache_gpu_metadata_token +\
+                #         2 * stride_offload_cache_gpu_metadata_k,
+                #     mask=idx_slot_is_valid_link,
+                #     other=MAX_INT,
+                # )
+                # idx_slot_is_valid_link = (
+                #     slot_metadata_ref_to_uvm != MAX_INT
+                # ) & idx_slot_is_valid_link
+                
+                # uvm_metadata_token_gen = tl.load(
+                #     OFFLOAD_CACHE_UVM_METADATA +\
+                #         slot_metadata_ref_to_uvm * stride_offload_cache_uvm_metadata_token +\
+                #         0 * stride_offload_cache_uvm_metadata_k,
+                #     mask=idx_slot_is_valid_link,
+                #     other=MAX_INT
+                # )
+                
+                # mask_slot_cache_hit = (
+                #     uvm_metadata_token_gen != MAX_INT
+                # ) & (
+                #     uvm_metadata_token_gen == slot_metadata_token_gen
+                # ) & idx_slot_is_valid_link
+                
+                validated_slots = validate_bank_metadata_slots(
+                    OFFLOAD_CACHE_UVM_METADATA,
+                    stride_offload_cache_uvm_metadata_token,
+                    stride_offload_cache_uvm_metadata_k,
+                    
+                    OFFLOAD_CACHE_GPU_METADATA,
+                    stride_offload_cache_gpu_metadata_token,
+                    stride_offload_cache_gpu_metadata_k,
+                    
+                    idx_slots,
+                    idx_page,
+                    idx_slot_has_reference_to_bank,
+                    
+                    HEAD_KV,
+                )
+                
+                mask_slot_cache_hit = validated_slots & idx_slot_has_reference_to_bank
+            else:
+                mask_slot_cache_hit = idx_slot_has_reference_to_bank
             
             idx_hid_cached = idx_hid
             if OFFLOAD_CACHE_LOAD_VALUE:
@@ -706,7 +842,13 @@ def load_tokens(
             if keys_cached.dtype == tl.float8e5:
                 keys_cached = keys_cached.to(tl.bfloat16)
             
-            mask_keys = mask_keys & (~mask_slot_cache_hit)
+            mask_keys_cache_miss = mask_keys & (~mask_slot_cache_hit)
+            mask_keys = mask_keys_cache_miss
+            
+            # if not IS_BSA:
+            #     mask_keys = mask_keys_cache_miss & False
+            # else:
+            #     mask_keys = mask_keys_cache_miss
         
         keys = tl.load(
             K_CACHE +\
@@ -729,14 +871,24 @@ def load_tokens(
                 keys,
             )
             
-            tl.atomic_add(
-                CACHE_MISS_COUNTER +\
-                    idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz +\
-                    idx_kv_head * stride_cache_miss_counter_head_kv +\
-                    idx_page * stride_cache_miss_counter_tsrc,
-                mask=mask_keys,
-                val=1,
-            )
+            if CACHE_MISS_COUNTER is not None:
+                # tl.atomic_add(
+                #     CACHE_MISS_COUNTER +\
+                #         idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz +\
+                #         idx_kv_head * stride_cache_miss_counter_head_kv +\
+                #         idx_page * stride_cache_miss_counter_tsrc,
+                #     mask=mask_keys_cache_miss,
+                #     val=1,
+                # )
+                
+                tl.store(
+                    CACHE_MISS_COUNTER +\
+                        idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz +\
+                        idx_kv_head * stride_cache_miss_counter_head_kv +\
+                        idx_page * stride_cache_miss_counter_tsrc,
+                    mask=mask_keys_cache_miss,
+                    value=1,
+                )
     
     if keys.dtype == tl.uint8:
         keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
@@ -801,6 +953,7 @@ def update_recency(
     stride_table_head_kv, stride_table_token, stride_table_k,
 
     page_count: int,
+    HEAD_KV: int,
 
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -838,43 +991,25 @@ def update_recency(
     ).to(tl.int64)
     cache_hit = (table != MAX_INT) & cache_hit
     
-    back_ref = tl.load(
-        METADATA +\
-            table * stride_metadata_slot +\
-            0 * stride_metadata_k,
-        mask=cache_hit,
-        other=MAX_INT
-    )
-    cache_hit = (back_ref == idx_token) & cache_hit
-
-    ref_to_uvm = tl.load(
-        METADATA +\
-            table * stride_metadata_slot +\
-            1 * stride_metadata_k,
-        mask=cache_hit,
-        other=MAX_INT,
-    ).to(tl.int64)
-    cache_hit = (ref_to_uvm != MAX_INT) & cache_hit
-
-    uvm_token_gen = tl.load(
-        UVM_METADATA +\
-            ref_to_uvm * stride_uvm_metadata_token +\
-            0 * stride_uvm_metadata_k,
-        mask=cache_hit,
-        other=MAX_INT
-    )
-    cache_token_gen = tl.load(
-        METADATA +\
-            table * stride_metadata_slot +\
-            2 * stride_metadata_k,
-        mask=cache_hit,
-        other=MAX_INT,
-    )
-    cache_hit = (
-        uvm_token_gen != MAX_INT
-    ) & (
-        uvm_token_gen == cache_token_gen
-    ) & cache_hit
+    ALWAYS_VALIDATE_LINK: tl.constexpr = True
+    
+    if ALWAYS_VALIDATE_LINK:
+        validated_cache_hit = validate_bank_metadata_slots(
+            UVM_METADATA, 
+            stride_uvm_metadata_token, 
+            stride_uvm_metadata_k,
+            
+            METADATA, 
+            stride_metadata_slot, 
+            stride_metadata_k,
+            
+            table,
+            idx_token,
+            cache_hit,
+            
+            HEAD_KV,
+        )
+        cache_hit = cache_hit & validated_cache_hit
 
     tl.store(
         METADATA +\
@@ -919,6 +1054,7 @@ def write_cache(
 
     qsize: int,
     page_count: int,
+    HEAD_KV: int,
     
     KV_PACKED: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -944,6 +1080,22 @@ def write_cache(
         EVICT + idx_queue * stride_evict_t,
         mask=mask_put
     )
+    
+    # unlink bank <-> table
+    victim_table_entry = tl.load(
+        METADATA +\
+            idx_evict * stride_metadata_t +\
+            0 * stride_metadata_k,
+        mask=mask_put,
+    )
+    tl.store(
+        TABLE +\
+            (victim_table_entry % HEAD_KV) * stride_table_head_kv +\
+            (victim_table_entry // HEAD_KV) * stride_table_t +\
+            0 * stride_table_k,
+        value=MAX_INT,
+        mask=mask_put & (victim_table_entry != MAX_INT),
+    )
 
     # setup metadata
     tl.store(
@@ -951,7 +1103,7 @@ def write_cache(
             idx_evict * stride_metadata_t +\
             0 * stride_metadata_k,
         mask=mask_put,
-        value=idx_page
+        value=idx_page * HEAD_KV + idx_head_kv
     )
     tl.store(
         METADATA +\

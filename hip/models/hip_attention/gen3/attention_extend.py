@@ -157,6 +157,7 @@ def load_keys_with_rope(
     BLOCK_CHUNK,
     BLOCK_HID,
     IS_RIGHT,
+    HEAD_KV,
 ):
     keys_left = load_tokens(
         K, 
@@ -212,6 +213,7 @@ def load_keys_with_rope(
         mask_tsrc_active[None, :], # & mask_hid[:, None],
         # mask_tsrc_active[None, :] & mask_hid[:, None],
         
+        HEAD_KV,
         BLOCK_CHUNK,
         BLOCK_HID,
     ).to(queries.dtype)
@@ -328,6 +330,7 @@ def load_keys_with_rope(
                     
                     mask_tsrc_active[None, :],
                     
+                    HEAD_KV,
                     BLOCK_CHUNK,
                     BLOCK_HID,
                 ).to(queries.dtype)
@@ -713,6 +716,7 @@ def chunk_controllable_sampling_mask_cuda(
             BLOCK_CHUNK,
             BLOCK_HID,
             False,
+            HEAD // HEAD_GROUP,
         )
             
         scores_left = tl.dot(
@@ -804,6 +808,7 @@ def chunk_controllable_sampling_mask_cuda(
             BLOCK_CHUNK,
             BLOCK_HID,
             True,
+            HEAD // HEAD_GROUP,
         )
         
         scores_right = tl.dot(
@@ -1180,6 +1185,7 @@ def calculate_chunk_score(
                 BLOCK_SIZE_K,
                 BLOCK_HID,
                 True,
+                HEAD // HEAD_GROUP,
             )
             
             scores = tl.dot(
