@@ -187,6 +187,8 @@ python3 -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization 0.50
 ```
 
+This command will be deprecated. Check below's SGlang `sglang.launch_server` command.
+
 ### vllm + Qwen's Dynamic-NTK
 
 add the following content in Qwen's `config.json`. 
