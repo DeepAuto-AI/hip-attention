@@ -216,6 +216,8 @@ def load_keys_with_rope(
         HEAD_KV,
         BLOCK_CHUNK,
         BLOCK_HID,
+        
+        # UPDATE_CACHE=True,
     ).to(queries.dtype)
     
     if USING_EXTEND:
@@ -333,6 +335,8 @@ def load_keys_with_rope(
                     HEAD_KV,
                     BLOCK_CHUNK,
                     BLOCK_HID,
+                    
+                    # UPDATE_CACHE=True,
                 ).to(queries.dtype)
                 
                 # TODO: multiply -right

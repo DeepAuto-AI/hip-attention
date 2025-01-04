@@ -19,7 +19,6 @@ from hip.models.hip_attention.gen3.uvm_gpu_cache import (
 )
 
 DEFAULT_EXTEND_BACKEND: tl.constexpr = 'streaming'
-MAX_INT: tl.constexpr = 2_147_483_647
 
 @triton.jit
 def block_sparse_attention_cuda_step(
