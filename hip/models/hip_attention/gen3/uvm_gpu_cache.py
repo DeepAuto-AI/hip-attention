@@ -761,7 +761,7 @@ def load_tokens(
             )
             idx_slot_has_reference_to_bank = idx_slots != MAX_INT
             
-            ALWAYS_VALIDATE_LINK: tl.constexpr = True
+            ALWAYS_VALIDATE_LINK: tl.constexpr = False
             
             if ALWAYS_VALIDATE_LINK:
                 # slot_metadata_backref_to_table = tl.load(
@@ -991,7 +991,7 @@ def update_recency(
     ).to(tl.int64)
     cache_hit = (table != MAX_INT) & cache_hit
     
-    ALWAYS_VALIDATE_LINK: tl.constexpr = True
+    ALWAYS_VALIDATE_LINK: tl.constexpr = False
     
     if ALWAYS_VALIDATE_LINK:
         validated_cache_hit = validate_bank_metadata_slots(
