@@ -453,7 +453,7 @@ class GPUCache:
         
         assert table.device == self.device
         
-        self.table[:, table, 0].fill_(MAX_INT.value)
+        self.table[:, :, 0].index_fill_(dim=1, index=table, value=MAX_INT.value)
 
 class HiPOffloadCache:
     def __init__(
