@@ -684,4 +684,3 @@ def custom_attention(
         raise Exception(attention_method)
 
     return attn_output, last_cumsum, attn_sparsity_loss
-

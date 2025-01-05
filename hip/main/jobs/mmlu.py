@@ -188,6 +188,10 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             'correct': correct,
             'seq_len': seq_len,
         })
+        for m in model.modules():
+            if hasattr(m, '_clean_cache'):
+                m._clean_cache()
+                    
     elapsed = time.time() - t_start
     
     accuracy = (n_correct / len(results)) * 100

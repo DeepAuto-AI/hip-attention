@@ -201,14 +201,28 @@ def load_model(args):
     
     if os.getenv('FORCE_FP32', '0') == '1':
         infer_dtype = torch.float32
-
-    if args.method == 'h2o':
-        # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
-        from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
+        
+    if args.method in ['h2o', 'h2o_stream']:
+        from hip.models.h2o.h2o_llama import H2OLlamaForCausalLM
         ModelClass = H2OLlamaForCausalLM
-        config.hh_size = 4
-        config.recent_size = args.k
+        
+        if args.method == 'h2o_stream':
+            args.h2o_streaming = True
+        config.attention_method = args.method
+        config.hh_size = args.k // 2
+        config.recent_size = args.k // 2
         config._attn_implementation = config.attn_implementation = 'eager'
+        config.h2o_shift_q_pos = args.h2o_shift_q_pos
+        config.h2o_streaming = args.h2o_streaming
+        config.reduction_for_gqa = args.h2o_reduce_for_gqa
+        config.tree_dense_layers = list(range(args.dense_layers))
+        config.tree_k = args.k
+        
+        if args.job not in ['stream', 'passkey']: # TODO ga?
+            config.is_decoding = False
+        else:
+            config.is_decoding = True
+        
     if args.method == 'tova':
         from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
         ModelClass = OriginalLlamaForCausalLM

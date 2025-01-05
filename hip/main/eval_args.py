@@ -84,6 +84,12 @@ def eval_args(
     parser.add_argument('--overwrite', default=ArgsType.overwrite, action='store_true')
     parser.add_argument('--dataset', default=ArgsType.dataset, type=str)
     parser.add_argument('--endpoint', default=ArgsType.endpoint, type=str)
+    
+    # h2o
+    parser.add_argument('--h2o-shift-q-pos', action='store_true')
+    parser.add_argument('--h2o-streaming', action='store_true')
+    parser.add_argument('--h2o-reduce-for-gqa', type=str, default='average')
+    
     parser.add_argument('--seed', type=int, default=ArgsType.seed)
     args = parser.parse_args()
     print(args)

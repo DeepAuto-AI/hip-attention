@@ -27,7 +27,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
         LLM = torch.Tensor
         warnings.warn('vllm is not installed, this may cause error when you gave vLLM LLM')
     
-    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
+    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}{"_c" + str(args.count) + "_rgqa" + args.h2o_reduce_for_gqa if args.h2o_reduce_for_gqa != "average" else ""}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     if not quite:
         print("Will write to", outfile)
@@ -102,7 +102,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method in ['h2o', 'tova']:
+                            if args.method == 'tova':
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
@@ -114,13 +114,12 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 }
                                 
                                 past_key_values = None
-                                if args.method == 'tova':
-                                    from hip.models.tova.tova_cache import TOVACache
-                                    past_key_values = TOVACache(args.k)
-                                    del kwargs['output_logits']
-                                    prompt_ids = input_ids[:, :2]
-                                    prompt_target_ids = target_ids[:, :2]
-                                    decode_ids = input_ids[:, 2:]
+                                from hip.models.tova.tova_cache import TOVACache
+                                past_key_values = TOVACache(args.k)
+                                del kwargs['output_logits']
+                                prompt_ids = input_ids[:, :2]
+                                prompt_target_ids = target_ids[:, :2]
+                                decode_ids = input_ids[:, 2:]
                                 
                                 outputs = model(
                                     prompt_ids,
@@ -134,20 +133,12 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 
                                 for curr_idx in tqdm(range(decode_ids.shape[-1]-1), dynamic_ncols=True):
                                     curr_token = decode_ids[:, curr_idx:curr_idx+1]
-                                    if args.method == 'tova':
-                                        position_ids = torch.arange(
-                                            curr_idx, 
-                                            curr_idx+1, 
-                                            device=curr_token.device
-                                        )[None, :]
-                                    elif args.method == 'h2o':
-                                        position_ids = torch.arange(
-                                            prompt_ids.shape[1]+curr_idx, 
-                                            prompt_ids.shape[1]+curr_idx+1, 
-                                            device=curr_token.device
-                                        )[None, :]
-                                    else:
-                                        raise Exception()
+                                    position_ids = torch.arange(
+                                        curr_idx, 
+                                        curr_idx+1, 
+                                        device=curr_token.device
+                                    )[None, :]
+                                    
 
                                     outputs = model(
                                         curr_token,
@@ -165,20 +156,20 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                     loss_count += curr_token.shape[-1]
                                     tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
                                     
-                                for m in model.modules():
-                                    if hasattr(m, '_clean_cache'):
-                                        m._clean_cache()
                                 final_loss = loss_sum / loss_count
                                 samples.append(final_loss)
                                 pbar_sample.set_description(
                                     f'ppl: {torch.exp(torch.stack(nlls + [final_loss.cpu()]).mean()).item():.6f}'
                                 )
+                                for m in model.modules():
+                                    if hasattr(m, '_clean_cache'):
+                                        m._clean_cache()
                             else:
                                 outputs = model(
                                     input_ids,
                                     labels=target_ids,
                                     output_logits=False,
-                                    use_cache=False,
+                                    use_cache=False if args.method not in ['h2o', 'h2o_stream'] else True, # TODO NOT tova?
                                 )
                                 if outputs.loss.numel() > 1:
                                     v, _ = outputs.loss.topk(k=min(len(outputs.loss), nll_topk))
@@ -194,6 +185,9 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 # pbar_sample.set_description(
                                 #     f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}, top: {torch.exp(topk_nlls.mean()).item()}'
                                 # )
+                                for m in model.modules():
+                                    if hasattr(m, '_clean_cache'):
+                                        m._clean_cache()
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
