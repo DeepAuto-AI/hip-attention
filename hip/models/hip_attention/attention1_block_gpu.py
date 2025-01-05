@@ -1652,7 +1652,7 @@ def main_latency_benchmark():
     get_bench().synchronize = True
 
     CHUNK_LEN = 1024
-    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
     HID = q.shape[-1]
     
     q = q.cpu()
