@@ -630,6 +630,8 @@ def block_sparse_attention_cuda(
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
+    
+    UPDATE_CACHE: tl.constexpr,
 ):
     G: tl.constexpr = 1
     
@@ -855,6 +857,13 @@ def block_sparse_attention_cuda(
                     HID,
                     
                     IS_BSA=True,
+                    UPDATE_CACHE=UPDATE_CACHE,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
                 
                 if USING_EXTEND and NEED_APPLY_ROPE:
@@ -916,6 +925,13 @@ def block_sparse_attention_cuda(
                         HID,
                         
                         IS_BSA=True,
+                        UPDATE_CACHE=False,
+                        
+                        V_CACHE=V_CACHE,
+                        stride_v_cache_page=stride_v_cache_page,
+                        stride_v_cache_offset=stride_v_cache_offset,
+                        stride_v_cache_kv_head=stride_v_cache_kv_head,
+                        stride_v_cache_hid=stride_v_cache_hid,
                     )
                 else:
                     keys_rot = None
@@ -978,6 +994,13 @@ def block_sparse_attention_cuda(
                     HID,
                     
                     IS_BSA=True,
+                    UPDATE_CACHE=False,
+                    
+                    V_CACHE=K_CACHE,
+                    stride_v_cache_page=stride_k_cache_page,
+                    stride_v_cache_offset=stride_k_cache_offset,
+                    stride_v_cache_kv_head=stride_k_cache_kv_head,
+                    stride_v_cache_hid=stride_k_cache_hid,
                 )
                 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1082,6 +1105,13 @@ def block_sparse_attention_cuda(
                 HID,
                 
                 IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=V_CACHE,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_offset=stride_v_cache_offset,
+                stride_v_cache_kv_head=stride_v_cache_kv_head,
+                stride_v_cache_hid=stride_v_cache_hid,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1143,6 +1173,13 @@ def block_sparse_attention_cuda(
                     HID,
                     
                     IS_BSA=True,
+                    UPDATE_CACHE=False,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
             else:
                 keys_rot = None
@@ -1205,6 +1242,13 @@ def block_sparse_attention_cuda(
                 HID,
                 
                 IS_BSA=True,
+                UPDATE_CACHE=False,
+                
+                V_CACHE=K_CACHE,
+                stride_v_cache_page=stride_k_cache_page,
+                stride_v_cache_offset=stride_k_cache_offset,
+                stride_v_cache_kv_head=stride_k_cache_kv_head,
+                stride_v_cache_hid=stride_k_cache_hid,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1312,6 +1356,13 @@ def block_sparse_attention_cuda(
                 HID,
                 
                 IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=V_CACHE,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_offset=stride_v_cache_offset,
+                stride_v_cache_kv_head=stride_v_cache_kv_head,
+                stride_v_cache_hid=stride_v_cache_hid,
             )
             
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -1373,6 +1424,13 @@ def block_sparse_attention_cuda(
                     HID,
                     
                     IS_BSA=True,
+                    UPDATE_CACHE=False,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
             else:
                 keys_rot = None
@@ -1435,6 +1493,13 @@ def block_sparse_attention_cuda(
                 HID,
                 
                 IS_BSA=True,
+                UPDATE_CACHE=False,
+                
+                V_CACHE=K_CACHE,
+                stride_v_cache_page=stride_k_cache_page,
+                stride_v_cache_offset=stride_k_cache_offset,
+                stride_v_cache_kv_head=stride_k_cache_kv_head,
+                stride_v_cache_hid=stride_k_cache_hid,
             )
             
             acc, l_i, m_i = block_sparse_attention_cuda_step(
@@ -1515,6 +1580,8 @@ def block_sparse_attention(
     EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,
     model_context_length: int = 131072,
     extend_context_length: int = 131072,
+    
+    offload_update_cache: bool = False,
 ):  
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -1628,6 +1695,7 @@ def block_sparse_attention(
         # 2,
         BLOCK_BK=BLOCK_BK,
         EXTEND_BACKEND=EXTEND_BACKEND,
+        UPDATE_CACHE=offload_update_cache,
         
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,

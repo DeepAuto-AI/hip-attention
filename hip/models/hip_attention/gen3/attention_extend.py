@@ -336,7 +336,8 @@ def load_keys_with_rope(
                     BLOCK_CHUNK,
                     BLOCK_HID,
                     
-                    # UPDATE_CACHE=True,
+                    # NOTE: in previous load, the fetch should be succesfully done.
+                    UPDATE_CACHE=False,
                 ).to(queries.dtype)
                 
                 # TODO: multiply -right
@@ -2062,6 +2063,8 @@ def dual_stage_quadratic_hip_attention(
         EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
+        offload_update_cache=False,
+        # offload_update_cache=cached_metadata is None,
     )
     
     if DEBUG:
