@@ -1255,7 +1255,7 @@ def decode_block_sparse_attention(
 
 def test_correctness():
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
-    args = torch.load("../bsa_args_2.pth", weights_only=True)
+    args = torch.load("../bsa_args_2.pth")
     gt_output = block_sparse_attention(
         args['q'], args['k'], args['v'],
         args['seq_lens'],
@@ -1287,5 +1287,78 @@ def test_correctness():
     print('context diff', (output - gt_output).abs().mean() / gt_output.abs().mean())
 
 
+def benchmark():
+    from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
+    args = torch.load("../bsa_args_2.pth")
+
+    def run_orig():
+        return block_sparse_attention(
+            args['q'], args['k'], args['v'],
+            args['seq_lens'],
+            args['indices'],
+            args['ks'],
+            args['ks_count'],
+            args['ks_start_end'],
+            args['args'],
+            args['access_counter'],
+            args['cache_miss_counter'],
+            args['EXTEND_BACKEND'],
+            args['model_context_length'],
+            args['extend_context_length'],
+        )
+
+    def run_flash():
+        return decode_block_sparse_attention(
+            args['q'], args['k'], args['v'],
+            args['seq_lens'],
+            args['indices'],
+            args['ks'],
+            args['ks_count'],
+            args['ks_start_end'],
+            args['args'],
+            args['access_counter'],
+            args['cache_miss_counter'],
+            args['EXTEND_BACKEND'],
+            args['model_context_length'],
+            args['extend_context_length'],
+        )
+
+    # Warmup
+    for _ in range(2):
+        run_orig()
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(0)
+    start_mem = torch.cuda.max_memory_allocated(0)
+    start_time = torch.cuda.Event(enable_timing=True)
+    end_time = torch.cuda.Event(enable_timing=True)
+    start_time.record()
+    run_orig()
+    end_time.record()
+    torch.cuda.synchronize()
+    peak_mem_orig = torch.cuda.max_memory_allocated(0) - start_mem
+    elapsed_orig = start_time.elapsed_time(end_time)
+
+    # Warmup
+    for _ in range(2):
+        run_flash()
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(0)
+    start_mem = torch.cuda.max_memory_allocated(0)
+    start_time = torch.cuda.Event(enable_timing=True)
+    end_time = torch.cuda.Event(enable_timing=True)
+    start_time.record()
+    run_flash()
+    end_time.record()
+    torch.cuda.synchronize()
+    peak_mem_flash = torch.cuda.max_memory_allocated(0) - start_mem
+    elapsed_flash = start_time.elapsed_time(end_time)
+
+    print(f"Time: orig={elapsed_orig:.2f}ms, flash={elapsed_flash:.2f}ms")
+    print(f"Peak memory: orig={peak_mem_orig / 10 ** 6:.3f}MB, flash={peak_mem_flash / 10 ** 6:.3f}MB")
+
+
 if __name__ == "__main__":
     test_correctness()
+    benchmark()
