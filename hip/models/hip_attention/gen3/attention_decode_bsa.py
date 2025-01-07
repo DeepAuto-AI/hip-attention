@@ -775,6 +775,7 @@ def _fwd_kernel_stage1(
                     offs_d[:, None],
                     mask_tsrc[None, :],
 
+                    q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
                 )
@@ -833,6 +834,7 @@ def _fwd_kernel_stage1(
                         ((offs_d[:, None] + Lk // 2) % Lk),
                         mask_tsrc[None, :],
 
+                        q_head_num // kv_group_num,
                         BLOCK_SIZE_K,
                         Lk,
                     )
@@ -892,6 +894,7 @@ def _fwd_kernel_stage1(
                     offs_dv[None, :],
                     mask_tsrc[:, None],
 
+                    q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lv,
                 )
@@ -998,6 +1001,7 @@ def _fwd_kernel_stage1(
                 offs_d[:, None],
                 mask_tsrc[None, :],
 
+                q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
             )
@@ -1056,6 +1060,7 @@ def _fwd_kernel_stage1(
                     ((offs_d[:, None] + Lk // 2) % Lk),
                     mask_tsrc[None, :],
 
+                    q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
                 )
@@ -1115,6 +1120,7 @@ def _fwd_kernel_stage1(
                 offs_dv[None, :],
                 mask_tsrc[:, None],
 
+                q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
             )
@@ -1221,6 +1227,7 @@ def _fwd_kernel_stage1(
                 offs_d[:, None],
                 mask_tsrc[None, :],
 
+                q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
             )
@@ -1279,6 +1286,7 @@ def _fwd_kernel_stage1(
                     ((offs_d[:, None] + Lk // 2) % Lk),
                     mask_tsrc[None, :],
 
+                    q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
                 )
@@ -1338,6 +1346,7 @@ def _fwd_kernel_stage1(
                 offs_dv[None, :],
                 mask_tsrc[:, None],
 
+                q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
             )
