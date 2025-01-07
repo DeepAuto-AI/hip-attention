@@ -24,6 +24,9 @@ from hip.models.hip_attention.gen3.uvm_gpu_cache import (
 from hip.models.hip_attention.gen3.attention_extend_bsa import (
     block_sparse_attention,
 )
+from hip.models.hip_attention.gen3.attention_decode_bsa import (
+    decode_block_sparse_attention,
+)
 from hip.models.hip_attention.gen3.attention_metadata import (
     Stage,
     NopStage,
@@ -2047,10 +2050,17 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
-    
-    context = block_sparse_attention(
-        q=q, 
-        k=k, 
+
+    block_sparse_attention_backend = block_sparse_attention
+
+    # Use flashdecode
+    if TDST == 1 and not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1":
+        print("Using Flashdecode")
+        block_sparse_attention_backend = decode_block_sparse_attention
+
+    context = block_sparse_attention_backend(
+        q=q,
+        k=k,
         v=v,
         seq_lens=position_ids + 1,
         indices=indices,
@@ -2063,7 +2073,7 @@ def dual_stage_quadratic_hip_attention(
         EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
-        offload_update_cache=False,
+        # offload_update_cache=False,
         # offload_update_cache=cached_metadata is None,
     )
     
