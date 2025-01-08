@@ -2082,7 +2082,6 @@ def dual_stage_quadratic_hip_attention(
         # offload_update_cache=False,
     )
     if args.offload_cache is not None:
-        # print('after BSA')
         args.offload_cache.sa_kv_cache._verify_cache()
     
     if DEBUG:
