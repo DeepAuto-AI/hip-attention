@@ -674,7 +674,7 @@ def _fwd_kernel_stage1(
         and split_sliding_end > split_sliding_start):
         for i_tsrc in range(split_sliding_start, split_sliding_end, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = idx_tsrc < MAX_TSRC
+            mask_tsrc = (0 <= idx_tsrc) & (idx_tsrc < cur_batch_seq_len)
 
             # idx_n = idx_b * G + idx_group
             keys = load_tokens(
@@ -896,7 +896,7 @@ def _fwd_kernel_stage1(
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
 
-    e_sum = tl.where(e_sum == 0.0, 1e-20, e_sum)
+    e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
 
     # Store results
     offs_mid_o = (
@@ -952,7 +952,7 @@ def decode_block_sparse_attention_stage1(
     )
     temp_attn_logits = torch.zeros(
         (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
-        dtype=q.dtype, device=q.device
+        dtype=torch.float32, device=q.device
     )
 
     grid = (
@@ -1066,6 +1066,8 @@ def _fwd_kernel_stage2(
 
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
+
+    e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
 
     tl.store(
         O
@@ -1231,7 +1233,7 @@ def decode_block_sparse_attention(
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
 
-    attn_logits = decode_block_sparse_attention_impl(
+    decode_block_sparse_attention_impl(
         q, k, v,
         seq_lens=seq_lens,
         indices=indices,
@@ -1253,41 +1255,94 @@ def decode_block_sparse_attention(
     return context
 
 
-def test_correctness():
+def test_correctness(use_cuda_graph=False):
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
     args = torch.load("../bsa_args_2.pth")
-    gt_output = block_sparse_attention(
-        args['q'], args['k'], args['v'],
-        args['seq_lens'],
-        args['indices'],
-        args['ks'],
-        args['ks_count'],
-        args['ks_start_end'],
-        args['args'],
-        args['access_counter'],
-        args['cache_miss_counter'],
-        args['EXTEND_BACKEND'],
-        args['model_context_length'],
-        args['extend_context_length'],
-    )
-    output = decode_block_sparse_attention(
-        args['q'], args['k'], args['v'],
-        args['seq_lens'],
-        args['indices'],
-        args['ks'],
-        args['ks_count'],
-        args['ks_start_end'],
-        args['args'],
-        args['access_counter'],
-        args['cache_miss_counter'],
-        args['EXTEND_BACKEND'],
-        args['model_context_length'],
-        args['extend_context_length'],
-    )
+
+    def run_orig(output=None):
+        result = block_sparse_attention(
+            args['q'], args['k'], args['v'],
+            args['seq_lens'],
+            args['indices'],
+            args['ks'],
+            args['ks_count'],
+            args['ks_start_end'],
+            args['args'],
+            args['access_counter'],
+            args['cache_miss_counter'],
+            args['EXTEND_BACKEND'],
+            args['model_context_length'],
+            args['extend_context_length'],
+        )
+        if output is not None:
+            output.copy_(result)
+        return result
+
+    def run_flash(output=None):
+        result = decode_block_sparse_attention(
+            args['q'], args['k'], args['v'],
+            args['seq_lens'],
+            args['indices'],
+            args['ks'],
+            args['ks_count'],
+            args['ks_start_end'],
+            args['args'],
+            args['access_counter'],
+            args['cache_miss_counter'],
+            args['EXTEND_BACKEND'],
+            args['model_context_length'],
+            args['extend_context_length'],
+        )
+        if output is not None:
+            output.copy_(result)
+        return result
+
+    if use_cuda_graph:
+        gt_output = torch.zeros_like(args['q'])
+
+        # Warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run_orig(gt_output)
+        torch.cuda.current_stream().wait_stream(s)
+
+        # capture
+        g_orig = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_orig):
+            run_orig(gt_output)
+
+        gt_output.zero_()
+        g_orig.replay()
+
+        output = torch.zeros_like(args['q'])
+
+        # Warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run_flash(output)
+        torch.cuda.current_stream().wait_stream(s)
+
+        # capture
+        g_flash = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_flash):
+            run_flash(output)
+
+        output.zero_()
+        g_flash.replay()
+
+    else:
+        gt_output = run_orig()
+        output = run_flash()
+
     print('context diff', (output - gt_output).abs().mean() / gt_output.abs().mean())
 
 
-def benchmark():
+@torch.no_grad()
+def benchmark(use_cuda_graph=False):
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
     args = torch.load("../bsa_args_2.pth")
 
@@ -1323,9 +1378,21 @@ def benchmark():
             args['extend_context_length'],
         )
 
-    # Warmup
-    for _ in range(2):
-        run_orig()
+    if use_cuda_graph:
+        # Warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run_orig()
+        torch.cuda.current_stream().wait_stream(s)
+
+        # capture
+        g_orig = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_orig):
+            run_orig()
+
+        run_orig = (lambda: g_orig.replay())
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(0)
@@ -1339,9 +1406,26 @@ def benchmark():
     peak_mem_orig = torch.cuda.max_memory_allocated(0) - start_mem
     elapsed_orig = start_time.elapsed_time(end_time)
 
-    # Warmup
-    for _ in range(2):
-        run_flash()
+    if use_cuda_graph:
+        # Warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                run_flash()
+        torch.cuda.current_stream().wait_stream(s)
+
+        # capture
+        g_flash = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_flash):
+            run_flash()
+
+        run_flash = (lambda: g_flash.replay())
+
+    else:
+        # Warmup
+        for _ in range(2):
+            run_flash()
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(0)
@@ -1360,5 +1444,5 @@ def benchmark():
 
 
 if __name__ == "__main__":
-    test_correctness()
-    benchmark()
+    test_correctness(use_cuda_graph=False)
+    benchmark(use_cuda_graph=False)

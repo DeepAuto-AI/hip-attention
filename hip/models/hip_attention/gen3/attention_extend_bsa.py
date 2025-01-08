@@ -1295,7 +1295,7 @@ def block_sparse_attention_cuda(
         TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
         for i_tsrc in range(i_tsrc_range_start, CURR_TSRC, TSRC_RANGE_STEP):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = idx_tsrc < MAX_TSRC
+            mask_tsrc = idx_tsrc < CURR_TSRC
             
             # idx_n = idx_b * G + idx_group
             keys = load_tokens(
