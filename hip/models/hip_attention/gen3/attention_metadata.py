@@ -158,6 +158,8 @@ class HiPAttentionArgs:
     
     # to support gemma2
     logit_softcap: Optional[float] = None
+
+    online_update_cache: bool = False
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:

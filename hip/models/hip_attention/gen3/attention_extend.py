@@ -158,6 +158,7 @@ def load_keys_with_rope(
     BLOCK_HID,
     IS_RIGHT,
     HEAD_KV,
+    UPDATE_CACHE,
 ):
     keys_left = load_tokens(
         K, 
@@ -217,7 +218,7 @@ def load_keys_with_rope(
         BLOCK_CHUNK,
         BLOCK_HID,
         
-        # UPDATE_CACHE=True,
+        UPDATE_CACHE=UPDATE_CACHE,
     ).to(queries.dtype)
     
     if USING_EXTEND:
@@ -473,6 +474,7 @@ def chunk_controllable_sampling_mask_cuda(
     NEED_APPLY_ROPE: tl.constexpr = False,
     TERMINATE_SIZE: tl.constexpr = 1,
     SCAN_STRIDE: tl.constexpr = 1,
+    UPDATE_CACHE: tl.constexpr = True,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)
@@ -722,6 +724,7 @@ def chunk_controllable_sampling_mask_cuda(
             BLOCK_HID,
             False,
             HEAD // HEAD_GROUP,
+            UPDATE_CACHE,
         )
             
         scores_left = tl.dot(
@@ -814,6 +817,7 @@ def chunk_controllable_sampling_mask_cuda(
             BLOCK_HID,
             True,
             HEAD // HEAD_GROUP,
+            UPDATE_CACHE,
         )
         
         scores_right = tl.dot(
@@ -1191,6 +1195,7 @@ def calculate_chunk_score(
                 BLOCK_HID,
                 True,
                 HEAD // HEAD_GROUP,
+                UPDATE_CACHE,
             )
             
             scores = tl.dot(
@@ -1719,6 +1724,9 @@ def dual_stage_quadratic_hip_attention(
                     triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE) *\
                     HEAD,
                 )
+                # if args.offload_cache is not None:
+                #     print('before masking')
+                #     args.offload_cache.mask_k_cache._verify_cache()
                 chunk_controllable_sampling_mask_cuda[grid](
                     q_mask, *q_mask.stride(),
                     k_mask, *safe_stride(k_mask, 4),
@@ -1755,7 +1763,11 @@ def dual_stage_quadratic_hip_attention(
                     NEED_APPLY_ROPE=args.need_apply_rope,
                     TERMINATE_SIZE=args.stage_early_terminate,
                     SCAN_STRIDE=STAGE_STRIDE,
+                    UPDATE_CACHE=args.online_update_cache,
                 )
+                if args.offload_cache is not None:
+                    # print('after masking')
+                    args.offload_cache.mask_k_cache._verify_cache()
             elif isinstance(stage_info, EvalScoreStage):
                 raise Exception() # TODO: handle new args
                 extend_backend = args.scan_extend_backend \
@@ -2048,6 +2060,9 @@ def dual_stage_quadratic_hip_attention(
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
     
+    # if args.offload_cache is not None:
+    #     print('before BSA')
+    #     args.offload_cache.sa_kv_cache._verify_cache()
     context = block_sparse_attention(
         q=q, 
         k=k, 
@@ -2063,9 +2078,12 @@ def dual_stage_quadratic_hip_attention(
         EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
-        offload_update_cache=False,
-        # offload_update_cache=cached_metadata is None,
+        offload_update_cache=(cached_metadata is None) and args.online_update_cache,
+        # offload_update_cache=False,
     )
+    if args.offload_cache is not None:
+        # print('after BSA')
+        args.offload_cache.sa_kv_cache._verify_cache()
     
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)
