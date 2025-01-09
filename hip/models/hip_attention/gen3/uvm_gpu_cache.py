@@ -700,6 +700,7 @@ def load_tokens(
     
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT: int,
     OFFLOAD_CACHE_LOAD_VALUE: tl.constexpr,
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
@@ -995,10 +996,11 @@ def load_tokens(
                         # idx_victim_slots_try = idx_victim_slots_try * 128 + tl.extra.cuda.smid()
                         idx_victim_slots_try = idx_randint
                         # idx_victim_slots_try = idx_randint * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-                        if IS_BSA:
-                            idx_victim_slots_try = idx_victim_slots_try % (10000 * HEAD_KV)
-                        else:
-                            idx_victim_slots_try = idx_victim_slots_try % (32000 * HEAD_KV)
+                        idx_victim_slots_try = idx_victim_slots_try % GPU_BANK_COUNT
+                        # if IS_BSA:
+                        #     idx_victim_slots_try = idx_victim_slots_try % (10000 * HEAD_KV)
+                        # else:
+                        #     idx_victim_slots_try = idx_victim_slots_try % (32000 * HEAD_KV)
                         
                         acquired = victim_slot_not_acquired
                         

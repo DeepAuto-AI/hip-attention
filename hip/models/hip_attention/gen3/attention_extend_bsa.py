@@ -597,6 +597,7 @@ def block_sparse_attention_cuda(
     
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT: int,
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
@@ -821,6 +822,7 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
@@ -889,6 +891,7 @@ def block_sparse_attention_cuda(
                         
                         USING_OFFLOAD_CACHE,
                         OFFLOAD_CACHE_KV_PACKED,
+                        GPU_BANK_COUNT,
                         False,
                         OFFLOAD_CACHE_UVM_METADATA,
                         stride_offload_cache_uvm_metadata_token,
@@ -958,6 +961,7 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     True,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
@@ -1069,6 +1073,7 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
@@ -1137,6 +1142,7 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
@@ -1206,6 +1212,7 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
@@ -1320,6 +1327,7 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
@@ -1388,6 +1396,7 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
@@ -1457,6 +1466,7 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,

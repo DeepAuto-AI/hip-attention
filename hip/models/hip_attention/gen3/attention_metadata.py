@@ -266,6 +266,7 @@ class HiPAttentionArgs:
             return (
                 True,
                 is_packed,
+                gpu_cache.bank.shape[0],
                 uvm_metadata, *safe_stride(uvm_metadata, 2),
                 gpu_cache.bank, *safe_stride(gpu_cache.bank, 2),
                 gpu_cache.metadata, *safe_stride(gpu_cache.metadata, 2),
@@ -275,6 +276,7 @@ class HiPAttentionArgs:
             return (
                 False,
                 False,
+                0,
                 None, 0, 0,
                 None, 0, 0,
                 None, 0, 0, 
