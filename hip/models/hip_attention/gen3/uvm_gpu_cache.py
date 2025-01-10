@@ -338,7 +338,7 @@ class GPUCache:
         assert accessed.ndim == 2
         assert accessed.shape == (self.head_num, uvm_page_count)
         assert self.k_uvm.metadata.shape == (uvm_page_count, 1)
-        assert self.global_metadata.shape == (1, pad_to_cacheline(1, self.global_metadata.dtype))
+        assert self.global_metadata.shape == (2, pad_to_cacheline(1, self.global_metadata.dtype))
         assert self.metadata.shape == (self.bank.shape[0], pad_to_cacheline(5, self.metadata.dtype))
         assert self.table.shape == (self.head_num, uvm_page_count, 1)
 
