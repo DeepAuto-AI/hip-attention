@@ -33,6 +33,7 @@ from hip.models.hip_attention.gen3.attention_metadata import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
     HiPAttentionCacheAccessStatistics,
+    HiPAttentionStageInputCache,
     safe_stride,
 )
 import numba.cuda
@@ -1645,27 +1646,41 @@ def dual_stage_quadratic_hip_attention(
     sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
     sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
     
-    if cached_metadata is None:
-        indices_left = torch.zeros(
-            (BSZ, BDST_SCAN, HEAD, chunk_count), 
-            device=q.device,
-            dtype=torch.int64
-        )
+    stage_caches = [] if (cached_metadata is None) or (cached_metadata.stage_caches is None) else cached_metadata.stage_caches
+    
+    if (cached_metadata is None) or (cached_metadata.indices is None):
+        # loop carrying variables: indices_left, indices_right, out_scores
+        if (cached_metadata is None) or (cached_metadata.stage_caches is None):
+            indices_left = torch.zeros(
+                (BSZ, BDST_SCAN, HEAD, chunk_count), 
+                device=q.device,
+                dtype=torch.int64
+            )
 
-        indices_left[:, :, :, :] = (
-            torch.floor(
-                torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
-            ).to(indices_left.dtype)
-        )[None, None, None, :]
-        indices_right = indices_left + chunk_size
-        indices_right.clamp_max_(MAX_TSRC - args.sliding_window_size)
-        
-        out_scores = torch.full(
-            (BSZ, BDST_SCAN, HEAD, triton.next_power_of_2(chunk_count)), 
-            device=q.device,
-            dtype=torch.float32,
-            fill_value=-32000.0
-        )
+            indices_left[:, :, :, :] = (
+                torch.floor(
+                    torch.arange(0, chunk_count, device=q.device, dtype=torch.float64) * chunk_size + args.sink_token_size
+                ).to(indices_left.dtype)
+            )[None, None, None, :]
+            indices_right = indices_left + chunk_size
+            indices_right.clamp_max_(MAX_TSRC - args.sliding_window_size)
+            
+            out_scores = torch.full(
+                (BSZ, BDST_SCAN, HEAD, triton.next_power_of_2(chunk_count)), 
+                device=q.device,
+                dtype=torch.float32,
+                fill_value=-32000.0
+            )
+        else:
+            assert cached_metadata is not None
+            assert cached_metadata.stage_caches is not None
+            assert len(stage_caches) <= len(args.stages)
+            
+            last_stage_cache = stage_caches[-1]
+            
+            indices_left = last_stage_cache.indices_left
+            indices_right = last_stage_cache.indices_right
+            out_scores = last_stage_cache.out_scores
         
         for i_stage, stage_info in enumerate(args.stages):
             # if stage_chunk_size > chunk_size: continue
@@ -1675,7 +1690,13 @@ def dual_stage_quadratic_hip_attention(
             stage_chunk_size = stage_info.stage_chunk_size
             stage_k = stage_info.stage_k
             
-            if i_stage > 0:
+            if i_stage < (len(stage_caches) - 1):
+                # print('stage cached pass', i_stage)
+                continue
+            elif i_stage == (len(stage_caches) - 1):
+                # print('last cached stage', i_stage)
+                pass
+            elif i_stage > 0:
                 assert (stage_k % chunk_size) == 0, f'{stage_k} % {chunk_size}'
                 indices_left = indices_left[..., :stage_k // chunk_size]
                 require_align = stage_info.require_realign_index
@@ -1734,6 +1755,14 @@ def dual_stage_quadratic_hip_attention(
                 assert isinstance(stage_info, ScanStage), f'frist stage always scan {stage_info}'
                 STAGE_STRIDE = stage_info.stage_stride
             
+            if i_stage >= len(stage_caches):
+                stage_caches.append(
+                    HiPAttentionStageInputCache(
+                        indices_left=indices_left.clone(),
+                        indices_right=indices_right.clone(),
+                        out_scores=out_scores.clone(),
+                    )
+                )
             
             chunk_size = stage_chunk_size
             chunk_count = indices_left.shape[-1]
@@ -2147,7 +2176,8 @@ def dual_stage_quadratic_hip_attention(
         sa_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=sa_access_counter,
             cache_miss_counter=sa_cache_miss_counter,
-        )
+        ),
+        stage_caches=stage_caches,
     )
 
 def main_debug():
@@ -2422,9 +2452,6 @@ def main_debug():
         start.record()
         if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
         
-        # print(cos.shape)
-        # print(sin.shape)
-        
         _, metadata = dual_stage_quadratic_hip_attention(
             **dual_stage_kwargs,
             cached_metadata=metadata
@@ -2456,9 +2483,6 @@ def main_debug():
         
         start.record()
         if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
-        
-        # print(cos.shape)
-        # print(sin.shape)
         
         context, metadata = dual_stage_quadratic_hip_attention(
             **dual_stage_kwargs,

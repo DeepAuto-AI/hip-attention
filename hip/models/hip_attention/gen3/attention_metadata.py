@@ -84,15 +84,24 @@ class HiPAttentionCacheAccessStatistics:
         }
 
 @dataclass
+class HiPAttentionStageInputCache:
+    indices_left: Tensor
+    indices_right: Tensor
+    out_scores: Tensor
+
+@dataclass
 class HiPAttentionOutputMetadata:
-    indices: Tensor
-    ks: Tensor
-    ks_count: Tensor
-    ks_start_end: Tensor
+    indices: Optional[Tensor]
+    ks: Optional[Tensor]
+    ks_count: Optional[Tensor]
+    ks_start_end: Optional[Tensor]
     
     # memory access statistics
     mask_cache_statistics: Optional[HiPAttentionCacheAccessStatistics]
     sa_cache_statistics: Optional[HiPAttentionCacheAccessStatistics]
+    
+    # stage caches
+    stage_caches: Optional[List[HiPAttentionStageInputCache]]
     
 @dataclass
 class HiPAttentionArgs:
@@ -110,17 +119,24 @@ class HiPAttentionArgs:
         default_factory=lambda: [
             ScanStage(
                 stage_block_size_q=64,
-                stage_block_stride_q=1,
-                stage_chunk_size=32,
+                stage_block_stride_q=4,
+                stage_chunk_size=256,
+                stage_k=None,
                 stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=4,
+                stage_chunk_size=32,
                 stage_k=32768,
+                stage_stride=1,
             ),
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
                 stage_chunk_size=8,
-                stage_stride=1,
                 stage_k=8192,
+                stage_stride=1,
             ),
         ]
     )
