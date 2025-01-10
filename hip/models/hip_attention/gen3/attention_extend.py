@@ -120,6 +120,9 @@ def load_keys_with_rope(
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
     OFFLOAD_CACHE_GPU_BANK,
     stride_offload_cache_gpu_bank_token,
     stride_offload_cache_gpu_bank_hid,
@@ -191,6 +194,9 @@ def load_keys_with_rope(
         OFFLOAD_CACHE_UVM_METADATA,
         stride_offload_cache_uvm_metadata_token,
         stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+        stride_offload_cache_gpu_global_metadata_k,
+        stride_offload_cache_gpu_global_metadata_pad,
         OFFLOAD_CACHE_GPU_BANK,
         stride_offload_cache_gpu_bank_token,
         stride_offload_cache_gpu_bank_hid,
@@ -312,6 +318,9 @@ def load_keys_with_rope(
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -344,7 +353,7 @@ def load_keys_with_rope(
                     BLOCK_HID,
                     
                     # NOTE: in previous load, the fetch should be succesfully done.
-                    UPDATE_CACHE=False,
+                    UPDATE_CACHE=UPDATE_CACHE,
                 ).to(queries.dtype)
                 
                 # TODO: multiply -right
@@ -415,6 +424,9 @@ def chunk_controllable_sampling_mask_cuda(
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
     OFFLOAD_CACHE_GPU_BANK,
     stride_offload_cache_gpu_bank_token,
     stride_offload_cache_gpu_bank_hid,
@@ -691,6 +703,9 @@ def chunk_controllable_sampling_mask_cuda(
                             OFFLOAD_CACHE_UVM_METADATA,
                             stride_offload_cache_uvm_metadata_token,
                             stride_offload_cache_uvm_metadata_k,
+                            OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                            stride_offload_cache_gpu_global_metadata_k,
+                            stride_offload_cache_gpu_global_metadata_pad,
                             OFFLOAD_CACHE_GPU_BANK,
                             stride_offload_cache_gpu_bank_token,
                             stride_offload_cache_gpu_bank_hid,
@@ -786,6 +801,9 @@ def chunk_controllable_sampling_mask_cuda(
                             OFFLOAD_CACHE_UVM_METADATA,
                             stride_offload_cache_uvm_metadata_token,
                             stride_offload_cache_uvm_metadata_k,
+                            OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                            stride_offload_cache_gpu_global_metadata_k,
+                            stride_offload_cache_gpu_global_metadata_pad,
                             OFFLOAD_CACHE_GPU_BANK,
                             stride_offload_cache_gpu_bank_token,
                             stride_offload_cache_gpu_bank_hid,
@@ -2105,8 +2123,8 @@ def dual_stage_quadratic_hip_attention(
         EXTEND_BACKEND=args.sa_extend_backend, # streaming works way much better in Gemma2, than dynamic_extend
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
-        # offload_update_cache=(cached_metadata is None) and args.online_update_cache,
-        offload_update_cache=args.online_update_cache,
+        offload_update_cache=(cached_metadata is None) and args.online_update_cache,
+        # offload_update_cache=args.online_update_cache,
         # offload_update_cache=False,
     )
     if args.offload_cache is not None:
