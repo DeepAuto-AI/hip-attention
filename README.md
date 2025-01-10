@@ -1,6 +1,6 @@
 ![demo gif](docs/demo.gif)
 
-| [**Demo**](docs/demo.mp4) | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**vLLM Integration**](https://github.com/DeepAuto-AI/vllm) | [**SGlang Integration (Preview)**](https://github.com/DeepAuto-AI/sglang) |
+| [**Demo**](docs/demo.mp4) | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) | [**vLLM Integration (Deprecated)**](https://github.com/DeepAuto-AI/vllm) |
 
 **HiP Attention** reduces the computational cost of quadratic attention, such as Flash Attention, into sub-quadratic `O(T log T)` in a plug-and-play manner while maintaining original performance using hierarchically pruned sparse attention. We are aiming to support future researchers while maintaining practical efficiency with this project.
 
