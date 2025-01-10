@@ -57,10 +57,8 @@ class SglangModel:
                         {'role': 'system', 'content': 'Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are helpful assistant.'},
                         {'role': 'user', 'content': input_text},
                     ],
-                    "sampling_params": {
-                        "topk": 1, # greedy
-                        "max_new_tokens": max_tokens,
-                    },
+                    "max_tokens": max_tokens,
+                    "top_p": 0.000000000001,
                 },
             )
             
