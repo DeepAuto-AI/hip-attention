@@ -1756,13 +1756,23 @@ def dual_stage_quadratic_hip_attention(
                 STAGE_STRIDE = stage_info.stage_stride
             
             if i_stage >= len(stage_caches):
-                stage_caches.append(
-                    HiPAttentionStageInputCache(
-                        indices_left=indices_left.clone(),
-                        indices_right=indices_right.clone(),
-                        out_scores=out_scores.clone(),
+                if i_stage == 0:
+                    # NOTE: do not cache first stage input, because it is meaning less.
+                    stage_caches.append(
+                        HiPAttentionStageInputCache(
+                            indices_left=None,
+                            indices_right=None,
+                            out_scores=None,
+                        )
                     )
-                )
+                else:
+                    stage_caches.append(
+                        HiPAttentionStageInputCache(
+                            indices_left=indices_left.clone(),
+                            indices_right=indices_right.clone(),
+                            out_scores=out_scores.clone(),
+                        )
+                    )
             
             chunk_size = stage_chunk_size
             chunk_count = indices_left.shape[-1]
@@ -2172,7 +2182,7 @@ def dual_stage_quadratic_hip_attention(
         mask_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=mask_access_counter,
             cache_miss_counter=mask_cache_miss_counter,
-        ) if (cached_metadata is None) else None,
+        ) if (cached_metadata is None) or (cached_metadata.indices is None) else None,
         sa_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=sa_access_counter,
             cache_miss_counter=sa_cache_miss_counter,
