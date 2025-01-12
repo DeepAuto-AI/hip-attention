@@ -381,12 +381,12 @@ class GPUCache:
         )
 
         # NOTE: for debug
-        self._verify_cache(put_mask)
+        self.verify_cache(put_mask)
     
-    def _verify_cache(self, put_mask: Optional[Tensor] = None):
-        if os.getenv('DEBUG_ONLINE_VERIFY', '0') == '0':
+    def verify_cache(self, put_mask: Optional[Tensor] = None, force: bool = False, max_verification: int = 10000):
+        if (os.getenv('DEBUG_ONLINE_VERIFY', '0') == '0') and (not force):
             return
-        if self.k_uvm.layer_id != 3:
+        if self.k_uvm.layer_id != 3 and (not force):
             return
         
         torch.cuda.synchronize()
@@ -404,7 +404,7 @@ class GPUCache:
         total_hash_hit = 0
         total_cache_hit = 0
         for idx_head in range(table.shape[0]):
-            for idx_page in tqdm.tqdm(range(min(table.shape[1], 10000)), dynamic_ncols=True, leave=False):
+            for idx_page in tqdm.tqdm(range(min(table.shape[1], max_verification)), dynamic_ncols=True, leave=False):
                 target_slot = table[idx_head, idx_page].item()
                 if target_slot < MAX_INT:
                     total_table_hit += 1
@@ -499,6 +499,9 @@ head={idx_head}, page={idx_page}, slot={target_slot}, backref={back_ref}, uvmref
         assert table.device == self.device
         
         self.table[:, :, 0].index_fill_(dim=1, index=table.to(torch.int64), value=MAX_INT.value)
+
+    def flush(self):
+        self.table[:, :, 0].fill_(MAX_INT.value)
 
 class HiPOffloadCache:
     def __init__(
@@ -745,7 +748,7 @@ def load_tokens(
     BLOCK_HID: tl.constexpr,
     
     IS_BSA: tl.constexpr = False,
-    UPDATE_CACHE: tl.constexpr = True,
+    UPDATE_CACHE: tl.constexpr = False,
     
     V_CACHE = None,
     stride_v_cache_page = None, 

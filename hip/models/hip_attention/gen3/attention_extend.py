@@ -1678,9 +1678,9 @@ def dual_stage_quadratic_hip_attention(
             
             last_stage_cache = stage_caches[-1]
             
-            indices_left = last_stage_cache.indices_left
-            indices_right = last_stage_cache.indices_right
-            out_scores = last_stage_cache.out_scores
+            indices_left = last_stage_cache.indices_left.clone()
+            indices_right = last_stage_cache.indices_right.clone()
+            out_scores = last_stage_cache.out_scores.clone()
         
         for i_stage, stage_info in enumerate(args.stages):
             # if stage_chunk_size > chunk_size: continue
@@ -1706,6 +1706,7 @@ def dual_stage_quadratic_hip_attention(
                 else:
                     indices_right = indices_right[..., :stage_k // chunk_size]
                 out_scores = out_scores[..., :stage_k // chunk_size]
+                # NOTE: revert this
                 if stage_info.require_reset_score:
                     out_scores.fill_(-32000.0)
                 
@@ -1851,7 +1852,7 @@ def dual_stage_quadratic_hip_attention(
                 )
                 if args.offload_cache is not None:
                     # print('after masking')
-                    args.offload_cache.mask_k_cache._verify_cache()
+                    args.offload_cache.mask_k_cache.verify_cache()
             elif isinstance(stage_info, EvalScoreStage):
                 raise Exception() # TODO: handle new args
                 extend_backend = args.scan_extend_backend \
@@ -2137,10 +2138,10 @@ def dual_stage_quadratic_hip_attention(
         args.using_extend = args.using_extend and True
         
         assert cached_metadata is not None
-        indices = cached_metadata.indices
-        ks = cached_metadata.ks
-        ks_count = cached_metadata.ks_count
-        ks_start_end = cached_metadata.ks_start_end
+        indices = cached_metadata.indices.clone()
+        ks = cached_metadata.ks.clone()
+        ks_count = cached_metadata.ks_count.clone()
+        ks_start_end = cached_metadata.ks_start_end.clone()
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
     
@@ -2167,7 +2168,7 @@ def dual_stage_quadratic_hip_attention(
         # offload_update_cache=False,
     )
     if args.offload_cache is not None:
-        args.offload_cache.sa_kv_cache._verify_cache()
+        args.offload_cache.sa_kv_cache.verify_cache()
     
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)

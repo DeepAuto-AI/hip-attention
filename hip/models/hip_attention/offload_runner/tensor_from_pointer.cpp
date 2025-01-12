@@ -12,21 +12,21 @@ torch::Tensor tensor_from_pointer(
     // printf("%ld\n", size);
     // printf("%ld\n", elem_size);
 
-    auto dtype = torch::kFloat32;
+    auto dtype = torch::kUInt32;
     if (elem_size == 16) {
-        dtype = torch::kFloat16;
+        dtype = torch::kUInt16;
     }
     else if (elem_size == 32) {
-        dtype = torch::kFloat32;
+        dtype = torch::kUInt32;
     }
     else if (elem_size == 64) {
-        dtype = torch::kFloat64;
+        dtype = torch::kUInt64;
     }
     else if (elem_size == 8) {
         dtype = torch::kByte;
     }
     else {
-        dtype = torch::kFloat32;
+        dtype = torch::kUInt32;
     }
 
     auto options = torch::TensorOptions();
