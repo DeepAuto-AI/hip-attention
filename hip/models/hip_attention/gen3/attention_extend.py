@@ -2201,7 +2201,10 @@ def main_debug():
     global DEBUG
     
     seq_len = int(os.getenv('SEQ_LEN', '131072'))
+    query_seq_dups = int(os.getenv('Q_DUPS', '-1'))
     seq_dups = int(os.getenv('DUPS', '1'))
+    if query_seq_dups < 0:
+        query_seq_dups = seq_dups
     block_size = int(os.getenv('BLOCK_SIZE', '64'))
     num_samples = int(os.getenv('NUM_SAMPLES', '100'))
     batch_size = int(os.getenv('BATCH_SIZE', '1'))
@@ -2222,7 +2225,7 @@ def main_debug():
     HEAD_KV = k.shape[0]
     seq_len = seq_len * seq_dups
     
-    q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    q = q.repeat(1, query_seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
     k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)#.to(torch.float8_e5m2)
     v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)#.to(torch.float8_e5m2)
     if cos is not None:
@@ -2399,65 +2402,57 @@ def main_debug():
         q=q,
         k=k,
         v=v,
-        q_mask=q_mask,
-        k_mask=k_mask,
-        idx_pca_hid_q=idx_pca_hid_q,
-        idx_pca_hid_k=idx_pca_hid_k,
         args=HiPAttentionArgs(
-            # deprecated
-            # mask_k=config_mask_k,
-            # block_size_q=64,
-            # block_stride_q=config_bsq,
             block_size_k=64, # BLOCK_CHUNK
-            block_stride_k=1,
             sliding_window_size=128 if preset == 'debug' else 1024,
             sink_token_size=64 if preset == 'debug' else 256,
             # position_ids=position_ids,
             
             using_extend=True,
+            need_apply_rope=True,
             rope_cos=cos,
             rope_sin=sin,
-            need_apply_rope=True,
+            
+            second_stage_k = config_second_k,
+            stages=config_stage,
+            block_sparse_block_size_q=block_size,
+            model_context_length=512,
+            # scan_early_terminate=1,
+            # stage_early_terminate=1,
+            # scan_extend_backend='relative',
+            sa_extend_backend=config_sa_extend_backend,
+            stage_early_terminate=k_group_size,
+            mask_only=mask_only,
         ),
-        second_stage_k = config_second_k,
-        stages=config_stage,
-        block_sparse_block_size_q=block_size,
-        model_context_length=512,
-        # scan_early_terminate=1,
-        # stage_early_terminate=1,
-        # scan_extend_backend='relative',
-        sa_extend_backend=config_sa_extend_backend,
-        stage_early_terminate=k_group_size,
-        mask_only=mask_only,
     )
     
-    hip_1k_kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        args=HiPAttentionArgs(
-            mask_k=1024,
-            block_size_q=64,
-            block_stride_q=2,
-            block_size_k=2,
-            block_stride_k=1,
-        ),
-        mask_only=mask_only,
-    )
+    # hip_1k_kwargs = dict(
+    #     q=q,
+    #     k=k,
+    #     v=v,
+    #     args=HiPAttentionArgs(
+    #         mask_k=1024,
+    #         block_size_q=64,
+    #         block_stride_q=2,
+    #         block_size_k=2,
+    #         block_stride_k=1,
+    #     ),
+    #     mask_only=mask_only,
+    # )
     
-    hip_512_kwargs = dict(
-        q=q,
-        k=k,
-        v=v,
-        args=HiPAttentionArgs(
-            mask_k=512,
-            block_size_q=64,
-            block_stride_q=2,
-            block_size_k=2,
-            block_stride_k=1,
-        ),
-        mask_only=mask_only,
-    )
+    # hip_512_kwargs = dict(
+    #     q=q,
+    #     k=k,
+    #     v=v,
+    #     args=HiPAttentionArgs(
+    #         mask_k=512,
+    #         block_size_q=64,
+    #         block_stride_q=2,
+    #         block_size_k=2,
+    #         block_stride_k=1,
+    #     ),
+    #     mask_only=mask_only,
+    # )
     
     refresh_interval = 8 if is_decode else 2
     
@@ -2520,48 +2515,48 @@ def main_debug():
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
     
-    metadata = None
-    for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+    # metadata = None
+    # for i in range(min(num_samples, 24)):
+    #     start = torch.cuda.Event(True)
+    #     end = torch.cuda.Event(True)
          
-        start.record()
-        context, metadata = hip_attention_11(
-            **hip_1k_kwargs,
-            previous_metadata=metadata,
-        )
-        end.record()
+    #     start.record()
+    #     context, metadata = hip_attention_11(
+    #         **hip_1k_kwargs,
+    #         previous_metadata=metadata,
+    #     )
+    #     end.record()
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
-            metadata = None
+    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
+    #         metadata = None
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+    #     end.synchronize()
+    #     print(start.elapsed_time(end))
     
-    print('-' * 20)
+    # print('-' * 20)
     
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    # torch.cuda.synchronize()
+    # torch.cuda.empty_cache()
     
-    metadata = None
-    for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+    # metadata = None
+    # for i in range(min(num_samples, 24)):
+    #     start = torch.cuda.Event(True)
+    #     end = torch.cuda.Event(True)
          
-        start.record()
-        context, metadata = hip_attention_11(
-            **hip_512_kwargs,
-            previous_metadata=metadata,
-        )
-        end.record()
+    #     start.record()
+    #     context, metadata = hip_attention_11(
+    #         **hip_512_kwargs,
+    #         previous_metadata=metadata,
+    #     )
+    #     end.record()
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
-            metadata = None
+    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
+    #         metadata = None
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+    #     end.synchronize()
+    #     print(start.elapsed_time(end))
     
-    print('-' * 20)
+    # print('-' * 20)
     
     for i in range(min(num_samples, 5)):
         start = torch.cuda.Event(True)

@@ -144,7 +144,7 @@ class HiPAttentionArgs:
     extend_context_length: int = 512 * 1024
     
     # kernel args,
-    mask_only = False
+    mask_only: bool = False
     block_sparse_block_size_q: Optional[int] = 64
     
     scan_early_terminate: int = 1

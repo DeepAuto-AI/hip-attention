@@ -35,8 +35,8 @@ def load_checkouts(
         k = k.view(N*H_KV, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
         v = v.view(N*H_KV, T_SRC, HID)[idx:idx+window, :seq_len].contiguous()
         out = out.view(N*H, T_DST, HID)[idx:idx+window, :seq_len].contiguous()
-        cos = cos.view(-1, HID)[:, :].contiguous()
-        sin = sin.view(-1, HID)[:, :].contiguous()
+        cos = cos.view(-1, HID)[:seq_len, :].contiguous()
+        sin = sin.view(-1, HID)[:seq_len, :].contiguous()
     else:
         q = torch.randn((1, 64, 4))
         k = torch.randn((1, 64, 4))
