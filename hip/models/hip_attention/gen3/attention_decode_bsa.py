@@ -1333,7 +1333,11 @@ def decode_block_sparse_attention_impl(
         (
             args.v_cache 
             if args.v_cache is not None else 
-            args.offload_cache.v_uvm.bank_cpu
+            (
+                args.offload_cache.v_uvm.bank_cpu
+                if args.offload_cache is not None else
+                v
+            )
         ), 
         seq_lens, 
         NUM_TOTAL_KV_SPLITS
