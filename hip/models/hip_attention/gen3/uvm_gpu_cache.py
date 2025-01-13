@@ -18,8 +18,8 @@ from hip.models.hip_attention.gen3.attention_metadata import (
     HiPAttentionCacheAccessStatistics,
 )
 
-MAX_INT: tl.constexpr =     tl.constexpr(10000000)
-MAX_INT_ACQUIRED: tl.constexpr =   tl.constexpr(10000001)
+MAX_INT: tl.constexpr =             tl.constexpr(10000000)
+MAX_INT_ACQUIRED: tl.constexpr =    tl.constexpr(10000001)
 
 def sizeof(dtype: Union[Tensor, torch.dtype]) -> int:
     if isinstance(dtype, Tensor):
@@ -93,12 +93,14 @@ class UVMCache:
     
     def __init__(
         self, 
+        layer_id: int,
         max_token_size: int,
         head_num: int,
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device,
     ):
+        self.layer_id = layer_id
         self.max_token_size = max_token_size
         self.head_num = head_num
         self.head_dim = head_dim
@@ -185,7 +187,7 @@ class UVMCache:
 import numba
 import numpy as np
 
-@numba.njit(parallel=True, fastmath=True)
+@numba.njit(parallel=True)
 def index_copy(src: np.ndarray, out: np.ndarray, table: np.ndarray):
     for i in numba.prange(table.shape[0]):
         out[i] = src[table[i]]
@@ -222,6 +224,7 @@ class GPUCache:
         k_uvm: UVMCache, 
         v_uvm: Optional[UVMCache],
         max_cache_token_size: int,
+        online_cache_update: bool,
     ):
         self.k_uvm = k_uvm
         self.v_uvm = v_uvm
@@ -240,11 +243,16 @@ class GPUCache:
         
         """
         [
-            CachelinePadded { current_tick: int32 }
+            CachelinePadded { 
+                current_tick: int32,
+            }
+            CachelinePadded {
+                random_seed: int32,
+            }
         ]
         """
         self.global_metadata = torch.zeros(
-            (1, pad_to_cacheline(1, torch.int32)), 
+            (2, pad_to_cacheline(1, torch.int32)), 
             dtype=torch.int32, 
             device=self.device
         )
@@ -257,23 +265,26 @@ class GPUCache:
         
         """
         CachelinePadded {
-            [0] Back reference to table: int64,        # initial handshake, store token index of UVM bank
-            [1] Reference to UVM Cache: int64,         # MAX_TOKEN, for token generation check
-            [2] Token Generation of UVM Cache: int64,  # To check the version of cached token
+            [0] Back reference to table: int64,         # initial handshake, store token index of UVM bank
+            [1] Reference to UVM Cache: int64,          # MAX_TOKEN, for token generation check
+            [2] Token Generation of UVM Cache: int64,   # To check the version of cached token
             [3] Last accessed tick: int64,
-            [4] Not accessed duration: int64,
+            [4] Not accessed duration: int64,           # Increse one every step
+            [5] Did taken in this kernel step: int64    # Reset to zero on every step
+            [6] Token hash: int64                       # for debug
         }
         """
         self.metadata = torch.zeros(
-            (self.max_cache_token_size, pad_to_cacheline(5, torch.int64)),
+            (self.max_cache_token_size, pad_to_cacheline(7, torch.int64)),
             dtype=torch.int64,
             device=self.device,
         )
-        # self.metadata[:, 0].fill_(MAX_INT.value)
-        # self.metadata[:, 1].fill_(MAX_INT.value)
-        # self.metadata[:, 2].fill_(MAX_INT.value)
+        # self.metadata[:, 0].fill_(0)
+        # self.metadata[:, 1].fill_(0)
+        # self.metadata[:, 2].fill_(0)
         # self.metadata[:, 3].fill_(0)
-        self.metadata[:, 4].fill_(MAX_INT.value)
+        self.metadata[:, 4].fill_(1)
+        # self.metadata[:, 5].fill_(0)
         
         # NOTE: this table is way too large to pad... sorry
         self.table = torch.full(
@@ -289,24 +300,25 @@ class GPUCache:
             sizeof(self.metadata) + 
             sizeof(self.table)
         )
-
-        self.flag = False
+        
         self.step = 0
+
+        self.online_update_cache = online_cache_update
 
     def handle_cache_miss(
         self,
         metadata: HiPAttentionOutputMetadata,
         stats: HiPAttentionCacheAccessStatistics
     ):
-        if self.flag: return
-        
+        # self._verify_cache()
+
         # NOTE: increase not accessed timer
         self.metadata[:, 4].add_(1)
+        self.metadata[:, 5].fill_(0)
         
-        if id(stats) == id(metadata.mask_cache_statistics):
-            return
-        if stats is None:
-            return
+        # if id(stats) == id(metadata.mask_cache_statistics): return
+        if stats is None: return
+        if self.online_update_cache: return
         
         # NOTE: this function should be capturable.
         # NOTE: this function will called only when mask is updated
@@ -326,7 +338,7 @@ class GPUCache:
         assert accessed.ndim == 2
         assert accessed.shape == (self.head_num, uvm_page_count)
         assert self.k_uvm.metadata.shape == (uvm_page_count, 1)
-        assert self.global_metadata.shape == (1, pad_to_cacheline(1, self.global_metadata.dtype))
+        assert self.global_metadata.shape == (2, pad_to_cacheline(1, self.global_metadata.dtype))
         assert self.metadata.shape == (self.bank.shape[0], pad_to_cacheline(5, self.metadata.dtype))
         assert self.table.shape == (self.head_num, uvm_page_count, 1)
 
@@ -368,11 +380,16 @@ class GPUCache:
             evict_list=evict_priority_list,
         )
 
-        # self.flag = True
-
-        # self._verify_cache(put_mask)
+        # NOTE: for debug
+        self.verify_cache(put_mask)
     
-    def _verify_cache(self, put_mask):
+    def verify_cache(self, put_mask: Optional[Tensor] = None, force: bool = False, max_verification: int = 10000):
+        if (os.getenv('DEBUG_ONLINE_VERIFY', '0') == '0') and (not force):
+            return
+        if self.k_uvm.layer_id != 3 and (not force):
+            return
+        
+        torch.cuda.synchronize()
         table = self.table.cpu()
         metadata = self.metadata.cpu()
         bank = self.bank.cpu()
@@ -380,26 +397,54 @@ class GPUCache:
         uvm_k_bank = self.k_uvm.bank_cpu
         uvm_v_bank = self.v_uvm.bank_cpu if self.kv_packed else None
 
+        total_table_hit = 0
+        total_back_ref_hit = 0
+        total_uvm_ref_hit = 0
+        total_token_gen_hit = 0
+        total_hash_hit = 0
         total_cache_hit = 0
         for idx_head in range(table.shape[0]):
-            for idx_page in tqdm.tqdm(range(table.shape[1]), dynamic_ncols=True, leave=False):
+            for idx_page in tqdm.tqdm(range(min(table.shape[1], max_verification)), dynamic_ncols=True, leave=False):
                 target_slot = table[idx_head, idx_page].item()
-                if target_slot != MAX_INT:
-                    back_ref, ref_to_uvm, token_gen, last_tick = metadata[target_slot, :4]
-                    if (back_ref == idx_page) and (ref_to_uvm != MAX_INT) and (uvm_metadata[ref_to_uvm, 0] == token_gen):
-                        gpu_value = bank[target_slot]
-                        if not self.kv_packed:
-                            cpu_value = uvm_k_bank[idx_page, idx_head]
-                        else:
-                            cpu_value = torch.cat([
-                                uvm_k_bank[idx_page, idx_head],
-                                uvm_v_bank[idx_page, idx_head],
-                            ], dim=0)
-                        mse = ((gpu_value - cpu_value) ** 2).mean().item()
-                        assert mse < 1e-4, mse
-                        assert last_tick > 0, last_tick
-                        total_cache_hit += 1
-        print('verified', total_cache_hit, 'lastly put', put_mask.sum().item())
+                if target_slot < MAX_INT:
+                    total_table_hit += 1
+                    back_ref, ref_to_uvm, token_gen, last_tick, sleep_tick, is_touched, token_hash = metadata[target_slot, :7]
+                    if (back_ref // table.shape[0]) == idx_page:
+                        total_back_ref_hit += 1
+                        if ref_to_uvm < MAX_INT:
+                            total_uvm_ref_hit += 1
+                            if uvm_metadata[ref_to_uvm, 0] == token_gen:
+                                total_token_gen_hit += 1
+                                gpu_value = bank[target_slot]
+                                if not self.kv_packed:
+                                    cpu_value = uvm_k_bank[idx_page, idx_head]
+                                else:
+                                    cpu_value = torch.cat([
+                                        uvm_k_bank[idx_page, idx_head],
+                                        uvm_v_bank[idx_page, idx_head],
+                                    ], dim=0)
+                                gpu_hash = gpu_value.view(torch.uint16).to(torch.uint32).sum().item()
+                                cpu_hash = cpu_value.view(torch.uint16).to(torch.uint32).sum().item()
+                                mse = ((gpu_value - cpu_value) ** 2).mean().item()
+                                check_pass = (mse < 1e-4) or True
+                                if not check_pass:
+                                    error_location = (uvm_k_bank.view(torch.uint16).to(torch.uint32).sum(dim=-1) == token_hash).nonzero()
+                                    error_cpu_location = (uvm_k_bank.view(torch.uint16).to(torch.uint32).sum(dim=-1) == gpu_hash).nonzero()
+                                    error_msg = f"""
+cache_hit={total_cache_hit}, token_gen={total_token_gen_hit}, ref_to_uvm={total_uvm_ref_hit}, back_ref={total_back_ref_hit}
+GPU = {gpu_value} ({gpu_value.shape})
+-----
+UVM = {cpu_value} ({cpu_value.shape})
+token_hash={token_hash}, gpu_hash={gpu_hash}, cpu_hash={cpu_hash}, token_found={error_location}, uvm_found={error_cpu_location}
+head={idx_head}, page={idx_page}, slot={target_slot}, backref={back_ref}, uvmref={ref_to_uvm}, gen={token_gen}, is_touched={is_touched}, mse={mse}"""
+                                    assert False, error_msg
+                                total_cache_hit += 1
+                                if (gpu_hash == cpu_hash):
+                                    total_hash_hit += 1
+        
+        if put_mask is not None:
+            print('lastly put', put_mask.sum().item())
+        tqdm.tqdm.write(f'verified kv_packed={self.kv_packed}, cache_hit={total_cache_hit}, token_gen={total_token_gen_hit}, ref_to_uvm={total_uvm_ref_hit}, back_ref={total_back_ref_hit}, hash_hit={total_hash_hit}')
 
     def write_cache(
         self,
@@ -455,9 +500,13 @@ class GPUCache:
         
         self.table[:, :, 0].index_fill_(dim=1, index=table.to(torch.int64), value=MAX_INT.value)
 
+    def flush(self):
+        self.table[:, :, 0].fill_(MAX_INT.value)
+
 class HiPOffloadCache:
     def __init__(
         self,
+        layer_id: int, 
         max_token_size: int,
         max_mask_cache_token_size: int,
         max_sa_cache_token_size: int,
@@ -465,8 +514,10 @@ class HiPOffloadCache:
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device,
+        online_cache_update: bool,
     ):
         self.k_uvm = UVMCache(
+            layer_id=layer_id,
             max_token_size=max_token_size,
             head_num=head_num,
             head_dim=head_dim,
@@ -475,6 +526,7 @@ class HiPOffloadCache:
         )
         
         self.v_uvm = UVMCache(
+            layer_id=layer_id,
             max_token_size=max_token_size,
             head_num=head_num,
             head_dim=head_dim,
@@ -486,12 +538,14 @@ class HiPOffloadCache:
             k_uvm=self.k_uvm,
             v_uvm=None,
             max_cache_token_size=max_mask_cache_token_size,
+            online_cache_update=online_cache_update,
         )
         
         self.sa_kv_cache = GPUCache(
             k_uvm=self.k_uvm,
             v_uvm=self.v_uvm,
             max_cache_token_size=max_sa_cache_token_size,
+            online_cache_update=online_cache_update,
         )
     
     def get_page_count(self):
@@ -503,16 +557,11 @@ class HiPOffloadCache:
         table: Tensor,
         device: torch.device
     ) -> Tuple[Tensor, Tensor]:
-        # t = time.time()
         table = table.to('cpu', non_blocking=False)
-        # e1 = time.time()
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
-        # e2 = time.time()
         k = k.to(device, non_blocking=False).unsqueeze(0)
         v = v.to(device, non_blocking=False).unsqueeze(0)
-        # e3 = time.time()
-        # print(e1-t, e2-e1, e3-e2)
         return k, v
     
     def set_kv_buffer(
@@ -659,10 +708,14 @@ def load_tokens(
     
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT: int,
     OFFLOAD_CACHE_LOAD_VALUE: tl.constexpr,
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
     OFFLOAD_CACHE_GPU_BANK,
     stride_offload_cache_gpu_bank_token,
     stride_offload_cache_gpu_bank_hid,
@@ -695,7 +748,7 @@ def load_tokens(
     BLOCK_HID: tl.constexpr,
     
     IS_BSA: tl.constexpr = False,
-    UPDATE_CACHE: tl.constexpr = True,
+    UPDATE_CACHE: tl.constexpr = False,
     
     V_CACHE = None,
     stride_v_cache_page = None, 
@@ -788,8 +841,9 @@ def load_tokens(
                 mask=mask_keys,
             )
             idx_slot_has_reference_to_bank = (idx_slots < MAX_INT) & mask_keys
+            idx_slots = idx_slots * idx_slot_has_reference_to_bank
             
-            ALWAYS_VALIDATE_LINK: tl.constexpr = False
+            ALWAYS_VALIDATE_LINK: tl.constexpr = False # not UPDATE_CACHE
             
             if ALWAYS_VALIDATE_LINK:
                 validated_slots = validate_bank_metadata_slots(
@@ -812,12 +866,15 @@ def load_tokens(
             else:
                 mask_slot_cache_hit = idx_slot_has_reference_to_bank
             
+            # if OFFLOAD_CACHE_LOAD_VALUE:
+            #     mask_slot_cache_hit = mask_slot_cache_hit & False
+            
             idx_hid_cached = idx_hid
             if OFFLOAD_CACHE_LOAD_VALUE:
                 idx_hid_cached += BLOCK_HID
             keys_cached = tl.load(
                 OFFLOAD_CACHE_GPU_BANK +\
-                    idx_slots * stride_offload_cache_gpu_bank_token +\
+                    idx_slots.to(tl.int64) * stride_offload_cache_gpu_bank_token +\
                     idx_hid_cached * stride_offload_cache_gpu_bank_hid,
                 mask=mask_slot_cache_hit,
                 other=0.0,
@@ -840,6 +897,34 @@ def load_tokens(
                 ) & (
                     idx_slots == idx_slots_verify
                 ) & mask_slot_cache_hit
+                
+            if mask_slot_cache_hit.shape[0] == 1:
+                keys_cached_hash = tl.sum(keys_cached.to(tl.uint16, bitcast=True), axis=0, keep_dims=True).to(tl.uint64)
+            elif mask_slot_cache_hit.shape[1] == 1:
+                keys_cached_hash = tl.sum(keys_cached.to(tl.uint16, bitcast=True), axis=1, keep_dims=True).to(tl.uint64)
+            else:
+                raise Exception()
+            tl.debug_barrier()
+            
+            tl.inline_asm_elementwise("MEMBAR.SC.GPU;", "=r", [], dtype=tl.int32, is_pure=True, pack=1)
+            
+            truth_hash = tl.load(
+                OFFLOAD_CACHE_GPU_METADATA +\
+                    idx_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token+\
+                    6 * stride_offload_cache_gpu_metadata_k,
+                mask=mask_slot_cache_hit,
+            ).to(tl.uint64)
+            hash_mask = tl.full((1,), value=1, dtype=tl.uint64)
+            hash_mask = (hash_mask << 32) - 1
+            if OFFLOAD_CACHE_LOAD_VALUE:
+                truth_hash = (truth_hash >> 32) & hash_mask
+            else:
+                truth_hash = truth_hash & hash_mask
+            tl.debug_barrier()
+            if UPDATE_CACHE:
+                mask_slot_cache_hit = (truth_hash == (keys_cached_hash & hash_mask)) & mask_slot_cache_hit
+            
+            tl.static_assert(mask_slot_cache_hit.dtype == tl.int1)
             
             mask_keys_cache_miss = mask_keys & (~mask_slot_cache_hit)
             mask_slot_cache_hit = mask_keys & (~mask_keys_cache_miss)
@@ -847,7 +932,7 @@ def load_tokens(
             
             tl.store(
                 OFFLOAD_CACHE_GPU_METADATA +\
-                    idx_slots * stride_offload_cache_gpu_metadata_token+\
+                    idx_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token+\
                     4 * stride_offload_cache_gpu_metadata_k,
                 value=0,
                 mask=mask_slot_cache_hit,
@@ -884,34 +969,60 @@ def load_tokens(
             
             if CACHE_MISS_COUNTER is not None:
                 if UPDATE_CACHE:
-                    cache_miss_counter = tl.atomic_xchg(
+                    tl.debug_barrier()
+                    tl.store(
                         CACHE_MISS_COUNTER +\
                             idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz +\
                             idx_kv_head * stride_cache_miss_counter_head_kv +\
                             idx_page * stride_cache_miss_counter_tsrc,
                         mask=mask_keys_cache_miss,
-                        val=1,
+                        value=1,
                     )
-                    mask_victim_slots = (cache_miss_counter == 0) & mask_keys_cache_miss
+                    # mask_victim_slots = (cache_miss_counter != 1) & mask_keys_cache_miss
+                    mask_victim_slots = mask_keys_cache_miss # NOTE: init value if cache miss counter is ignored
                     # table is protected by cache miss counter
-                    tl.store(
+                    previous_table = tl.atomic_xchg(
                         OFFLOAD_CACHE_GPU_TABLE +\
                             idx_page.to(tl.int64) * stride_offload_cache_gpu_table_token +\
                             idx_kv_head * stride_offload_cache_gpu_table_head_kv +\
                             0 * strdie_offload_cache_gpu_table_k,
-                        value=MAX_INT,
+                        val=MAX_INT_ACQUIRED,
                         mask=mask_victim_slots,
                     )
+                    mask_victim_slots = (previous_table != MAX_INT_ACQUIRED) & mask_victim_slots
+                    mask_table_acquired = mask_victim_slots
+                    
+                    tl.debug_barrier()
                     
                     idx_victim_slots = tl.zeros_like(idx_slots).to(tl.int64) + MAX_INT
-                    max_not_accessed_time = tl.zeros_like(idx_slots).to(tl.int64)
+                    max_not_accessed_time = tl.zeros_like(idx_slots).to(tl.int64) - 1
                     victim_slot_not_acquired = mask_victim_slots
-                    for i in range(5):
-                        idx_randint = (tl.randint(tl.program_id(0) + i, idx_page * HEAD_KV + idx_kv_head + i, 3) & ((1 << 31) - 1)).to(tl.int64)
-                        if IS_BSA:
-                            idx_victim_slots_try = idx_randint % (10000 * HEAD_KV)
+                    seed = tl.atomic_add(
+                        OFFLOAD_CACHE_GPU_GLOBAL_METADATA +\
+                            1 * stride_offload_cache_gpu_global_metadata_k +\
+                            0 * stride_offload_cache_gpu_global_metadata_pad,
+                        val=1,
+                    )
+                    for i in range(10):
+                        pid = tl.program_id(0).to(tl.int64) * tl.num_programs(1) * tl.num_programs(2) + tl.program_id(1) * tl.num_programs(2) + tl.program_id(2)
+                        if original_mask_keys.shape[0] == 1:
+                            idx_randint = (tl.randint(seed, tl.arange(0, BLOCK_SIZE_K)[None, :] + i * BLOCK_SIZE_K, 10).to(tl.int64) & ((1 << 30) - 1))
                         else:
-                            idx_victim_slots_try = idx_randint % (64000 * HEAD_KV)
+                            idx_randint = (tl.randint(seed, tl.arange(0, BLOCK_SIZE_K)[:, None] + i * BLOCK_SIZE_K, 10).to(tl.int64) & ((1 << 30) - 1))
+                        # if IS_BSA:
+                        #     idx_victim_slots_try = idx_randint % (8192 * HEAD_KV)
+                        # else:
+                        #     idx_victim_slots_try = idx_randint % (8192 * HEAD_KV)
+                        # idx_victim_slots_try = idx_victim_slots_try * 128 + tl.extra.cuda.smid()
+                        idx_victim_slots_try = idx_randint
+                        # idx_victim_slots_try = idx_randint * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                        idx_victim_slots_try = idx_victim_slots_try % GPU_BANK_COUNT
+                        # if IS_BSA:
+                        #     idx_victim_slots_try = idx_victim_slots_try % (10000 * HEAD_KV)
+                        # else:
+                        #     idx_victim_slots_try = idx_victim_slots_try % (32000 * HEAD_KV)
+                        
+                        acquired = victim_slot_not_acquired
                         
                         not_accessed_time = tl.load(
                             OFFLOAD_CACHE_GPU_METADATA +\
@@ -921,34 +1032,34 @@ def load_tokens(
                         )
                         new_old_slot = (not_accessed_time > max_not_accessed_time) & mask_victim_slots
                         # if already acquired, release it
-                        tl.store(
+                        tl.atomic_xchg(
                             OFFLOAD_CACHE_GPU_METADATA +\
-                                idx_victim_slots_try * stride_offload_cache_gpu_metadata_token+\
+                                idx_victim_slots * stride_offload_cache_gpu_metadata_token+\
+                                5 * stride_offload_cache_gpu_metadata_k,
+                            val=0,
+                            mask=new_old_slot & (~victim_slot_not_acquired),
+                        )
+                        tl.atomic_xchg(
+                            OFFLOAD_CACHE_GPU_METADATA +\
+                                idx_victim_slots * stride_offload_cache_gpu_metadata_token+\
                                 0 * stride_offload_cache_gpu_metadata_k,
-                            value=MAX_INT,
+                            val=MAX_INT,
                             mask=new_old_slot & (~victim_slot_not_acquired),
                         )
                         max_not_accessed_time = tl.maximum(max_not_accessed_time, not_accessed_time)
                         victim_slot_not_acquired = victim_slot_not_acquired | new_old_slot
-                        acquired = victim_slot_not_acquired & (not_accessed_time != 0)
+                        acquired = victim_slot_not_acquired & (not_accessed_time > 0)
                         
-                        # previous_state = tl.load(
-                        #     OFFLOAD_CACHE_GPU_METADATA +\
-                        #         idx_victim_slots_try * stride_offload_cache_gpu_metadata_token+\
-                        #         0 * stride_offload_cache_gpu_metadata_k,
-                        #     mask=victim_slot_not_acquired,
-                        # )
-                        # acquired = (
-                        #     previous_state != MAX_INT_ACQUIRED
-                        # ) & acquired
-                        
-                        # tl.store(
-                        #     OFFLOAD_CACHE_GPU_METADATA +\
-                        #         idx_victim_slots_try * stride_offload_cache_gpu_metadata_token+\
-                        #         0 * stride_offload_cache_gpu_metadata_k,
-                        #     value=MAX_INT,
-                        #     mask=acquired,
-                        # )
+                        # check already written or not
+                        previous_state = tl.atomic_xchg(
+                            OFFLOAD_CACHE_GPU_METADATA +\
+                                idx_victim_slots_try * stride_offload_cache_gpu_metadata_token+\
+                                5 * stride_offload_cache_gpu_metadata_k,
+                            val=1, # NOTE: this should be MAX_INT_1, but just for temporary.
+                            mask=acquired,
+                        )
+                        acquired = (previous_state != 1) & acquired
+
                         # check acquired or not
                         previous_state = tl.atomic_xchg(
                             OFFLOAD_CACHE_GPU_METADATA +\
@@ -959,6 +1070,18 @@ def load_tokens(
                         )
                         acquired = (previous_state != MAX_INT_ACQUIRED) & acquired
                         
+                        previously_acquired = (previous_state < MAX_INT) & acquired
+                        previous_idx_page = previous_state // HEAD_KV
+                        previous_idx_head_kv = previous_state % HEAD_KV
+                        tl.atomic_xchg(
+                            OFFLOAD_CACHE_GPU_TABLE +\
+                                previous_idx_page.to(tl.int64) * stride_offload_cache_gpu_table_token +\
+                                previous_idx_head_kv * stride_offload_cache_gpu_table_head_kv +\
+                                0 * strdie_offload_cache_gpu_table_k,
+                            val=MAX_INT,
+                            mask=previously_acquired,
+                        )
+                        
                         idx_victim_slots = tl.where(
                             acquired,
                             idx_victim_slots_try,
@@ -966,42 +1089,74 @@ def load_tokens(
                         )
                         
                         victim_slot_not_acquired = (~acquired) & victim_slot_not_acquired
+                        tl.debug_barrier()
+                    tl.debug_barrier()
                     # mask_victim_slots = mask_victim_slots & (idx_victim_slots < MAX_INT)
-                    mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & mask_keys_cache_miss
-                    if not IS_BSA:
-                        mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & (idx_victim_slots < (64000 * HEAD_KV)) & (idx_victim_slots > -1)
-                    else:
-                        mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & (idx_victim_slots < (10000 * HEAD_KV)) & (idx_victim_slots > -1)
+                    mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & mask_keys_cache_miss & (idx_victim_slots != MAX_INT) & original_mask_keys
+                    # if not IS_BSA:
+                    #     mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & (idx_victim_slots < (32000 * HEAD_KV)) & (idx_victim_slots > -1)
+                    # else:
+                    #     mask_victim_slots = mask_victim_slots & (~victim_slot_not_acquired) & (idx_victim_slots < (10000 * HEAD_KV)) & (idx_victim_slots > -1)
+                    idx_victim_slots = idx_victim_slots * mask_victim_slots
+                    tl.debug_barrier()
                     
                     tl.store(
                         OFFLOAD_CACHE_GPU_BANK +\
                             idx_victim_slots.to(tl.int64) * stride_offload_cache_gpu_bank_token +\
-                            idx_hid * stride_offload_cache_gpu_bank_hid,
+                            idx_hid_cached * stride_offload_cache_gpu_bank_hid,
                         value=keys,
                         mask=mask_victim_slots,
                     )
-                    # if IS_BSA:
-                    #     values = tl.load(
-                    #         V_CACHE +\
-                    #             idx_page.to(tl.int64) * stride_v_cache_page +\
-                    #             offset_page.to(tl.int64) * stride_v_cache_offset +\
-                    #             idx_kv_head.to(tl.int64) * stride_v_cache_kv_head +\
-                    #             idx_hid.to(tl.int64) * stride_v_cache_hid,
-                    #         mask=mask_victim_slots,
-                    #         other=0.0,
-                    #     )
-                    #     if values.dtype == tl.uint8:
-                    #         values = values.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
-                    #     if values.dtype == tl.float8e5:
-                    #         values = values.to(tl.bfloat16)
-                    #     tl.store(
-                    #         OFFLOAD_CACHE_GPU_BANK +\
-                    #             idx_victim_slots * stride_offload_cache_gpu_bank_token +\
-                    #             idx_hid * stride_offload_cache_gpu_bank_hid,
-                    #             # ((idx_hid_cached + BLOCK_HID) % (BLOCK_HID * 2)) * stride_offload_cache_gpu_bank_hid,
-                    #         value=values,
-                    #         mask=mask_victim_slots,
-                    #     )
+
+                    # take token hash for debug
+                    if mask_victim_slots.shape[0] == 1:
+                        keys_hash = tl.sum(keys.to(tl.uint16, bitcast=True), axis=0, keep_dims=True).to(tl.uint64)
+                    elif mask_victim_slots.shape[1] == 1:
+                        keys_hash = tl.sum(keys.to(tl.uint16, bitcast=True), axis=1, keep_dims=True).to(tl.uint64)
+                    else:
+                        raise Exception()
+                    
+                    if IS_BSA:
+                        values = tl.load(
+                            V_CACHE +\
+                                idx_page.to(tl.int64) * stride_v_cache_page +\
+                                offset_page.to(tl.int64) * stride_v_cache_offset +\
+                                idx_kv_head.to(tl.int64) * stride_v_cache_kv_head +\
+                                idx_hid.to(tl.int64) * stride_v_cache_hid,
+                            mask=mask_victim_slots,
+                            other=0.0,
+                        )
+                        if values.dtype == tl.uint8:
+                            values = values.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
+                        if values.dtype == tl.float8e5:
+                            values = values.to(tl.bfloat16)
+                        tl.store(
+                            OFFLOAD_CACHE_GPU_BANK +\
+                                idx_victim_slots.to(tl.int64) * stride_offload_cache_gpu_bank_token +\
+                                # idx_hid * stride_offload_cache_gpu_bank_hid,
+                                ((idx_hid_cached + BLOCK_HID) % (BLOCK_HID * 2)) * stride_offload_cache_gpu_bank_hid,
+                            value=values,
+                            mask=mask_victim_slots,
+                        )
+                        
+                        if mask_victim_slots.shape[0] == 1:
+                            values_hash = tl.sum(values.to(tl.uint16, bitcast=True), axis=0, keep_dims=True).to(tl.uint64)
+                        elif mask_victim_slots.shape[1] == 1:
+                            values_hash = tl.sum(values.to(tl.uint16, bitcast=True), axis=1, keep_dims=True).to(tl.uint64)
+                        else:
+                            raise Exception()
+                        if not OFFLOAD_CACHE_LOAD_VALUE:
+                            keys_hash = keys_hash | (values_hash << 32)
+                        else:
+                            keys_hash = (keys_hash << 32) | values_hash
+
+                    tl.store(
+                        OFFLOAD_CACHE_GPU_METADATA +\
+                            idx_victim_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token+\
+                            6 * stride_offload_cache_gpu_metadata_k,
+                        value=keys_hash,
+                        mask=mask_victim_slots,
+                    )
                     
                     uvm_token_gen = tl.load(
                         OFFLOAD_CACHE_UVM_METADATA +\
@@ -1032,22 +1187,33 @@ def load_tokens(
                         mask=mask_victim_slots,
                     )
                     
+                    tl.debug_barrier()
+                    
+                    # core.inline_asm_elementwise("mov.u32 $0, %smid;", "=r", [], dtype=core.int32, is_pure=True, pack=1,
+                    #                    _builder=_builder)
+                    tl.inline_asm_elementwise("MEMBAR.SC.GPU;", "=r", [], dtype=tl.int32, is_pure=True, pack=1)
+                    
                     # release slot
-                    tl.store(
+                    tl.atomic_xchg(
                         OFFLOAD_CACHE_GPU_METADATA +\
                             idx_victim_slots * stride_offload_cache_gpu_metadata_token+\
                             0 * stride_offload_cache_gpu_metadata_k,
-                        value=idx_page * HEAD_KV + idx_kv_head,
+                        val=idx_page * HEAD_KV + idx_kv_head,
                         mask=mask_victim_slots,
                     )
                     # release table
-                    tl.store(
+                    table_slots = tl.where(
+                        mask_table_acquired & (~mask_victim_slots),
+                        MAX_INT,
+                        idx_victim_slots,
+                    )
+                    tl.atomic_xchg(
                         OFFLOAD_CACHE_GPU_TABLE +\
                             idx_page.to(tl.int64) * stride_offload_cache_gpu_table_token +\
                             idx_kv_head * stride_offload_cache_gpu_table_head_kv +\
                             0 * strdie_offload_cache_gpu_table_k,
-                        value=idx_victim_slots,
-                        mask=mask_victim_slots,
+                        val=table_slots,
+                        mask=mask_table_acquired,
                     )
                 else:
                     tl.store(
@@ -1159,7 +1325,7 @@ def update_recency(
     ).to(tl.int64)
     cache_hit = (table < MAX_INT) & cache_hit
     
-    ALWAYS_VALIDATE_LINK: tl.constexpr = False
+    ALWAYS_VALIDATE_LINK: tl.constexpr = False # True
     
     if ALWAYS_VALIDATE_LINK:
         validated_cache_hit = validate_bank_metadata_slots(

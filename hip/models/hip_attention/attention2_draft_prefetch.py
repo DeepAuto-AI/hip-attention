@@ -2700,7 +2700,7 @@ def masking_iteration_draft_python_epilog(
     return ks_count, ks_start_end
 
 def get_masking_iteration_draft_cuda_fused_configs():
-    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
+    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '1') == '1'
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         defaults = {
@@ -5023,7 +5023,7 @@ def block_sparse_attention_cuda_step(
     return acc, l_i, m_i
 
 def get_block_sparse_attention_configs():
-    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
+    autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '1') == '1'
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         defaults = {

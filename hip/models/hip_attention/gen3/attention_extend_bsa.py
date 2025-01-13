@@ -597,9 +597,13 @@ def block_sparse_attention_cuda(
     
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT: int,
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
     OFFLOAD_CACHE_GPU_BANK,
     stride_offload_cache_gpu_bank_token,
     stride_offload_cache_gpu_bank_hid,
@@ -821,10 +825,14 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -853,7 +861,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     HEAD // KV_HEAD_REPEAT,
-                    BLOCK_SIZE_K,
+                    BLOCK_BK * BLOCK_SIZE_K,
                     HID,
                     
                     IS_BSA=True,
@@ -889,10 +897,14 @@ def block_sparse_attention_cuda(
                         
                         USING_OFFLOAD_CACHE,
                         OFFLOAD_CACHE_KV_PACKED,
+                        GPU_BANK_COUNT,
                         False,
                         OFFLOAD_CACHE_UVM_METADATA,
                         stride_offload_cache_uvm_metadata_token,
                         stride_offload_cache_uvm_metadata_k,
+                        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                        stride_offload_cache_gpu_global_metadata_k,
+                        stride_offload_cache_gpu_global_metadata_pad,
                         OFFLOAD_CACHE_GPU_BANK,
                         stride_offload_cache_gpu_bank_token,
                         stride_offload_cache_gpu_bank_hid,
@@ -921,11 +933,11 @@ def block_sparse_attention_cuda(
                         mask_tsrc[None, :],
                         
                         HEAD // KV_HEAD_REPEAT,
-                        BLOCK_SIZE_K,
+                        BLOCK_BK * BLOCK_SIZE_K,
                         HID,
                         
                         IS_BSA=True,
-                        UPDATE_CACHE=False,
+                        UPDATE_CACHE=UPDATE_CACHE,
                         
                         V_CACHE=V_CACHE,
                         stride_v_cache_page=stride_v_cache_page,
@@ -958,10 +970,14 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     True,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -990,11 +1006,11 @@ def block_sparse_attention_cuda(
                     mask_tsrc[:, None],
                     
                     HEAD // KV_HEAD_REPEAT,
-                    BLOCK_SIZE_K,
+                    BLOCK_BK * BLOCK_SIZE_K,
                     HID,
                     
                     IS_BSA=True,
-                    UPDATE_CACHE=False,
+                    UPDATE_CACHE=UPDATE_CACHE,
                     
                     V_CACHE=K_CACHE,
                     stride_v_cache_page=stride_k_cache_page,
@@ -1069,10 +1085,14 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -1101,7 +1121,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 
                 HEAD // KV_HEAD_REPEAT,
-                BLOCK_SIZE_K,
+                BLOCK_BK * BLOCK_SIZE_K,
                 HID,
                 
                 IS_BSA=True,
@@ -1137,10 +1157,14 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -1169,11 +1193,11 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     HEAD // KV_HEAD_REPEAT,
-                    BLOCK_SIZE_K,
+                    BLOCK_BK * BLOCK_SIZE_K,
                     HID,
                     
                     IS_BSA=True,
-                    UPDATE_CACHE=False,
+                    UPDATE_CACHE=UPDATE_CACHE,
                     
                     V_CACHE=V_CACHE,
                     stride_v_cache_page=stride_v_cache_page,
@@ -1206,10 +1230,14 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -1238,11 +1266,11 @@ def block_sparse_attention_cuda(
                 mask_tsrc[:, None],
                 
                 HEAD // KV_HEAD_REPEAT,
-                BLOCK_SIZE_K,
+                BLOCK_BK * BLOCK_SIZE_K,
                 HID,
                 
                 IS_BSA=True,
-                UPDATE_CACHE=False,
+                UPDATE_CACHE=UPDATE_CACHE,
                 
                 V_CACHE=K_CACHE,
                 stride_v_cache_page=stride_k_cache_page,
@@ -1320,10 +1348,14 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -1352,7 +1384,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 
                 HEAD // KV_HEAD_REPEAT,
-                BLOCK_SIZE_K,
+                BLOCK_BK * BLOCK_SIZE_K,
                 HID,
                 
                 IS_BSA=True,
@@ -1388,10 +1420,14 @@ def block_sparse_attention_cuda(
                     
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -1420,11 +1456,11 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     
                     HEAD // KV_HEAD_REPEAT,
-                    BLOCK_SIZE_K,
+                    BLOCK_BK * BLOCK_SIZE_K,
                     HID,
                     
                     IS_BSA=True,
-                    UPDATE_CACHE=False,
+                    UPDATE_CACHE=UPDATE_CACHE,
                     
                     V_CACHE=V_CACHE,
                     stride_v_cache_page=stride_v_cache_page,
@@ -1457,10 +1493,14 @@ def block_sparse_attention_cuda(
                 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -1489,11 +1529,11 @@ def block_sparse_attention_cuda(
                 mask_tsrc[:, None],
                 
                 HEAD // KV_HEAD_REPEAT,
-                BLOCK_SIZE_K,
+                BLOCK_BK * BLOCK_SIZE_K,
                 HID,
                 
                 IS_BSA=True,
-                UPDATE_CACHE=False,
+                UPDATE_CACHE=UPDATE_CACHE,
                 
                 V_CACHE=K_CACHE,
                 stride_v_cache_page=stride_k_cache_page,
