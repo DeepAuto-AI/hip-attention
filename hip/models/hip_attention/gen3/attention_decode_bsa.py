@@ -71,9 +71,13 @@ def _fwd_kernel_stage1(
 
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT,
     OFFLOAD_CACHE_UVM_METADATA,
     stride_offload_cache_uvm_metadata_token,
     stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
     OFFLOAD_CACHE_GPU_BANK,
     stride_offload_cache_gpu_bank_token,
     stride_offload_cache_gpu_bank_hid,
@@ -111,6 +115,7 @@ def _fwd_kernel_stage1(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
+    UPDATE_CACHE: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -247,10 +252,14 @@ def _fwd_kernel_stage1(
 
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -281,6 +290,15 @@ def _fwd_kernel_stage1(
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
+                    
+                    IS_BSA=True,
+                    UPDATE_CACHE=UPDATE_CACHE,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
 
                 if USING_EXTEND and NEED_APPLY_ROPE:
@@ -306,10 +324,14 @@ def _fwd_kernel_stage1(
 
                         USING_OFFLOAD_CACHE,
                         OFFLOAD_CACHE_KV_PACKED,
+                        GPU_BANK_COUNT,
                         False,
                         OFFLOAD_CACHE_UVM_METADATA,
                         stride_offload_cache_uvm_metadata_token,
                         stride_offload_cache_uvm_metadata_k,
+                        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                        stride_offload_cache_gpu_global_metadata_k,
+                        stride_offload_cache_gpu_global_metadata_pad,
                         OFFLOAD_CACHE_GPU_BANK,
                         stride_offload_cache_gpu_bank_token,
                         stride_offload_cache_gpu_bank_hid,
@@ -340,6 +362,15 @@ def _fwd_kernel_stage1(
                         q_head_num // kv_group_num,
                         BLOCK_SIZE_K,
                         Lk,
+                        
+                        IS_BSA=True,
+                        UPDATE_CACHE=UPDATE_CACHE,
+                        
+                        V_CACHE=V_CACHE,
+                        stride_v_cache_page=stride_v_cache_page,
+                        stride_v_cache_offset=stride_v_cache_offset,
+                        stride_v_cache_kv_head=stride_v_cache_kv_head,
+                        stride_v_cache_hid=stride_v_cache_hid,
                     )
                 else:
                     keys_rot = None
@@ -366,10 +397,14 @@ def _fwd_kernel_stage1(
 
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     True,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -400,6 +435,15 @@ def _fwd_kernel_stage1(
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lv,
+                    
+                    IS_BSA=True,
+                    UPDATE_CACHE=UPDATE_CACHE,
+                    
+                    V_CACHE=K_CACHE,
+                    stride_v_cache_page=stride_k_cache_page,
+                    stride_v_cache_offset=stride_k_cache_offset,
+                    stride_v_cache_kv_head=stride_k_cache_kv_head,
+                    stride_v_cache_hid=stride_k_cache_hid,
                 )
 
                 acc, e_sum, e_max = block_sparse_attention_cuda_step(
@@ -473,10 +517,14 @@ def _fwd_kernel_stage1(
 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -507,6 +555,15 @@ def _fwd_kernel_stage1(
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
+                
+                IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=V_CACHE,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_offset=stride_v_cache_offset,
+                stride_v_cache_kv_head=stride_v_cache_kv_head,
+                stride_v_cache_hid=stride_v_cache_hid,
             )
 
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -532,10 +589,14 @@ def _fwd_kernel_stage1(
 
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -566,6 +627,15 @@ def _fwd_kernel_stage1(
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
+                    
+                    IS_BSA=True,
+                    UPDATE_CACHE=UPDATE_CACHE,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
             else:
                 keys_rot = None
@@ -592,10 +662,14 @@ def _fwd_kernel_stage1(
 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -626,6 +700,15 @@ def _fwd_kernel_stage1(
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
+                
+                IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=K_CACHE,
+                stride_v_cache_page=stride_k_cache_page,
+                stride_v_cache_offset=stride_k_cache_offset,
+                stride_v_cache_kv_head=stride_k_cache_kv_head,
+                stride_v_cache_hid=stride_k_cache_hid,
             )
 
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
@@ -699,10 +782,14 @@ def _fwd_kernel_stage1(
 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 False,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -733,6 +820,15 @@ def _fwd_kernel_stage1(
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
+                
+                IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=V_CACHE,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_offset=stride_v_cache_offset,
+                stride_v_cache_kv_head=stride_v_cache_kv_head,
+                stride_v_cache_hid=stride_v_cache_hid,
             )
 
             if USING_EXTEND and NEED_APPLY_ROPE:
@@ -758,10 +854,14 @@ def _fwd_kernel_stage1(
 
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
+                    GPU_BANK_COUNT,
                     False,
                     OFFLOAD_CACHE_UVM_METADATA,
                     stride_offload_cache_uvm_metadata_token,
                     stride_offload_cache_uvm_metadata_k,
+                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                    stride_offload_cache_gpu_global_metadata_k,
+                    stride_offload_cache_gpu_global_metadata_pad,
                     OFFLOAD_CACHE_GPU_BANK,
                     stride_offload_cache_gpu_bank_token,
                     stride_offload_cache_gpu_bank_hid,
@@ -792,6 +892,15 @@ def _fwd_kernel_stage1(
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
+                    
+                    IS_BSA=True,
+                    UPDATE_CACHE=UPDATE_CACHE,
+                    
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_offset=stride_v_cache_offset,
+                    stride_v_cache_kv_head=stride_v_cache_kv_head,
+                    stride_v_cache_hid=stride_v_cache_hid,
                 )
             else:
                 keys_rot = None
@@ -818,10 +927,14 @@ def _fwd_kernel_stage1(
 
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
+                GPU_BANK_COUNT,
                 True,
                 OFFLOAD_CACHE_UVM_METADATA,
                 stride_offload_cache_uvm_metadata_token,
                 stride_offload_cache_uvm_metadata_k,
+                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                stride_offload_cache_gpu_global_metadata_k,
+                stride_offload_cache_gpu_global_metadata_pad,
                 OFFLOAD_CACHE_GPU_BANK,
                 stride_offload_cache_gpu_bank_token,
                 stride_offload_cache_gpu_bank_hid,
@@ -852,6 +965,15 @@ def _fwd_kernel_stage1(
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
+                
+                IS_BSA=True,
+                UPDATE_CACHE=UPDATE_CACHE,
+                
+                V_CACHE=K_CACHE,
+                stride_v_cache_page=stride_k_cache_page,
+                stride_v_cache_offset=stride_k_cache_offset,
+                stride_v_cache_kv_head=stride_k_cache_kv_head,
+                stride_v_cache_hid=stride_k_cache_hid,
             )
 
             idx_bk = (
@@ -928,22 +1050,33 @@ def decode_block_sparse_attention_stage1(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
+    
     args: HiPAttentionArgs,
-    head_num: int, BK: int, MAX_TDST: int, MAX_TSRC: int, kv_group_num: int,
+    
+    head_num: int, 
+    BK: int, 
+    MAX_TDST: int, 
+    MAX_TSRC: int, 
+    kv_group_num: int,
     model_context_length: int,
-    HID: int, BLOCK_BK: int, extend_backend: str,
+    HID: int, 
+    BLOCK_BK: int, 
+    
+    extend_backend: str,
     access_counter: Tensor,
     cache_miss_counter: Tensor,
+    offload_update_cache: bool,
 ):
     batch = q.shape[0]
     BLOCK_H = 16
 
-    NUM_SPARSE_KV_SPLITS = 8  # TODO: apply from server args
-    NUM_SINK_KV_SPLITS = 1
-    NUM_SLIDING_KV_SPLITS = 1
+    NUM_SPARSE_KV_SPLITS = min(16, triton.cdiv(args.second_stage_k, 128))  # TODO: apply from server args
+    NUM_SINK_KV_SPLITS = min(4, triton.cdiv(args.sink_token_size, 128))
+    NUM_SLIDING_KV_SPLITS = min(8, triton.cdiv(args.sliding_window_size, 128))
 
     NUM_TOTAL_KV_SPLITS = (
         NUM_SPARSE_KV_SPLITS
@@ -951,7 +1084,8 @@ def decode_block_sparse_attention_stage1(
         + NUM_SLIDING_KV_SPLITS
     )
     temp_attn_logits = torch.zeros(
-        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
+        # NOTE: make address space 32byte bank aligned
+        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32//4),
         dtype=torch.float32, device=q.device
     )
 
@@ -976,7 +1110,11 @@ def decode_block_sparse_attention_stage1(
 
         temp_attn_logits, *safe_stride(temp_attn_logits, 4),
 
-        head_num, BK, MAX_TDST, MAX_TSRC, kv_group_num,
+        head_num, 
+        BK, 
+        MAX_TDST, 
+        MAX_TSRC, 
+        kv_group_num,
 
         args.sliding_window_size,
         args.sink_token_size,
@@ -1005,6 +1143,7 @@ def decode_block_sparse_attention_stage1(
         BLOCK_DMODEL=BLOCK_DMODEL,
         BLOCK_DV=BLOCK_DV,
         EXTEND_BACKEND=extend_backend,
+        UPDATE_CACHE=offload_update_cache,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS
@@ -1013,10 +1152,20 @@ def decode_block_sparse_attention_stage1(
 @triton.jit
 def _fwd_kernel_stage2(
     ATTN_LOGITS,
-    stride_attn_logits_bsz, stride_attn_logits_head, stride_attn_logits_kv_split, stride_attn_logits_hid,
+    stride_attn_logits_bsz, 
+    stride_attn_logits_head, 
+    stride_attn_logits_kv_split, 
+    stride_attn_logits_hid,
 
-    O, stride_o_bsz, stride_o_tdst, stride_o_head, stride_o_hid,
-    B_Seqlen, stride_pos_bsz, stride_pos_tdst,
+    O, 
+    stride_o_bsz, 
+    stride_o_tdst, 
+    stride_o_head, 
+    stride_o_hid,
+    
+    B_SEQ_LEN, 
+    stride_pos_bsz, 
+    stride_pos_tdst,
 
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
@@ -1025,7 +1174,11 @@ def _fwd_kernel_stage2(
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch * stride_pos_bsz + 0 * stride_pos_tdst)
+    cur_batch_seq_len = tl.load(
+        B_SEQ_LEN 
+        + cur_batch * stride_pos_bsz 
+        + 0 * stride_pos_tdst
+    )
 
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lv
@@ -1052,11 +1205,17 @@ def _fwd_kernel_stage2(
 
         if split_kv_end > split_kv_start:
             tv = tl.load(
-                ATTN_LOGITS + offs_v + split_kv_id * stride_attn_logits_kv_split,
+                ATTN_LOGITS 
+                + offs_v 
+                + split_kv_id * stride_attn_logits_kv_split,
                 mask=mask_d,
                 other=0.0
             )
-            tlogic = tl.load(ATTN_LOGITS + offs_logic + split_kv_id * stride_attn_logits_kv_split)
+            tlogic = tl.load(
+                ATTN_LOGITS 
+                + offs_logic 
+                + split_kv_id * stride_attn_logits_kv_split
+            )
             n_e_max = tl.maximum(tlogic, e_max)
 
             old_scale = tl.math.exp2(e_max - n_e_max)
@@ -1075,10 +1234,9 @@ def _fwd_kernel_stage2(
         + 0 * stride_o_tdst
         + cur_head * stride_o_head
         + offs_d * stride_o_hid,
-        acc / e_sum,
+        value=acc / e_sum,
         mask=mask_d,
     )
-
 
 def decode_block_sparse_attention_stage2(
     logits,
@@ -1106,21 +1264,34 @@ def decode_block_sparse_attention_stage2(
         num_stages=2,
     )
 
-
 def decode_block_sparse_attention_impl(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
+    
     context: Tensor,
+    
     args: HiPAttentionArgs,
-    HEAD: int, BK: int, MAX_TDST: int, MAX_TSRC: int, KV_HEAD_REPEAT: int,
+    
+    HEAD: int, 
+    BK: int, 
+    MAX_TDST: int, 
+    MAX_TSRC: int, 
+    KV_HEAD_REPEAT: int,
+    
     model_context_length: int,
-    HID: int, BLOCK_BK: int, extend_backend: str,
+    
+    HID: int, 
+    BLOCK_BK: int, 
+    
+    extend_backend: str,
     access_counter: Tensor,
     cache_miss_counter: Tensor,
+    offload_update_cache: bool,
 ):
     """
     FlashDecode block sparse attention.
@@ -1130,26 +1301,45 @@ def decode_block_sparse_attention_impl(
     :param ks_start_end: (BSZ, BSRC, 2)
     :param context: (BSZ, TDST, HEAD, HID)
     """
+    
     attn_logits, NUM_TOTAL_KV_SPLITS = decode_block_sparse_attention_stage1(
         q, k, v,
+        
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
+        
         args=args,
-        head_num=HEAD, BK=BK,
-        MAX_TDST=MAX_TDST, MAX_TSRC=MAX_TSRC,
+        
+        head_num=HEAD, 
+        BK=BK,
+        MAX_TDST=MAX_TDST, 
+        MAX_TSRC=MAX_TSRC,
         kv_group_num=KV_HEAD_REPEAT,
         model_context_length=model_context_length,
-        HID=HID, BLOCK_BK=BLOCK_BK,
+        HID=HID, 
+        BLOCK_BK=BLOCK_BK,
+        
         extend_backend=extend_backend,
         access_counter=access_counter,
         cache_miss_counter=cache_miss_counter,
+        offload_update_cache=offload_update_cache,
     )
+    
     decode_block_sparse_attention_stage2(
-        attn_logits, q, context, args.v_cache, seq_lens, NUM_TOTAL_KV_SPLITS
+        attn_logits, 
+        q, 
+        context, 
+        (
+            args.v_cache 
+            if args.v_cache is not None else 
+            args.offload_cache.v_uvm.bank_cpu
+        ), 
+        seq_lens, 
+        NUM_TOTAL_KV_SPLITS
     )
+    
     return attn_logits
-
 
 def decode_block_sparse_attention(
     q: Tensor,  # [1, 1 (TDST), 32 (Q_HEAD), 128]
@@ -1177,6 +1367,7 @@ def decode_block_sparse_attention(
     EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,  # 'streaming'
     model_context_length: int = 131072,  # 131072
     extend_context_length: int = 131072,  # 196608
+    offload_update_cache: bool = False,
 ):
     BSZ, TDST, HEAD, HID = q.shape
 
@@ -1198,7 +1389,7 @@ def decode_block_sparse_attention(
 
     context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
-    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '32'))
+    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '16'))
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
@@ -1248,12 +1439,12 @@ def decode_block_sparse_attention(
         extend_backend=EXTEND_BACKEND,
         access_counter=access_counter,
         cache_miss_counter=cache_miss_counter,
+        offload_update_cache=offload_update_cache,
     )
 
     torch.set_default_device(pre_device)
 
     return context
-
 
 def test_correctness(use_cuda_graph=False):
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
@@ -1261,7 +1452,9 @@ def test_correctness(use_cuda_graph=False):
 
     def run_orig(output=None):
         result = block_sparse_attention(
-            args['q'], args['k'], args['v'],
+            args['q'], 
+            args['k'], 
+            args['v'],
             args['seq_lens'],
             args['indices'],
             args['ks'],
@@ -1280,7 +1473,9 @@ def test_correctness(use_cuda_graph=False):
 
     def run_flash(output=None):
         result = decode_block_sparse_attention(
-            args['q'], args['k'], args['v'],
+            args['q'], 
+            args['k'], 
+            args['v'],
             args['seq_lens'],
             args['indices'],
             args['ks'],
