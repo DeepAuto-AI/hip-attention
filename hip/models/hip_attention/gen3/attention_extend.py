@@ -535,7 +535,7 @@ def chunk_controllable_sampling_mask_cuda(
             )
             
             # real_pos_tdst_min = idx_bdst * BLOCK_SIZE_Q + TSRC - TDST
-            real_pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst, 99999999999))
+            real_pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst, 999999999))
             real_pos_tdst_min = tl.where(tl.sum(mask_tdst.to(tl.int32)) > 0, real_pos_tdst_min, -1)
             
             if real_pos_tdst_min >= 0:
