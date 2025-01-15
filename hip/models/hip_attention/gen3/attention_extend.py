@@ -1853,6 +1853,12 @@ def dual_stage_quadratic_hip_attention(
                     SCAN_STRIDE=STAGE_STRIDE,
                     UPDATE_CACHE=args.online_update_cache,
                 )
+
+                if os.getenv('HIP_HEAD_REDUCE', '0') == '1':
+                    ori_shape = out_scores.shape
+                    out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
+                    out_scores = torch.broadcast_to(out_scores, ori_shape)
+
                 if args.offload_cache is not None:
                     # print('after masking')
                     args.offload_cache.mask_k_cache.verify_cache()
