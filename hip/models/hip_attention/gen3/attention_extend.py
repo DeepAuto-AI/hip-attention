@@ -1853,7 +1853,8 @@ def dual_stage_quadratic_hip_attention(
                     SCAN_STRIDE=STAGE_STRIDE,
                     UPDATE_CACHE=args.online_update_cache,
                 )
-
+                
+                # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if os.getenv('HIP_HEAD_REDUCE', '0') == '1':
                     ori_shape = out_scores.shape
                     out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
