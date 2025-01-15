@@ -13,7 +13,8 @@ class SglangModel:
         max_tokens=128, 
         verbose=True,
         need_chat_prompt=False,
-    ):
+        system_message='You are helpful assistant.',
+    ) -> str:
         if input_text is None:
             assert input_ids is not None
             input_text = self.tokenizer.decode(input_ids[0], skip_special_tokens=False)[0]
@@ -26,7 +27,8 @@ class SglangModel:
                 json={
                     "text": input_text,
                     "sampling_params": {
-                        "top_k": 1, # greedy
+                        # "top_k": 1, # greedy,
+                        "top_p": 1e-6,
                         "max_new_tokens": max_tokens,
                     },
                 },
@@ -47,16 +49,19 @@ class SglangModel:
             
             return responses
         else:
-            assert isinstance(input_text, str)
+            assert isinstance(input_text, (str, list))
+            
+            if isinstance(input_text, str):
+                input_text = [
+                    {'role': 'system', 'content': f'Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n{system_message}'},
+                    {'role': 'user', 'content': input_text},
+                ]
             
             response = requests.post(
                 f"{self.endpoint}/v1/chat/completions",
                 json={
                     "model": "anything",
-                    "messages": [
-                        {'role': 'system', 'content': 'Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are helpful assistant.'},
-                        {'role': 'user', 'content': input_text},
-                    ],
+                    "messages": input_text,
                     "max_tokens": max_tokens,
                     "top_p": 0.000000000001,
                 },
