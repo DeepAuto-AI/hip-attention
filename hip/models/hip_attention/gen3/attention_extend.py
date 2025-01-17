@@ -271,6 +271,8 @@ def load_keys_with_rope(
                 new_tsrc = idx_chunk * 0
                 if IS_RIGHT:
                     new_tsrc += 1
+            elif EXTEND_BACKEND == 'infllm':
+                new_tsrc = idx_chunk * 0
             elif EXTEND_BACKEND == 'streaming':
                 # streaming
                 new_tsrc = idx_chunk
@@ -601,6 +603,8 @@ def chunk_controllable_sampling_mask_cuda(
                                     new_tdst = pos_tdst
                                 elif EXTEND_BACKEND == 'relative':
                                     new_tdst = pos_tdst * 0 + 1 + sliding_window_size
+                                elif EXTEND_BACKEND == 'infllm':
+                                    new_tdst = pos_tdst * 0 + sliding_window_size
                                 elif EXTEND_BACKEND == 'streaming':
                                     # streaming
                                     new_tdst = tl.minimum(pos_tdst, CHUNK_COUNT + sliding_window_size)

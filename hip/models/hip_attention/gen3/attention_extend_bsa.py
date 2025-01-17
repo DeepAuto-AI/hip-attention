@@ -127,7 +127,7 @@ def block_sparse_attention_cuda_step(
             #     t_window,
             #     t_grouped,
             # ).to(tl.float32) * 1.44269504
-        elif (EXTEND_BACKEND == 'streaming') or (EXTEND_BACKEND == 'dynamic_extend'):
+        elif (EXTEND_BACKEND == 'streaming') | (EXTEND_BACKEND == 'dynamic_extend') | (EXTEND_BACKEND == 'infllm'):
             pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
             if not NEED_APPLY_ROPE:
                 if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
@@ -222,60 +222,26 @@ def block_sparse_attention_cuda_step(
                         # streaming
                         new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
                         new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k + 1)
-                        # new_tsrc = idx_tsrc
                     elif EXTEND_BACKEND == 'dynamic_extend':
                         # dynamic extend
                         window = model_context_length // 4
                         
-                        # new_tsrc = tl.where(
-                        #     (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
-                        #     idx_tsrc,
-                        #     ((idx_tsrc - (pos_tdst_min - model_context_length)) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
-                        # )
                         new_tsrc = tl.where(
                             (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
                             idx_tsrc,
                             ((idx_tsrc + window - pos_tdst_min) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + pos_tdst_min - window
                         )
                         new_tsrc = tl.maximum(pos_tdst_max - model_context_length, new_tsrc)
+                    elif EXTEND_BACKEND == 'infllm':
+                        new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        new_tsrc = tl.maximum(0, new_tsrc * 0 + pos_tdst_min - sliding_window_size)
                     else:
                         raise Exception()
                 else:
                     new_tsrc = idx_tsrc
-                # new_tsrc = idx_tsrc
-                
-                # keys_adjusted = keys.trans(1, 0)
-                # keys_adjusted = adjust_rope(
-                #     keys_adjusted.to(queries.dtype), 
-                #     new_tsrc,
-                #     new_tsrc,
-                #     mask_tsrc,
-                #     idx_hid,
-                #     COS, stride_cos_t, stride_cos_hid,
-                #     SIN, stride_sin_t, stride_sin_hid,
-                #     BLOCK_TK, 
-                #     HID,
-                #     True,
-                # )
-                # keys_adjusted = tl.trans(keys_adjusted, 1, 0)
                 
                 keys = keys.to(queries.dtype)
                 keys_rot = keys_rot.to(queries.dtype)
-                
-                # cos_new = tl.load(
-                #     COS +\
-                #         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
-                #         idx_hid[:, None] * stride_cos_hid,
-                #     mask=mask_tsrc[None, :],
-                #     other=0.0,
-                # ).to(keys.dtype)
-                # sin_new = tl.load(
-                #     SIN +\
-                #         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
-                #         idx_hid[:, None] * stride_sin_hid,
-                #     mask=mask_tsrc[None, :],
-                #     other=0.0,
-                # ).to(keys.dtype)
                 
                 cos_new = tl.load(
                     COS +\
@@ -334,12 +300,7 @@ def block_sparse_attention_cuda_step(
                 
                 keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype)
                 
-                # error = tl.sum(tl.abs(keys_adjusted * mask_tsrc[None, :] - keys_adjusted_ * mask_tsrc[None, :]))
-                # tl.device_print('err', error)
-                # keys_adjusted = keys_adjusted_
-                
                 queries_adjusted = queries
-                # pass
                 
             qk = tl.dot(
                 queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0))).to(queries.dtype), 

@@ -109,10 +109,10 @@ class HiPAttentionArgs:
     
     sink_token_size: int = 256
     sliding_window_size: int = 512
-    block_size_k: int = 64
+    block_size_k: int = 64  # for optimization this will be BLOCK_CHUNK
     
     block_size_q: int = 64  # no effect, set automatically
-    mask_k: int = 512 # no effect, set automatically
+    mask_k: int = 512       # no effect, set automatically
     
     second_stage_k: int = 2048
     stages: List[Stage] = field(
