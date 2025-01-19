@@ -16,7 +16,7 @@ HEAD_KV = 8
 HID = 128
 DTYPE = torch.bfloat16
 DEVICE = 'cuda'
-N_SAMPLES = 1
+N_SAMPLES = 10
 
 def run_inf_llm(fn, seq_len: int, chunk_size: int):
     fwd = fn()
@@ -273,30 +273,43 @@ def exp():
         seq_len = seq_len * 1024
         # flash_latency = run_flash_atten(seq_len, chunk_size)
         
-        # infllm_latency = run_inf_llm(lambda: inf_llm_forward(
-        #     n_local=4096, 
-        #     n_init=128, 
-        #     topk=64, 
-        #     block_size=128, 
-        #     max_cached_block=64, 
-        #     exc_block_size=512, 
-        #     fattn=True, 
-        #     repr_topk=4, 
-        #     score_decay=0.1
-        # ), seq_len, chunk_size)
+        infllm_offload_latency = run_inf_llm(lambda: inf_llm_forward(
+            n_local=4096, 
+            n_init=128, 
+            topk=64, 
+            block_size=128, 
+            max_cached_block=64, 
+            exc_block_size=512, 
+            fattn=True, 
+            repr_topk=4, 
+            score_decay=0.1
+        ), seq_len, chunk_size)
+        
+        infllm_latency = run_inf_llm(lambda: inf_llm_forward(
+            n_local=4096, 
+            n_init=128, 
+            topk=64, 
+            block_size=128, 
+            max_cached_block=seq_len // 128, 
+            exc_block_size=512, 
+            fattn=True, 
+            repr_topk=4, 
+            score_decay=0.1
+        ), seq_len, chunk_size)
         
         # gen2_latency = run_gen2(seq_len, chunk_size)
         
-        gen3_latency = run_gen3(seq_len, chunk_size, False)
-        gen3_extend_latency = run_gen3(seq_len, chunk_size, True)
+        # gen3_latency = run_gen3(seq_len, chunk_size, False)
+        # gen3_extend_latency = run_gen3(seq_len, chunk_size, True)
         
         print(
             seq_len, 
             # 'flash', flash_latency, 
-            # 'infllm', infllm_latency, 
+            'infllm_offload', infllm_offload_latency, 
+            'infllm', infllm_latency, 
             # 'gen2', gen2_latency,
-            'gen3', gen3_latency, 
-            'gen3e', gen3_extend_latency, 
+            # 'gen3', gen3_latency, 
+            # 'gen3e', gen3_extend_latency, 
         )
 
 if __name__ == '__main__':

@@ -117,10 +117,10 @@ def _fwd_kernel_stage1(
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head_id = tl.program_id(1)
+    cur_batch = tl.program_id(0).to(tl.int64)
+    cur_head_id = tl.program_id(1).to(tl.int64)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
-    split_kv_id = tl.program_id(2)
+    split_kv_id = tl.program_id(2).to(tl.int64)
     sink_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS
     sliding_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS - NUM_SINK_KV_SPLITS
 
@@ -136,16 +136,24 @@ def _fwd_kernel_stage1(
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lk
     mask_dv = offs_dv < Lv
-    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch * stride_pos_bsz + 0 * stride_pos_tdst)
+    cur_batch_seq_len = tl.load(
+        B_Seqlen 
+        + cur_batch.to(tl.int64) * stride_pos_bsz 
+        + 0 * stride_pos_tdst
+    )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
     offs_q = (
-        cur_batch * stride_q_bsz
+        cur_batch.to(tl.int64) * stride_q_bsz
         + 0 * stride_q_tdst
         + cur_head[:, None] * stride_q_head
         + offs_d[None, :] * stride_q_hid
     )
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)  # [BLOCK_H, BLOCK_DMODEL]
+    q = tl.load(
+        Q + offs_q, 
+        mask=(mask_h[:, None]) & (mask_d[None, :]), 
+        other=0.0
+    )  # [BLOCK_H, BLOCK_DMODEL]
     if q.dtype == tl.float8e5:
         q = q.to(tl.float16)
 
@@ -154,7 +162,7 @@ def _fwd_kernel_stage1(
 
         queries_rot = tl.load(
             Q
-            + cur_batch * stride_q_bsz
+            + cur_batch.to(tl.int64) * stride_q_bsz
             + 0 * stride_q_tdst
             + cur_head[:, None] * stride_q_head
             + ((offs_d[None, :] + Lk // 2) % Lk) * stride_q_hid,
@@ -186,13 +194,13 @@ def _fwd_kernel_stage1(
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
         KS_START_END
-        + cur_batch * stride_ks_start_end_b
+        + cur_batch.to(tl.int64) * stride_ks_start_end_b
         + 0 * stride_ks_start_end_bdst
         + 0 * stride_ks_start_end_g
     )
     range_end = tl.load(
         KS_START_END
-        + cur_batch * stride_ks_start_end_b
+        + cur_batch.to(tl.int64) * stride_ks_start_end_b
         + 0 * stride_ks_start_end_bdst
         + 1 * stride_ks_start_end_g
     )
@@ -216,7 +224,7 @@ def _fwd_kernel_stage1(
             if (range_start <= i_bk + BLOCK_BK) & (i_bk < range_end):
                 idx_tsrc_start = tl.load(
                     INDICES
-                    + cur_batch * stride_indices_b
+                    + cur_batch.to(tl.int64) * stride_indices_b
                     + 0 * stride_indices_bdst
                     + idx_bk * stride_indices_bk,
                     mask=mask_bk,
@@ -1022,7 +1030,7 @@ def _fwd_kernel_stage1(
 
     # Store results
     offs_mid_o = (
-        cur_batch * stride_attn_logits_bsz
+        cur_batch.to(tl.int64) * stride_attn_logits_bsz
         + cur_head[:, None] * stride_attn_logits_head
         + split_kv_id * stride_attn_logits_kv_split
         + offs_dv[None, :] * stride_attn_logits_hid
@@ -1034,7 +1042,7 @@ def _fwd_kernel_stage1(
     )
 
     offs_mid_o_1 = (
-        cur_batch * stride_attn_logits_bsz
+        cur_batch.to(tl.int64) * stride_attn_logits_bsz
         + cur_head * stride_attn_logits_head
         + split_kv_id * stride_attn_logits_kv_split
         + Lv * stride_attn_logits_hid
@@ -1171,12 +1179,12 @@ def _fwd_kernel_stage2(
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
+    cur_batch = tl.program_id(0).to(tl.int64)
+    cur_head = tl.program_id(1).to(tl.int64)
 
     cur_batch_seq_len = tl.load(
         B_SEQ_LEN 
-        + cur_batch * stride_pos_bsz 
+        + cur_batch.to(tl.int64) * stride_pos_bsz 
         + 0 * stride_pos_tdst
     )
 
@@ -1206,14 +1214,14 @@ def _fwd_kernel_stage2(
         if split_kv_end > split_kv_start:
             tv = tl.load(
                 ATTN_LOGITS 
-                + offs_v 
+                + offs_v.to(tl.int64) 
                 + split_kv_id * stride_attn_logits_kv_split,
                 mask=mask_d,
                 other=0.0
             )
             tlogic = tl.load(
                 ATTN_LOGITS 
-                + offs_logic 
+                + offs_logic.to(tl.int64) 
                 + split_kv_id * stride_attn_logits_kv_split
             )
             n_e_max = tl.maximum(tlogic, e_max)
@@ -1230,7 +1238,7 @@ def _fwd_kernel_stage2(
 
     tl.store(
         O
-        + cur_batch * stride_o_bsz
+        + cur_batch.to(tl.int64) * stride_o_bsz
         + 0 * stride_o_tdst
         + cur_head * stride_o_head
         + offs_d * stride_o_hid,

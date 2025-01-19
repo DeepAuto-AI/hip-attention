@@ -1648,10 +1648,16 @@ def dual_stage_quadratic_hip_attention(
     else:
         MAX_PAGE = MAX_TSRC
     
-    mask_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
-    mask_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
-    sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
-    sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+    if args.require_cache_statistics:
+        mask_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+        mask_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+        sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+        sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+    else:
+        sa_cache_miss_counter =\
+        sa_access_counter =\
+        mask_cache_miss_counter =\
+        mask_access_counter = None
     
     stage_caches = [] if (cached_metadata is None) or (cached_metadata.stage_caches is None) else cached_metadata.stage_caches
     
