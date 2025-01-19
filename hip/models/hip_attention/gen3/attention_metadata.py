@@ -1,7 +1,10 @@
 import copy
 from dataclasses import dataclass, field
+import os
 from torch import Tensor
 from typing import Dict, Literal, Optional, List, TYPE_CHECKING
+
+import torch
 if TYPE_CHECKING:
     from hip.models.hip_attention.gen3.uvm_gpu_cache import (
         HiPOffloadCache
@@ -71,10 +74,17 @@ class HiPAttentionCacheAccessStatistics:
         StatKeys,
         Tensor,
     ]:
-        unique_access_count = self.access_counter.clamp(0, 1).sum()
-        access_counts = self.access_counter.sum()
-        cache_miss_counts = self.cache_miss_counter.sum()
-        cache_hit_ratio = 1 - (cache_miss_counts / access_counts)
+        # FIXME: heejun
+        if os.getenv('HIP_DISABLE_COMPUTE_STATISTICS', '1') == '0':
+            unique_access_count = self.access_counter.clamp(0, 1).sum()
+            access_counts = self.access_counter.sum()
+            cache_miss_counts = self.cache_miss_counter.sum()
+            cache_hit_ratio = 1 - (cache_miss_counts / access_counts)
+        else:
+            unique_access_count = None
+            access_counts = None
+            cache_miss_counts = None
+            cache_hit_ratio = None
         
         return {
             'unique_access_count': unique_access_count,
@@ -109,10 +119,10 @@ class HiPAttentionArgs:
     
     sink_token_size: int = 256
     sliding_window_size: int = 512
-    block_size_k: int = 64
+    block_size_k: int = 64  # for optimization this will be BLOCK_CHUNK
     
     block_size_q: int = 64  # no effect, set automatically
-    mask_k: int = 512 # no effect, set automatically
+    mask_k: int = 512       # no effect, set automatically
     
     second_stage_k: int = 2048
     stages: List[Stage] = field(
@@ -144,7 +154,7 @@ class HiPAttentionArgs:
     extend_context_length: int = 512 * 1024
     
     # kernel args,
-    mask_only = False
+    mask_only: bool = False
     block_sparse_block_size_q: Optional[int] = 64
     
     scan_early_terminate: int = 1
@@ -176,6 +186,8 @@ class HiPAttentionArgs:
     logit_softcap: Optional[float] = None
 
     online_update_cache: bool = False
+    
+    require_cache_statistics: bool = True
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
