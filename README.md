@@ -1,113 +1,6 @@
 # HiP Attention
 ![demo gif](docs/demo.gif)
 
----
-
-From now, we are giving comments for ICLR reviewers. **Thank you for taking a look at our codebase :heart: .**
-
----
-
-# Contents and Instructions
-
-- Codebase structure
-
-```
-/
-    - Repository root
-/hip
-    - HiP Attention library root
-/third_party/LongBench-hip
-    - Modified LongBench, to support hip & baselines 
-/third_party/RULER-hip
-    - Modified RULER, to support hip & baselines
-/third_party/sglang
-    - Modified SGlang
-/third_party/vllm
-    - Modifed vLLM
-/third_party/hip-h2o
-    - Modifed HiP library to support h2o in Llama3.1
-```
-
-- How to install
-```
-# install vLLM first
-cd /third_party/vllm
-pip -r requirements-dev.txt
-pip install cupy-cu12x cuda-python pandas matplotlib
-pip install -e . --verbose --no-build-isolation
-
-# install hip after it
-cd /
-pip install -e . --verbose --no-build-isolation --no-deps
-
-# install sglang at last
-cd /thrid_party/sglang
-pip install -e "python[all]" --verbose --no-deps --no-build-isolation
-```
-
-- FAQ about `triton`
-
-We always encounter triton bug on autotuner. So please update `triton/runtime/autotuner.py` as follows.
-
-```diff
-# triton/runtime/autotuner.py
-# Line 69
-- self.restore_copies = [args[i].clone() for i in self.restore_idx]
-+ self.restore_copies = [args[i].clone() if args[i] is not None else None for i in self.restore_idx]
-# Line 74
-+ if args[j] is None: continue
-args[j].copy_(self.restore_copies[i])
-
-```
-
-If you are someone who very lucky, so you have H100, then I strongly suggest you install `triton` from up-to-dated source from github. And in H100, we observe many weird bugs with block sizes. Therefore please utilize `HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_SIZE=16` environment value. Adjust `SA_BLOCK_SIZE` to avoid weird compilation issues.
-
-Our kernels are greedly use int8 and float16 qunatization. If you encounter too high PPL with your custom model, that not tested by us, then please check `tl.float16` and `tl.bfloat16` and `tl.int8` in our kernel. We will revise this precision issue by supporting softmax scaling inside of kernel in later update.
-
-- FAQ about latency
-
-If you encounter extremely different latency result from our paper, don't panic. Our kernel utilizing thread resource heavily rather than ALU and memory due to complex algorithm. Therefore the speedup of our kernel is quite heavily dependent on IPC and a nmber of CUDA cores. This metric is not well known outside, so if you are not familar with GPU architecture, just use RTX 4090 for best latency-perforamnce & cost trade-off.
-
-- FAQ: Which kernels should I use, review, study?
-
-We have following kernel evolutions during our research history in `/hip/models/hip_attention/`. 
-1. `attention1.py`: Initial CPU based HiP PoC kernel.
-2. `attention1_gpu.py`: Initial GPU based HiP PoC kernel. We utilize only vector ops, not MMU
-3. `attention1_block_gpu.py`: First generation of working HiP. We support many dynamic features with this release (dyanmic latency allocations using dynamic sparsity...) But important problem is, this kernel is using floating point to calculate the position of blocks (During PoC, we tested many weird block split strategies, so we used floating point for generality). But once after we fix the algorithm, this feature seems useless.
-4. `attention2_draft.py`: Intial second generation of working HiP on CPU. So we change address calculation from floating point to integers. That bump up performance ALOT.
-5. `attention2_draft_causal_batch.py`: We adopt `causal-batch` setting from SEA paper.
-6. `attention2_draft_causal_batch_gpu.py`: Now we move on to GPU. If you want maximum controllability, and modificationability, this file is good to look in. But please do not use this for your final selection, because `_prefetch.py` is more stable and accurate and fast. 
-7. `attention2_draft_causal_batch_fused.py`: Now we fuse the masking micro kernels into single big kernel.
-8. `attention2_draft_causal_batch_fused_vec.py`: We change sequence memory format from [B*H, T, HID] to  [B, T, H, HID] to improve spatial locality
-9. `attention2_draft_prefetch.py`: We added KV offloading cache in this version.
-
-Every generation is written with single header style as intended. It might bad for production, but we are researchers and require high modification-ability, we keep everything in single file if the feature is same.
-
-- Some example commands
-
-```bash
-# longbench from /hip/thrid_party/LongBench-hip/
-HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_BK=16 MEM_UTIL=0.8 HIP_SEQ_THRESH=-1 HIP_USING_SNAP_KV=0 HIP_SNAP_KV_VERT_K=1024 HIP_SNAP_KV_DIAG_K=256 HIP_GROUP_SIZE_Q=1 HIP_PREFILL_BQ=64 HIP_PREFILL_BSQ=2 HIP_PREFILL_BK=2 HIP_PREFILL_BSK=1 HIP_K=512 HIP_SW=256 HIP_NSINK=16 HIP_BK_AFTER_MASK=-1 HIP_PREFIX_QUERY=0 HIP_FIRST_DENSE_ITERATION=0 KV_CACHE_DTYPE=auto VLLM_ATTENTION_BACKEND=HIP_ATTN CUDA_VISIBLE_DEVICES=1 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=0 HIP_PREFILL_ALWAYS_DENSE=0 HIP_REFRESH_INTERVAL=8 python pred.py --model llama3.1-8b-chat-128k --stride 128000 --name hip512
-
-# ruler from /hip/third_party/RULER-hip/scripts
-SERVER_PORT=5157 BATCH_SIZE=1 SA_BLOCK_BK=16 HIP_DISABLE_AUTOTUNE=1 CUDA_VISIBLE_DEVICES=4,5,6,7 GPUS=4 VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=1024 HIP_NSINK=16 HIP_K=2048 HIP_USING_SNAP_KV=0 HIP_SNAP_KV_VERT_K=4096 HIP_SNAP_KV_DIAG_K=4096 HIP_BK_AFTER_MASK=-1 HIP_RANDOM_MASK=0 ./run.sh llama3.1-8b-chat-5 synthetic
-
-# passkey from /hip
-HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_BK=16 CUDA_VISIBLE_DEVICES=2 KV_CACHE_DTYPE=auto VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_K=512 HIP_SW=256 HIP_DECODE_ALWAYS_DENSE=0 HIP_PREFILL_ALWAYS_DENSE=0 HIP_RANDOM_MASK=0 python hip/main/model_eval.py --method hip --job passkey --stride 131072 --model vllm_llama3.1_8b_instruct
-```
-
-- Addtional reproducibility statement from authors
-
-We know that we have so many un-documented environment variables not only the hyperparameter of our HiP algorithm to run experiemtns. The reason is that we want to fair to every baselines, so we try to build general framework to run every targeted sparse attention baselines including HiP itself. If you have any-, ANY problem about reproducibility, please let us know during discussion session ASAP. Please understand this situation, and we will improve the codebase when we release it.
-
-We are trying best to be practical and generalist to every use cases with HiP attention. We are looking forward to recieve reviews including about codes too!
-
----
-
-From now, the general README.md restarts
-
----
-
 # Usage
 
 After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
@@ -394,3 +287,96 @@ VLLM_ATTENTION_BACKEND=HIP_ATTN CUDA_VISIBLE_DEVICES=1 python -c "import vllm; x
 ```bash
 OMP_NUM_THREADS=16 CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --num_processes=4 --main_process_port 29501 hip/trainer/hip_trainer_hf.py --method hip --block_size_q 32 --block_size_k 2 --k 512 --lora_r 256 --dataset openwebtext --dense_layers 4 --name bs16_warmup10_dq2k --dense_queries 2048 --seq_len 32768 --disable_kd --sparsity_reg 0.01 --gradient_accumulation_steps 4 --warmup_steps 10 --model giraffe13b --using_deepspeed
 ```
+
+# Contents and Instructions
+
+- Codebase structure
+
+```
+/
+    - Repository root
+/hip
+    - HiP Attention library root
+/third_party/LongBench-hip
+    - Modified LongBench, to support hip & baselines 
+/third_party/RULER-hip
+    - Modified RULER, to support hip & baselines
+/third_party/sglang
+    - Modified SGlang
+/third_party/vllm
+    - Modifed vLLM
+/third_party/hip-h2o
+    - Modifed HiP library to support h2o in Llama3.1
+```
+
+- How to install
+```
+# install vLLM first
+cd /third_party/vllm
+pip -r requirements-dev.txt
+pip install cupy-cu12x cuda-python pandas matplotlib
+pip install -e . --verbose --no-build-isolation
+
+# install hip after it
+cd /
+pip install -e . --verbose --no-build-isolation --no-deps
+
+# install sglang at last
+cd /thrid_party/sglang
+pip install -e "python[all]" --verbose --no-deps --no-build-isolation
+```
+
+- FAQ about `triton`
+
+We always encounter triton bug on autotuner. So please update `triton/runtime/autotuner.py` as follows.
+
+```diff
+# triton/runtime/autotuner.py
+# Line 69
+- self.restore_copies = [args[i].clone() for i in self.restore_idx]
++ self.restore_copies = [args[i].clone() if args[i] is not None else None for i in self.restore_idx]
+# Line 74
++ if args[j] is None: continue
+args[j].copy_(self.restore_copies[i])
+
+```
+
+If you are someone who very lucky, so you have H100, then I strongly suggest you install `triton` from up-to-dated source from github. And in H100, we observe many weird bugs with block sizes. Therefore please utilize `HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_SIZE=16` environment value. Adjust `SA_BLOCK_SIZE` to avoid weird compilation issues.
+
+Our kernels are greedly use int8 and float16 qunatization. If you encounter too high PPL with your custom model, that not tested by us, then please check `tl.float16` and `tl.bfloat16` and `tl.int8` in our kernel. We will revise this precision issue by supporting softmax scaling inside of kernel in later update.
+
+- FAQ about latency
+
+If you encounter extremely different latency result from our paper, don't panic. Our kernel utilizing thread resource heavily rather than ALU and memory due to complex algorithm. Therefore the speedup of our kernel is quite heavily dependent on IPC and a nmber of CUDA cores. This metric is not well known outside, so if you are not familar with GPU architecture, just use RTX 4090 for best latency-perforamnce & cost trade-off.
+
+- FAQ: Which kernels should I use, review, study?
+
+We have following kernel evolutions during our research history in `/hip/models/hip_attention/`. 
+1. `attention1.py`: Initial CPU based HiP PoC kernel.
+2. `attention1_gpu.py`: Initial GPU based HiP PoC kernel. We utilize only vector ops, not MMU
+3. `attention1_block_gpu.py`: First generation of working HiP. We support many dynamic features with this release (dyanmic latency allocations using dynamic sparsity...) But important problem is, this kernel is using floating point to calculate the position of blocks (During PoC, we tested many weird block split strategies, so we used floating point for generality). But once after we fix the algorithm, this feature seems useless.
+4. `attention2_draft.py`: Intial second generation of working HiP on CPU. So we change address calculation from floating point to integers. That bump up performance ALOT.
+5. `attention2_draft_causal_batch.py`: We adopt `causal-batch` setting from SEA paper.
+6. `attention2_draft_causal_batch_gpu.py`: Now we move on to GPU. If you want maximum controllability, and modificationability, this file is good to look in. But please do not use this for your final selection, because `_prefetch.py` is more stable and accurate and fast. 
+7. `attention2_draft_causal_batch_fused.py`: Now we fuse the masking micro kernels into single big kernel.
+8. `attention2_draft_causal_batch_fused_vec.py`: We change sequence memory format from [B*H, T, HID] to  [B, T, H, HID] to improve spatial locality
+9. `attention2_draft_prefetch.py`: We added KV offloading cache in this version.
+
+Every generation is written with single header style as intended. It might bad for production, but we are researchers and require high modification-ability, we keep everything in single file if the feature is same.
+
+- Some example commands
+
+```bash
+# longbench from /hip/thrid_party/LongBench-hip/
+HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_BK=16 MEM_UTIL=0.8 HIP_SEQ_THRESH=-1 HIP_USING_SNAP_KV=0 HIP_SNAP_KV_VERT_K=1024 HIP_SNAP_KV_DIAG_K=256 HIP_GROUP_SIZE_Q=1 HIP_PREFILL_BQ=64 HIP_PREFILL_BSQ=2 HIP_PREFILL_BK=2 HIP_PREFILL_BSK=1 HIP_K=512 HIP_SW=256 HIP_NSINK=16 HIP_BK_AFTER_MASK=-1 HIP_PREFIX_QUERY=0 HIP_FIRST_DENSE_ITERATION=0 KV_CACHE_DTYPE=auto VLLM_ATTENTION_BACKEND=HIP_ATTN CUDA_VISIBLE_DEVICES=1 HIP_RANDOM_MASK=0 HIP_DECODE_ALWAYS_DENSE=0 HIP_PREFILL_ALWAYS_DENSE=0 HIP_REFRESH_INTERVAL=8 python pred.py --model llama3.1-8b-chat-128k --stride 128000 --name hip512
+
+# ruler from /hip/third_party/RULER-hip/scripts
+SERVER_PORT=5157 BATCH_SIZE=1 SA_BLOCK_BK=16 HIP_DISABLE_AUTOTUNE=1 CUDA_VISIBLE_DEVICES=4,5,6,7 GPUS=4 VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_PREFILL_BQ=64 HIP_PREFILL_BK=2 HIP_SW=1024 HIP_NSINK=16 HIP_K=2048 HIP_USING_SNAP_KV=0 HIP_SNAP_KV_VERT_K=4096 HIP_SNAP_KV_DIAG_K=4096 HIP_BK_AFTER_MASK=-1 HIP_RANDOM_MASK=0 ./run.sh llama3.1-8b-chat-5 synthetic
+
+# passkey from /hip
+HIP_DISABLE_AUTOTUNE=1 SA_BLOCK_BK=16 CUDA_VISIBLE_DEVICES=2 KV_CACHE_DTYPE=auto VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_K=512 HIP_SW=256 HIP_DECODE_ALWAYS_DENSE=0 HIP_PREFILL_ALWAYS_DENSE=0 HIP_RANDOM_MASK=0 python hip/main/model_eval.py --method hip --job passkey --stride 131072 --model vllm_llama3.1_8b_instruct
+```
+
+- Addtional reproducibility statement from authors
+
+We know that we have so many un-documented environment variables not only the hyperparameter of our HiP algorithm to run experiemtns. The reason is that we want to fair to every baselines, so we try to build general framework to run every targeted sparse attention baselines including HiP itself. If you have any-, ANY problem about reproducibility, please let us know during discussion session ASAP. Please understand this situation, and we will improve the codebase when we release it.
