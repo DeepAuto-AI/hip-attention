@@ -694,7 +694,8 @@ def set_kv_buffer_(
     for ithread in numba.prange(num_threads):
         for i in range(chunk_size):
             t = ithread * chunk_size + i
-            bank[table[t]] = cache[t]
+            if t < table.shape[0]:
+                bank[table[t]] = cache[t]
 
 @triton.jit
 def validate_bank_metadata_slots(
