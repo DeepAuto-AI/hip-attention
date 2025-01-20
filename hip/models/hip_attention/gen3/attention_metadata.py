@@ -75,7 +75,7 @@ class HiPAttentionCacheAccessStatistics:
         Tensor,
     ]:
         # FIXME: heejun
-        if os.getenv('HIP_DISABLE_COMPUTE_STATISTICS', '1') == '0':
+        if (os.getenv('HIP_DISABLE_COMPUTE_STATISTICS', '1') == '0') and (self.access_counter is not None):
             unique_access_count = self.access_counter.clamp(0, 1).sum()
             access_counts = self.access_counter.sum()
             cache_miss_counts = self.cache_miss_counter.sum()
