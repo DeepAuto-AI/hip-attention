@@ -55,12 +55,14 @@ def render_plot(
 
 @numba.njit(parallel=True)
 def render_plot_dynamic(
-    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size,
+    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size, causal_mask=False,
 ):
     for i in numba.prange(out_indices_cpu.shape[1]):
         for j in range(math.ceil(stage_k / chunk_size)):
             if j >= out_indices_cpu.shape[-1]: continue
             t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
+            if causal_mask and (t >= i):
+                continue
             debug[i, t:t+math.ceil(chunk_size / BLOCK_SIZE_Q)] = 1
 
 @numba.njit(parallel=True)
@@ -2018,7 +2020,7 @@ def dual_stage_quadratic_hip_attention(
                     next_stage_k = args.second_stage_k
                 out_indices_cpu = indices_left.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size)
+                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size, causal_mask=True)
                 cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
                 print(f'saved dummy_sampled_stage_{i_stage}.png')
         
@@ -2433,10 +2435,10 @@ def main_debug():
             second_stage_k = config_second_k,
             stages=config_stage,
             block_sparse_block_size_q=block_size,
-            model_context_length=512,
+            model_context_length=65536,
             # scan_early_terminate=1,
             # stage_early_terminate=1,
-            # scan_extend_backend='relative',
+            scan_extend_backend='streaming',
             sa_extend_backend=config_sa_extend_backend,
             stage_early_terminate=k_group_size,
             mask_only=mask_only,

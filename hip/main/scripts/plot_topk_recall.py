@@ -114,7 +114,7 @@ def compute_all(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, top_k: int):
     }
 
 num_heads = 32
-chunk_sizes = [256, 512, 1024, 2048, 4096, 8192]
+chunk_sizes = [256, 512, 1024, 2048, 4096,]
 
 def run_exp():
     q, k, v, out, cos, sin = load_checkouts(
@@ -165,23 +165,75 @@ def run_exp():
         json.dump(data, f)
 
 def render_plot():
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    font_path = 'NotoSans-Medium.ttf'  # Your font path goes here
+    font_manager.fontManager.addfont(font_path)
+    prop = font_manager.FontProperties(fname=font_path)
+
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = prop.get_name()
+
+    import seaborn as sns
+
+    label_fontsize = 10
+    legend_fontsize = 9
+    axes_label_fontsize = 9
+    font_weight = 500
+    axes_label_weight = 600
+    axis_below = True
+    sns.set_theme(
+        context='paper',
+        style='whitegrid',
+        palette=[
+            '#ff8370', 
+            '#00b1b0', 
+            '#fec84d', 
+            '#e42256', 
+            '#34586e', 
+            '#45BDC6', 
+            '#7AAAF7', 
+            '#CDCDFF'
+        ],
+        font='Noto Sans',
+        font_scale=1.0,
+        color_codes=True,
+        rc={
+            'axes.titlesize': str(label_fontsize),
+            'font.weight': font_weight,
+            'axes.labelweight': axes_label_weight,
+            'axes.titleweight': '600',
+            'legend.fontsize': str(legend_fontsize),
+            'axes.grid.which': 'both',
+            'ytick.labelsize': str(axes_label_fontsize),
+            'xtick.labelsize': str(axes_label_fontsize),
+            'axes.labelsize': str(label_fontsize),
+            'ytick.major.pad': '1.0',
+            'xtick.major.pad': '1.0',
+            'axes.axisbelow': axis_below,
+        }
+    )
+    
     with open('./saves/plot_topk_recall/data.json', 'r') as f:
         data = json.load(f)
     
-    plt.figure(figsize=(4, 3))
+    plt.figure(figsize=(2, 2.5))
 
     for legend in data:
-        plt.plot(chunk_sizes, (np.array(data[legend]) / num_heads).tolist(), label=legend)
+        xs = chunk_sizes
+        ys = (np.array(data[legend]) / num_heads).tolist()
+        plt.plot(xs, ys, label=legend, linewidth=2, marker='o', mec='black', mew=1)
 
-    plt.grid()
-    plt.title('Recall of Attention Probabilities')
+    plt.grid(True)
     plt.xlabel('Top-k Tokens')
     plt.ylabel('Recall (%)')
-    # plt.xscale('log', base=2)
-    plt.legend()
+    plt.legend(loc='upper left')
+    plt.ylim(None, 97)
 
-    plt.savefig('./saves/plot_topk_recall/plot.pdf', bbox_inches='tight', pad_inches=0.05)
-    plt.savefig('./saves/plot_topk_recall/plot.png', bbox_inches='tight', pad_inches=0.05)
+    plt.savefig('./saves/plot_topk_recall/plot_topk_recall.pdf', bbox_inches='tight', pad_inches=0.015)
+    plt.savefig('./saves/plot_topk_recall/plot_topk_recall.png', bbox_inches='tight', pad_inches=0.015)
+    print('./saves/plot_topk_recall/plot_topk_recall.png')
     
 if __name__ == '__main__':
     # run_exp()

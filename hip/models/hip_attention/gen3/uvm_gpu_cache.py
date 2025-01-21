@@ -355,7 +355,7 @@ class GPUCache:
         self.global_metadata[0, 0].add_(1)
 
         if stats.access_counter.shape[0] != 1:
-            assert False
+            # assert False
             # NOTE: if paged attention, stats should be single batch.
             accessed = stats.access_counter.sum(0)
         else:
