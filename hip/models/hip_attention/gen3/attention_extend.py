@@ -500,7 +500,7 @@ def chunk_controllable_sampling_mask_cuda(
     HEAD_GROUP: tl.constexpr = 4,
     REDUCE: tl.constexpr = 'max',
     USING_EXTEND: tl.constexpr = False,
-    EXTEND_BACKEND: tl.constexpr = 'dynamic_extend',
+    EXTEND_BACKEND: tl.constexpr = 'relative',
     NEED_APPLY_ROPE: tl.constexpr = False,
     TERMINATE_SIZE: tl.constexpr = 1,
     SCAN_STRIDE: tl.constexpr = 1,
