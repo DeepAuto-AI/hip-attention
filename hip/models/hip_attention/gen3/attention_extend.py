@@ -1,5 +1,5 @@
-import math
 import os
+import math
 import time
 import cv2
 import torch
@@ -2034,6 +2034,27 @@ def dual_stage_quadratic_hip_attention(
             print('indices_left', indices_left[0, -1])
             print('out_scores', out_scores[0, -1], args.second_stage_k, indices_left.shape, chunk_size)
         indices = indices_left[..., :args.second_stage_k // chunk_size] // chunk_size * chunk_size
+
+        # NOTE: performing SnapKV
+        if (os.getenv('HIP_DEBUG_SNAP_KV', '0') == '1') and (BDST > 1):
+            is_paged = False
+            if k is None:
+                is_paged = True
+                k = args.k_cache[:, 0, :, :][args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % chunk_size)]]
+            scores = torch.matmul(q.permute(0, 2, 1, 3)[:, :, -128:, :], k.permute(0, 2, 3, 1).repeat(1, HEAD // HEAD_KV, 1, 1))
+            if is_paged:
+                tsrcs = torch.arange(0, scores.shape[-1], device=q.device)
+                tsrc_mask = tsrcs[None, :] > args.position_ids[:, -1, None]
+                scores = scores.masked_fill_(tsrc_mask[:, None, None, :], -32000.0)
+            scores = scores.amax(dim=-2) # B H TSRC
+            scores = scores.view(scores.shape[0], scores.shape[1], -1, chunk_size)
+            scores = scores.amax(dim=-1)
+            _, snap_indices = scores.topk(k=1024 // chunk_size, dim=-1)
+            snap_indices = snap_indices * chunk_size
+            snap_indices = snap_indices.unsqueeze(1).expand(snap_indices.shape[0], indices.shape[1], snap_indices.shape[1], snap_indices.shape[2])
+            indices = torch.concat([indices, snap_indices], dim=-1)
+            if is_paged:
+                k = None
         
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
             out_indices_cpu = indices.cpu().numpy()
@@ -2050,7 +2071,7 @@ def dual_stage_quadratic_hip_attention(
         args.mask_k = args.second_stage_k
         args.using_extend = args.using_extend and True
         
-        # print('ff', indices.shape)
+        # NOTE: convert format and taking unique in indices
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
         
         indices, t_sort_1 = indices.sort(dim=-1)
@@ -2139,6 +2160,7 @@ def dual_stage_quadratic_hip_attention(
                 time.sleep(1)
                 pass
         
+        # NOTE: break-down to fit BSA block size
         if  (
                 (block_sparse_block_size_q is not None) and\
                 (triton.cdiv(TDST, block_sparse_block_size_q) != triton.cdiv(TDST, args.block_size_q))
