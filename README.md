@@ -153,19 +153,20 @@ docker run --runtime nvidia --rm -it --ipc=host \
 Run commands below:
 
 ```bash
-cd ../
-git clone {REPO URL}
-cd vllm
-docker build . --build-context hip=../hip-attention --target vllm-openai --tag hip/vllm-hip-openai
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+docker build -t hip-sglang:latest -f Dockerfile.sglang .
 ```
 
 ### Setup without docker
 
 ```bash
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+
 conda create --name hip python=3.11
 conda activate hip
 
-cd hip-attention
 pip install -e "."
 # Optional for development
 pip install -e ".[dev]"
@@ -233,7 +234,7 @@ python -m sglang.launch_server \
 --max-total-tokens 1048576 \
 --max-running-requests 1 \
 --enable-hip-attention \
---hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}'   \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
 --hip-max-sa-cache-token-size 5000 \
 --hip-max-mask-cache-token-size 64000 \
