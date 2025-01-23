@@ -1,2 +1,0 @@
-# Our OpenAI API requires Multimodal support.
-pillow

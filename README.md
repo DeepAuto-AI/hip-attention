@@ -162,8 +162,8 @@ docker build . --build-context hip=../hip-attention --target vllm-openai --tag h
 ### Setup without docker
 
 ```bash
-conda create --name llm python=3.11
-conda activate llm
+conda create --name hip python=3.11
+conda activate hip
 
 cd hip-attention
 pip install -e "."
@@ -173,27 +173,72 @@ pip install -e ".[dev]"
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
 # Dependencies that requires --no-build-isolation
-pip install -e ".[no_build_iso]" --no-build-isolation --verbose
-# vLLM with OpenAI API support for serving
-pip install -e ".[vllm,openai]" --no-build-isolation --verbose
+pip install -e ".[no_build_iso]" \
+--no-build-isolation \
+--verbose
+# SGLang with OpenAI API support for serving
+pip install -e ".[sglang]" \
+--no-build-isolation \
+--verbose \
+--find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 ```
 
 ### Running without docker
+
+- Without offloading
+
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
-VLLM_ATTENTION_BACKEND=HIP_ATTN \
-HIP_K=512 \
-HIP_REFRESH_INTERVAL=8 \
-HIP_DENSE_LAYERS=4 \
-python3 -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen2-1.5B-Instruct \
-    --tensor-parallel-size 1 \
-    --kv-cache-dtype fp8_e5m2 \
-    --dtype half \
-    --gpu-memory-utilization 0.50
+export SRT_PORT=8913
+export CUDA_VISIBLE_DEVICES=0
+
+SRT_WARMUP_PASSKEY_LENGTH=1024 \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype auto \
+--tp-size 1 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length 1048576 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96,24,8]}' \
+--mem-fraction-static 0.8 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-request 32 \
+--allow-auto-truncate
 ```
 
-This command will be deprecated. Check below's SGlang `sglang.launch_server` command.
+- With offloading
+
+```bash
+export SRT_PORT=8913
+export CUDA_VISIBLE_DEVICES=0
+
+SRT_WARMUP_PASSKEY_LENGTH=1024 \
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+--served-model-name meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 1 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--disable-radix-cache \
+--cuda-graph-bs 1 \
+--context-length 1048576 \
+--max-total-tokens 1048576 \
+--max-running-requests 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}'   \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 5000 \
+--hip-max-mask-cache-token-size 64000 \
+--allow-auto-truncate
+```
 
 ### vllm + Qwen's Dynamic-NTK
 
