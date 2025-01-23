@@ -678,7 +678,7 @@ def chunk_controllable_sampling_mask_cuda(
                     
                     while (max_chunk_size >= TERMINATE_SIZE):
                         max_chunk_size /= 2.0
-                        mask_tsrc_active = mask_chunk & (idx_tsrc_left < idx_tsrc_right) & (idx_tsrc_left <= pos_tdst_min)
+                        mask_tsrc_active = mask_chunk & (idx_tsrc_left < idx_tsrc_right) & (idx_tsrc_left <= pos_tdst_min) & (idx_tsrc_left >= 0)
                         # mask_tsrc_active = mask_tsrc_active & (idx_tsrc_left < (real_pos_tdst_min - sliding_window_size + BLOCK_SIZE_Q))
                         idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
                         
