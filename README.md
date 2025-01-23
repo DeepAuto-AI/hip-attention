@@ -4,6 +4,12 @@
 
 **HiP Attention** reduces the computational cost of quadratic attention, such as Flash Attention, into sub-quadratic `O(T log T)` in a plug-and-play manner while maintaining original performance using hierarchically pruned sparse attention. We are aiming to support future researchers while maintaining practical efficiency with this project.
 
+> [!NOTE]
+> You can try it in our [Liteai.io LLMOps](https://www.deepauto.ai/litellmops) platform!
+
+> [!IMPORTANT]
+> This is **NOT yet free for commercial use**. The license is [FSL-1.1-MIT](https://fsl.software/), which is free for non-commercial use but will automatically convert to MIT license two years after each release. Please refer to the [LICENSE](./LICENSE) for more details.
+
 ## News
 
 - 2025.01.03: Version 1.2 will be released soon. The new version fully supports context extension and better controls pruning hierarchy. It will also have better SGlang support (with proper KV offloading!, [working preview](https://github.com/gmlwns2000/sglang-hip12)).
