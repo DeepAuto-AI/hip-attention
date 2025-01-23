@@ -2192,7 +2192,7 @@ def dual_stage_quadratic_hip_attention(
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
-    if TDST == 1 and not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1":
+    if (TDST == 1) and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1") and (not args.disable_flashdecode):
         block_sparse_attention_backend = decode_block_sparse_attention
 
     context = block_sparse_attention_backend(
