@@ -133,6 +133,7 @@ def _fwd_kernel_stage1(
     mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H
     mask_h = mask_h & (cur_head < q_head_num)
 
+    # FIXME: current implementation is incorrect across heads
     cur_flattened_batch = cur_batch * q_head_num + cur_head_begin  # [BLOCK_H]
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
@@ -141,7 +142,7 @@ def _fwd_kernel_stage1(
     mask_dv = offs_dv < Lv
     cur_batch_seq_len = tl.load(
         B_Seqlen 
-        + cur_batch.to(tl.int64) * stride_pos_bsz 
+        + cur_batch.to(tl.int64) * stride_pos_bsz
         + 0 * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
@@ -513,7 +514,7 @@ def _fwd_kernel_stage1(
     ) and True:
         for i_tsrc in range(split_sink_start, split_sink_end, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = idx_tsrc < tl.minimum(MAX_TSRC, sink_token_size)
+            mask_tsrc = idx_tsrc < tl.minimum(cur_batch_seq_len, split_sink_end)
 
             keys = load_tokens(
                 K,
@@ -766,6 +767,7 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_K,
 
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                debug=(cur_head_id == 0 and split_kv_id == 7) and i_tsrc == 0,
             )
 
     # process sliding window
@@ -775,14 +777,13 @@ def _fwd_kernel_stage1(
     split_sliding_end = tl.minimum(split_sliding_start + sliding_tokens_per_split, cur_batch_seq_len)
     if (
         (sliding_window_size > 0)
-        # BUG: WHY?!?!?!?!?!?!?? Shorter than sink, with this condition, not work.
-        & ((0 <= sliding_split_kv_id) or (cur_batch_seq_len <= (sliding_window_size + BLOCK_SIZE_Q + sink_token_size)))
+        & (0 <= sliding_split_kv_id)
         & (sliding_split_kv_id < NUM_SLIDING_KV_SPLITS)
         & (split_sliding_end > split_sliding_start)
     ) and True:
         for i_tsrc in range(split_sliding_start, split_sliding_end, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = (0 <= idx_tsrc) & (idx_tsrc < cur_batch_seq_len)
+            mask_tsrc = (0 <= idx_tsrc) & (idx_tsrc < split_sliding_end)
 
             # idx_n = idx_b * G + idx_group
             keys = load_tokens(
@@ -1172,7 +1173,7 @@ def decode_block_sparse_attention_stage1(
         UPDATE_CACHE=offload_update_cache,
     )
 
-    return temp_attn_logits, NUM_TOTAL_KV_SPLITS
+    return temp_attn_logits, (NUM_SPARSE_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SLIDING_KV_SPLITS)
 
 
 @triton.jit
@@ -1193,7 +1194,9 @@ def _fwd_kernel_stage2(
     stride_pos_bsz, 
     stride_pos_tdst,
 
-    NUM_KV_SPLITS: tl.constexpr,
+    NUM_SPARSE_KV_SPLITS: tl.constexpr,
+    NUM_SINK_KV_SPLITS: tl.constexpr,
+    NUM_SLIDING_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
@@ -1224,33 +1227,28 @@ def _fwd_kernel_stage2(
         + Lv * stride_attn_logits_hid
     )
 
-    for split_kv_id in range(0, NUM_KV_SPLITS):
-        kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-        split_kv_start = kv_len_per_split * split_kv_id
-        split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+    for split_kv_id in range(0, NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS):
+        tv = tl.load(
+            ATTN_LOGITS
+            + offs_v.to(tl.int64)
+            + split_kv_id * stride_attn_logits_kv_split,
+            mask=mask_d,
+            other=0.0
+        )
+        tlogic = tl.load(
+            ATTN_LOGITS
+            + offs_logic.to(tl.int64)
+            + split_kv_id * stride_attn_logits_kv_split
+        )
+        n_e_max = tl.maximum(tlogic, e_max)
 
-        if split_kv_end > split_kv_start:
-            tv = tl.load(
-                ATTN_LOGITS 
-                + offs_v.to(tl.int64) 
-                + split_kv_id * stride_attn_logits_kv_split,
-                mask=mask_d,
-                other=0.0
-            )
-            tlogic = tl.load(
-                ATTN_LOGITS 
-                + offs_logic.to(tl.int64) 
-                + split_kv_id * stride_attn_logits_kv_split
-            )
-            n_e_max = tl.maximum(tlogic, e_max)
+        n_e_max_valid = (n_e_max > -1e50)
+        old_scale = tl.math.exp2(e_max - n_e_max)
+        exp_logic = tl.math.exp2(tlogic - n_e_max)
+        acc = tl.where(n_e_max_valid, acc * old_scale + exp_logic * tv, acc)
 
-            old_scale = tl.math.exp2(e_max - n_e_max)
-            acc *= old_scale
-            exp_logic = tl.math.exp2(tlogic - n_e_max)
-            acc += exp_logic * tv
-
-            e_sum = e_sum * old_scale + exp_logic
-            e_max = n_e_max
+        e_sum = tl.where(n_e_max_valid, e_sum * old_scale + exp_logic, e_sum)
+        e_max = n_e_max
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
 
@@ -1270,20 +1268,22 @@ def decode_block_sparse_attention_stage2(
     o,
     v_buffer,
     b_seq_len,
-    num_total_kv_splits,
+    kv_splits,
 ):
     batch, head_num = q.shape[0], q.shape[2]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
 
-    NUM_KV_SPLITS = num_total_kv_splits
+    NUM_SPARSE_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SLIDING_KV_SPLITS = kv_splits
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
         logits, *safe_stride(logits, 4),
         o, *safe_stride(o, 4),
         b_seq_len, *safe_stride(b_seq_len, 2),
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
+        NUM_SPARSE_KV_SPLITS,
+        NUM_SINK_KV_SPLITS,
+        NUM_SLIDING_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
         num_warps=4,
@@ -1328,7 +1328,7 @@ def decode_block_sparse_attention_impl(
     :param context: (BSZ, TDST, HEAD, HID)
     """
     
-    attn_logits, NUM_TOTAL_KV_SPLITS = decode_block_sparse_attention_stage1(
+    attn_logits, kv_splits = decode_block_sparse_attention_stage1(
         q, k, v,
         
         seq_lens=seq_lens,
@@ -1366,7 +1366,7 @@ def decode_block_sparse_attention_impl(
             )
         ), 
         seq_lens, 
-        NUM_TOTAL_KV_SPLITS
+        kv_splits
     )
     
     return attn_logits
@@ -1476,9 +1476,9 @@ def decode_block_sparse_attention(
 
     return context
 
-def test_correctness(use_cuda_graph=False):
+def test_correctness(file_path, use_cuda_graph=False):
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
-    args = torch.load("../bsa_args_2.pth")
+    args = load_saved_tensors(file_path)
 
     def run_orig(output=None):
         result = block_sparse_attention(
@@ -1567,9 +1567,9 @@ def test_correctness(use_cuda_graph=False):
 
 
 @torch.no_grad()
-def benchmark(use_cuda_graph=False):
+def benchmark(file_path, use_cuda_graph=False):
     from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
-    args = torch.load("../bsa_args_2.pth")
+    args = load_saved_tensors(file_path)
 
     def run_orig():
         return block_sparse_attention(
@@ -1668,6 +1668,22 @@ def benchmark(use_cuda_graph=False):
     print(f"Peak memory: orig={peak_mem_orig / 10 ** 6:.3f}MB, flash={peak_mem_flash / 10 ** 6:.3f}MB")
 
 
+# Test
+def load_saved_tensors(file_path):
+    args = torch.load(file_path, map_location='cuda:0')
+
+    # FIXME: current implementation is incorrect across heads
+    for i in range(args['indices'].shape[0]):
+        args['indices'][i] = args['indices'][0]
+        args['ks'][i] = args['ks'][0]
+        args['ks_count'][i] = args['ks_count'][0]
+        args['ks_start_end'][i] = args['ks_start_end'][0]
+
+    return args
+
+
 if __name__ == "__main__":
-    test_correctness(use_cuda_graph=False)
-    benchmark(use_cuda_graph=False)
+    file = "../bsa_args_2.pth"
+    #file = "../bsa_args_short.pth"
+    test_correctness(file, use_cuda_graph=False)
+    benchmark(file, use_cuda_graph=False)
