@@ -1336,24 +1336,33 @@ def compute_v_cos(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
-    OFFLOAD_CACHE_METHOD: tl.constexpr,
-    OFFLOAD_CACHE_BUDGET: tl.constexpr,
-    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
-    OFFLOAD_CACHE_K_TABLES,
-    stride_offload_cache_k_tables_n,
-    stride_offload_cache_k_tables_t,
-    OFFLOAD_CACHE_K_BANKS,
-    stride_offload_cache_k_banks_n,
-    stride_offload_cache_k_banks_page,
-    stride_offload_cache_k_banks_offset,
-    stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_K_BANK_STATS,
-    stride_offload_cache_k_bank_stats_n,
-    stride_offload_cache_k_bank_stats_page,
-    stride_offload_cache_k_bank_stats_k,
-    OFFLOAD_CACHE_COUNTERS,
-    stride_offload_cache_counters_n,
-    stride_offload_cache_counters_k,
+    OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT,
+    OFFLOAD_CACHE_UVM_METADATA,
+    stride_offload_cache_uvm_metadata_token,
+    stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
+    OFFLOAD_CACHE_GPU_BANK,
+    stride_offload_cache_gpu_bank_token,
+    stride_offload_cache_gpu_bank_hid,
+    OFFLOAD_CACHE_GPU_METADATA,
+    stride_offload_cache_gpu_metadata_token,
+    stride_offload_cache_gpu_metadata_k,
+    OFFLOAD_CACHE_GPU_TABLE,
+    stride_offload_cache_gpu_table_head_kv,
+    stride_offload_cache_gpu_table_token,
+    strdie_offload_cache_gpu_table_k,
+    
+    ACCESS_COUNTER,
+    stride_access_counter_bsz,
+    stride_access_counter_head_kv,
+    stride_access_counter_tsrc,
+    CACHE_MISS_COUNTER,
+    stride_cache_miss_counter_bsz,
+    stride_cache_miss_counter_head_kv,
+    stride_cache_miss_counter_tsrc,
     
     TDST,
     TSRC,
@@ -1419,7 +1428,7 @@ def compute_v_cos(
     #     other=0,
     # )
     
-    tl.static_assert(not USING_OFFLOAD_CACHE)
+    # tl.static_assert(not USING_OFFLOAD_CACHE)
     values_tdst = load_tokens(
         V, 
         stride_v_bsz,
@@ -1441,25 +1450,34 @@ def compute_v_cos(
         stride_cache_seq_lens_b,
         
         USING_OFFLOAD_CACHE,
-        OFFLOAD_CACHE_METHOD,
-        OFFLOAD_CACHE_BUDGET,
-        OFFLOAD_CACHE_KV_HEAD,
+        OFFLOAD_CACHE_KV_PACKED,
+        GPU_BANK_COUNT,
         True,
-        OFFLOAD_CACHE_K_TABLES,
-        stride_offload_cache_k_tables_n,
-        stride_offload_cache_k_tables_t,
-        OFFLOAD_CACHE_K_BANKS,
-        stride_offload_cache_k_banks_n,
-        stride_offload_cache_k_banks_page,
-        stride_offload_cache_k_banks_offset,
-        stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_K_BANK_STATS,
-        stride_offload_cache_k_bank_stats_n,
-        stride_offload_cache_k_bank_stats_page,
-        stride_offload_cache_k_bank_stats_k,
-        OFFLOAD_CACHE_COUNTERS,
-        stride_offload_cache_counters_n,
-        stride_offload_cache_counters_k,
+        OFFLOAD_CACHE_UVM_METADATA,
+        stride_offload_cache_uvm_metadata_token,
+        stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+        stride_offload_cache_gpu_global_metadata_k,
+        stride_offload_cache_gpu_global_metadata_pad,
+        OFFLOAD_CACHE_GPU_BANK,
+        stride_offload_cache_gpu_bank_token,
+        stride_offload_cache_gpu_bank_hid,
+        OFFLOAD_CACHE_GPU_METADATA,
+        stride_offload_cache_gpu_metadata_token,
+        stride_offload_cache_gpu_metadata_k,
+        OFFLOAD_CACHE_GPU_TABLE,
+        stride_offload_cache_gpu_table_head_kv,
+        stride_offload_cache_gpu_table_token,
+        strdie_offload_cache_gpu_table_k,
+        
+        ACCESS_COUNTER,
+        stride_access_counter_bsz,
+        stride_access_counter_head_kv,
+        stride_access_counter_tsrc,
+        CACHE_MISS_COUNTER,
+        stride_cache_miss_counter_bsz,
+        stride_cache_miss_counter_head_kv,
+        stride_cache_miss_counter_tsrc,
         
         idx_bsz,
         pos_tdst[:, None],
@@ -1468,7 +1486,9 @@ def compute_v_cos(
         
         mask_tdst[:, None],
         
+        HEAD // HEAD_GROUP,
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q,
+        BLOCK_HID,
     ).to(tl.bfloat16)
     
     # values_tdst = (
@@ -1507,25 +1527,34 @@ def compute_v_cos(
         stride_cache_seq_lens_b,
         
         USING_OFFLOAD_CACHE,
-        OFFLOAD_CACHE_METHOD,
-        OFFLOAD_CACHE_BUDGET,
-        OFFLOAD_CACHE_KV_HEAD,
+        OFFLOAD_CACHE_KV_PACKED,
+        GPU_BANK_COUNT,
         True,
-        OFFLOAD_CACHE_K_TABLES,
-        stride_offload_cache_k_tables_n,
-        stride_offload_cache_k_tables_t,
-        OFFLOAD_CACHE_K_BANKS,
-        stride_offload_cache_k_banks_n,
-        stride_offload_cache_k_banks_page,
-        stride_offload_cache_k_banks_offset,
-        stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_K_BANK_STATS,
-        stride_offload_cache_k_bank_stats_n,
-        stride_offload_cache_k_bank_stats_page,
-        stride_offload_cache_k_bank_stats_k,
-        OFFLOAD_CACHE_COUNTERS,
-        stride_offload_cache_counters_n,
-        stride_offload_cache_counters_k,
+        OFFLOAD_CACHE_UVM_METADATA,
+        stride_offload_cache_uvm_metadata_token,
+        stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+        stride_offload_cache_gpu_global_metadata_k,
+        stride_offload_cache_gpu_global_metadata_pad,
+        OFFLOAD_CACHE_GPU_BANK,
+        stride_offload_cache_gpu_bank_token,
+        stride_offload_cache_gpu_bank_hid,
+        OFFLOAD_CACHE_GPU_METADATA,
+        stride_offload_cache_gpu_metadata_token,
+        stride_offload_cache_gpu_metadata_k,
+        OFFLOAD_CACHE_GPU_TABLE,
+        stride_offload_cache_gpu_table_head_kv,
+        stride_offload_cache_gpu_table_token,
+        strdie_offload_cache_gpu_table_k,
+        
+        ACCESS_COUNTER,
+        stride_access_counter_bsz,
+        stride_access_counter_head_kv,
+        stride_access_counter_tsrc,
+        CACHE_MISS_COUNTER,
+        stride_cache_miss_counter_bsz,
+        stride_cache_miss_counter_head_kv,
+        stride_cache_miss_counter_tsrc,
         
         idx_bsz,
         idx_tsrc[:, None],
@@ -1534,7 +1563,9 @@ def compute_v_cos(
         
         mask_tsrc[:, None],
         
+        HEAD // HEAD_GROUP,
         GROUP_K * BLOCK_SIZE_K,
+        BLOCK_HID,
     ).to(tl.bfloat16)
 
     # values_tsrc = (
@@ -1547,8 +1578,8 @@ def compute_v_cos(
     
     normalized_values_tdst = values_tdst
     normalized_values_tsrc = values_tsrc
-    # normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
-    # normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
+    normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
+    normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
     
     # - 
     # cos_sim_scores = tl.sum(normalized_values_tdst[None, :] * normalized_values_tsrc, axis=-1)
@@ -1872,7 +1903,7 @@ def dual_stage_quadratic_hip_attention(
                 if os.getenv('HIP_HEAD_REDUCE', '1') == '1':
                     ori_shape = out_scores.shape
                     out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
-                    out_scores = torch.broadcast_to(out_scores, ori_shape)
+                    out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
 
                 if args.offload_cache is not None:
                     # print('after masking')
@@ -1940,7 +1971,6 @@ def dual_stage_quadratic_hip_attention(
                 # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
                 apply_v_dot = apply_v_dot and (i_stage != 0)
                 if apply_v_dot:
-                    raise Exception() # TODO: handle new args
                     v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
                     V_BLOCK_SIZE_K = 8
                     V_BLOCK_STRIDE_Q = 1
@@ -1962,6 +1992,9 @@ def dual_stage_quadratic_hip_attention(
                         
                         *args.args_paged_kv_cache(),
                         *args.args_offload_cache(is_masking=True),
+                        
+                        sa_access_counter, *safe_stride(sa_access_counter, 3),
+                        sa_cache_miss_counter, *safe_stride(sa_cache_miss_counter, 3),
                         
                         TDST,
                         MAX_TSRC,
@@ -2000,7 +2033,7 @@ def dual_stage_quadratic_hip_attention(
 
                     # out_scores = out_scores * v_scores
 
-                    out_scores = out_scores + v_scores * 0.8
+                    out_scores = out_scores + v_scores
                 
                 if (i_stage < (len(args.stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
