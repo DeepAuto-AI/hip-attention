@@ -1600,15 +1600,16 @@ def dual_stage_quadratic_hip_attention(
     global DEBUG
     
     if args.q_mask is None:
-        q_mask = q
+        q_bsa = q
     else:
-        q_mask = args.q_mask
+        q_bsa = q
+        q = args.q_mask
     if args.k_mask is None:
         k_mask = k
     else:
         k_mask = args.k_mask
     
-    BLOCK_HID = q_mask.shape[-1]
+    BLOCK_HID = q.shape[-1]
     
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -1761,7 +1762,7 @@ def dual_stage_quadratic_hip_attention(
                 assert (chunk_size % stage_chunk_size) == 0
                 splits = chunk_size // stage_chunk_size
                 chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
-                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q_mask.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
+                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
                 indices_left = indices_left.flatten(-2, -1)
                 indices_right = indices_right[..., None] - (((splits - 1) - torch.arange(0, splits, device=q.device)[None, None, None, None, :]) * chunk_sizes[..., None]).floor().long()
                 indices_right = indices_right.flatten(-2, -1)
@@ -1824,8 +1825,9 @@ def dual_stage_quadratic_hip_attention(
                 # if args.offload_cache is not None:
                 #     print('before masking')
                 #     args.offload_cache.mask_k_cache._verify_cache()
+                assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 chunk_controllable_sampling_mask_cuda[grid](
-                    q_mask, *q_mask.stride(),
+                    q, *q.stride(),
                     k_mask, *safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
                 
@@ -1843,7 +1845,7 @@ def dual_stage_quadratic_hip_attention(
                     
                     chunk_count,
                     MAX_TSRC,
-                    TDST,
+                    q.shape[1],
                     HEAD,
                     args.sliding_window_size,
                     args.sink_token_size,
@@ -2036,11 +2038,17 @@ def dual_stage_quadratic_hip_attention(
         indices = indices_left[..., :args.second_stage_k // chunk_size] // chunk_size * chunk_size
 
         # NOTE: performing SnapKV
-        if (os.getenv('HIP_DEBUG_SNAP_KV', '0') == '1') and (BDST > 1):
+        if (os.getenv('HIP_DEBUG_SNAP_KV', '0') == '1') and (BDST >= 1):
             is_paged = False
             if k is None:
                 is_paged = True
-                k = args.k_cache[:, 0, :, :][args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % chunk_size)]]
+                if args.k_cache is not None:
+                    assert args.k_cache is not None
+                    k_cache = args.k_cache
+                else:
+                    k_cache = args.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
+                assert args.block_table is not None
+                k = k_cache[:, 0, :, :][args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % chunk_size)]]
             scores = torch.matmul(q.permute(0, 2, 1, 3)[:, :, -128:, :], k.permute(0, 2, 3, 1).repeat(1, HEAD // HEAD_KV, 1, 1))
             if is_paged:
                 tsrcs = torch.arange(0, scores.shape[-1], device=q.device)
@@ -2049,7 +2057,7 @@ def dual_stage_quadratic_hip_attention(
             scores = scores.amax(dim=-2) # B H TSRC
             scores = scores.view(scores.shape[0], scores.shape[1], -1, chunk_size)
             scores = scores.amax(dim=-1)
-            _, snap_indices = scores.topk(k=1024 // chunk_size, dim=-1)
+            _, snap_indices = scores.topk(k=2048 // chunk_size, dim=-1)
             snap_indices = snap_indices * chunk_size
             snap_indices = snap_indices.unsqueeze(1).expand(snap_indices.shape[0], indices.shape[1], snap_indices.shape[1], snap_indices.shape[2])
             indices = torch.concat([indices, snap_indices], dim=-1)
@@ -2196,10 +2204,10 @@ def dual_stage_quadratic_hip_attention(
         block_sparse_attention_backend = decode_block_sparse_attention
 
     context = block_sparse_attention_backend(
-        q=q,
+        q=q_bsa,
         k=k,
         v=v,
-        seq_lens=position_ids + 1,
+        seq_lens=position_ids[:, -q_bsa.shape[1]:] + 1,
         indices=indices,
         ks=ks,
         ks_count=ks_count,
