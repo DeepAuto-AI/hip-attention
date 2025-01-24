@@ -767,7 +767,6 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_K,
 
                 EXTEND_BACKEND=EXTEND_BACKEND,
-                debug=(cur_head_id == 0 and split_kv_id == 7) and i_tsrc == 0,
             )
 
     # process sliding window
@@ -1173,7 +1172,7 @@ def decode_block_sparse_attention_stage1(
         UPDATE_CACHE=offload_update_cache,
     )
 
-    return temp_attn_logits, (NUM_SPARSE_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SLIDING_KV_SPLITS)
+    return temp_attn_logits, NUM_TOTAL_KV_SPLITS
 
 
 @triton.jit
@@ -1194,9 +1193,7 @@ def _fwd_kernel_stage2(
     stride_pos_bsz, 
     stride_pos_tdst,
 
-    NUM_SPARSE_KV_SPLITS: tl.constexpr,
-    NUM_SINK_KV_SPLITS: tl.constexpr,
-    NUM_SLIDING_KV_SPLITS: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
@@ -1227,7 +1224,7 @@ def _fwd_kernel_stage2(
         + Lv * stride_attn_logits_hid
     )
 
-    for split_kv_id in range(0, NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS):
+    for split_kv_id in range(0, NUM_KV_SPLITS):
         tv = tl.load(
             ATTN_LOGITS
             + offs_v.to(tl.int64)
@@ -1268,22 +1265,20 @@ def decode_block_sparse_attention_stage2(
     o,
     v_buffer,
     b_seq_len,
-    kv_splits,
+    num_total_kv_splits,
 ):
     batch, head_num = q.shape[0], q.shape[2]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
 
-    NUM_SPARSE_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SLIDING_KV_SPLITS = kv_splits
+    NUM_KV_SPLITS = num_total_kv_splits
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
         logits, *safe_stride(logits, 4),
         o, *safe_stride(o, 4),
         b_seq_len, *safe_stride(b_seq_len, 2),
-        NUM_SPARSE_KV_SPLITS,
-        NUM_SINK_KV_SPLITS,
-        NUM_SLIDING_KV_SPLITS,
+        NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
         num_warps=4,
@@ -1328,7 +1323,7 @@ def decode_block_sparse_attention_impl(
     :param context: (BSZ, TDST, HEAD, HID)
     """
     
-    attn_logits, kv_splits = decode_block_sparse_attention_stage1(
+    attn_logits, NUM_TOTAL_KV_SPLITS = decode_block_sparse_attention_stage1(
         q, k, v,
         
         seq_lens=seq_lens,
@@ -1366,7 +1361,7 @@ def decode_block_sparse_attention_impl(
             )
         ), 
         seq_lens, 
-        kv_splits
+        NUM_TOTAL_KV_SPLITS
     )
     
     return attn_logits

@@ -61,7 +61,6 @@ def block_sparse_attention_cuda_step(
     BLOCK_SIZE_K: tl.constexpr,
     
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
-    debug: tl.constexpr = False,
 ):
     if USING_EXTEND:
         if EXTEND_BACKEND == 'self_extend':
@@ -438,8 +437,6 @@ def block_sparse_attention_cuda_step(
     
     # -- update m_i and l_i
     l_valid = (m_ij > -1e50)
-    #if debug:
-    #    tl.device_print("l_valid", l_valid)
     alpha = tl.math.exp2(m_i - m_ij)
     l_i = tl.where(
         l_valid,
