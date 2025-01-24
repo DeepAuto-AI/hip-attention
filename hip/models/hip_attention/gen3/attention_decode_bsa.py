@@ -25,10 +25,10 @@ def _fwd_kernel_stage1(
     V, stride_v_bsz, stride_v_tsrc, stride_v_head, stride_v_hid,
     B_Seqlen, stride_pos_bsz, stride_pos_tdst,
 
-    INDICES,
+    INDICES,  # Warning: first dim is a flattened axis of (batch, q_head)
     stride_indices_b, stride_indices_bdst, stride_indices_bk,
 
-    KS_START_END,
+    KS_START_END,  # Warning: first dim is a flattened axis of (batch, q_head)
     stride_ks_start_end_b, stride_ks_start_end_bdst, stride_ks_start_end_g,
 
     ATTN_LOGITS,
@@ -128,9 +128,12 @@ def _fwd_kernel_stage1(
         VALID_BLOCK_H: tl.constexpr = BLOCK_H
     else:
         VALID_BLOCK_H: tl.constexpr = kv_group_num
+    cur_head_begin = cur_head_id * VALID_BLOCK_H
     cur_head = cur_head_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
     mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H
     mask_h = mask_h & (cur_head < q_head_num)
+
+    cur_flattened_batch = cur_batch * q_head_num + cur_head_begin  # [BLOCK_H]
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_dv = tl.arange(0, BLOCK_DV)
@@ -194,15 +197,19 @@ def _fwd_kernel_stage1(
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
         KS_START_END
-        + cur_batch.to(tl.int64) * stride_ks_start_end_b
+        + cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
         + 0 * stride_ks_start_end_bdst
-        + 0 * stride_ks_start_end_g
+        + 0 * stride_ks_start_end_g,
+        mask=cur_head_begin < q_head_num,
+        other=0,
     )
     range_end = tl.load(
         KS_START_END
-        + cur_batch.to(tl.int64) * stride_ks_start_end_b
+        + cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
         + 0 * stride_ks_start_end_bdst
-        + 1 * stride_ks_start_end_g
+        + 1 * stride_ks_start_end_g,
+        mask=cur_head_begin < q_head_num,
+        other=0,
     )
     if BK <= 0:
         range_start = 0
@@ -224,10 +231,11 @@ def _fwd_kernel_stage1(
             if (range_start <= i_bk + BLOCK_BK) & (i_bk < range_end):
                 idx_tsrc_start = tl.load(
                     INDICES
-                    + cur_batch.to(tl.int64) * stride_indices_b
+                    + cur_flattened_batch.to(tl.int64) * stride_indices_b
                     + 0 * stride_indices_bdst
                     + idx_bk * stride_indices_bk,
-                    mask=mask_bk,
+                    mask=mask_bk & (cur_head_begin < q_head_num),
+                    other=0,
                 )  # [BLOCK_BK]
                 idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC + 1)
                 idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
