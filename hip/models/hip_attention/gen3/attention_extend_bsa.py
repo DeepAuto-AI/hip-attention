@@ -403,7 +403,7 @@ def block_sparse_attention_cuda_step(
         if LOGIT_SOFTCAP is not None:
             qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
         qk = qk * 1.44269504
-    
+
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
             qk_mask = (
@@ -421,9 +421,11 @@ def block_sparse_attention_cuda_step(
         qk_mask = (
             (~(mask_tdst[:, None] & mask_tsrc[None, :]))
         )
-    
+
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
+    qk_ = tl.where(qk_mask, tl.full(qk.shape, float('-inf'), qk.dtype), qk)
+    m_ij = tl.maximum(m_i, tl.max(qk_, axis=1)[:, None])
+
     qk = qk - m_ij
     # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     p = tl.math.exp2(qk)
@@ -434,22 +436,28 @@ def block_sparse_attention_cuda_step(
     l_ij = tl.sum(p, axis=1)
     
     # -- update m_i and l_i
+    l_valid = (m_ij > -1e50)
     alpha = tl.math.exp2(m_i - m_ij)
-    l_i = (l_i * alpha + l_ij[:, None]).to(l_i.dtype)
+    l_i = tl.where(
+        l_valid,
+        (l_i * alpha + l_ij[:, None]).to(l_i.dtype),
+        l_i,
+    )
     
     # -- update output accumulator --
-    acc = acc * alpha.to(acc.dtype)
-    
-    # update acc
-    acc += tl.dot(
-        p.to(queries.dtype),
-        values.to(queries.dtype),
-        out_dtype=tl.float32,
-        allow_tf32=True,
-    ).to(acc.dtype)
+    acc = tl.where(
+        l_valid,
+        acc * alpha.to(acc.dtype) + tl.dot(
+            p.to(queries.dtype),
+            values.to(queries.dtype),
+            out_dtype=tl.float32,
+            allow_tf32=True,
+        ).to(acc.dtype),
+        acc
+    )
     
     # update m_i and l_i
-    m_i = m_ij.to(m_i.dtype)
+    m_i = tl.where(l_valid, m_ij.to(m_i.dtype), m_i)
     
     return acc, l_i, m_i
 
@@ -1019,9 +1027,10 @@ def block_sparse_attention_cuda(
                 pass
     
     if (sink_token_size > 0) and True:
+        CURR_TSRC = tl.max(pos_tdst)
         for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = idx_tsrc < tl.minimum(MAX_TSRC, sink_token_size)
+            mask_tsrc = idx_tsrc < tl.minimum(CURR_TSRC, sink_token_size)
             
             # idx_n = idx_b * G + idx_group
             keys = load_tokens(
