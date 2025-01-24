@@ -189,6 +189,8 @@ class HiPAttentionArgs:
     
     require_cache_statistics: bool = True
     
+    disable_flashdecode: bool = False
+    
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
             self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])

@@ -2,7 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-def render(data, name, ylabel, fn = None, ylims=(None, None), show_legend=True):
+def render(data, name, ylabel, fn = None, ylims=(None, None), show_legend=True, fa2_limit=None):
     from matplotlib import font_manager
 
     font_path = 'NotoSans-Medium.ttf'  # Your font path goes here
@@ -59,6 +59,8 @@ def render(data, name, ylabel, fn = None, ylims=(None, None), show_legend=True):
         xs = data['T']
         ys = (np.array(data[legend]) * 100).tolist()
         plt.plot(xs, ys, label=legend, linewidth=2, marker='.', linestyle=':')
+    if fa2_limit is not None:
+        plt.axhline(fa2_limit * 100, color='red')
     
     plt.grid(True)
     plt.xlabel('Context Length (k)')

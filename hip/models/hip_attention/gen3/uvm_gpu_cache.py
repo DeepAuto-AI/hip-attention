@@ -868,7 +868,7 @@ def load_tokens(
             CACHE_SEQ_LENS +\
                 idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
         )
-        mask_tsrc = idx_tsrc < seq_len
+        mask_tsrc = (idx_tsrc >= 0) & (idx_tsrc < seq_len)
         ptrs = BLOCK_TABLE +\
             idx_bsz.to(tl.int64) * stride_block_table_bsz + \
             (idx_tsrc // PAGE_SIZE).to(tl.int64) * stride_block_table_page

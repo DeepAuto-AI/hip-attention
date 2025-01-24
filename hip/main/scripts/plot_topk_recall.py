@@ -218,7 +218,7 @@ def render_plot():
     with open('./saves/plot_topk_recall/data.json', 'r') as f:
         data = json.load(f)
     
-    plt.figure(figsize=(2, 2.5))
+    plt.figure(figsize=(2.8, 2.0))
 
     for legend in data:
         xs = chunk_sizes

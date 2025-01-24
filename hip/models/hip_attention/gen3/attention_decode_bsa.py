@@ -216,7 +216,7 @@ def _fwd_kernel_stage1(
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
-    if split_kv_block_end > split_kv_block_start:
+    if (split_kv_block_end > split_kv_block_start) and True:
         for i_bk in range(split_kv_block_start, split_kv_block_end, BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)  # [BLOCK_BK]
             mask_bk = (range_start <= idx_bk) & (idx_bk < tl.minimum(range_start + BK, range_end))  # [BLOCK_BK]
@@ -497,8 +497,12 @@ def _fwd_kernel_stage1(
     sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
     split_sink_start = sink_tokens_per_split * sink_split_kv_id
     split_sink_end = tl.minimum(split_sink_start + sink_tokens_per_split, sink_token_size)
-    if (((sink_token_size > 0 and 0 <= sink_split_kv_id) and sink_split_kv_id < NUM_SINK_KV_SPLITS)
-        and split_sink_end > split_sink_start):
+    if (
+        (sink_token_size > 0) 
+        & (0 <= sink_split_kv_id) 
+        & (sink_split_kv_id < NUM_SINK_KV_SPLITS)
+        & (split_sink_end > split_sink_start)
+    ) and True:
         for i_tsrc in range(split_sink_start, split_sink_end, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < tl.minimum(MAX_TSRC, sink_token_size)
@@ -761,8 +765,13 @@ def _fwd_kernel_stage1(
     sliding_tokens_per_split = tl.cdiv(cur_batch_seq_len - i_tsrc_range_start, NUM_SLIDING_KV_SPLITS)
     split_sliding_start = i_tsrc_range_start + sliding_tokens_per_split * sliding_split_kv_id
     split_sliding_end = tl.minimum(split_sliding_start + sliding_tokens_per_split, cur_batch_seq_len)
-    if (((sliding_window_size > 0 and 0 <= sliding_split_kv_id) and sliding_split_kv_id < NUM_SLIDING_KV_SPLITS)
-        and split_sliding_end > split_sliding_start):
+    if (
+        (sliding_window_size > 0)
+        # BUG: WHY?!?!?!?!?!?!?? Shorter than sink, with this condition, not work.
+        & ((0 <= sliding_split_kv_id) or (cur_batch_seq_len <= (sliding_window_size + BLOCK_SIZE_Q + sink_token_size)))
+        & (sliding_split_kv_id < NUM_SLIDING_KV_SPLITS)
+        & (split_sliding_end > split_sliding_start)
+    ) and True:
         for i_tsrc in range(split_sliding_start, split_sliding_end, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = (0 <= idx_tsrc) & (idx_tsrc < cur_batch_seq_len)
@@ -1081,10 +1090,12 @@ def decode_block_sparse_attention_stage1(
 ):
     batch = q.shape[0]
     BLOCK_H = 16
-
-    NUM_SPARSE_KV_SPLITS = min(16, triton.cdiv(args.second_stage_k, 128))  # TODO: apply from server args
-    NUM_SINK_KV_SPLITS = min(4, triton.cdiv(args.sink_token_size, 128))
-    NUM_SLIDING_KV_SPLITS = min(8, triton.cdiv(args.sliding_window_size, 128))
+    
+    total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
+    token_chunk = triton.cdiv(total_tokens, 8)
+    NUM_SPARSE_KV_SPLITS = min(12, triton.cdiv(args.second_stage_k, token_chunk))  # TODO: apply from server args
+    NUM_SINK_KV_SPLITS = min(12, triton.cdiv(args.sink_token_size, token_chunk))
+    NUM_SLIDING_KV_SPLITS = min(12, triton.cdiv(args.sliding_window_size, token_chunk))
 
     NUM_TOTAL_KV_SPLITS = (
         NUM_SPARSE_KV_SPLITS
@@ -1092,7 +1103,6 @@ def decode_block_sparse_attention_stage1(
         + NUM_SLIDING_KV_SPLITS
     )
     temp_attn_logits = torch.zeros(
-        # NOTE: make address space 32byte bank aligned
         (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32//4),
         dtype=torch.float32, device=q.device
     )
