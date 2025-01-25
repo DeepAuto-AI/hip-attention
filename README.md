@@ -143,6 +143,14 @@ python -m sglang.launch_server \
 --hip-max-mask-cache-token-size 128000
 ```
 
+### Testing OpenAI API
+
+```bash
+SRT_PORT=9913 python scripts/test_openai.py
+# 1M tokens
+SRT_PORT=9913 python scripts/test_openai_long.py
+```
+
 ### Building Docker
 
 ```bash
