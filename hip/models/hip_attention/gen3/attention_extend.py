@@ -2229,6 +2229,9 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end.clone()
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
+    
+    if args.sliding_window_size == 777:
+        args.sliding_window_size = args.model_context_length - args.sink_token_size - args.second_stage_k - args.block_size_q
 
     block_sparse_attention_backend = block_sparse_attention
 
