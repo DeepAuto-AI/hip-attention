@@ -16,49 +16,144 @@
 - 2024.10.05: Version 1.1 is now ready, check `ainl-hip-offload`. KV offloading feature in under alpha state.
 - 2024.09.09: Version 1.1 will be released soon. Please refer to the `ainl-hip-attention2` branch for a preview. It will reduce the latency further and improve the accuracy (and this will fix most of the internal bugs of v1.0). It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). As discussed in the Appendix, this release will actually have (hopefully) a KV offloading feature, either UVM or a custom cache management algorithm. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
 
-## Usage
+## Getting Started
+
+### Building from source
+
+```bash
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+
+conda create --name hip python=3.11
+conda activate hip
+
+pip install -e "."
+# Optional for development
+pip install -e ".[dev]"
+
+# Optional, depends on your CUDA environment
+export CUDACXX=/usr/local/cuda/bin/nvcc
+# Dependencies that requires --no-build-isolation
+pip install -e ".[no_build_iso]" \
+--no-build-isolation \
+--verbose
+# SGLang with OpenAI API support for serving
+pip install -e ".[sglang]" \
+--no-build-isolation \
+--verbose \
+--find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+```
+
+### Running
+
+- Single GPU
+  - 1M context length
+  - Without cache offloading
+  - Tested on a L40S
+
+```bash
+export SRT_PORT=9913
+export CUDA_VISIBLE_DEVICES=0
+export CONTEXT_LENGTH=1024000
+
+SRT_WARMUP_PASSKEY_LENGTH=1024 \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype auto \
+--tp-size 1 \
+--mem-fraction-static 0.8 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $CONTEXT_LENGTH \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96,24,8]}' \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-request 32 \
+--allow-auto-truncate
+```
+
+- Single GPU with larger context length and cache offloading
+  - 2M context length
+  - With cache offloading
+  - For cache offloading, KV cache type is `fp8_e5m2`
+  - Tested on a L40S
+
+```bash
+export SRT_PORT=9913
+export CUDA_VISIBLE_DEVICES=0
+export CONTEXT_LENGTH=2048000
+
+SRT_WARMUP_PASSKEY_LENGTH=1024 \
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+--served-model-name meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 1 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--disable-radix-cache \
+--cuda-graph-bs 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $CONTEXT_LENGTH \
+--max-running-requests 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 5000 \
+--hip-max-mask-cache-token-size 64000 \
+--allow-auto-truncate
+```
+
+- Multi GPU
+  - 2M context length
+  - With cache offloading
+  - For cache offloading, KV cache type is `fp8_e5m2`
+  - Testwd on 2x A100 40GB
+
+```bash
+export SRT_PORT=9913
+export CUDA_VISIBLE_DEVICES=0,1
+export CONTEXT_LENGTH=2048000
+
+SRT_WARMUP_PASSKEY_LENGTH=1024000 \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+--served-model-name meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 2 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--cuda-graph-bs 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $CONTEXT_LENGTH \
+--max-running-requests 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 8000 \
+--hip-max-mask-cache-token-size 128000
+```
+
+### Building Docker
+
+```bash
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+docker build -t hip-sglang:latest -f Dockerfile.sglang .
+```
+
+## Using HiP Attention as a library
 
 After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
-
-## TL;DR
-
-**We provide an OpenAI-compatible API server built with vLLM and HiP attention!** The only thing you need to integrate HiP is replacing the single line of the flash attention call.
-
-```diff
-- | from flash_attn import flash_attn_func
-- | context = flash_attn_func(q, k, v, sm_scale=1.0, is_causal=True)
-+ | from hip import hip_attention
-+ | context, metadata = hip_attention(q, k, v)
-```
-
-## SGlang
-
-```
-SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-POPULATION_FILE=none
-HIP_EXTEND_CONTEXT_LENGTH=131072
-HIP_REFRESH_INTERVAL=4
-SRT_DEBUG_DECODE_SPECIAL_TOKENS=1
-EXTEND_LEN=512 HIP_EXTEND=1
-HIP_DISABLE_AUTOTUNE=1
-SRT_ATTENTION_BACKEND=HIP_ATTN
-SRT_MAX_BATCH=8
-python -m sglang.launch_server \
-    --model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
-    --kv-cache-dtype auto \
-    --mem-fraction-static 0.6 \
-    --tp-size 1 \
-    --chunked-prefill-size 8192 \
-    --max-prefill-tokens 8192 \
-    --context-length 256000 \
-    --port 30000 \
-    --enable-p2p-check \
-    --disable-cuda-graph
-```
-
-The above command requires version 1.2. Set `HIP_EXTEND=0` to use version 1.1.
-
-## API
 
 ```py
 from torch import Tensor
@@ -115,145 +210,6 @@ OpenAI compatible API server with HiP.
 output, _ = paged_hip_attention(
     ...
 ) # type: Tuple[Tensor[N, TDST, H, HID], ...]
-```
-
-## How To Install
-
-### How to clone the repository
-
-```bash
-git clone {REPO URL}
-cd hip-attention
-```
-
-### Running Docker
-
-After building the container, run commands below (change `--gpus` and `--tensor-parallel-size` according to your environment):
-
-```bash
-docker run --runtime nvidia --rm -it --ipc=host \
-    --gpus '"device=0"' \
-    -p 8001:8001 \
-    -v ~/.cache/huggingface/:/root/.cache/huggingface \
-    -e 'ATTENTION_BACKEND=hip' \
-    -e 'HIP_K=512' \
-    -e 'HIP_REFRESH_INTERVAL=8' \
-    -e 'HIP_DENSE_LAYERS=4' \
-    hip/vllm-hip-openai:latest \
-        --port 8001 \
-        --model Qwen/Qwen2-1.5B-Instruct \
-        --tensor-parallel-size 1 \
-        --kv-cache-dtype fp8_e5m2 \
-        --dtype half \
-        --gpu-memory-utilization 0.50
-```
-
-### How to build Docker
-
-Run commands below:
-
-```bash
-git clone git@github.com:DeepAuto-AI/hip-attention.git
-cd hip-attention
-docker build -t hip-sglang:latest -f Dockerfile.sglang .
-```
-
-### Setup without docker
-
-```bash
-git clone git@github.com:DeepAuto-AI/hip-attention.git
-cd hip-attention
-
-conda create --name hip python=3.11
-conda activate hip
-
-pip install -e "."
-# Optional for development
-pip install -e ".[dev]"
-
-# Optional, depends on your CUDA environment
-export CUDACXX=/usr/local/cuda/bin/nvcc
-# Dependencies that requires --no-build-isolation
-pip install -e ".[no_build_iso]" \
---no-build-isolation \
---verbose
-# SGLang with OpenAI API support for serving
-pip install -e ".[sglang]" \
---no-build-isolation \
---verbose \
---find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
-```
-
-### Running without docker
-
-- Without offloading
-
-```bash
-export SRT_PORT=8913
-export CUDA_VISIBLE_DEVICES=0
-
-SRT_WARMUP_PASSKEY_LENGTH=1024 \
-python -m sglang.launch_server \
---host 0.0.0.0 \
---port $SRT_PORT \
---model-path meta-llama/Llama-3.1-8B-Instruct \
---kv-cache-dtype auto \
---tp-size 1 \
---chunked-prefill-size 32768 \
---max-prefill-tokens 32768 \
---stream-interval 1 \
---context-length 1048576 \
---enable-hip-attention \
---hip-attention-config '{"mask_refresh_interval": [96,24,8]}' \
---mem-fraction-static 0.8 \
---cuda-graph-bs 1 2 4 8 16 24 32 \
---max-running-request 32 \
---allow-auto-truncate
-```
-
-- With offloading
-
-```bash
-export SRT_PORT=8913
-export CUDA_VISIBLE_DEVICES=0
-
-SRT_WARMUP_PASSKEY_LENGTH=1024 \
-PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-python -m sglang.launch_server \
---host 0.0.0.0 \
---port $SRT_PORT \
---model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
---served-model-name meta-llama/Llama-3.1-8B-Instruct \
---kv-cache-dtype fp8_e5m2 \
---tp-size 1 \
---chunked-prefill-size 32768 \
---max-prefill-tokens 32768 \
---disable-radix-cache \
---cuda-graph-bs 1 \
---context-length 1048576 \
---max-total-tokens 1048576 \
---max-running-requests 1 \
---enable-hip-attention \
---hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
---enable-hip-offload \
---hip-max-sa-cache-token-size 5000 \
---hip-max-mask-cache-token-size 64000 \
---allow-auto-truncate
-```
-
-### vllm + Qwen's Dynamic-NTK
-
-add the following content in Qwen's `config.json`.
-
-- `seq_length` is the threshold for activating NTK, default 8192 (the same as Qwen).
-- `factor` does not affect the logic of dynamic-ntk. It is used by vllm to calculate the maximum input length for model. If it is set to 1, warnings will occur if input is longer than 8192. Setting to 4 may be enough.
-
-```
-"rope_scaling": {
-    "type": "dynamic-qwen",
-    "seq_length": 8192,
-    "factor": 4.0
-}
 ```
 
 ## Experiments Reproduce
