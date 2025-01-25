@@ -1,4 +1,5 @@
 # Please update sglang version to the latest commit hash.
-sglang[all] @ git+https://github.com/DeepAuto-AI/sglang@a917567874ca4b1ccc70c29d37d4256b149f3822#subdirectory=python
+# See https://github.com/DeepAuto-AI/sglang to track commit hash.
+sglang[all] @ git+https://github.com/DeepAuto-AI/sglang@cb2d74ed45ad2030eb75d223682c096cca7a473d#subdirectory=python
 vllm==0.6.4.post1
 flashinfer
