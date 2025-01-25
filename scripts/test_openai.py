@@ -1,3 +1,15 @@
+import json
+import time
+
+import os
+
+import requests
+
+port = os.getenv('SRT_PORT', '8913')
+
+url = 'http://localhost:{port}/v1'
+
+
 PROMPT = r"""
 Here, I found the code from `HiP Attention: Sparse Sub-quadratic Attention using Hierarchical Pruned Attention`.
 
@@ -1797,12 +1809,6 @@ Now, Let's start.
 First, please summarize the previous provided code!
 """
 
-import json
-import time
-
-import requests
-url = 'http://localhost:8021/v1'
-
 def run():
     prompt = PROMPT[:]
     # prompt = ''.join(filter(str.isalpha, PROMPT))
@@ -1811,7 +1817,7 @@ def run():
         {"role": "system", "content": "You are a helpful assistant"},
         {"role": "user", "content": prompt},
     ]
-    model = 'DeepAuto/Meta-Llama-3.1-8B-Instruct-AWQ-INT4-HiP'
+    model = 'meta-llama/Llama-3.1-8B-Instruct'
     body = {
         "model": model,
         "messages": message,
@@ -1870,7 +1876,7 @@ def run():
                     error_msg = data["error"]["message"]
                     error_response_code = data["error"]["code"]
                     raise RuntimeError(data["error"]["message"])
-                    
+
                 delta = data["choices"][0]["delta"]
                 if delta.get("content", None):
                     if not ttft:
