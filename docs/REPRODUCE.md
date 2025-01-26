@@ -1,6 +1,6 @@
 # How to reproduce
 
-## v1.2.0 (Gen3; Codename: InfiniteHiP; ICML2025 submitted version)
+## v1.2.0 (Gen3; Codename: InfiniteHiP; Under review version)
 
 Following experiment commands are should be done after install `hip` and `sglang`.
 
