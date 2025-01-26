@@ -55,15 +55,18 @@ def render_plot(
 
 @numba.njit(parallel=True)
 def render_plot_dynamic(
-    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size, causal_mask=False,
+    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size, causal_mask=False, sliding_window_size=0,
 ):
     for i in numba.prange(out_indices_cpu.shape[1]):
         for j in range(math.ceil(stage_k / chunk_size)):
             if j >= out_indices_cpu.shape[-1]: continue
             t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
-            if causal_mask and (t >= i):
+            if causal_mask and ((t + sliding_window_size // BLOCK_SIZE_Q) >= i):
                 continue
-            debug[i, t:t+math.ceil(chunk_size / BLOCK_SIZE_Q)] = 1
+            tt = t+math.ceil(chunk_size / BLOCK_SIZE_Q)
+            if causal_mask:
+                tt = min(tt, i+1)
+            debug[i, t:tt] = 1
 
 @numba.njit(parallel=True)
 def render_plot_sampled(
@@ -2055,7 +2058,7 @@ def dual_stage_quadratic_hip_attention(
                     next_stage_k = args.second_stage_k
                 out_indices_cpu = indices_left.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size, causal_mask=True)
+                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size, causal_mask=True, sliding_window_size=args.sliding_window_size)
                 cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
                 print(f'saved dummy_sampled_stage_{i_stage}.png')
         
