@@ -3,7 +3,7 @@
   <img src="docs/demo_vllm.gif" width="49%" />
 </p>
 
-:sunglasses: **HiP Attention** could extend the model context length in a training-free manner and can server 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
+:sunglasses: **HiP Attention** could extend the model context length in a training-free manner and can serve 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
 
 | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
