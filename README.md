@@ -5,7 +5,7 @@
 
 :sunglasses: **HiP Attention** could extend the model context length in a training-free manner and can server 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
 
-| [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
+| [**Paper (Arxiv, latest)**](https://arxiv.org/abs/2406.09827) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
 > You can try it in our [Liteai.io LLMOps](https://www.deepauto.ai/litellmops) platform!
@@ -16,6 +16,7 @@
 ## News
 
 - 2025.01.26: Version 1.2 is now ready! Check the [preprint](TODO) for details.
+- 2025.01.22: HiP Attention is **accepted in ICLR 2025**!
 <details>
 <summary>... More News ...</summary>
 
