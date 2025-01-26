@@ -15,7 +15,7 @@
 
 ## News
 
-- 2025.01.26: Version 1.2 is now ready! Check the [preprint](TODO) for details.
+- 2025.01.26: Version 1.2 is now ready! The preprint will be relased soon.
 - 2025.01.22: HiP Attention is **accepted in ICLR 2025**!
 <details>
 <summary>... More News ...</summary>
