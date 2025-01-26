@@ -42,15 +42,15 @@ from hip.models.attention \
 from hip.models.modeling_llama \
     import LlamaForCausalLM as HipLlamaForCausalLM
 
-# NOTE: V1.1 is used for main API (for temporary)
-hip_attention = hip_attention_11
-paged_hip_attention = paged_hip_attention_11
-varlen_hip_attention = varlen_hip_attention_11
-paged_varlen_hip_attention = paged_varlen_hip_attention_11
-HiPAttentionArgs = HiPAttentionArgs11
-HiPAttentionOutputMetadata = HiPAttentionOutputMetadata11
+hip_attention = hip_attention_12
+# NOTE: paged attention API is merged into hip_attention funciton
+# paged_hip_attention = paged_hip_attention_11
+# varlen_hip_attention = varlen_hip_attention_11
+# paged_varlen_hip_attention = paged_varlen_hip_attention_11
+HiPAttentionArgs = HiPAttentionArgs12
+HiPAttentionOutputMetadata = HiPAttentionOutputMetadata12
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 __all__ = [
     # version 1.0
