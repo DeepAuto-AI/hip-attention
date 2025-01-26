@@ -1,8 +1,11 @@
-![demo gif](docs/demo.gif)
+:sunglasses: **HiP Attention** :sunglasses: could extend the model context length in a training-free manner and can server 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
 
-| [**Demo**](docs/demo.mp4) | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) | [**vLLM Integration (Deprecated)**](https://github.com/DeepAuto-AI/vllm) |
+<p float="center">
+  <img src="docs/demo_infinite.gif" width="49%" />
+  <img src="docs/demo_vllm.gif" width="49%" />
+</p>
 
-**HiP Attention** reduces the computational cost of quadratic attention, such as Flash Attention, into sub-quadratic `O(T log T)` in a plug-and-play manner while maintaining original performance using hierarchically pruned sparse attention. We are aiming to support future researchers while maintaining practical efficiency with this project.
+| [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
 > You can try it in our [Liteai.io LLMOps](https://www.deepauto.ai/litellmops) platform!
@@ -12,13 +15,54 @@
 
 ## News
 
-- 2025.01.03: Version 1.2 will be released soon. The new version fully supports context extension and better controls pruning hierarchy. It will also have better SGlang support (with proper KV offloading!, [working preview](https://github.com/gmlwns2000/sglang-hip12)).
+- 2025.01.26: Version 1.2 is now ready! Check the [preprint](TODO) for details.
+<details>
+<summary>... More News ...</summary>
+
+- 2025.01.03: Version 1.2 will be released soon. The new version fully supports context extension and better controls pruning hierarchy. It will also have better SGlang support (with proper KV offloading!)
 - 2024.10.05: Version 1.1 is now ready, check `ainl-hip-offload`. KV offloading feature in under alpha state.
 - 2024.09.09: Version 1.1 will be released soon. Please refer to the `ainl-hip-attention2` branch for a preview. It will reduce the latency further and improve the accuracy (and this will fix most of the internal bugs of v1.0). It offers many more experimental options for further research (e.g., key access logs, modular design of masking kernel). As discussed in the Appendix, this release will actually have (hopefully) a KV offloading feature, either UVM or a custom cache management algorithm. Also, SGLang will be supported by this release. Please take a look at our company's fork for a preview.
+</details>
+
+## Usage
+
+After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
+
+```py
+import torch
+from hip import hip_attention_12, HiPAttentionArgs12
+
+device = 'cuda'
+
+batch_size = 1
+kv_len = 128 * 1024
+q_len = 32 * 1024
+num_heads = 32
+num_kv_heads = 8
+head_dims = 128
+dtype = torch.bfloat16
+
+q = torch.randn(
+    (batch_size, q_len, num_heads, head_dims), 
+    dtype=dtype, 
+    device=device
+)
+k = torch.randn(
+    (batch_size, kv_len, num_kv_heads, head_dims),
+    dtype=dtype,
+    device=device,
+)
+v = k.clone()
+
+output, metadata = hip_attention_12(q=q, k=k, v=v, args=HiPAttentionArgs12())
+print(output.shape)
+
+# > torch.Size([1, 32768, 32, 128])
+```
 
 ## Getting Started
 
-### Building from source
+### Building from source (Recommanded)
 
 ```bash
 git clone git@github.com:DeepAuto-AI/hip-attention.git
@@ -107,8 +151,7 @@ python -m sglang.launch_server \
 --hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
 --hip-max-sa-cache-token-size 5000 \
---hip-max-mask-cache-token-size 64000 \
---allow-auto-truncate
+--hip-max-mask-cache-token-size 64000
 ```
 
 - Multi GPU
@@ -157,67 +200,6 @@ SRT_PORT=9913 python scripts/test_openai_long.py
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 docker build -t hip-sglang:latest -f Dockerfile.sglang .
-```
-
-## Using HiP Attention as a library
-
-After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
-
-```py
-from torch import Tensor
-from typing import Tuple
-from hip import (
-    hip_attention,
-    HiPAttentionArgs,
-    HiPAttentionOutputMetadata
-)
-
-# NOTE: **you have to scale the Q before pass to our kernel**
-scale = 1 / (HID ** 0.5)
-
-"""
-- q: Tensor[N, TDST, H, HID]
-- k: Tensor[N, TSRC, H, HID]
-- v: Tensor[N, TSRC, H, HID]
-    query, key, value of attention mechanism.
-
-- mask_k: int,
-    same as $k$ in the paper
-- block_size_q: int,
-    same as $b_q$ in the paper.
-- block_stride_q: int,
-    same as $b_{sq}$ in the paper.
-- block_size_k: int,
-    same as $b_k$ in the paper.
-- block_stride_k: int,
-    same as $b_{sk}$ in the paper.
-
-... Please refer HiPAttentionArgs for more details ...
-"""
-
-output, _ = hip_attention(
-    q=q * scale, # NOTE: **IMPORTANT** You have to scale Q before attention, because we did not implement softmax scaler...
-    k=k,
-    v=v,
-    mask_k=512,
-    block_size_q=64,
-    block_stride_q=2,
-    block_size_k=2,
-    block_stride_k=1,
-) # type: Tuple[Tensor[N, TDST, HEAD, HID], HiPAttentionMetadata]
-
-from hip import hip_attention, paged_hip_attention
-
-"""
-Paged Attention Supported HiP Attention
-
-This function is already integrated with in provided vLLM patches.
-Please look following sections, to utilize the paged attention and
-OpenAI compatible API server with HiP.
-"""
-output, _ = paged_hip_attention(
-    ...
-) # type: Tuple[Tensor[N, TDST, H, HID], ...]
 ```
 
 ## Experiment Reproduce
