@@ -99,9 +99,7 @@ class HiPMetadataCachePool:
                     self.init_buffer(
                         layer_idx,
                         f"stage_{i_stage}_indices_left",
-                        [
-                            chunk_count,
-                        ],
+                        [chunk_count],
                         torch.int64,
                         "B,1,H",
                         torch.uint32,
@@ -109,9 +107,7 @@ class HiPMetadataCachePool:
                     self.init_buffer(
                         layer_idx,
                         f"stage_{i_stage}_indices_right",
-                        [
-                            chunk_count,
-                        ],
+                        [chunk_count],
                         torch.int64,
                         "B,1,H",
                         torch.uint32,
@@ -119,9 +115,7 @@ class HiPMetadataCachePool:
                     self.init_buffer(
                         layer_idx,
                         f"stage_{i_stage}_out_scores",
-                        [
-                            chunk_count,
-                        ],
+                        [chunk_count],
                         torch.float32,
                         "B,1,H",
                         torch.bfloat16,
