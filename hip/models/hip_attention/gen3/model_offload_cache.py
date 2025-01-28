@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 
 from hip.models.hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
-from hip.models.hip_attention.gen3 import HiPAttentionConfig
+from hip.models.hip_attention.gen3.hip_config import HiPAttentionConfig
 
 logger = logging.getLogger(__name__)
 
