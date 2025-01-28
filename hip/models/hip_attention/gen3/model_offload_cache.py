@@ -130,6 +130,9 @@ class HiPModelOffloadCache:
         else:
             self.validation_cache = None
 
+    def is_online_cache_update_enabled(self):
+        return self.online_update_cache
+
     def get_kv_buffer(
         self,
         layer_id: int,
