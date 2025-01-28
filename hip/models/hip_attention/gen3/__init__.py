@@ -1,6 +1,6 @@
 import os
 import torch
-from typing import Optional
+from typing import Optional, Any
 
 from hip.models.hip_attention.gen3.attention_metadata import HiPAttentionOutputMetadata
 from hip.models.hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
@@ -12,6 +12,282 @@ from hip.models.hip_attention.gen3.attention_metadata import HiPAttentionArgs
 
 
 def forward_paged_hip(
+    query: torch.Tensor,
+    sm_scale: float,
+    batch_size: int,
+    k_cache: Optional[torch.Tensor],
+    v_cache: Optional[torch.Tensor],
+    offload_cache: Optional[HiPOffloadCache],
+    positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    req_to_tokens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    rope_cos: Optional[torch.Tensor],
+    rope_sin: Optional[torch.Tensor],
+    layer_id: int,
+    logit_cap: float,
+    orig_context_len: int,
+    max_context_len: int,
+    is_prefill: bool,
+    hip_config: HiPAttentionConfig,
+    cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
+    k: Optional[torch.Tensor] = None,
+    v: Optional[torch.Tensor] = None,
+    online_update_cache: bool = False,
+    offloading_metadata: Any = None,
+) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
+
+    if k is not None:
+        # BUG: this padding is neccesary to match non offload scenario. why?
+        pad_size = max_context_len
+        if k.shape[1] != pad_size:
+            k_chunk_padded = torch.zeros(
+                (
+                    k.shape[0],
+                    pad_size,
+                    k.shape[2],
+                    k.shape[3],
+                ),
+                dtype=k.dtype,
+                device=k.device,
+            )
+            k_chunk_padded[:, : k.shape[1]] = k
+            del k
+            v_chunk_padded = torch.zeros(
+                (
+                    v.shape[0],
+                    pad_size,
+                    v.shape[2],
+                    v.shape[3],
+                ),
+                dtype=v.dtype,
+                device=v.device,
+            )
+            v_chunk_padded[:, : v.shape[1]] = v
+            del v
+            k = k_chunk_padded
+            v = v_chunk_padded
+
+    require_validation = offloading_metadata is not None
+    if require_validation:
+        if is_prefill:
+            k_pages, v_pages = offloading_metadata
+        else:
+            k_cache_valid, v_cache_valid = offloading_metadata
+
+            err_k = sse(offload_cache.k_uvm.bank_gpu, k_cache_valid)
+            err_v = sse(offload_cache.v_uvm.bank_gpu, v_cache_valid)
+
+    o, metadata_new = _forward_paged_hip(
+        query=query,
+        sm_scale=sm_scale,
+        batch_size=batch_size,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        offload_cache=offload_cache,
+        positions=positions,
+        seq_lens=seq_lens,
+        req_to_tokens=req_to_tokens,
+        req_pool_indices=req_pool_indices,
+        rope_cos=rope_cos,
+        rope_sin=rope_sin,
+        layer_id=layer_id,
+        logit_cap=logit_cap,
+        orig_context_len=orig_context_len,
+        max_context_len=max_context_len,
+        hip_config=hip_config,
+        cached_metadata=cached_metadata,
+        k=k,
+        v=v,
+        online_update_cache=online_update_cache,
+    )
+
+    if require_validation:
+        if is_prefill:
+            o_req_valid, _ = _forward_paged_hip(
+                query=query,
+                sm_scale=sm_scale,
+                batch_size=batch_size,
+                k_cache=k_pages,
+                v_cache=v_pages,
+                offload_cache=offload_cache,
+                positions=positions,
+                seq_lens=seq_lens,
+                req_to_tokens=req_to_tokens,
+                req_pool_indices=req_pool_indices,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                layer_id=layer_id,
+                logit_cap=logit_cap,
+                orig_context_len=orig_context_len,
+                max_context_len=max_context_len,
+                hip_config=hip_config,
+                cached_metadata=cached_metadata,
+                k=k,
+                v=v,
+                online_update_cache=online_update_cache,
+            )
+
+            o_err = ((o - o_req_valid) ** 2).sum()
+            assert o_err < 1e-6, o_err
+
+        else:
+            o_valid, metadata_valid = _forward_paged_hip(
+                query=query,
+                sm_scale=sm_scale,
+                batch_size=batch_size,
+                k_cache=k_cache_valid,
+                v_cache=v_cache_valid,
+                offload_cache=None,
+                positions=positions,
+                seq_lens=seq_lens,
+                req_to_tokens=req_to_tokens,
+                req_pool_indices=req_pool_indices,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                layer_id=layer_id,
+                logit_cap=logit_cap,
+                orig_context_len=orig_context_len,
+                max_context_len=max_context_len,
+                hip_config=hip_config,
+                cached_metadata=cached_metadata,
+                k=k,
+                v=v,
+                online_update_cache=online_update_cache,
+            )
+
+            err_thresh = 1e-7
+
+            o_sse = sse(o, o_valid)
+            err_retry = -1
+            err_uvm = None
+            if o_sse >= err_thresh:
+                indices_err = sse(metadata_new.indices, metadata_valid.indices)
+                ks_err = sse(metadata_new.ks, metadata_valid.ks)
+                ks_count_err = sse(metadata_new.ks_count, metadata_valid.ks_count)
+                ks_start_end_err = sse(
+                    metadata_new.ks_start_end, metadata_valid.ks_start_end
+                )
+                if (metadata_valid.stage_caches is not None) and (
+                        len(metadata_valid.stage_caches) > 0
+                ):
+                    stage1_left_err = sse(
+                        metadata_new.stage_caches[1].indices_left,
+                        metadata_valid.stage_caches[1].indices_left,
+                    )
+                    stage1_right_err = sse(
+                        metadata_new.stage_caches[1].indices_right,
+                        metadata_valid.stage_caches[1].indices_right,
+                    )
+                    stage1_score_err = sse(
+                        metadata_new.stage_caches[1].out_scores,
+                        metadata_valid.stage_caches[1].out_scores,
+                    )
+                    stage2_left_err = sse(
+                        metadata_new.stage_caches[2].indices_left,
+                        metadata_valid.stage_caches[2].indices_left,
+                    )
+                    stage2_right_err = sse(
+                        metadata_new.stage_caches[2].indices_right,
+                        metadata_valid.stage_caches[2].indices_right,
+                    )
+                    stage2_score_err = sse(
+                        metadata_new.stage_caches[2].out_scores,
+                        metadata_valid.stage_caches[2].out_scores,
+                    )
+                else:
+                    stage1_left_err = stage1_right_err = stage1_score_err = (
+                        stage2_left_err
+                    ) = stage2_right_err = stage2_score_err = None
+
+                o_uvm, metadata_uvm = _forward_paged_hip(
+                    query=query,
+                    sm_scale=sm_scale,
+                    batch_size=batch_size,
+                    k_cache=offload_cache.k_uvm.bank_gpu,
+                    v_cache=offload_cache.v_uvm.bank_gpu,
+                    offload_cache=None,
+                    positions=positions,
+                    seq_lens=seq_lens,
+                    req_to_tokens=req_to_tokens,
+                    req_pool_indices=req_pool_indices,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    layer_id=layer_id,
+                    logit_cap=logit_cap,
+                    orig_context_len=orig_context_len,
+                    max_context_len=max_context_len,
+                    hip_config=hip_config,
+                    cached_metadata=cached_metadata,
+                    k=k,
+                    v=v,
+                    online_update_cache=online_update_cache,
+                )
+
+                offload_cache.sa_kv_cache.flush()
+                offload_cache.mask_k_cache.flush()
+
+                o_retry, metadata_retry = _forward_paged_hip(
+                    query=query,
+                    sm_scale=sm_scale,
+                    batch_size=batch_size,
+                    k_cache=None,
+                    v_cache=None,
+                    offload_cache=offload_cache,
+                    positions=positions,
+                    seq_lens=seq_lens,
+                    req_to_tokens=req_to_tokens,
+                    req_pool_indices=req_pool_indices,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    layer_id=layer_id,
+                    logit_cap=logit_cap,
+                    orig_context_len=orig_context_len,
+                    max_context_len=max_context_len,
+                    hip_config=hip_config,
+                    cached_metadata=cached_metadata,
+                    k=k,
+                    v=v,
+                    online_update_cache=online_update_cache,
+                )
+                err_uvm = sse(o, o_uvm)
+                err_retry = sse(o_valid, o_retry)
+
+                print(o)
+                print(o_valid)
+                print(metadata_new.indices)
+                print(metadata_valid.indices)
+
+                assert (
+                    o_sse < err_thresh
+                ), (
+                    f"sse={o_sse}\n"
+                    f"err_k (uvm_k <=> valid_k) = {err_k}\n"
+                    f"err_v (uvm_v <=> valid_v) = {err_v}\n"
+                    f"err_retry (o_valid <=> o_retry) = {err_retry}\n"
+                    f"err_uvm (o_first <=> o_uvm_retry) = {err_uvm}\n"
+                    f"indices_err={indices_err}\n"
+                    f"ks_err={ks_err}\n"
+                    f"ks_count_err={ks_count_err}\n"
+                    f"ks_start_end_err={ks_start_end_err}\n"
+                    f"stage1_left_err={stage1_left_err}\n"
+                    f"stage1_right_err={stage1_right_err}\n"
+                    f"stage1_score_err={stage1_score_err}\n"
+                    f"stage2_left_err={stage2_left_err}\n"
+                    f"stage2_right_err={stage2_right_err}\n"
+                    f"stage2_score_err={stage2_score_err}\n"
+                    f"online_update={online_update_cache}\n"
+                )
+
+    return o, metadata_new
+
+
+def sse(a: torch.Tensor, b: torch.Tensor):
+    assert a.dtype == b.dtype
+    return ((a - b) ** 2).sum().item()
+
+
+def _forward_paged_hip(
     query: torch.Tensor,
     sm_scale: float,
     batch_size: int,
