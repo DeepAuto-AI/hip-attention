@@ -41,7 +41,12 @@ from hip.models.hip_attention.gen3.attention_metadata import (
 )
 import numba.cuda
 
-NUM_STREAMING_MULTIPROCESSOR = numba.cuda.get_current_device().MULTIPROCESSOR_COUNT
+_NUM_STREAMING_MULTIPROCESSOR = None
+def num_streaming_multiprocessor():
+    global _NUM_STREAMING_MULTIPROCESSOR
+    if _NUM_STREAMING_MULTIPROCESSOR is None:
+        _NUM_STREAMING_MULTIPROCESSOR = numba.cuda.get_current_device().MULTIPROCESSOR_COUNT
+    return _NUM_STREAMING_MULTIPROCESSOR
 
 @numba.njit(parallel=True)
 def render_plot(
@@ -1853,7 +1858,7 @@ def dual_stage_quadratic_hip_attention(
                         triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE) *\
                         HEAD
                     )
-                    sm_count = NUM_STREAMING_MULTIPROCESSOR
+                    sm_count = num_streaming_multiprocessor()
                     group_jobs = triton.cdiv(njobs, sm_count)
                     grid = (min(sm_count, njobs),)
                 # if args.offload_cache is not None:
