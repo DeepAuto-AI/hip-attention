@@ -2,15 +2,61 @@
 
 - [Running HiP Attention with SGLang OpenAI server](#running-hip-attention-with-sglang-openai-server)
   - [`meta-llama/Llama-3.1-8B-Instruct`](#meta-llamallama-31-8b-instruct)
-    - [Multi GPU](#multi-gpu)
+    - [Single GPU](#single-gpu)
       - [Local](#local)
+    - [Multi GPU](#multi-gpu)
+      - [Local](#local-1)
       - [Docker](#docker)
   - [`deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`](#deepseek-aideepseek-r1-distill-qwen-14b)
-    - [Single GPU](#single-gpu)
-      - [Local](#local-1)
+    - [Single GPU](#single-gpu-1)
+      - [Local](#local-2)
       - [Docker](#docker-1)
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
+
+### Single GPU
+
+#### Local
+
+- 2M context length
+- Cache offloading enabled
+- For cache offloading, KV cache type is `fp8_e5m2`
+- Tested model: `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`
+- Testwd GPU: 1x L40S 48GB
+- Tested at: 2025-01-29
+- Tested version:
+  - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
+  - `sglang`: `0005b7e1e2523e7ed40a5f6a43a62e2306e95c55`
+
+```bash
+export SRT_PORT=9913
+export CONTEXT_LENGTH=2048000
+export DOCKER_NAME="meta-llama-llama-3-1-8b-instruct"
+export SRT_MODEL_PATH="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
+export SRT_SERVED_MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+
+SRT_WARMUP_PASSKEY_LENGTH=1024000 \
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+--served-model-name meta-llama/Llama-3.1-8B-Instruct \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 1 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--cuda-graph-bs 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $CONTEXT_LENGTH \
+--max-running-requests 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 5000 \
+--hip-max-mask-cache-token-size 64000
+```
 
 ### Multi GPU
 
@@ -18,7 +64,7 @@
 - With cache offloading
 - For cache offloading, KV cache type is `fp8_e5m2`
 - Tested model: `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`
-- Testwd on 2x A100 40GB
+- Testwd GPU: 2x A100 40GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
@@ -98,7 +144,7 @@ python3 \
 - 2M context length
 - Cache offloading enabled
 - Tested model: `neody/r1-14b-awq`
-- Testwd on 1x L40S 48GB
+- Testwd GPU: 1x L40S 48GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`

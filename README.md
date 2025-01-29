@@ -121,39 +121,6 @@ python -m sglang.launch_server \
 --allow-auto-truncate
 ```
 
-- Single GPU with larger context length and cache offloading
-  - 2M context length
-  - With cache offloading
-  - For cache offloading, KV cache type is `fp8_e5m2`
-  - Tested on a L40S
-
-```bash
-export SRT_PORT=9913
-export CUDA_VISIBLE_DEVICES=0
-export CONTEXT_LENGTH=2048000
-
-SRT_WARMUP_PASSKEY_LENGTH=1024 \
-PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-python -m sglang.launch_server \
---host 0.0.0.0 \
---port $SRT_PORT \
---model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
---served-model-name meta-llama/Llama-3.1-8B-Instruct \
---kv-cache-dtype fp8_e5m2 \
---tp-size 1 \
---chunked-prefill-size 32768 \
---max-prefill-tokens 32768 \
---cuda-graph-bs 1 \
---context-length $CONTEXT_LENGTH \
---max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 1 \
---enable-hip-attention \
---hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
---enable-hip-offload \
---hip-max-sa-cache-token-size 5000 \
---hip-max-mask-cache-token-size 64000
-```
-
 ### Testing OpenAI API
 
 ```bash
