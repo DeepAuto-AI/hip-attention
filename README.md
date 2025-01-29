@@ -91,35 +91,9 @@ pip install -e ".[sglang]" \
 
 ### Running
 
-- Single GPU
-  - 1M context length
-  - Without cache offloading
-  - Tested on a L40S
+See the following pages for more details:
 
-```bash
-export SRT_PORT=9913
-export CUDA_VISIBLE_DEVICES=0
-export CONTEXT_LENGTH=1024000
-
-SRT_WARMUP_PASSKEY_LENGTH=1024 \
-python -m sglang.launch_server \
---host 0.0.0.0 \
---port $SRT_PORT \
---model-path meta-llama/Llama-3.1-8B-Instruct \
---kv-cache-dtype auto \
---tp-size 1 \
---mem-fraction-static 0.8 \
---chunked-prefill-size 32768 \
---max-prefill-tokens 32768 \
---stream-interval 1 \
---context-length $CONTEXT_LENGTH \
---max-total-tokens $CONTEXT_LENGTH \
---enable-hip-attention \
---hip-attention-config '{"mask_refresh_interval": [96,24,8]}' \
---cuda-graph-bs 1 2 4 8 16 24 32 \
---max-running-request 32 \
---allow-auto-truncate
-```
+- [Running OpenAI API server examples (SGlang)](docs/USAGE.sglang.md)
 
 ### Testing OpenAI API
 

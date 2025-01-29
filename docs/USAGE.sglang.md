@@ -2,21 +2,21 @@
 
 - [Running HiP Attention with SGLang OpenAI server](#running-hip-attention-with-sglang-openai-server)
   - [`meta-llama/Llama-3.1-8B-Instruct`](#meta-llamallama-31-8b-instruct)
-    - [Single GPU](#single-gpu)
+    - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading)
       - [Local](#local)
-    - [Multi GPU](#multi-gpu)
+    - [Single GPU (WITHOUT cache offloading)](#single-gpu-without-cache-offloading)
       - [Local](#local-1)
+    - [Multi GPU (with cache offloading)](#multi-gpu-with-cache-offloading)
+      - [Local](#local-2)
       - [Docker](#docker)
   - [`deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`](#deepseek-aideepseek-r1-distill-qwen-14b)
-    - [Single GPU](#single-gpu-1)
-      - [Local](#local-2)
+    - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading-1)
+      - [Local](#local-3)
       - [Docker](#docker-1)
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
 
-### Single GPU
-
-#### Local
+### Single GPU (with cache offloading)
 
 - 2M context length
 - Cache offloading enabled
@@ -27,6 +27,8 @@
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
   - `sglang`: `0005b7e1e2523e7ed40a5f6a43a62e2306e95c55`
+
+#### Local
 
 ```bash
 export SRT_PORT=9913
@@ -41,8 +43,8 @@ PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 python -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
---model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
---served-model-name meta-llama/Llama-3.1-8B-Instruct \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
 --kv-cache-dtype fp8_e5m2 \
 --tp-size 1 \
 --chunked-prefill-size 32768 \
@@ -58,7 +60,49 @@ python -m sglang.launch_server \
 --hip-max-mask-cache-token-size 64000
 ```
 
-### Multi GPU
+### Single GPU (WITHOUT cache offloading)
+
+- 2M context length
+- Cache offloading disabled
+- Tested model: `meta-llama/Llama-3.1-8B-Instruct`
+- Testwd GPU: 1x L40S 48GB
+- Tested at: 2025-01-29
+- Tested version:
+  - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
+  - `sglang`: `0005b7e1e2523e7ed40a5f6a43a62e2306e95c55`
+
+#### Local
+
+```bash
+export SRT_PORT=9913
+export CONTEXT_LENGTH=1024000
+export DOCKER_NAME="meta-llama-llama-3-1-8b-instruct"
+export SRT_MODEL_PATH="meta-llama/Llama-3.1-8B-Instruct"
+export SRT_SERVED_MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+
+SRT_WARMUP_PASSKEY_LENGTH=1024000 \
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+python -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
+--kv-cache-dtype auto \
+--tp-size 1 \
+--mem-fraction-static 0.8 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $CONTEXT_LENGTH \
+--max-running-request 32 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--allow-auto-truncate
+```
+
+### Multi GPU (with cache offloading)
 
 - 2M context length
 - With cache offloading
@@ -139,7 +183,7 @@ python3 \
 
 ## `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`
 
-### Single GPU
+### Single GPU (with cache offloading)
 
 - 2M context length
 - Cache offloading enabled
