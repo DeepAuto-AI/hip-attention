@@ -30,6 +30,11 @@ class CachedBuffer:
             raise Exception()
 
     def set(self, value: torch.Tensor):
+        if self.buffer.shape[0] < value.shape[0]:
+            raise ValueError(
+                f"Buffer size {self.buffer.shape[0]} is smaller than value size {value.shape[0]}.\n"
+                f"Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{\"metadata_cache_max_batch_size\"}}."
+            )
         if self.batch_format == "BH":
             self.buffer[: value.shape[0]].copy_(value.to(self.buffer.dtype))
         elif self.batch_format == "B,1,H":
