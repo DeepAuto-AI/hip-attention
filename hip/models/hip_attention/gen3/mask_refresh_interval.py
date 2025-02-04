@@ -2,17 +2,18 @@ from hip.models.hip_attention.gen3.hip_config import HiPAttentionConfig
 
 
 class HiPMaskRefreshState:
-    def __init__(self):
+    def __init__(self, hip_config: HiPAttentionConfig):
+        self.hip_config = hip_config
         self.decode_index = 0
 
-    def update(self, is_decode, is_extend, hip_config: HiPAttentionConfig):
+    def update(self, is_decode, is_extend):
         metadata_cached_stages = None
 
         if is_decode:
-            if hip_config.mask_refresh_interval is not None:
+            if self.hip_config.mask_refresh_interval is not None:
                 require_refresh = False
 
-                for i_stage, refresh_inteval in enumerate(hip_config.mask_refresh_interval):
+                for i_stage, refresh_inteval in enumerate(self.hip_config.mask_refresh_interval):
                     if self.decode_index % refresh_inteval == 0 and not require_refresh:
                         metadata_cached_stages = i_stage
                         require_refresh = True
