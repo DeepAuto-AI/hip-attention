@@ -1702,7 +1702,7 @@ def dual_stage_quadratic_hip_attention(
         mask_access_counter = None
     
     stage_caches = [] if (cached_metadata is None) or (cached_metadata.stage_caches is None) else cached_metadata.stage_caches
-    
+
     if (cached_metadata is None) or (cached_metadata.indices is None):
         # loop carrying variables: indices_left, indices_right, out_scores
         if (cached_metadata is None) or (cached_metadata.stage_caches is None):

@@ -6,24 +6,20 @@ class HiPMaskRefreshState:
         self.hip_config = hip_config
         self.decode_index = 0
 
-    def update(self, is_decode, is_extend):
+    def update(self):
         metadata_cached_stages = None
 
-        if is_decode:
-            if self.hip_config.mask_refresh_interval is not None:
-                require_refresh = False
+        if self.hip_config.mask_refresh_interval is not None:
+            require_refresh = False
 
-                for i_stage, refresh_inteval in enumerate(self.hip_config.mask_refresh_interval):
-                    if self.decode_index % refresh_inteval == 0 and not require_refresh:
-                        metadata_cached_stages = i_stage
-                        require_refresh = True
+            for i_stage, refresh_inteval in enumerate(self.hip_config.mask_refresh_interval):
+                if self.decode_index % refresh_inteval == 0 and not require_refresh:
+                    metadata_cached_stages = i_stage
+                    require_refresh = True
 
-                if not require_refresh:
-                    metadata_cached_stages = None
+            if not require_refresh:
+                metadata_cached_stages = None
 
-            self.decode_index += 1
-
-        elif is_extend:
-            self.decode_index = 0
+        self.decode_index += 1
 
         return metadata_cached_stages

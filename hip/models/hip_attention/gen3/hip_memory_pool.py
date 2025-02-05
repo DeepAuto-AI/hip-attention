@@ -55,6 +55,7 @@ class HiPMetadataCachePool:
 
     def __init__(
         self,
+        max_total_num_tokens: int,
         query_head_num: int,
         layer_num: int,
         context_length: int,

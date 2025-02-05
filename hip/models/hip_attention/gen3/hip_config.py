@@ -1,3 +1,4 @@
+import json
 from dataclasses import InitVar, dataclass, field
 from typing import List, Optional, Union
 
@@ -94,10 +95,18 @@ class HiPAttentionConfig:
     force_dense: bool = False
     prefill_dense_threshold: int = 8192
 
-    parsed_json: InitVar[dict | None] = None
+    json_or_path: InitVar[str | None] = None
 
-    def __post_init__(self, parsed_json: dict | None):
+    def __post_init__(self, json_or_path: str | None):
         super().__init__()
+
+        if json_or_path is None:
+            parsed_json = {}
+        elif json_or_path.startswith("{"):
+            parsed_json = json.loads(json_or_path)
+        else:
+            with open(json_or_path, "r") as f:
+                parsed_json = json.load(f)
 
         if parsed_json is not None:
             if "apply_v_dot" in parsed_json:
