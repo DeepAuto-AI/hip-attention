@@ -22,6 +22,11 @@ class CachedBuffer:
     dtype: torch.dtype
 
     def get(self, batch_size: int, head_size: int) -> torch.Tensor:
+        if self.buffer.shape[0] < batch_size:
+            raise ValueError(
+                f"Buffer batch size {self.buffer.shape[0]} is smaller than the requested batch size {batch_size}.\n"
+                f"Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{\"metadata_cache_max_batch_size\"}}."
+            )
         if self.batch_format == "BH":
             return self.buffer[: batch_size * head_size].to(self.dtype, copy=True)
         elif self.batch_format == "B,1,H":
@@ -30,6 +35,11 @@ class CachedBuffer:
             raise Exception()
 
     def set(self, value: torch.Tensor):
+        if self.buffer.shape[0] < value.shape[0]:
+            raise ValueError(
+                f"Buffer batch size {self.buffer.shape[0]} is smaller than value batch size {value.shape[0]}.\n"
+                f"Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{\"metadata_cache_max_batch_size\"}}."
+            )
         if self.batch_format == "BH":
             self.buffer[: value.shape[0]].copy_(value.to(self.buffer.dtype))
         elif self.batch_format == "B,1,H":
@@ -45,6 +55,7 @@ class HiPMetadataCachePool:
 
     def __init__(
         self,
+        max_total_num_tokens: int,
         query_head_num: int,
         layer_num: int,
         context_length: int,
