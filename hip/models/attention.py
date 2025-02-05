@@ -63,6 +63,7 @@ def custom_attention(
     model_context_length=131072,
     layer_idx=10,
     extend_stages=None,
+    sliding_window_indices=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -298,7 +299,7 @@ def custom_attention(
                     dual_stage_quadratic_hip_attention as \
                     dual_stage_quadratic_hip_attention_extend
                 from hip.models.hip_attention.gen3.attention_extend import \
-                    HiPAttentionArgs as HiPAttentionArgs11
+                    HiPAttentionArgs as HiPAttentionArgs12
                 from hip.models.hip_attention.gen3.attention_extend import (
                     ScanStage,
                     EvalScoreStage,
@@ -410,7 +411,7 @@ def custom_attention(
                 cos = rope_cos.squeeze(0) if rope_cos is not None else None
                 sin = rope_sin.squeeze(0) if rope_sin is not None else None
                 block_size = 64
-                HiPAttentionArgs = HiPAttentionArgs11
+                HiPAttentionArgs = HiPAttentionArgs12
                 
                 k_mask = k
                 k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
@@ -469,6 +470,9 @@ def custom_attention(
                         mask_only=mask_only,
                         # q_mask=q,
                         # k_mask=k_mask,
+                        require_stage_caches=False,
+                        require_cache_statistics=False,
+                        sliding_window_indices=sliding_window_indices,
                     ),
                 )
                 

@@ -39,7 +39,19 @@ def job_passkey(args, model, tokenizer, device):
                 output.append(item.outputs[0].text)
         elif isinstance(model, SglangModel):
             input_text = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
-            output = [model.generate(input_text=input_text, max_tokens=20)]
+            IS_CHAT = os.getenv('IS_CHAT', '0') == '1'
+            if IS_CHAT:
+                output = [model.generate(
+                    input_text=input_text[0], 
+                    max_tokens=1024, 
+                    need_chat_prompt=True, 
+                    system_message=None,
+                    handle_deepseek=True,
+                    verbose=False,
+                )]
+                print(output)
+            else:
+                output = [model.generate(input_text=input_text, max_tokens=20)]
         else:
             input_ids = input_ids.cuda()
             target_ids = target_ids.cuda()
