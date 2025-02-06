@@ -84,6 +84,7 @@ pip install -e ".[no_build_iso]" \
 --verbose
 # SGLang with OpenAI API support for serving
 pip install -e ".[sglang]" \
+--upgrade \
 --no-build-isolation \
 --verbose \
 --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
