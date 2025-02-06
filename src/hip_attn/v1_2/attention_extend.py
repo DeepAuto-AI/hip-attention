@@ -2208,6 +2208,7 @@ def dual_stage_quadratic_hip_attention(
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
                     ori_shape = out_scores.shape
+                    # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
                     out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
 
@@ -2391,6 +2392,13 @@ def dual_stage_quadratic_hip_attention(
         #     print('indices_left', indices_left[0, -1])
         #     print('out_scores', out_scores[0, -1], args.second_stage_k, indices_left.shape, chunk_size)
         indices = indices_left[..., :args.second_stage_k // chunk_size] // chunk_size * chunk_size
+        
+        # NOTE: union head masks
+        if (os.getenv('HIP_DEBUG_UNION_HEAD', '0') == '1'):
+            assert os.getenv('HIP_HEAD_REDUCE', '1') == '0'
+            # args.disable_flashdecode = True
+            # B BDST H CHUNK
+            indices = indices.flatten(-2, -1).unsqueeze(-2).repeat(1, 1, HEAD, 1)
 
         # NOTE: sampled indices might be delayed
         if (os.getenv('HIP_DEBUG_ADD_DELAY_WINDOW', '0') == '1'):
@@ -2506,7 +2514,9 @@ def dual_stage_quadratic_hip_attention(
             (ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device
         )
         ks_start_end[:, :, -1] = ks
-
+        
+        # print(args._layer_id, round(ks.float().mean().item() * args.block_size_k))
+        
         if (args.low_percent > 0) and (args.low_k_ratio < 1):
             scores = (
                 out_scores[..., : args.second_stage_k // chunk_size]
