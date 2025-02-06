@@ -13,6 +13,7 @@
     - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading-1)
       - [Local](#local-3)
       - [Docker](#docker-1)
+  - [Testing](#testing)
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
 
@@ -269,3 +270,12 @@ python3 \
 --max-total-tokens $CONTEXT_LENGTH \
 --hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}'
 ```
+
+## Testing
+
+```bash
+SRT_PORT=9913 python scripts/test_openai.py
+# 1M tokens
+SRT_PORT=9913 python scripts/test_openai_long.py
+```
+****

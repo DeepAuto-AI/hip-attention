@@ -95,13 +95,6 @@ See the following pages for more details:
 
 - [Running OpenAI API server examples (SGlang)](docs/USAGE.sglang.md)
 
-### Testing OpenAI API
-
-```bash
-SRT_PORT=9913 python scripts/test_openai.py
-# 1M tokens
-SRT_PORT=9913 python scripts/test_openai_long.py
-```
 
 ### Building Docker
 
