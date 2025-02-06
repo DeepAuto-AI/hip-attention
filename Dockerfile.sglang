@@ -33,7 +33,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel
 RUN python3 -m pip install "."
 RUN python3 -m pip install ".[no_build_iso]" \
     --no-build-isolation
-RUN python3 -m pip install -e ".[sglang]" \
+RUN python3 -m pip install ".[sglang]" \
     --no-build-isolation \
     --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 
