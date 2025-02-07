@@ -13,6 +13,9 @@
     - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading-1)
       - [Local](#local-3)
       - [Docker](#docker-1)
+  - [`deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`](#deepseek-aideepseek-r1-distill-qwen-32b)
+    - [Multi GPU (with cache offloading)](#multi-gpu-with-cache-offloading-1)
+      - [Local](#local-4)
   - [Testing](#testing)
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
@@ -269,6 +272,103 @@ python3 \
 --hip-max-sa-cache-token-size 4096 \
 --max-total-tokens $CONTEXT_LENGTH \
 --hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}'
+```
+
+## `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`
+
+### Multi GPU (with cache offloading)
+
+- 1M context length
+- Cache offloading enabled
+- Tested model: `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`
+- Testwd GPU: 4x A100 40GB
+- Tested at: 2025-02-07
+- Tested version:
+  - `hip-attention`: `1f346394bf98c4f53b3484d83c746435038b5b98`
+  - `sglang`: `06fafb06657f18103886956995da5ecbdc5f1817`
+
+#### Local
+
+```bash
+export SRT_PORT=8921
+export HIP_DEBUG_UNION_HEAD=1;
+export HIP_HEAD_REDUCE=0;
+export CUDA_VISIBLE_DEVICES=0,1,2,3;
+export SRT_WARMUP_PASSKEY_LENGTH=1000;
+export TOTAL_TOKENS=2097152;
+export CONTEXT_LENGTH=1048576;
+export SRT_MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+export SRT_SERVED_MODEL_NAME="deepauto/DeepSeek-R1-Distill-Qwen-32B-1B-Ctx"
+
+$(which python) -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 4 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $TOTAL_TOKENS \
+--max-running-requests 1 \
+--cuda-graph-bs 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 32768 \
+--hip-max-mask-cache-token-size 131072 \
+--disable-custom-all-reduce
+```
+
+#### Docker
+
+```bash
+export SRT_PORT=8921
+export HIP_DEBUG_UNION_HEAD=1;
+export HIP_HEAD_REDUCE=0;
+export SRT_WARMUP_PASSKEY_LENGTH=1000;
+export TOTAL_TOKENS=2097152;
+export CONTEXT_LENGTH=1048576;
+export DOCKER_NAME="deepseek-ai-deepseek-r1-distill-qwen-32b"
+export SRT_MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+export SRT_SERVED_MODEL_NAME="deepauto/DeepSeek-R1-Distill-Qwen-32B-1B-Ctx"
+
+docker run --rm --runtime nvidia \
+--gpus '"device=0,1,2,3"' \
+--name $DOCKER_NAME \
+-p $SRT_PORT:$SRT_PORT \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN={__secret__}" \
+--env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
+--env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
+--env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
+--env "TOTAL_TOKENS=$TOTAL_TOKENS" \
+--env "CONTEXT_LENGTH=$CONTEXT_LENGTH" \
+hip-sglang:1f34639 \
+python3 \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
+--kv-cache-dtype fp8_e5m2 \
+--tp-size 4 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $TOTAL_TOKENS \
+--max-running-requests 1 \
+--cuda-graph-bs 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 32768 \
+--hip-max-mask-cache-token-size 131072 \
+--disable-custom-all-reduce
 ```
 
 ## Testing
