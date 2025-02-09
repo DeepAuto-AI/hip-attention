@@ -7,25 +7,9 @@ import tqdm
 
 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
 IS_EXAONE = os.getenv('IS_EXAONE', '0') == '1'
+IS_CHAT = os.getenv('IS_CHAT', '0') == '1'
 
-if (not IS_GEMMA) and (not IS_EXAONE):
-    PREFIX = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-Cutting Knowledge Date: December 2023
-Today Date: 26 Jul 2024
-
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
-
-"""
-    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
-    QUERY = """
-In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-"""
-elif IS_EXAONE:
+if IS_EXAONE:
     PREFIX = """[BOS][|system|][|endofturn|]
 [|user|]You are a helpful assistant. 
 There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
@@ -47,8 +31,31 @@ There is a pass key hidden inside a lot of irrelevant text. Find the pass key an
 <start_of_turn>assistant
 
 """
+elif IS_CHAT:
+    PREFIX = """You are a helpful assistant. There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
+
+"""
+    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    QUERY = """
+
+In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text."""
 else:
-    raise Exception()
+    PREFIX = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
+
+"""
+    FILLER_TEXT = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    QUERY = """
+In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
 
 def interpolate_passkey(k):
     keyline = f"HERE IS THE SECRET KEYWORD! The secret keyword is ${k}$. ${k}$ is the secret keyword. **the secret keyword is ${k}$** LOOK BEHIND FOR SECRET KEYWORD"

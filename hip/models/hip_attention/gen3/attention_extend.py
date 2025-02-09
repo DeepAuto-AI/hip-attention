@@ -7,6 +7,7 @@ import cv2
 import numba
 import triton
 import numpy as np
+import warnings
 import triton.language as tl
 from torch import Tensor
 from typing import List, Dict, Literal, Optional, Tuple
@@ -55,15 +56,18 @@ def render_plot(
 
 @numba.njit(parallel=True)
 def render_plot_dynamic(
-    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size, causal_mask=False,
+    out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, stage_k, chunk_size, causal_mask=False, sliding_window_size=0,
 ):
     for i in numba.prange(out_indices_cpu.shape[1]):
         for j in range(math.ceil(stage_k / chunk_size)):
             if j >= out_indices_cpu.shape[-1]: continue
             t = out_indices_cpu[0, i, DEBUG_HEAD, j] // BLOCK_SIZE_Q
-            if causal_mask and (t >= i):
+            if causal_mask and ((t + sliding_window_size // BLOCK_SIZE_Q) >= i):
                 continue
-            debug[i, t:t+math.ceil(chunk_size / BLOCK_SIZE_Q)] = 1
+            tt = t+math.ceil(chunk_size / BLOCK_SIZE_Q)
+            if causal_mask:
+                tt = min(tt, i+1)
+            debug[i, t:tt] = 1
 
 @numba.njit(parallel=True)
 def render_plot_sampled(
@@ -505,6 +509,7 @@ def chunk_controllable_sampling_mask_cuda(
     TERMINATE_SIZE: tl.constexpr = 1,
     SCAN_STRIDE: tl.constexpr = 1,
     UPDATE_CACHE: tl.constexpr = True,
+    ORACLE_MAXIMUM: tl.constexpr = False,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)
@@ -525,8 +530,12 @@ def chunk_controllable_sampling_mask_cuda(
             
             # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
             # mask_tdst = idx_tdst < TDST
-            idx_tdst = ((BDST - 1) - (BDST_SCAN - 1) * SCAN_STRIDE + idx_bdst_scan * SCAN_STRIDE) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
-            mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
+            if BLOCK_SIZE_Q // STRIDE_Q < 16:
+                idx_tdst = ((BDST - 1) - (BDST_SCAN - 1) * SCAN_STRIDE + idx_bdst_scan * SCAN_STRIDE) * BLOCK_SIZE_Q + tl.arange(0, 16) * STRIDE_Q
+                mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0) & (tl.arange(0, 16) < (BLOCK_SIZE_Q // STRIDE_Q))
+            else:
+                idx_tdst = ((BDST - 1) - (BDST_SCAN - 1) * SCAN_STRIDE + idx_bdst_scan * SCAN_STRIDE) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
+                mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
             idx_hid = tl.arange(0, BLOCK_HID)
             mask_hid = idx_hid < BLOCK_HID #(tl.arange(0, BLOCK_HID) % 4) == 0
             
@@ -682,92 +691,184 @@ def chunk_controllable_sampling_mask_cuda(
                         # mask_tsrc_active = mask_tsrc_active & (idx_tsrc_left < (real_pos_tdst_min - sliding_window_size + BLOCK_SIZE_Q))
                         idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
                         
-                        idx_tsrc = (idx_tsrc_left + idx_tsrc_center) // 2
-                        keys_left = load_keys_with_rope(
-                            K, 
-                            stride_k_bsz, 
-                            stride_k_tsrc, 
-                            stride_k_head_kv, 
-                            stride_k_hid,
-                            
-                            COS, stride_cos_t, stride_cos_hid,
-                            SIN, stride_sin_t, stride_sin_hid,
-                            
-                            # paged attention args template
-                            USING_PAGES,
-                            PAGE_SIZE,
-                            K_CACHE, 
-                            stride_k_cache_page, 
-                            stride_k_cache_offset, 
-                            stride_k_cache_kv_head, 
-                            stride_k_cache_hid,
-                            BLOCK_TABLE,
-                            stride_block_table_bsz,
-                            stride_block_table_page,
-                            CACHE_SEQ_LENS,
-                            stride_cache_seq_lens_b,
-                            
-                            USING_OFFLOAD_CACHE,
-                            OFFLOAD_CACHE_KV_PACKED,
-                            GPU_BANK_COUNT,
-                            OFFLOAD_CACHE_UVM_METADATA,
-                            stride_offload_cache_uvm_metadata_token,
-                            stride_offload_cache_uvm_metadata_k,
-                            OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
-                            stride_offload_cache_gpu_global_metadata_k,
-                            stride_offload_cache_gpu_global_metadata_pad,
-                            OFFLOAD_CACHE_GPU_BANK,
-                            stride_offload_cache_gpu_bank_token,
-                            stride_offload_cache_gpu_bank_hid,
-                            OFFLOAD_CACHE_GPU_METADATA,
-                            stride_offload_cache_gpu_metadata_token,
-                            stride_offload_cache_gpu_metadata_k,
-                            OFFLOAD_CACHE_GPU_TABLE,
-                            stride_offload_cache_gpu_table_head_kv,
-                            stride_offload_cache_gpu_table_token,
-                            strdie_offload_cache_gpu_table_k,
-                            
-                            MASK_ACCESS_COUNTER,
-                            stride_mask_access_counter_bsz,
-                            stride_mask_access_counter_head_kv,
-                            stride_mask_access_counter_tsrc,
-                            
-                            MASK_CACHE_MISS_COUNTER,
-                            stride_mask_cache_miss_counter_bsz,
-                            stride_mask_cache_miss_counter_head_kv,
-                            stride_mask_cache_miss_counter_tsrc,
-                            
-                            queries,
-                            
-                            idx_bsz,
-                            idx_tsrc,
-                            idx_head // HEAD_GROUP,
-                            idx_hid,
-                            idx_chunk,
-                            mask_tsrc_active,
-                            mask_tdst,
-                            mask_hid,
-                            
-                            real_pos_tdst_min,
-                            model_context_length,
-                            num_sinks,
-                            
-                            USING_EXTEND,
-                            EXTEND_BACKEND,
-                            NEED_APPLY_ROPE,
-                            BLOCK_CHUNK,
-                            BLOCK_HID,
-                            False,
-                            HEAD // HEAD_GROUP,
-                            UPDATE_CACHE,
-                        )
-                            
-                        scores_left = tl.dot(
-                            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-                            (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-                            allow_tf32=True,
-                            out_dtype=tl.float32,
-                        ).to(queries.dtype)
+                        if ORACLE_MAXIMUM:
+                            scores_left = tl.full((idx_tdst.shape[0], BLOCK_CHUNK), dtype=tl.float32, value=float('-inf'))
+                            for tt in range(0, max_chunk_size.to(tl.int32)):
+                                idx_tsrc = idx_tsrc_left + tt
+                                keys_left = load_keys_with_rope(
+                                    K, 
+                                    stride_k_bsz, 
+                                    stride_k_tsrc, 
+                                    stride_k_head_kv, 
+                                    stride_k_hid,
+                                    
+                                    COS, stride_cos_t, stride_cos_hid,
+                                    SIN, stride_sin_t, stride_sin_hid,
+                                    
+                                    # paged attention args template
+                                    USING_PAGES,
+                                    PAGE_SIZE,
+                                    K_CACHE, 
+                                    stride_k_cache_page, 
+                                    stride_k_cache_offset, 
+                                    stride_k_cache_kv_head, 
+                                    stride_k_cache_hid,
+                                    BLOCK_TABLE,
+                                    stride_block_table_bsz,
+                                    stride_block_table_page,
+                                    CACHE_SEQ_LENS,
+                                    stride_cache_seq_lens_b,
+                                    
+                                    USING_OFFLOAD_CACHE,
+                                    OFFLOAD_CACHE_KV_PACKED,
+                                    GPU_BANK_COUNT,
+                                    OFFLOAD_CACHE_UVM_METADATA,
+                                    stride_offload_cache_uvm_metadata_token,
+                                    stride_offload_cache_uvm_metadata_k,
+                                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                                    stride_offload_cache_gpu_global_metadata_k,
+                                    stride_offload_cache_gpu_global_metadata_pad,
+                                    OFFLOAD_CACHE_GPU_BANK,
+                                    stride_offload_cache_gpu_bank_token,
+                                    stride_offload_cache_gpu_bank_hid,
+                                    OFFLOAD_CACHE_GPU_METADATA,
+                                    stride_offload_cache_gpu_metadata_token,
+                                    stride_offload_cache_gpu_metadata_k,
+                                    OFFLOAD_CACHE_GPU_TABLE,
+                                    stride_offload_cache_gpu_table_head_kv,
+                                    stride_offload_cache_gpu_table_token,
+                                    strdie_offload_cache_gpu_table_k,
+                                    
+                                    MASK_ACCESS_COUNTER,
+                                    stride_mask_access_counter_bsz,
+                                    stride_mask_access_counter_head_kv,
+                                    stride_mask_access_counter_tsrc,
+                                    
+                                    MASK_CACHE_MISS_COUNTER,
+                                    stride_mask_cache_miss_counter_bsz,
+                                    stride_mask_cache_miss_counter_head_kv,
+                                    stride_mask_cache_miss_counter_tsrc,
+                                    
+                                    queries,
+                                    
+                                    idx_bsz,
+                                    idx_tsrc,
+                                    idx_head // HEAD_GROUP,
+                                    idx_hid,
+                                    idx_chunk,
+                                    mask_tsrc_active,
+                                    mask_tdst,
+                                    mask_hid,
+                                    
+                                    real_pos_tdst_min,
+                                    model_context_length,
+                                    num_sinks,
+                                    
+                                    USING_EXTEND,
+                                    EXTEND_BACKEND,
+                                    NEED_APPLY_ROPE,
+                                    BLOCK_CHUNK,
+                                    BLOCK_HID,
+                                    False,
+                                    HEAD // HEAD_GROUP,
+                                    UPDATE_CACHE,
+                                )
+                                    
+                                t_scores_left = tl.dot(
+                                    (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                    (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                    allow_tf32=True,
+                                    out_dtype=tl.float32,
+                                ).to(queries.dtype)
+                                
+                                scores_left = tl.maximum(scores_left, t_scores_left)
+                        else:
+                            idx_tsrc = (idx_tsrc_left + idx_tsrc_center) // 2
+                            keys_left = load_keys_with_rope(
+                                K, 
+                                stride_k_bsz, 
+                                stride_k_tsrc, 
+                                stride_k_head_kv, 
+                                stride_k_hid,
+                                
+                                COS, stride_cos_t, stride_cos_hid,
+                                SIN, stride_sin_t, stride_sin_hid,
+                                
+                                # paged attention args template
+                                USING_PAGES,
+                                PAGE_SIZE,
+                                K_CACHE, 
+                                stride_k_cache_page, 
+                                stride_k_cache_offset, 
+                                stride_k_cache_kv_head, 
+                                stride_k_cache_hid,
+                                BLOCK_TABLE,
+                                stride_block_table_bsz,
+                                stride_block_table_page,
+                                CACHE_SEQ_LENS,
+                                stride_cache_seq_lens_b,
+                                
+                                USING_OFFLOAD_CACHE,
+                                OFFLOAD_CACHE_KV_PACKED,
+                                GPU_BANK_COUNT,
+                                OFFLOAD_CACHE_UVM_METADATA,
+                                stride_offload_cache_uvm_metadata_token,
+                                stride_offload_cache_uvm_metadata_k,
+                                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                                stride_offload_cache_gpu_global_metadata_k,
+                                stride_offload_cache_gpu_global_metadata_pad,
+                                OFFLOAD_CACHE_GPU_BANK,
+                                stride_offload_cache_gpu_bank_token,
+                                stride_offload_cache_gpu_bank_hid,
+                                OFFLOAD_CACHE_GPU_METADATA,
+                                stride_offload_cache_gpu_metadata_token,
+                                stride_offload_cache_gpu_metadata_k,
+                                OFFLOAD_CACHE_GPU_TABLE,
+                                stride_offload_cache_gpu_table_head_kv,
+                                stride_offload_cache_gpu_table_token,
+                                strdie_offload_cache_gpu_table_k,
+                                
+                                MASK_ACCESS_COUNTER,
+                                stride_mask_access_counter_bsz,
+                                stride_mask_access_counter_head_kv,
+                                stride_mask_access_counter_tsrc,
+                                
+                                MASK_CACHE_MISS_COUNTER,
+                                stride_mask_cache_miss_counter_bsz,
+                                stride_mask_cache_miss_counter_head_kv,
+                                stride_mask_cache_miss_counter_tsrc,
+                                
+                                queries,
+                                
+                                idx_bsz,
+                                idx_tsrc,
+                                idx_head // HEAD_GROUP,
+                                idx_hid,
+                                idx_chunk,
+                                mask_tsrc_active,
+                                mask_tdst,
+                                mask_hid,
+                                
+                                real_pos_tdst_min,
+                                model_context_length,
+                                num_sinks,
+                                
+                                USING_EXTEND,
+                                EXTEND_BACKEND,
+                                NEED_APPLY_ROPE,
+                                BLOCK_CHUNK,
+                                BLOCK_HID,
+                                False,
+                                HEAD // HEAD_GROUP,
+                                UPDATE_CACHE,
+                            )
+                                
+                            scores_left = tl.dot(
+                                (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                (keys_left.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                allow_tf32=True,
+                                out_dtype=tl.float32,
+                            ).to(queries.dtype)
                         
                         if REDUCE == 'max':
                             scores_left = tl.where(mask_tdst[:, None], scores_left, float('-inf'))
@@ -780,91 +881,182 @@ def chunk_controllable_sampling_mask_cuda(
                             raise Exception()
                         scores_left = tl.where(mask_tsrc_active, scores_left, float('-inf')).to(scores_left.dtype)
                         
-                        idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
-                        keys_right = load_keys_with_rope(
-                            K, 
-                            stride_k_bsz, 
-                            stride_k_tsrc, 
-                            stride_k_head_kv, 
-                            stride_k_hid,
+                        if ORACLE_MAXIMUM:
+                            scores_right = tl.full((idx_tdst.shape[0], BLOCK_CHUNK), dtype=tl.float32, value=float('-inf'))
+                            for tt in range(0, max_chunk_size.to(tl.int32)):
+                                idx_tsrc = idx_tsrc_center + tt
+                                keys_right = load_keys_with_rope(
+                                    K, 
+                                    stride_k_bsz, 
+                                    stride_k_tsrc, 
+                                    stride_k_head_kv, 
+                                    stride_k_hid,
+                                    
+                                    COS, stride_cos_t, stride_cos_hid,
+                                    SIN, stride_sin_t, stride_sin_hid,
+                                    
+                                    # paged attention args template
+                                    USING_PAGES,
+                                    PAGE_SIZE,
+                                    K_CACHE, 
+                                    stride_k_cache_page, 
+                                    stride_k_cache_offset, 
+                                    stride_k_cache_kv_head, 
+                                    stride_k_cache_hid,
+                                    BLOCK_TABLE,
+                                    stride_block_table_bsz,
+                                    stride_block_table_page,
+                                    CACHE_SEQ_LENS,
+                                    stride_cache_seq_lens_b,
+                                    
+                                    USING_OFFLOAD_CACHE,
+                                    OFFLOAD_CACHE_KV_PACKED,
+                                    GPU_BANK_COUNT,
+                                    OFFLOAD_CACHE_UVM_METADATA,
+                                    stride_offload_cache_uvm_metadata_token,
+                                    stride_offload_cache_uvm_metadata_k,
+                                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                                    stride_offload_cache_gpu_global_metadata_k,
+                                    stride_offload_cache_gpu_global_metadata_pad,
+                                    OFFLOAD_CACHE_GPU_BANK,
+                                    stride_offload_cache_gpu_bank_token,
+                                    stride_offload_cache_gpu_bank_hid,
+                                    OFFLOAD_CACHE_GPU_METADATA,
+                                    stride_offload_cache_gpu_metadata_token,
+                                    stride_offload_cache_gpu_metadata_k,
+                                    OFFLOAD_CACHE_GPU_TABLE,
+                                    stride_offload_cache_gpu_table_head_kv,
+                                    stride_offload_cache_gpu_table_token,
+                                    strdie_offload_cache_gpu_table_k,
+                                    
+                                    MASK_ACCESS_COUNTER,
+                                    stride_mask_access_counter_bsz,
+                                    stride_mask_access_counter_head_kv,
+                                    stride_mask_access_counter_tsrc,
+                                    MASK_CACHE_MISS_COUNTER,
+                                    stride_mask_cache_miss_counter_bsz,
+                                    stride_mask_cache_miss_counter_head_kv,
+                                    stride_mask_cache_miss_counter_tsrc,
+                                    
+                                    queries,
+                                    
+                                    idx_bsz,
+                                    idx_tsrc,
+                                    idx_head // HEAD_GROUP,
+                                    idx_hid,
+                                    idx_chunk,
+                                    mask_tsrc_active,
+                                    mask_tdst,
+                                    mask_hid,
+                                    
+                                    real_pos_tdst_min,
+                                    model_context_length,
+                                    num_sinks,
+                                    
+                                    USING_EXTEND,
+                                    EXTEND_BACKEND,
+                                    NEED_APPLY_ROPE,
+                                    BLOCK_CHUNK,
+                                    BLOCK_HID,
+                                    True,
+                                    HEAD // HEAD_GROUP,
+                                    UPDATE_CACHE,
+                                )
+                                
+                                t_scores_right = tl.dot(
+                                    (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                    (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                    allow_tf32=True,
+                                    out_dtype=tl.float32,
+                                ).to(queries.dtype)
+                                
+                                scores_right = tl.maximum(scores_right, t_scores_right)
+                        else:
+                            idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
+                            keys_right = load_keys_with_rope(
+                                K, 
+                                stride_k_bsz, 
+                                stride_k_tsrc, 
+                                stride_k_head_kv, 
+                                stride_k_hid,
+                                
+                                COS, stride_cos_t, stride_cos_hid,
+                                SIN, stride_sin_t, stride_sin_hid,
+                                
+                                # paged attention args template
+                                USING_PAGES,
+                                PAGE_SIZE,
+                                K_CACHE, 
+                                stride_k_cache_page, 
+                                stride_k_cache_offset, 
+                                stride_k_cache_kv_head, 
+                                stride_k_cache_hid,
+                                BLOCK_TABLE,
+                                stride_block_table_bsz,
+                                stride_block_table_page,
+                                CACHE_SEQ_LENS,
+                                stride_cache_seq_lens_b,
+                                
+                                USING_OFFLOAD_CACHE,
+                                OFFLOAD_CACHE_KV_PACKED,
+                                GPU_BANK_COUNT,
+                                OFFLOAD_CACHE_UVM_METADATA,
+                                stride_offload_cache_uvm_metadata_token,
+                                stride_offload_cache_uvm_metadata_k,
+                                OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                                stride_offload_cache_gpu_global_metadata_k,
+                                stride_offload_cache_gpu_global_metadata_pad,
+                                OFFLOAD_CACHE_GPU_BANK,
+                                stride_offload_cache_gpu_bank_token,
+                                stride_offload_cache_gpu_bank_hid,
+                                OFFLOAD_CACHE_GPU_METADATA,
+                                stride_offload_cache_gpu_metadata_token,
+                                stride_offload_cache_gpu_metadata_k,
+                                OFFLOAD_CACHE_GPU_TABLE,
+                                stride_offload_cache_gpu_table_head_kv,
+                                stride_offload_cache_gpu_table_token,
+                                strdie_offload_cache_gpu_table_k,
+                                
+                                MASK_ACCESS_COUNTER,
+                                stride_mask_access_counter_bsz,
+                                stride_mask_access_counter_head_kv,
+                                stride_mask_access_counter_tsrc,
+                                MASK_CACHE_MISS_COUNTER,
+                                stride_mask_cache_miss_counter_bsz,
+                                stride_mask_cache_miss_counter_head_kv,
+                                stride_mask_cache_miss_counter_tsrc,
+                                
+                                queries,
+                                
+                                idx_bsz,
+                                idx_tsrc,
+                                idx_head // HEAD_GROUP,
+                                idx_hid,
+                                idx_chunk,
+                                mask_tsrc_active,
+                                mask_tdst,
+                                mask_hid,
+                                
+                                real_pos_tdst_min,
+                                model_context_length,
+                                num_sinks,
+                                
+                                USING_EXTEND,
+                                EXTEND_BACKEND,
+                                NEED_APPLY_ROPE,
+                                BLOCK_CHUNK,
+                                BLOCK_HID,
+                                True,
+                                HEAD // HEAD_GROUP,
+                                UPDATE_CACHE,
+                            )
                             
-                            COS, stride_cos_t, stride_cos_hid,
-                            SIN, stride_sin_t, stride_sin_hid,
-                            
-                            # paged attention args template
-                            USING_PAGES,
-                            PAGE_SIZE,
-                            K_CACHE, 
-                            stride_k_cache_page, 
-                            stride_k_cache_offset, 
-                            stride_k_cache_kv_head, 
-                            stride_k_cache_hid,
-                            BLOCK_TABLE,
-                            stride_block_table_bsz,
-                            stride_block_table_page,
-                            CACHE_SEQ_LENS,
-                            stride_cache_seq_lens_b,
-                            
-                            USING_OFFLOAD_CACHE,
-                            OFFLOAD_CACHE_KV_PACKED,
-                            GPU_BANK_COUNT,
-                            OFFLOAD_CACHE_UVM_METADATA,
-                            stride_offload_cache_uvm_metadata_token,
-                            stride_offload_cache_uvm_metadata_k,
-                            OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
-                            stride_offload_cache_gpu_global_metadata_k,
-                            stride_offload_cache_gpu_global_metadata_pad,
-                            OFFLOAD_CACHE_GPU_BANK,
-                            stride_offload_cache_gpu_bank_token,
-                            stride_offload_cache_gpu_bank_hid,
-                            OFFLOAD_CACHE_GPU_METADATA,
-                            stride_offload_cache_gpu_metadata_token,
-                            stride_offload_cache_gpu_metadata_k,
-                            OFFLOAD_CACHE_GPU_TABLE,
-                            stride_offload_cache_gpu_table_head_kv,
-                            stride_offload_cache_gpu_table_token,
-                            strdie_offload_cache_gpu_table_k,
-                            
-                            MASK_ACCESS_COUNTER,
-                            stride_mask_access_counter_bsz,
-                            stride_mask_access_counter_head_kv,
-                            stride_mask_access_counter_tsrc,
-                            MASK_CACHE_MISS_COUNTER,
-                            stride_mask_cache_miss_counter_bsz,
-                            stride_mask_cache_miss_counter_head_kv,
-                            stride_mask_cache_miss_counter_tsrc,
-                            
-                            queries,
-                            
-                            idx_bsz,
-                            idx_tsrc,
-                            idx_head // HEAD_GROUP,
-                            idx_hid,
-                            idx_chunk,
-                            mask_tsrc_active,
-                            mask_tdst,
-                            mask_hid,
-                            
-                            real_pos_tdst_min,
-                            model_context_length,
-                            num_sinks,
-                            
-                            USING_EXTEND,
-                            EXTEND_BACKEND,
-                            NEED_APPLY_ROPE,
-                            BLOCK_CHUNK,
-                            BLOCK_HID,
-                            True,
-                            HEAD // HEAD_GROUP,
-                            UPDATE_CACHE,
-                        )
-                        
-                        scores_right = tl.dot(
-                            (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-                            (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
-                            allow_tf32=True,
-                            out_dtype=tl.float32,
-                        ).to(queries.dtype)
+                            scores_right = tl.dot(
+                                (queries * (tl.sqrt(BLOCK_HID * 1.0) / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                (keys_right.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(queries.dtype)).to(queries.dtype),
+                                allow_tf32=True,
+                                out_dtype=tl.float32,
+                            ).to(queries.dtype)
                         
                         if REDUCE == 'max':
                             scores_right = tl.where(mask_tdst[:, None], scores_right, float('-inf'))
@@ -1336,24 +1528,33 @@ def compute_v_cos(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
-    OFFLOAD_CACHE_METHOD: tl.constexpr,
-    OFFLOAD_CACHE_BUDGET: tl.constexpr,
-    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
-    OFFLOAD_CACHE_K_TABLES,
-    stride_offload_cache_k_tables_n,
-    stride_offload_cache_k_tables_t,
-    OFFLOAD_CACHE_K_BANKS,
-    stride_offload_cache_k_banks_n,
-    stride_offload_cache_k_banks_page,
-    stride_offload_cache_k_banks_offset,
-    stride_offload_cache_k_banks_hid,
-    OFFLOAD_CACHE_K_BANK_STATS,
-    stride_offload_cache_k_bank_stats_n,
-    stride_offload_cache_k_bank_stats_page,
-    stride_offload_cache_k_bank_stats_k,
-    OFFLOAD_CACHE_COUNTERS,
-    stride_offload_cache_counters_n,
-    stride_offload_cache_counters_k,
+    OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
+    GPU_BANK_COUNT,
+    OFFLOAD_CACHE_UVM_METADATA,
+    stride_offload_cache_uvm_metadata_token,
+    stride_offload_cache_uvm_metadata_k,
+    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+    stride_offload_cache_gpu_global_metadata_k,
+    stride_offload_cache_gpu_global_metadata_pad,
+    OFFLOAD_CACHE_GPU_BANK,
+    stride_offload_cache_gpu_bank_token,
+    stride_offload_cache_gpu_bank_hid,
+    OFFLOAD_CACHE_GPU_METADATA,
+    stride_offload_cache_gpu_metadata_token,
+    stride_offload_cache_gpu_metadata_k,
+    OFFLOAD_CACHE_GPU_TABLE,
+    stride_offload_cache_gpu_table_head_kv,
+    stride_offload_cache_gpu_table_token,
+    strdie_offload_cache_gpu_table_k,
+    
+    ACCESS_COUNTER,
+    stride_access_counter_bsz,
+    stride_access_counter_head_kv,
+    stride_access_counter_tsrc,
+    CACHE_MISS_COUNTER,
+    stride_cache_miss_counter_bsz,
+    stride_cache_miss_counter_head_kv,
+    stride_cache_miss_counter_tsrc,
     
     TDST,
     TSRC,
@@ -1419,7 +1620,7 @@ def compute_v_cos(
     #     other=0,
     # )
     
-    tl.static_assert(not USING_OFFLOAD_CACHE)
+    # tl.static_assert(not USING_OFFLOAD_CACHE)
     values_tdst = load_tokens(
         V, 
         stride_v_bsz,
@@ -1441,25 +1642,34 @@ def compute_v_cos(
         stride_cache_seq_lens_b,
         
         USING_OFFLOAD_CACHE,
-        OFFLOAD_CACHE_METHOD,
-        OFFLOAD_CACHE_BUDGET,
-        OFFLOAD_CACHE_KV_HEAD,
+        OFFLOAD_CACHE_KV_PACKED,
+        GPU_BANK_COUNT,
         True,
-        OFFLOAD_CACHE_K_TABLES,
-        stride_offload_cache_k_tables_n,
-        stride_offload_cache_k_tables_t,
-        OFFLOAD_CACHE_K_BANKS,
-        stride_offload_cache_k_banks_n,
-        stride_offload_cache_k_banks_page,
-        stride_offload_cache_k_banks_offset,
-        stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_K_BANK_STATS,
-        stride_offload_cache_k_bank_stats_n,
-        stride_offload_cache_k_bank_stats_page,
-        stride_offload_cache_k_bank_stats_k,
-        OFFLOAD_CACHE_COUNTERS,
-        stride_offload_cache_counters_n,
-        stride_offload_cache_counters_k,
+        OFFLOAD_CACHE_UVM_METADATA,
+        stride_offload_cache_uvm_metadata_token,
+        stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+        stride_offload_cache_gpu_global_metadata_k,
+        stride_offload_cache_gpu_global_metadata_pad,
+        OFFLOAD_CACHE_GPU_BANK,
+        stride_offload_cache_gpu_bank_token,
+        stride_offload_cache_gpu_bank_hid,
+        OFFLOAD_CACHE_GPU_METADATA,
+        stride_offload_cache_gpu_metadata_token,
+        stride_offload_cache_gpu_metadata_k,
+        OFFLOAD_CACHE_GPU_TABLE,
+        stride_offload_cache_gpu_table_head_kv,
+        stride_offload_cache_gpu_table_token,
+        strdie_offload_cache_gpu_table_k,
+        
+        ACCESS_COUNTER,
+        stride_access_counter_bsz,
+        stride_access_counter_head_kv,
+        stride_access_counter_tsrc,
+        CACHE_MISS_COUNTER,
+        stride_cache_miss_counter_bsz,
+        stride_cache_miss_counter_head_kv,
+        stride_cache_miss_counter_tsrc,
         
         idx_bsz,
         pos_tdst[:, None],
@@ -1468,7 +1678,9 @@ def compute_v_cos(
         
         mask_tdst[:, None],
         
+        HEAD // HEAD_GROUP,
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q,
+        BLOCK_HID,
     ).to(tl.bfloat16)
     
     # values_tdst = (
@@ -1507,25 +1719,34 @@ def compute_v_cos(
         stride_cache_seq_lens_b,
         
         USING_OFFLOAD_CACHE,
-        OFFLOAD_CACHE_METHOD,
-        OFFLOAD_CACHE_BUDGET,
-        OFFLOAD_CACHE_KV_HEAD,
+        OFFLOAD_CACHE_KV_PACKED,
+        GPU_BANK_COUNT,
         True,
-        OFFLOAD_CACHE_K_TABLES,
-        stride_offload_cache_k_tables_n,
-        stride_offload_cache_k_tables_t,
-        OFFLOAD_CACHE_K_BANKS,
-        stride_offload_cache_k_banks_n,
-        stride_offload_cache_k_banks_page,
-        stride_offload_cache_k_banks_offset,
-        stride_offload_cache_k_banks_hid,
-        OFFLOAD_CACHE_K_BANK_STATS,
-        stride_offload_cache_k_bank_stats_n,
-        stride_offload_cache_k_bank_stats_page,
-        stride_offload_cache_k_bank_stats_k,
-        OFFLOAD_CACHE_COUNTERS,
-        stride_offload_cache_counters_n,
-        stride_offload_cache_counters_k,
+        OFFLOAD_CACHE_UVM_METADATA,
+        stride_offload_cache_uvm_metadata_token,
+        stride_offload_cache_uvm_metadata_k,
+        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+        stride_offload_cache_gpu_global_metadata_k,
+        stride_offload_cache_gpu_global_metadata_pad,
+        OFFLOAD_CACHE_GPU_BANK,
+        stride_offload_cache_gpu_bank_token,
+        stride_offload_cache_gpu_bank_hid,
+        OFFLOAD_CACHE_GPU_METADATA,
+        stride_offload_cache_gpu_metadata_token,
+        stride_offload_cache_gpu_metadata_k,
+        OFFLOAD_CACHE_GPU_TABLE,
+        stride_offload_cache_gpu_table_head_kv,
+        stride_offload_cache_gpu_table_token,
+        strdie_offload_cache_gpu_table_k,
+        
+        ACCESS_COUNTER,
+        stride_access_counter_bsz,
+        stride_access_counter_head_kv,
+        stride_access_counter_tsrc,
+        CACHE_MISS_COUNTER,
+        stride_cache_miss_counter_bsz,
+        stride_cache_miss_counter_head_kv,
+        stride_cache_miss_counter_tsrc,
         
         idx_bsz,
         idx_tsrc[:, None],
@@ -1534,7 +1755,9 @@ def compute_v_cos(
         
         mask_tsrc[:, None],
         
+        HEAD // HEAD_GROUP,
         GROUP_K * BLOCK_SIZE_K,
+        BLOCK_HID,
     ).to(tl.bfloat16)
 
     # values_tsrc = (
@@ -1547,8 +1770,8 @@ def compute_v_cos(
     
     normalized_values_tdst = values_tdst
     normalized_values_tsrc = values_tsrc
-    # normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
-    # normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
+    normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
+    normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
     
     # - 
     # cos_sim_scores = tl.sum(normalized_values_tdst[None, :] * normalized_values_tsrc, axis=-1)
@@ -1599,16 +1822,26 @@ def dual_stage_quadratic_hip_attention(
     DEBUG_HEAD = -1
     global DEBUG
     
+    # if (q.shape[1] == 1) and (not args.disable_flashdecode):
+    #     pass
+    # else:
+    #     # FIXME: just for dev
+    #     k = args.gather_k_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
+    #     v = args.gather_v_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
+    
     if args.q_mask is None:
-        q_mask = q
+        q_bsa = q
     else:
-        q_mask = args.q_mask
+        q_bsa = q
+        q = args.q_mask
     if args.k_mask is None:
         k_mask = k
     else:
         k_mask = args.k_mask
     
-    BLOCK_HID = q_mask.shape[-1]
+    k_mask_original = k_mask
+    
+    BLOCK_HID = q.shape[-1]
     
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -1636,6 +1869,7 @@ def dual_stage_quadratic_hip_attention(
     
     args = args.clone()
     args.mask_k = args.stages[0].stage_chunk_size
+    original_sliding_window_size = args.sliding_window_size
     args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
@@ -1662,10 +1896,12 @@ def dual_stage_quadratic_hip_attention(
         mask_access_counter = None
     
     stage_caches = [] if (cached_metadata is None) or (cached_metadata.stage_caches is None) else cached_metadata.stage_caches
+    if not args.require_stage_caches:
+        stage_caches = None
     
     if (cached_metadata is None) or (cached_metadata.indices is None):
         # loop carrying variables: indices_left, indices_right, out_scores
-        if (cached_metadata is None) or (cached_metadata.stage_caches is None):
+        if (cached_metadata is None) or (cached_metadata.stage_caches is None) or (stage_caches is None):
             indices_left = torch.zeros(
                 (BSZ, BDST_SCAN, HEAD, chunk_count), 
                 device=q.device,
@@ -1705,10 +1941,10 @@ def dual_stage_quadratic_hip_attention(
             stage_chunk_size = stage_info.stage_chunk_size
             stage_k = stage_info.stage_k
             
-            if i_stage < (len(stage_caches) - 1):
+            if i_stage < (len(stage_caches if stage_caches is not None else []) - 1):
                 # print('stage cached pass', i_stage)
                 continue
-            elif i_stage == (len(stage_caches) - 1):
+            elif i_stage == (len(stage_caches if stage_caches is not None else []) - 1):
                 # print('last cached stage', i_stage)
                 pass
             elif i_stage > 0:
@@ -1761,7 +1997,7 @@ def dual_stage_quadratic_hip_attention(
                 assert (chunk_size % stage_chunk_size) == 0
                 splits = chunk_size // stage_chunk_size
                 chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
-                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q_mask.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
+                indices_left = indices_left[..., None] + (torch.arange(0, splits, device=q.device)[None, None, None, None, :] * chunk_sizes[..., None]).floor().long()
                 indices_left = indices_left.flatten(-2, -1)
                 indices_right = indices_right[..., None] - (((splits - 1) - torch.arange(0, splits, device=q.device)[None, None, None, None, :]) * chunk_sizes[..., None]).floor().long()
                 indices_right = indices_right.flatten(-2, -1)
@@ -1771,7 +2007,7 @@ def dual_stage_quadratic_hip_attention(
                 assert isinstance(stage_info, ScanStage), f'frist stage always scan {stage_info}'
                 STAGE_STRIDE = stage_info.stage_stride
             
-            if i_stage >= len(stage_caches):
+            if (stage_caches is not None) and (i_stage >= len(stage_caches)):
                 if i_stage == 0:
                     # NOTE: do not cache first stage input, because it is meaning less.
                     stage_caches.append(
@@ -1824,13 +2060,27 @@ def dual_stage_quadratic_hip_attention(
                 # if args.offload_cache is not None:
                 #     print('before masking')
                 #     args.offload_cache.mask_k_cache._verify_cache()
+                
+                # B T H D
+                # if k_mask_original is not None:
+                #     B, T, H, D = k.shape
+                #     wind_size = args.stages[i_stage + 1].stage_chunk_size // 2 - 1 if (i_stage + 1) < len(args.stages) else 0
+                #     if wind_size > 0:
+                #         k_max = torch.nn.functional.max_pool1d(k_mask_original.permute(0, 2, 3, 1).reshape(-1, 1, T), kernel_size=wind_size*2 + 1, padding=wind_size, stride=1)
+                #         k_min = -torch.nn.functional.max_pool1d((-k_mask_original).permute(0, 2, 3, 1).reshape(-1, 1, T), kernel_size=wind_size*2 + 1, padding=wind_size, stride=1)
+                #         k_mask = ((k_min + k_max) / 2).view(B, H, D, T).permute(0, 3, 1, 2).contiguous()
+                #         del k_max, k_min
+                #     else:
+                #         k_mask = k_mask_original
+                
+                assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 chunk_controllable_sampling_mask_cuda[grid](
-                    q_mask, *q_mask.stride(),
+                    q, *q.stride(),
                     k_mask, *safe_stride(k_mask, 4),
                     position_ids, *position_ids.stride(),
                 
-                    *args.args_paged_kv_cache(),
-                    *args.args_offload_cache(True),
+                    *args.args_paged_kv_cache(disable_cache=k_mask is not None),
+                    *args.args_offload_cache(True, disable_cache=k_mask is not None),
                     
                     indices_left, *indices_left.stride(),
                     indices_right, *indices_right.stride(),
@@ -1843,7 +2093,7 @@ def dual_stage_quadratic_hip_attention(
                     
                     chunk_count,
                     MAX_TSRC,
-                    TDST,
+                    q.shape[1],
                     HEAD,
                     args.sliding_window_size,
                     args.sink_token_size,
@@ -1864,13 +2114,15 @@ def dual_stage_quadratic_hip_attention(
                     TERMINATE_SIZE=args.stage_early_terminate,
                     SCAN_STRIDE=STAGE_STRIDE,
                     UPDATE_CACHE=args.online_update_cache,
+                    ORACLE_MAXIMUM=False, # NOTE: seems has bug... but why?
                 )
                 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if os.getenv('HIP_HEAD_REDUCE', '1') == '1':
                     ori_shape = out_scores.shape
+                    # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
                     out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
-                    out_scores = torch.broadcast_to(out_scores, ori_shape)
+                    out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
 
                 if args.offload_cache is not None:
                     # print('after masking')
@@ -1923,7 +2175,7 @@ def dual_stage_quadratic_hip_attention(
                     BLOCK_STRIDE_K=args.block_stride_k,
                     SCAN_STRIDE=stage_info.stage_stride,
                     BLOCK_CHUNK=stage_info.block_chunk,
-                )                
+                )
             elif isinstance(stage_info, EnsembleScoreStage):
                 raise Exception()
             elif isinstance(stage_info, NopStage):
@@ -1938,7 +2190,6 @@ def dual_stage_quadratic_hip_attention(
                 # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
                 apply_v_dot = apply_v_dot and (i_stage != 0)
                 if apply_v_dot:
-                    raise Exception() # TODO: handle new args
                     v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
                     V_BLOCK_SIZE_K = 8
                     V_BLOCK_STRIDE_Q = 1
@@ -1960,6 +2211,9 @@ def dual_stage_quadratic_hip_attention(
                         
                         *args.args_paged_kv_cache(),
                         *args.args_offload_cache(is_masking=True),
+                        
+                        sa_access_counter, *safe_stride(sa_access_counter, 3),
+                        sa_cache_miss_counter, *safe_stride(sa_cache_miss_counter, 3),
                         
                         TDST,
                         MAX_TSRC,
@@ -1998,7 +2252,7 @@ def dual_stage_quadratic_hip_attention(
 
                     # out_scores = out_scores * v_scores
 
-                    out_scores = out_scores + v_scores * 0.8
+                    out_scores = out_scores + v_scores
                 
                 if (i_stage < (len(args.stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
@@ -2020,9 +2274,9 @@ def dual_stage_quadratic_hip_attention(
                     next_stage_k = args.second_stage_k
                 out_indices_cpu = indices_left.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous().cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
-                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size, causal_mask=True)
+                render_plot_dynamic(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q, next_stage_k, chunk_size, causal_mask=True, sliding_window_size=args.sliding_window_size)
                 cv2.imwrite(f'dummy_sampled_stage_{i_stage}.png', debug * 255)
-                print(f'saved dummy_sampled_stage_{i_stage}.png')
+                # print(f'saved dummy_sampled_stage_{i_stage}.png')
         
         if (STAGE_STRIDE > 1):
             indices_left = indices_left.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
@@ -2030,38 +2284,95 @@ def dual_stage_quadratic_hip_attention(
             out_scores = out_scores.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
         
         assert (args.second_stage_k % chunk_size) == 0
-        if DEBUG:
-            print('indices_left', indices_left[0, -1])
-            print('out_scores', out_scores[0, -1], args.second_stage_k, indices_left.shape, chunk_size)
+        # if DEBUG:
+        #     print('indices_left', indices_left[0, -1])
+        #     print('out_scores', out_scores[0, -1], args.second_stage_k, indices_left.shape, chunk_size)
         indices = indices_left[..., :args.second_stage_k // chunk_size] // chunk_size * chunk_size
+        
+        # NOTE: union head masks
+        if (os.getenv('HIP_DEBUG_UNION_HEAD', '0') == '1'):
+            assert os.getenv('HIP_HEAD_REDUCE', '1') == '0'
+            # args.disable_flashdecode = True
+            # B BDST H CHUNK
+            indices = indices.flatten(-2, -1).unsqueeze(-2).repeat(1, 1, HEAD, 1)
 
+        # NOTE: sampled indices might be delayed
+        if (os.getenv('HIP_DEBUG_ADD_DELAY_WINDOW', '0') == '1'):
+            delayed_indices = [indices,]
+            delay_window = 64
+            for i_delay in range(0, delay_window, chunk_size):
+                delayed_indices.append(indices - i_delay - chunk_size)
+            # print(indices.shape)
+            indices = torch.cat(delayed_indices, dim=-1)
+            # print(indices.shape)
+        
         # NOTE: performing SnapKV
         if (os.getenv('HIP_DEBUG_SNAP_KV', '0') == '1') and (BDST > 1):
             is_paged = False
-            if k is None:
+            if k_mask_original is None:
                 is_paged = True
-                k = args.k_cache[:, 0, :, :][args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % chunk_size)]]
-            scores = torch.matmul(q.permute(0, 2, 1, 3)[:, :, -128:, :], k.permute(0, 2, 3, 1).repeat(1, HEAD // HEAD_KV, 1, 1))
-            if is_paged:
-                tsrcs = torch.arange(0, scores.shape[-1], device=q.device)
-                tsrc_mask = tsrcs[None, :] > args.position_ids[:, -1, None]
-                scores = scores.masked_fill_(tsrc_mask[:, None, None, :], -32000.0)
+                k_mask = args.gather_k_from_paged_cache(chunk_size=chunk_size)
+            else:
+                k_mask = k_mask_original
+            scores = torch.matmul(q.permute(0, 2, 1, 3)[:, :, -128:, :], k_mask.permute(0, 2, 3, 1).repeat(1, HEAD // HEAD_KV, 1, 1))
+            # if is_paged:
+            tsrcs = torch.arange(0, scores.shape[-1], device=q.device)
+            tsrc_mask = tsrcs[None, :] > args.position_ids[:, -1, None]
+            scores = scores.masked_fill_(tsrc_mask[:, None, None, :], float('-inf'))
             scores = scores.amax(dim=-2) # B H TSRC
+            snap_window = 127
+            scores = torch.nn.functional.max_pool1d(
+                scores, kernel_size=snap_window*2+1, stride=1, padding=snap_window
+            )
             scores = scores.view(scores.shape[0], scores.shape[1], -1, chunk_size)
             scores = scores.amax(dim=-1)
-            _, snap_indices = scores.topk(k=1024 // chunk_size, dim=-1)
+            # print(scores.shape)
+            _, snap_indices = scores.topk(k=min(scores.shape[-1], 131072 // chunk_size), dim=-1)
             snap_indices = snap_indices * chunk_size
             snap_indices = snap_indices.unsqueeze(1).expand(snap_indices.shape[0], indices.shape[1], snap_indices.shape[1], snap_indices.shape[2])
             indices = torch.concat([indices, snap_indices], dim=-1)
             if is_paged:
-                k = None
+                k_mask = None
+        
+        # NOTE: add sliding window indices
+        if args.sliding_window_indices is not None:
+            sw_indices = (args.sliding_window_indices // chunk_size) * chunk_size
+            assert position_ids.shape == (BSZ, TDST), position_ids.shape
+            assert sw_indices.shape[0] == HEAD, sw_indices.shape
+            args.disable_flashdecode = True
+            warnings.warn('Flash Decode is disabled due to experimental feature')
+            sw_indices = position_ids[:, ::BLOCK_SIZE_Q, None, None] + sw_indices[None, None, :, :]
+            sw_indices = (sw_indices // chunk_size) * chunk_size
+            sw_indices.clamp_min_(0)
+            indices = torch.concat([indices, sw_indices], dim=-1)
+
+        # NOTE: adding important Ks
+        if (os.getenv('HIP_DEBUG_IMPORTANT_K', '0') == '1') and (BDST > 1):
+            k_seq = args.gather_k_from_paged_cache(chunk_size=chunk_size)
+            k_bos = k_seq[:, :1, :, :].contiguous().permute(0, 2, 1, 3)
+            k_seq = k_seq.permute(0, 2, 1, 3)
+            k_seq = k_seq / k_seq.square().sum(dim=-1, keepdim=True).sqrt()
+            k_bos = k_bos / k_bos.square().sum(dim=-1, keepdim=True).sqrt()
+            scores = torch.matmul(k_bos, k_seq.permute(0, 1, 3, 2))\
+                .squeeze(2) # B H T
+            tsrcs = torch.arange(0, scores.shape[-1], device=q.device)
+            tsrc_mask = (tsrcs[None, :] + original_sliding_window_size) > args.position_ids[:, -1, None]
+            scores.masked_fill_(tsrc_mask[:, None, :], float('-inf'))
+            scores[:, :, :args.sink_token_size].fill_(float('-inf'))
+            scores = scores.view(scores.shape[0], scores.shape[1], -1, chunk_size)
+            # scores = scores.amax(dim=1, keepdim=True)
+            scores = scores.amax(dim=-1)
+            _, important_indices = torch.topk(scores, k=8192 // chunk_size, dim=-1)
+            important_indices = important_indices.repeat_interleave(HEAD // important_indices.shape[1], 1) * chunk_size
+            important_indices = important_indices.unsqueeze(1).expand(important_indices.shape[0], indices.shape[1], important_indices.shape[1], important_indices.shape[2])
+            indices = torch.concat([indices, important_indices], dim=-1)
         
         if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
             out_indices_cpu = indices.cpu().numpy()
             debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
             cv2.imwrite('dummy_sampled_final.png', debug * 255)
-            print('saved dummy_sampled_final.png')
+            # print('saved dummy_sampled_final.png')
         
         args = args.clone()
         args.block_size_q = args.stages[-1].stage_block_size_q
@@ -2085,6 +2396,8 @@ def dual_stage_quadratic_hip_attention(
         ks_count = ks.unsqueeze(-1)
         ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
         ks_start_end[:, :, -1] = ks
+        
+        # print(args._layer_id, round(ks.float().mean().item() * args.block_size_k))
         
         if (args.low_percent > 0) and (args.low_k_ratio < 1):
             scores = out_scores[..., :args.second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
@@ -2140,7 +2453,7 @@ def dual_stage_quadratic_hip_attention(
                 cv2.imwrite('dummy_sampled_final_lowk.png', debug * 255)
                 print('saved dummy_sampled_final_lowk.png', DEBUG_HEAD)
                 
-                print(ks[:, -1])
+                # print(ks[:, -1])
                 
                 plt.clf()
                 plt.plot(scores_std[:3, :].float().cpu().numpy().T)
@@ -2157,7 +2470,7 @@ def dual_stage_quadratic_hip_attention(
             try:
                 input('>>>')
             except EOFError:
-                time.sleep(1)
+                # time.sleep(1)
                 pass
         
         # NOTE: break-down to fit BSA block size
@@ -2188,6 +2501,9 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end.clone()
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
+    
+    if args.sliding_window_size == 777:
+        args.sliding_window_size = args.model_context_length - args.sink_token_size - args.second_stage_k - args.block_size_q
 
     block_sparse_attention_backend = block_sparse_attention
 
@@ -2196,10 +2512,10 @@ def dual_stage_quadratic_hip_attention(
         block_sparse_attention_backend = decode_block_sparse_attention
 
     context = block_sparse_attention_backend(
-        q=q,
+        q=q_bsa,
         k=k,
         v=v,
-        seq_lens=position_ids + 1,
+        seq_lens=position_ids[:, -q_bsa.shape[1]:] + 1,
         indices=indices,
         ks=ks,
         ks_count=ks_count,
@@ -2217,10 +2533,10 @@ def dual_stage_quadratic_hip_attention(
     if args.offload_cache is not None:
         args.offload_cache.sa_kv_cache.verify_cache()
     
-    if DEBUG:
-        print('context', context[0, :, DEBUG_HEAD, :], context.shape)
-        print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
-        print('ks', ks[0 + DEBUG_HEAD, -1], ks.shape)
+    # if DEBUG:
+    #     print('context', context[0, :, DEBUG_HEAD, :], context.shape)
+    #     print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
+    #     print('ks', ks[0 + DEBUG_HEAD, -1], ks.shape)
     
     return context, HiPAttentionOutputMetadata(
         indices=indices,

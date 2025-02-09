@@ -188,8 +188,14 @@ class HiPAttentionArgs:
     online_update_cache: bool = False
     
     require_cache_statistics: bool = True
+    require_stage_caches: bool = True
     
     disable_flashdecode: bool = False
+    
+    sliding_window_indices: Optional[torch.Tensor] = None
+    
+    # NOTE: use only for debugging purpose
+    _layer_id: int = 31
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -247,8 +253,18 @@ class HiPAttentionArgs:
     def args_rope_sin(self):
         return self.rope_sin, *safe_stride(self.rope_sin, 2),
     
-    def args_paged_kv_cache(self):
+    def args_paged_kv_cache(self, disable_cache: bool = False):
         using_page = self.using_paged_cache
+        
+        if disable_cache:
+            return (
+                False,
+                1,
+                None, 0,0,0,0,
+                None, 0,0,0,0,
+                None, 0,0,
+                None, 0,
+            )
         
         if self.offload_cache is None:
             if using_page:
@@ -286,8 +302,8 @@ class HiPAttentionArgs:
                 self.cache_seq_lens, *safe_stride(self.cache_seq_lens, 1),
             )
     
-    def args_offload_cache(self, is_masking):
-        if self.offload_cache:
+    def args_offload_cache(self, is_masking, disable_cache: bool = False):
+        if self.offload_cache and (not disable_cache):
             gpu_cache = self.offload_cache.mask_k_cache\
                 if is_masking else\
                     self.offload_cache.sa_kv_cache
@@ -314,3 +330,23 @@ class HiPAttentionArgs:
                 None, 0, 0, 
                 None, 0, 0, 0,
             )
+    
+    def gather_k_from_paged_cache(self, chunk_size: int = 1):
+        if self.k_cache is not None:
+            assert self.k_cache is not None
+            k_cache = self.k_cache
+        else:
+            k_cache = self.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
+        assert self.block_table is not None
+        k = k_cache[:, 0, :, :][self.block_table[:, :self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size)]]
+        return k
+
+    def gather_v_from_paged_cache(self, chunk_size: int = 1):
+        if self.v_cache is not None:
+            assert self.v_cache is not None
+            v_cache = self.v_cache
+        else:
+            v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+        assert self.block_table is not None
+        v = v_cache[:, 0, :, :][self.block_table[:, :self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size)]]
+        return v

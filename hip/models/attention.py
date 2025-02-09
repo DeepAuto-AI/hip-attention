@@ -63,6 +63,7 @@ def custom_attention(
     model_context_length=131072,
     layer_idx=10,
     extend_stages=None,
+    sliding_window_indices=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -287,17 +288,19 @@ def custom_attention(
                     num_sink=16,
                 )
             else:
-                from hip import hip_attention_11, HiPAttentionArgs11
+                # from hip import hip_attention_11, HiPAttentionArgs11
                 from hip.models.hip_attention.attention2_draft_sampling import (
                     sampling_only_attention, 
                     dual_stage_sub_quadratic_hip_attention,
                     dual_stage_quadratic_hip_attention,
                     dual_stage_quadratic_scan_hip_attention,
                 )
-                from hip.models.hip_attention.attention2_draft_sampling_extend import \
+                from hip.models.hip_attention.gen3.attention_extend import \
                     dual_stage_quadratic_hip_attention as \
                     dual_stage_quadratic_hip_attention_extend
-                from hip.models.hip_attention.attention2_draft_sampling_extend import (
+                from hip.models.hip_attention.gen3.attention_extend import \
+                    HiPAttentionArgs as HiPAttentionArgs12
+                from hip.models.hip_attention.gen3.attention_extend import (
                     ScanStage,
                     EvalScoreStage,
                     NopStage,
@@ -408,7 +411,7 @@ def custom_attention(
                 cos = rope_cos.squeeze(0) if rope_cos is not None else None
                 sin = rope_sin.squeeze(0) if rope_sin is not None else None
                 block_size = 64
-                HiPAttentionArgs = HiPAttentionArgs11
+                HiPAttentionArgs = HiPAttentionArgs12
                 
                 k_mask = k
                 k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
@@ -423,7 +426,7 @@ def custom_attention(
                         # block_size_q=64,
                         # block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
-                        block_stride_k=k_group_size,
+                        # block_stride_k=k_group_size,
                         sliding_window_size=1024 if extend_stages is None else extend_stages['sliding_window_size'],
                         sink_token_size=256 if extend_stages is None else extend_stages['sink_token_size'],
                         # position_ids=position_ids,
@@ -432,42 +435,45 @@ def custom_attention(
                         rope_cos=cos,
                         rope_sin=sin,
                         need_apply_rope=True,
+                        second_stage_k=2*1024 if extend_stages is None else extend_stages['second_stage_k'],
+                        # low_percent = 0.75 if layer_idx >= 3 else 0.25,
+                        # low_k_ratio = 0.25,
+                        stages=[
+                            ScanStage(
+                                stage_block_size_q=64,
+                                stage_block_stride_q=4,
+                                stage_chunk_size=128,
+                                stage_k=None,
+                                stage_stride=1,
+                            ),
+                            ScanStage(
+                                stage_block_size_q=64,
+                                stage_block_stride_q=4,
+                                stage_chunk_size=32,
+                                stage_k=32768,
+                                stage_stride=1,
+                            ),
+                            ScanStage(
+                                stage_block_size_q=64,
+                                stage_block_stride_q=1,
+                                stage_chunk_size=8,
+                                stage_k=8192,
+                                stage_stride=1,
+                            ),
+                        ] if extend_stages is None else extend_stages['stages'],
+                        block_sparse_block_size_q=block_size,
+                        model_context_length=model_context_length,
+                        scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
+                        # scan_extend_backend='relative',
+                        sa_extend_backend='streaming' if extend_stages is None else extend_stages['sa_extend_backend'],
+                        stage_early_terminate=k_group_size,
+                        mask_only=mask_only,
+                        # q_mask=q,
+                        # k_mask=k_mask,
+                        require_stage_caches=False,
+                        require_cache_statistics=False,
+                        sliding_window_indices=sliding_window_indices,
                     ),
-                    second_stage_k=2*1024 if extend_stages is None else extend_stages['second_stage_k'],
-                    # low_percent = 0.75 if layer_idx >= 3 else 0.25,
-                    # low_k_ratio = 0.25,
-                    stages=[
-                        ScanStage(
-                            stage_block_size_q=64,
-                            stage_block_stride_q=4,
-                            stage_chunk_size=128,
-                            stage_k=None,
-                            stage_stride=1,
-                        ),
-                        ScanStage(
-                            stage_block_size_q=64,
-                            stage_block_stride_q=4,
-                            stage_chunk_size=32,
-                            stage_k=32768,
-                            stage_stride=1,
-                        ),
-                        ScanStage(
-                            stage_block_size_q=64,
-                            stage_block_stride_q=1,
-                            stage_chunk_size=8,
-                            stage_k=8192,
-                            stage_stride=1,
-                        ),
-                    ] if extend_stages is None else extend_stages['stages'],
-                    block_sparse_block_size_q=block_size,
-                    model_context_length=model_context_length,
-                    scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
-                    # scan_extend_backend='relative',
-                    sa_extend_backend='streaming' if extend_stages is None else extend_stages['sa_extend_backend'],
-                    stage_early_terminate=k_group_size,
-                    mask_only=mask_only,
-                    q_mask=q,
-                    k_mask=k_mask,
                 )
                 
                 attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
