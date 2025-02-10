@@ -2075,25 +2075,15 @@ def dual_stage_quadratic_hip_attention(
                 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if os.getenv('HIP_DEBUG_TOPKMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
+                    debug_topk_window = int(os.getenv('HIP_DEBUG_TOPK_WINDOW', '8'))
                     k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
                     scores = torch.matmul(q.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
                     mask = (args.position_ids[0][:, None] >= torch.arange(0, k_dense.shape[1], dtype=q.dtype, device=q.device)[None, :])[None, None, :, :]
                     scores = torch.where(mask, scores, -32000.0)
                     scores = scores.view(scores.shape[0], scores.shape[1], scores.shape[2] // BLOCK_SIZE_Q, BLOCK_SIZE_Q, scores.shape[3] // chunk_size, chunk_size)
                     scores = torch.amax(scores, dim=3)
-                    topk_scores, _ = torch.topk(scores, dim=-1, k=8)
+                    topk_scores, _ = torch.topk(scores, dim=-1, k=debug_topk_window)
                     scores = topk_scores.mean(dim=-1)
-                    scores = scores.permute(0, 2, 1, 3)
-                    out_scores[:, :, :, :scores.shape[-1]] = scores
-                elif os.getenv('HIP_DEBUG_TOPKMAX', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
-                    k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
-                    scores = torch.matmul(q.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
-                    mask = (args.position_ids[0][:, None] >= torch.arange(0, k_dense.shape[1], dtype=q.dtype, device=q.device)[None, :])[None, None, :, :]
-                    scores = torch.where(mask, scores, -32000.0)
-                    scores = scores.view(scores.shape[0], scores.shape[1], scores.shape[2] // BLOCK_SIZE_Q, BLOCK_SIZE_Q, scores.shape[3] // chunk_size, chunk_size)
-                    scores = torch.amax(scores, dim=3)
-                    topk_scores, _ = torch.topk(scores, dim=-1, k=8)
-                    scores = topk_scores.amax(dim=-1)
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, :scores.shape[-1]] = scores
                 else:
