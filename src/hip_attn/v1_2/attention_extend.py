@@ -2176,7 +2176,7 @@ def dual_stage_quadratic_hip_attention(
                     scores = topk_scores.mean(dim=-1)
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, :scores.shape[-1]] = scores
-                elif os.getenv('HIP_DEBUG_FLATTNTOPKMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
+                elif os.getenv('HIP_DEBUG_FLATTENTOPKMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
                     debug_topk_window = int(os.getenv('HIP_DEBUG_TOPK_WINDOW', '8'))
                     k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
                     scores = torch.matmul(q.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
@@ -2184,6 +2184,7 @@ def dual_stage_quadratic_hip_attention(
                     scores = torch.where(mask, scores, -32000.0)
                     scores = scores.view(scores.shape[0], scores.shape[1], scores.shape[2] // BLOCK_SIZE_Q, BLOCK_SIZE_Q, scores.shape[3] // chunk_size, chunk_size)
                     scores = scores.permute(0, 1, 2, 4, 3, 5).contiguous().view(scores.shape[0], scores.shape[1], scores.shape[2], scores.shape[4], -1)
+                    print(scores.shape, debug_topk_window)
                     topk_scores, _ = torch.topk(scores, dim=-1, k=debug_topk_window)
                     scores = topk_scores.mean(dim=-1)
                     scores = scores.permute(0, 2, 1, 3)
