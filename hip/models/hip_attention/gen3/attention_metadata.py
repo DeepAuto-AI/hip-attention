@@ -331,7 +331,7 @@ class HiPAttentionArgs:
                 None, 0, 0, 0,
             )
     
-    def gather_k_from_paged_cache(self, chunk_size: int = 1):
+    def gather_k_from_paged_cache(self, chunk_size: int = 1, disable_gqa = False, gqa_q = None):
         if self.k_cache is not None:
             assert self.k_cache is not None
             k_cache = self.k_cache
@@ -339,6 +339,8 @@ class HiPAttentionArgs:
             k_cache = self.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
         assert self.block_table is not None
         k = k_cache[:, 0, :, :][self.block_table[:, :self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size)]]
+        if disable_gqa:
+            k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
         return k
 
     def gather_v_from_paged_cache(self, chunk_size: int = 1):
