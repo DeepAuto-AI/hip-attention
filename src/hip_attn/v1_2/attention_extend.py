@@ -2164,47 +2164,72 @@ def dual_stage_quadratic_hip_attention(
                 #         k_mask = k_mask_original
                 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
-                chunk_controllable_sampling_mask_cuda[grid](
-                    q, *q.stride(),
-                    k_mask, *safe_stride(k_mask, 4),
-                    position_ids, *position_ids.stride(),
+                if os.getenv('HIP_DEBUG_TOPKMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
+                    k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
+                    scores = torch.matmul(q.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
+                    mask = (args.position_ids[0][:, None] >= torch.arange(0, k_dense.shape[1], dtype=q.dtype, device=q.device)[None, :])[None, None, :, :]
+                    scores = torch.where(mask, scores, -32000.0)
+                    scores = scores.view(scores.shape[0], scores.shape[1], scores.shape[2] // BLOCK_SIZE_Q, BLOCK_SIZE_Q, scores.shape[3] // chunk_size, chunk_size)
+                    scores = torch.amax(scores, dim=3)
+                    topk_scores, _ = torch.topk(scores, dim=-1, k=8)
+                    scores = topk_scores.mean(dim=-1)
+                    scores = scores.permute(0, 2, 1, 3)
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
+                elif os.getenv('HIP_DEBUG_TOPKMAX', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
+                    k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
+                    scores = torch.matmul(q.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
+                    mask = (args.position_ids[0][:, None] >= torch.arange(0, k_dense.shape[1], dtype=q.dtype, device=q.device)[None, :])[None, None, :, :]
+                    scores = torch.where(mask, scores, -32000.0)
+                    scores = scores.view(scores.shape[0], scores.shape[1], scores.shape[2] // BLOCK_SIZE_Q, BLOCK_SIZE_Q, scores.shape[3] // chunk_size, chunk_size)
+                    scores = torch.amax(scores, dim=3)
+                    topk_scores, _ = torch.topk(scores, dim=-1, k=8)
+                    scores = topk_scores.amax(dim=-1)
+                    scores = scores.permute(0, 2, 1, 3)
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
+                else:
+                    chunk_controllable_sampling_mask_cuda[grid](
+                        q, *q.stride(),
+                        k_mask, *safe_stride(k_mask, 4),
+                        position_ids, *position_ids.stride(),
+                    
+                        *args.args_paged_kv_cache(disable_cache=k_mask is not None),
+                        *args.args_offload_cache(True, disable_cache=k_mask is not None),
+                        
+                        indices_left, *indices_left.stride(),
+                        indices_right, *indices_right.stride(),
+                        out_scores, *out_scores.stride(),
+                        args.rope_cos, *safe_stride(args.rope_cos, 2),
+                        args.rope_sin, *safe_stride(args.rope_sin, 2),
+                        
+                        mask_access_counter, *safe_stride(mask_access_counter, 3),
+                        mask_cache_miss_counter, *safe_stride(mask_cache_miss_counter, 3),
+                        
+                        chunk_count,
+                        MAX_TSRC,
+                        q.shape[1],
+                        HEAD,
+                        args.sliding_window_size,
+                        args.sink_token_size,
+                        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
+                        args.model_context_length,
+                        
+                        group_jobs,
+                        njobs,
+                        
+                        BLOCK_HID=BLOCK_HID,
+                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                        STRIDE_Q=stage_block_stride_q,
+                        BLOCK_CHUNK=BLOCK_CHUNK,
+                        HEAD_GROUP=HEAD // HEAD_KV,
+                        USING_EXTEND=args.using_extend,
+                        EXTEND_BACKEND=extend_backend,
+                        NEED_APPLY_ROPE=args.need_apply_rope,
+                        TERMINATE_SIZE=args.stage_early_terminate,
+                        SCAN_STRIDE=STAGE_STRIDE,
+                        UPDATE_CACHE=args.online_update_cache,
+                        ORACLE_MAXIMUM=False, # NOTE: seems has bug... but why?
+                    )
                 
-                    *args.args_paged_kv_cache(disable_cache=k_mask is not None),
-                    *args.args_offload_cache(True, disable_cache=k_mask is not None),
-                    
-                    indices_left, *indices_left.stride(),
-                    indices_right, *indices_right.stride(),
-                    out_scores, *out_scores.stride(),
-                    args.rope_cos, *safe_stride(args.rope_cos, 2),
-                    args.rope_sin, *safe_stride(args.rope_sin, 2),
-                    
-                    mask_access_counter, *safe_stride(mask_access_counter, 3),
-                    mask_cache_miss_counter, *safe_stride(mask_cache_miss_counter, 3),
-                    
-                    chunk_count,
-                    MAX_TSRC,
-                    q.shape[1],
-                    HEAD,
-                    args.sliding_window_size,
-                    args.sink_token_size,
-                    # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                    args.model_context_length,
-                    group_jobs,
-                    njobs,
-                    BLOCK_HID=BLOCK_HID,
-                    BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                    STRIDE_Q=stage_block_stride_q,
-                    BLOCK_CHUNK=BLOCK_CHUNK,
-                    HEAD_GROUP=HEAD // HEAD_KV,
-                    USING_EXTEND=args.using_extend,
-                    EXTEND_BACKEND=extend_backend,
-                    NEED_APPLY_ROPE=args.need_apply_rope,
-                    TERMINATE_SIZE=args.stage_early_terminate,
-                    SCAN_STRIDE=STAGE_STRIDE,
-                    UPDATE_CACHE=args.online_update_cache,
-                    ORACLE_MAXIMUM=False, # NOTE: seems has bug... but why?
-                )
-
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
                     ori_shape = out_scores.shape
