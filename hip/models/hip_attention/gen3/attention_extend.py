@@ -2086,6 +2086,44 @@ def dual_stage_quadratic_hip_attention(
                     scores = topk_scores.mean(dim=-1)
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, :scores.shape[-1]] = scores
+                elif os.getenv('HIP_DEBUG_SOFTMAXMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
+                    def rotate_half(vec):
+                        # assert len(vec.shape) == 1
+                        out = torch.zeros_like(vec)
+                        x1 = vec[..., :vec.shape[-1] // 2]
+                        x2 = vec[..., vec.shape[-1] // 2:]
+                        out[..., :vec.shape[-1] // 2] = -x2
+                        out[..., vec.shape[-1] // 2:] = x1
+                        return out
+                    def apply_rope(vec, cos, sin):
+                        vec_rope = (vec * cos) + (rotate_half(vec) * sin)
+                        return vec_rope
+                    k_dense = args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)[:, args.sink_token_size:-args.sliding_window_size, :, :]
+                    k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
+                    q_dense = apply_rope(q, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
+                    scores = torch.matmul(q_dense.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
+                    mask = (args.position_ids[0][:, None] >= (args.sink_token_size + torch.arange(0, k_dense.shape[1], dtype=q_dense.dtype, device=q_dense.device))[None, :])[None, None, :, :]
+                    scores = torch.where(mask, scores, -32000.0).float()
+                    scores = scores.softmax(dim=-1)
+                    scores = torch.where(mask, scores, -32000.0)
+                    scores = scores.view(
+                        scores.shape[0], 
+                        scores.shape[1], 
+                        scores.shape[2] // BLOCK_SIZE_Q, 
+                        BLOCK_SIZE_Q, 
+                        scores.shape[3] // chunk_size, 
+                        chunk_size,
+                    )
+                    scores = scores\
+                        .permute(0, 1, 2, 4, 3, 5)\
+                            .contiguous()\
+                                .view(scores.shape[0], scores.shape[1], scores.shape[2], scores.shape[4], -1)
+                    mask = scores > -30000.0
+                    scores = (scores * mask).sum(dim=-1) / (mask.float().sum(dim=-1) + 1e-12)
+                    scores.masked_fill_(mask.float().sum(dim=-1) == 0, -32000.0)
+                    scores = scores.permute(0, 2, 1, 3)
+                    # print(scores[0,:,0,:])
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
                 elif os.getenv('HIP_DEBUG_FLATTENMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1):
                     def rotate_half(vec):
                         # assert len(vec.shape) == 1
