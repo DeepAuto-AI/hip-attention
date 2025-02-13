@@ -11,6 +11,14 @@ from hip.models.hip_attention.gen3.attention_extend import (
 from hip.models.hip_attention.gen3.attention_metadata import HiPAttentionArgs
 
 
+def cuda_graph_capture_configs(hip_config: HiPAttentionConfig):
+    num_stages = len(hip_config.layers[0].stages)
+    cache_configs = [(None,)]  # (num_stage_cached,)
+    for i_stage in range(num_stages):
+        cache_configs.append((i_stage,))
+    return cache_configs
+
+
 def forward_paged_hip(
     query: torch.Tensor,
     sm_scale: float,
