@@ -3,12 +3,12 @@
   <img src="docs/demo_vllm.gif" width="49%" />
 </p>
 
-:sunglasses: **HiP Attention** could extend the model context length in a training-free manner and can serve 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
+:sunglasses: **HiP Attention** could extend the model context length training-free and can serve 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
 
 | [**Paper (Arxiv, InfiniteHiP *latest*)**](https://arxiv.org/abs/2502.08910) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
-> You can try it in our [Liteai.io LLMOps](https://www.deepauto.ai/litellmops) platform!
+> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)! 
 
 > [!IMPORTANT]
 > This is **NOT yet free for commercial use**. The license is [FSL-1.1-MIT](https://fsl.software/), which is free for non-commercial use but will automatically convert to MIT license two years after each release. Please refer to the [LICENSE](./LICENSE) for more details.
@@ -63,7 +63,7 @@ print(output.shape)
 
 ## Getting Started
 
-### Building from source (Recommanded)
+### Building from source (Recommended)
 
 ```bash
 git clone git@github.com:DeepAuto-AI/hip-attention.git
@@ -111,13 +111,23 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 ## Citation
 
 ```
-@misc{lee2024_hip_attention,
-      title={A Training-free Sub-quadratic Cost Transformer Model Serving Framework With Hierarchically Pruned Attention},
-      author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyoung Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
-      year={2024},
-      eprint={2406.09827},
+@misc{lee2025_infinite_hip,
+      title={InfiniteHiP: Extending Language Model Context Up to 3 Million Tokens on a Single GPU},
+      author={Heejun Lee and Geon Park and Jaduk Suh and Sung Ju Hwang},
+      year={2025},
+      eprint={2502.08910},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2406.09827},
+      url={https://arxiv.org/abs/2502.08910},
 }
+
+@inproceedings{
+      lee2025_hip_attention,
+      title={A Training-Free Sub-quadratic Cost Transformer Model Serving Framework with Hierarchically Pruned Attention},
+      author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyong Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
+      booktitle={The Thirteenth International Conference on Learning Representations},
+      year={2025},
+      url={https://openreview.net/forum?id=PTcMzQgKmn}
+}
+
 ```
