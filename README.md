@@ -110,7 +110,7 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ## Citation
 
-```
+```bibtex
 @misc{lee2025_infinite_hip,
       title={InfiniteHiP: Extending Language Model Context Up to 3 Million Tokens on a Single GPU},
       author={Heejun Lee and Geon Park and Jaduk Suh and Sung Ju Hwang},
@@ -129,5 +129,4 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
       year={2025},
       url={https://openreview.net/forum?id=PTcMzQgKmn}
 }
-
 ```
