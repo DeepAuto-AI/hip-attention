@@ -121,8 +121,7 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
       url={https://arxiv.org/abs/2502.08910},
 }
 
-@inproceedings{
-      lee2025_hip_attention,
+@inproceedings{lee2025_hip_attention,
       title={A Training-Free Sub-quadratic Cost Transformer Model Serving Framework with Hierarchically Pruned Attention},
       author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyong Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
       booktitle={The Thirteenth International Conference on Learning Representations},
