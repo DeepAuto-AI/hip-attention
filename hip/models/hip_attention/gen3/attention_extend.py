@@ -1844,7 +1844,9 @@ def dual_stage_quadratic_hip_attention(
         (os.getenv('HIP_DEBUG_ORACLE_QKMAX', '0') == '1') or
         (os.getenv('HIP_DEBUG_ORACLE_KSOFTMAX_QKMEAN', '0') == '1') or
         (os.getenv('HIP_DEBUG_ORACLE_QKMEAN', '0') == '1') or 
-        (os.getenv('HIP_DEBUG_ORACLE_QKTOPKMEAN', '0') == '1')
+        (os.getenv('HIP_DEBUG_ORACLE_QKLOGSUMEXP', '0') == '1') or
+        (os.getenv('HIP_DEBUG_ORACLE_QKTOPKMEAN', '0') == '1') or
+        (os.getenv('HIP_DEBUG_ORACLE_QKRELUMEAN', '0') == '1')
     )
     if require_flatten_k:
         k_flatten_dense = args.gather_k_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size, disable_gqa=True, gqa_q=q)
@@ -2151,6 +2153,86 @@ def dual_stage_quadratic_hip_attention(
                     scores.masked_fill_(mask.float().sum(dim=-1) == 0, -32000.0)
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, :scores.shape[-1]] = scores
+                elif os.getenv('HIP_DEBUG_ORACLE_QKRELUMEAN', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1) and (original_sliding_window_size != 777):
+                    def rotate_half(vec):
+                        # assert len(vec.shape) == 1
+                        out = torch.zeros_like(vec)
+                        x1 = vec[..., :vec.shape[-1] // 2]
+                        x2 = vec[..., vec.shape[-1] // 2:]
+                        out[..., :vec.shape[-1] // 2] = -x2
+                        out[..., vec.shape[-1] // 2:] = x1
+                        return out
+                    def apply_rope(vec, cos, sin):
+                        vec_rope = (vec * cos) + (rotate_half(vec) * sin)
+                        return vec_rope
+                    q_dense = q
+                    k_dense = k_flatten_dense
+                    k_indices = (indices_left[0, -1, 0, :, None] + torch.arange(0, chunk_size, device=q.device)[None, None, None, None, :]).view(-1)
+                    k_dense = k_dense[:, k_indices, :, :]
+                    # k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
+                    # q_dense = apply_rope(q_dense, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
+                    scores = torch.matmul(q_dense.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
+                    mask = (args.position_ids[0][:, None] >= (args.sink_token_size + torch.arange(0, k_dense.shape[1], dtype=q_dense.dtype, device=q_dense.device))[None, :])[None, None, :, :]
+                    scores = torch.relu(scores)
+                    scores = torch.where(mask, scores, -32000.0)
+                    scores = scores.view(
+                        scores.shape[0], 
+                        scores.shape[1], 
+                        scores.shape[2] // BLOCK_SIZE_Q, 
+                        BLOCK_SIZE_Q, 
+                        scores.shape[3] // chunk_size, 
+                        chunk_size,
+                    )
+                    scores = scores\
+                        .permute(0, 1, 2, 4, 3, 5)\
+                            .contiguous()\
+                                .view(scores.shape[0], scores.shape[1], scores.shape[2], scores.shape[4], -1)
+                    mask = scores > -30000.0
+                    scores = ((scores * mask).sum(dim=-1) / mask.float().sum(dim=-1))
+                    scores = torch.where(mask.float().sum(dim=-1) != 0, scores, -32000.0)
+                    scores = scores.permute(0, 2, 1, 3)
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
+                elif os.getenv('HIP_DEBUG_ORACLE_QKLOGSUMEXP', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1) and (original_sliding_window_size != 777):
+                    def rotate_half(vec):
+                        # assert len(vec.shape) == 1
+                        out = torch.zeros_like(vec)
+                        x1 = vec[..., :vec.shape[-1] // 2]
+                        x2 = vec[..., vec.shape[-1] // 2:]
+                        out[..., :vec.shape[-1] // 2] = -x2
+                        out[..., vec.shape[-1] // 2:] = x1
+                        return out
+                    def apply_rope(vec, cos, sin):
+                        vec_rope = (vec * cos) + (rotate_half(vec) * sin)
+                        return vec_rope
+                    q_dense = q
+                    k_dense = k_flatten_dense
+                    k_indices = (indices_left[0, -1, 0, :, None] + torch.arange(0, chunk_size, device=q.device)[None, None, None, None, :]).view(-1)
+                    k_dense = k_dense[:, k_indices, :, :]
+                    # k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
+                    # q_dense = apply_rope(q_dense, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
+                    scores = torch.matmul(q_dense.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
+                    mask = (args.position_ids[0][:, None] >= (args.sink_token_size + torch.arange(0, k_dense.shape[1], dtype=q_dense.dtype, device=q_dense.device))[None, :])[None, None, :, :]
+                    scores = torch.where(mask, scores, -32000.0)
+                    scores = scores.view(
+                        scores.shape[0], 
+                        scores.shape[1], 
+                        scores.shape[2] // BLOCK_SIZE_Q, 
+                        BLOCK_SIZE_Q, 
+                        scores.shape[3] // chunk_size, 
+                        chunk_size,
+                    )
+                    scores = scores\
+                        .permute(0, 1, 2, 4, 3, 5)\
+                            .contiguous()
+                    #             .view(scores.shape[0], scores.shape[1], scores.shape[2], scores.shape[4], -1)
+                    mask = scores > -30000.0
+                    scores = torch.logsumexp(scores, dim=-1)
+                    scores.masked_fill_(mask.float().sum(dim=-1) == 0, -32000.0)
+                    mask = scores > -30000.0
+                    scores = (scores.sum(dim=-1) / mask.int().sum(dim=-1))
+                    scores.masked_fill_(mask.int().sum(dim=-1) == 0, -32000.0)
+                    scores = scores.permute(0, 2, 1, 3)
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
                 elif os.getenv('HIP_DEBUG_ORACLE_QKMAX', '0') == '1' and (i_stage == 0) and (BDST > 1) and ((q.shape[1] % BLOCK_SIZE_Q) == 0) and (args.position_ids.shape[0] == 1) and (original_sliding_window_size != 777):
                     def rotate_half(vec):
                         # assert len(vec.shape) == 1
@@ -2200,11 +2282,12 @@ def dual_stage_quadratic_hip_attention(
                     def apply_rope(vec, cos, sin):
                         vec_rope = (vec * cos) + (rotate_half(vec) * sin)
                         return vec_rope
+                    q_dense = q
                     k_dense = k_flatten_dense #args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)[:, :, :, :]
                     k_indices = (indices_left[0, -1, 0, :, None] + torch.arange(0, chunk_size, device=q.device)[None, None, None, None, :]).view(-1)
                     k_dense = k_dense[:, k_indices, :, :]
-                    k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
-                    q_dense = apply_rope(q, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
+                    # k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
+                    # q_dense = apply_rope(q_dense, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
                     scores = torch.matmul(q_dense.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
                     mask = (args.position_ids[0][:, None] >= (args.sink_token_size + torch.arange(0, k_dense.shape[1], dtype=q_dense.dtype, device=q_dense.device))[None, :])[None, None, :, :]
                     scores = torch.where(mask, scores, -32000.0).float()
@@ -2239,11 +2322,12 @@ def dual_stage_quadratic_hip_attention(
                     def apply_rope(vec, cos, sin):
                         vec_rope = (vec * cos) + (rotate_half(vec) * sin)
                         return vec_rope
+                    q_dense = q
                     k_dense = k_flatten_dense #args.gather_k_from_paged_cache(chunk_size=chunk_size, disable_gqa=True, gqa_q=q)
                     k_indices = (indices_left[0, -1, 0, :, None] + torch.arange(0, chunk_size, device=q.device)[None, None, None, None, :]).view(-1)
                     k_dense = k_dense[:, k_indices, :, :]
-                    k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
-                    q_dense = apply_rope(q, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
+                    # k_dense = apply_rope(k_dense, args.rope_cos[None, 0:0+1, None, :], args.rope_sin[None, 0:0+1, None, :])
+                    # q_dense = apply_rope(q_dense, args.rope_cos[None, 1024:1024+1, None, :], args.rope_sin[None, 1024:1024+1, None, :])
                     scores = torch.matmul(q_dense.permute(0, 2, 1, 3), k_dense.permute(0, 2, 3, 1))
                     mask = (args.position_ids[0][:, None] >= (args.sink_token_size + torch.arange(0, k_dense.shape[1], dtype=q_dense.dtype, device=q_dense.device))[None, :])[None, None, :, :]
                     scores = torch.where(mask, scores, -32000.0)
@@ -2532,6 +2616,13 @@ def dual_stage_quadratic_hip_attention(
             # args.disable_flashdecode = True
             # B BDST H CHUNK
             indices = indices.flatten(-2, -1).unsqueeze(-2).repeat(1, 1, HEAD, 1)
+
+        if (os.getenv('HIP_DEBUG_UNION_LAYERS', '0') == '1'):
+            assert (
+                os.getenv('HIP_HEAD_REDUCE', '1') == '1' or
+                os.getenv('HIP_DEBUG_UNION_HEAD', '0') == '1'
+            )
+            assert False, "todo"
 
         # NOTE: sampled indices might be delayed
         if (os.getenv('HIP_DEBUG_ADD_DELAY_WINDOW', '0') == '1'):
