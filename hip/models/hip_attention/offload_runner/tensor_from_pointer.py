@@ -1,19 +1,61 @@
+import math
+import cuda
+import cuda.cudart
 import cupy
 import numpy as np
 import torch
 from math import prod
 import ctypes
-from typing import Tuple
+from typing import Tuple, Union
 from torch.utils.cpp_extension import load
 import os
 
 module_path = os.path.dirname(__file__)
-ops = load(
+load(
     "tensor_from_pointer",
+    verbose=False,
+    is_python_module=False,
+    is_standalone=False,
     sources=[
         os.path.join(module_path, "tensor_from_pointer.cpp"),
     ],
+    extra_cflags=['-O3'],
 )
+
+def sizeof(dtype: Union[torch.Tensor, torch.dtype]) -> int:
+    if isinstance(dtype, torch.Tensor):
+        return dtype.numel() * sizeof(dtype.dtype)
+    
+    if dtype in [
+        torch.uint8, 
+        torch.int8, 
+        torch.float8_e4m3fn, 
+        torch.float8_e4m3fnuz, 
+        torch.float8_e5m2, 
+        torch.float8_e5m2fnuz
+    ]:
+        return 1
+    elif dtype in [
+        torch.uint16,
+        torch.int16,
+        torch.float16,
+        torch.bfloat16,
+    ]:
+        return 2
+    elif dtype in [
+        torch.uint32,
+        torch.int32,
+        torch.float32,
+    ]:
+        return 4
+    elif dtype in [
+        torch.uint64,
+        torch.int64,
+        torch.float64,
+    ]:
+        return 8
+    else:
+        raise Exception()
 
 def tensor_from_pointer(
     ptr: int, 
@@ -31,7 +73,7 @@ def tensor_from_pointer(
         elem_size = 8
     else:
         raise NotImplementedError()
-    tensor = ops.tensor_from_pointer(
+    tensor = torch.ops.hip_attn.tensor_from_pointer(
         ptr, 
         prod(shape), 
         elem_size, 
@@ -40,9 +82,32 @@ def tensor_from_pointer(
     tensor = tensor.view(shape).view(dtype)
     return tensor
 
+def alloc_managed_tensor(
+    shape: tuple, dtype: torch.dtype, device: Union[str, torch.device],
+):
+    device = device
+    if isinstance(device, str):
+        device = torch.device(device)
+        
+    elem_size = sizeof(dtype)
+    numel = math.prod(shape)
+    align = 4096
+    byte_size = elem_size * numel
+    byte_size = byte_size + byte_size % align
+    
+    _result_code, pointer = cuda.cudart.cudaMallocManaged(
+        byte_size, 
+        cuda.cudart.cudaMemAttachGlobal
+    )
+    
+    t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
+    t_cpu = tensor_from_pointer(pointer, shape, dtype, -1)
+    
+    return t_gpu, t_cpu
+
 if __name__ == '__main__':
     shape = (2, 2)
-    dtype = torch.float16
+    dtype = torch.bfloat16
     
     elem_size = torch.tensor([], dtype=dtype).element_size()
     numel = prod(shape)

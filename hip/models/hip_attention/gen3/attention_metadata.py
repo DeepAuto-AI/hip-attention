@@ -195,7 +195,7 @@ class HiPAttentionArgs:
     sliding_window_indices: Optional[torch.Tensor] = None
     
     # NOTE: use only for debugging purpose
-    _layer_id: int = 31
+    layer_id: int = 31
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:

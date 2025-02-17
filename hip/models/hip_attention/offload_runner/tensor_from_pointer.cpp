@@ -40,7 +40,6 @@ torch::Tensor tensor_from_pointer(
     return tharray;
 }
 
-// bind function by PYBIND11
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("tensor_from_pointer", &tensor_from_pointer, "tensor_from_pointer (CUDA)");
+TORCH_LIBRARY(hip_attn, m) {
+    m.def("tensor_from_pointer", &tensor_from_pointer);
 }
