@@ -65,9 +65,25 @@ class HiPAttentionPerLayerConfig:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
 
 
+_DEFAULT_LAEYRS = [
+    HiPAttentionPerLayerConfig(
+        # sliding_window_size = 777, # NOTE: debugging sw
+        second_stage_k=4096,
+        sa_extend_backend="streaming",
+        scan_extend_backend="streaming",
+    ),
+    HiPAttentionPerLayerConfig(
+        # sliding_window_size = 777, # NOTE: debugging sw
+        second_stage_k=2048,
+        sa_extend_backend="streaming",
+        scan_extend_backend="relative",
+    ),
+]
+
+
 @dataclass
 class HiPAttentionConfig:
-    dense_layers: list[int] = field(default_factory=lambda: [0, 1, 2])
+    dense_layers: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 31])
     block_sparse_block_size_q: int = 64
     metadata_cache_max_batch_size: int = 32
     mask_refresh_interval: Union[int, List[int]] = field(
@@ -75,18 +91,11 @@ class HiPAttentionConfig:
     )
     using_extend: bool = True
     layers: list[HiPAttentionPerLayerConfig] = field(
-        default_factory=lambda: [
-            HiPAttentionPerLayerConfig(
-                parsed_json={
-                    "second_stage_k": 4096,
-                    "sliding_window_size": 1024,
-                    "sink_token_size": 256,
-                }
-            ),
-            HiPAttentionPerLayerConfig(),
-        ]
+        default_factory=lambda: _DEFAULT_LAEYRS
     )
-    prefill_layers: Optional[list[HiPAttentionPerLayerConfig]] = None
+    prefill_layers: list[HiPAttentionPerLayerConfig] = field(
+        default_factory=lambda: _DEFAULT_LAEYRS
+    )
 
     # deprecated
     apply_v_dot: bool = False

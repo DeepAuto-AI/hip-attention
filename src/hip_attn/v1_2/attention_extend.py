@@ -2641,7 +2641,7 @@ def dual_stage_quadratic_hip_attention(
         )
         ks_start_end[:, :, -1] = ks
         
-        # print(args._layer_id, round(ks.float().mean().item() * args.block_size_k))
+        # print(args.layer_id, round(ks.float().mean().item() * args.block_size_k))
         
         if (args.low_percent > 0) and (args.low_k_ratio < 1):
             scores = (

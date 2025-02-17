@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import os
 from typing import Dict, List, Literal, Optional
 
 import torch
@@ -80,8 +81,27 @@ class HiPMetadataCachePool:
                 layer_config = hip_config.layers[layer_idx]
             self.layer_configs[layer_idx] = layer_config
 
+            additional_tokens = 0
+            # if os.getenv("HIP_DEBUG_SNAP_KV", "0") == "1":
+            #     additional_tokens += 8192
+            if os.getenv("HIP_DEBUG_UNION_HEAD", "0") == "1":
+                additional_tokens += layer_config.second_stage_k * (self.head_num - 1)
+            if os.getenv("HIP_DIAG_INFO", None) != None:
+                additional_tokens += 8192 if require_dense else 4096
+            if os.getenv("HIP_DEBUG_ADD_DELAY_WINDOW", "0") == "1":
+                additional_tokens += layer_config.second_stage_k * (
+                    64 // layer_config.stages[-1].stage_chunk_size
+                )
+
+            actual_tokens = layer_config.second_stage_k + additional_tokens
+            if actual_tokens != layer_config.second_stage_k:
+                print(
+                    f"actual attened tokens are {actual_tokens + layer_config.sliding_window_size + layer_config.sink_token_size}"
+                )
+
             n_chunks = triton.cdiv(
-                layer_config.second_stage_k, layer_config.stages[-1].stage_chunk_size
+                actual_tokens,
+                layer_config.stages[-1].stage_chunk_size,
             )
 
             num_q_blocks = 1
@@ -148,11 +168,19 @@ class HiPMetadataCachePool:
                         "B,1,H",
                         torch.bfloat16,
                     )
+        
+        self.num_delays = int(os.getenv("HIP_DEBUG_DELAYED_STAGE0", "0"))
+        self.delayed_first_stage = [[] for _ in range(self.layer_num)]
 
         self.allocated_gpu_bytes = self.compute_allocated_bytes()
         logger.info(
             f"Allocated HiP metadata cache pool size: {self.allocated_gpu_bytes / 1024 / 1024:.2f} MB"
         )
+    
+    def reset_decode_phase(self):
+        # BUG: this function should be called somewhere!!!
+        for layer in self.delayed_first_stage:
+            layer.clear()
 
     def compute_allocated_bytes(self):
         t = 0
@@ -318,12 +346,66 @@ class HiPMetadataCachePool:
 
         if metadata.stage_caches is not None:
             for i_stage, cache in enumerate(metadata.stage_caches):
-                if i_stage > 0:
+                if i_stage == 0:
+                    pass
+                elif i_stage == 1:
+                    if (
+                        torch.cuda.is_current_stream_capturing()
+                        and self.num_delays > 0
+                    ):
+                        raise Exception(
+                            "delayed stage is only supported on eager mode for research purpose."
+                        )
+                    if len(self.delayed_first_stage[layer_id]) == 0:
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_left",
+                            cache.indices_left,
+                        )
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_right",
+                            cache.indices_right,
+                        )
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_out_scores",
+                            cache.out_scores,
+                        )
+                    self.delayed_first_stage[layer_id].append(
+                        {
+                            "indices_left": cache.indices_left,
+                            "indices_right": cache.indices_right,
+                            "out_scores": cache.out_scores,
+                        }
+                    )
+                    if len(self.delayed_first_stage[layer_id]) > self.num_delays:
+                        delayed_state = self.delayed_first_stage[layer_id].pop(0)
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_left",
+                            delayed_state["indices_left"],
+                        )
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_right",
+                            delayed_state["indices_right"],
+                        )
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_out_scores",
+                            delayed_state["out_scores"],
+                        )
+                else:
                     self.set_buffer(
-                        layer_id, f"stage_{i_stage}_indices_left", cache.indices_left
+                        layer_id,
+                        f"stage_{i_stage}_indices_left",
+                        cache.indices_left,
                     )
                     self.set_buffer(
-                        layer_id, f"stage_{i_stage}_indices_right", cache.indices_right
+                        layer_id,
+                        f"stage_{i_stage}_indices_right",
+                        cache.indices_right,
                     )
                     self.set_buffer(
                         layer_id, f"stage_{i_stage}_out_scores", cache.out_scores
