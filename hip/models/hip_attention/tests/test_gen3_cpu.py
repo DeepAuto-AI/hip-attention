@@ -111,6 +111,7 @@ def scan_stage(
             idx_head,
             idx_chunk,
         ] = chunk_right
+
 bsz = 1
 tdst = 1
 tsrc = 1024 * 1024
@@ -122,6 +123,7 @@ dtype = np.float32
 stage_chunk_size = 256
 stage_block_size_q = 64
 stage_block_stride_q = 4
+# NOTE: tune this
 block_size_k = 4
 
 q = np.random.randn(bsz, tdst, head, hid).astype(dtype)
@@ -129,6 +131,7 @@ k = np.random.randn(bsz, tsrc, head_kv, hid).astype(dtype)
 
 print('init done', flush=True)
 
+elapsed = []
 for i in range(100):
     indices_left = np.arange(0, tsrc, stage_chunk_size)[None, None, None, :]
     indices_left = np.tile(indices_left, (bsz, triton.cdiv(tdst, stage_block_size_q), head, 1))
@@ -147,3 +150,7 @@ for i in range(100):
     t_end = time.monotonic() * 1000
     
     print(t_end - t_start)
+    if i > 3:
+        elapsed.append(t_end - t_start)
+    
+print('avg', sum(elapsed) / len(elapsed))
