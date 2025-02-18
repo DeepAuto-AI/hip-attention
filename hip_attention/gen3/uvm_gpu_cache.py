@@ -1,20 +1,21 @@
 import math
 import os
+from typing import Optional, Tuple, Union
+
 import cuda
 import cuda.cudart
 import torch
-from torch import Tensor
-from typing import Optional, Tuple, Union
 import tqdm
 import triton
 import triton.language as tl
+from torch import Tensor
 
-from hip_attention.offload_runner.tensor_from_pointer import (
-    tensor_from_pointer
-)
 from hip_attention.gen3.attention_metadata import (
     HiPAttentionOutputMetadata,
     HiPAttentionCacheAccessStatistics,
+)
+from hip_attention.offload_runner.tensor_from_pointer import (
+    tensor_from_pointer
 )
 
 MAX_INT: tl.constexpr =             tl.constexpr(90000000)

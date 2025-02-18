@@ -1,15 +1,15 @@
+import logging
 import os
 import threading
 import time
-from typing import Dict, Tuple, Callable, Any, Optional, Set
-import logging
+from typing import Dict, Tuple, Any, Optional, Set
 
 import numpy as np
 import torch
 from torch import Tensor
 
-from hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
 from hip_attention.gen3.hip_config import HiPAttentionConfig
+from hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
 
 logger = logging.getLogger(__name__)
 

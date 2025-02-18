@@ -1,31 +1,26 @@
-import os
 import math
+import os
 import time
-import cv2
-import torch
-import numba
-import triton
-import numpy as np
-import triton.language as tl
-from torch import Tensor
-from typing import List, Dict, Literal, Optional, Tuple
+from typing import Optional
 
+import cv2
+import numba
+import numba.cuda
+import numpy as np
+import torch
+import triton
+import triton.language as tl
 from matplotlib import pyplot as plt
-from hip_attention.attention2_draft_prefetch import (
-    load_checkouts,
-    adjust_rope,
-)
-from hip_attention.gen3.uvm_gpu_cache import (
-    load_tokens,
+from torch import Tensor
+
+from hip_attention.common import load_checkouts
+from hip_attention.gen3.attention_decode_bsa import (
+    decode_block_sparse_attention,
 )
 from hip_attention.gen3.attention_extend_bsa import (
     block_sparse_attention,
 )
-from hip_attention.gen3.attention_decode_bsa import (
-    decode_block_sparse_attention,
-)
 from hip_attention.gen3.attention_metadata import (
-    Stage,
     NopStage,
     EvalScoreStage,
     ScanStage,
@@ -36,7 +31,10 @@ from hip_attention.gen3.attention_metadata import (
     HiPAttentionStageInputCache,
     safe_stride,
 )
-import numba.cuda
+from hip_attention.gen3.uvm_gpu_cache import (
+    load_tokens,
+)
+from hip_attention.rope import adjust_rope
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 def num_streaming_multiprocessor():

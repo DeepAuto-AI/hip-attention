@@ -6,6 +6,7 @@ from typing import Dict, List, Literal, Optional
 
 import torch
 import triton
+
 from hip_attention.gen3.attention_metadata import (
     HiPAttentionCacheAccessStatistics,
     HiPAttentionOutputMetadata,

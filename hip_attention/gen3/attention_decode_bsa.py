@@ -1,15 +1,16 @@
 from __future__ import annotations
-from typing import Optional, TYPE_CHECKING
 
 import os
+from typing import Optional, TYPE_CHECKING
+
 import torch
-from torch import Tensor
 import triton
 import triton.language as tl
+from torch import Tensor
 
-from hip_attention.gen3.uvm_gpu_cache import load_tokens
-from hip_attention.gen3.attention_metadata import safe_stride
 from hip_attention.gen3.attention_extend_bsa import block_sparse_attention_cuda_step
+from hip_attention.gen3.attention_metadata import safe_stride
+from hip_attention.gen3.uvm_gpu_cache import load_tokens
 
 if TYPE_CHECKING:
     from hip_attention.gen3.attention_metadata import HiPAttentionArgs

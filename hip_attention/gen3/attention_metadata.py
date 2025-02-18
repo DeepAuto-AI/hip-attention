@@ -1,8 +1,9 @@
 import copy
-from dataclasses import dataclass, field
 import os
-from torch import Tensor
+from dataclasses import dataclass, field
 from typing import Dict, Literal, Optional, List, TYPE_CHECKING
+
+from torch import Tensor
 
 if TYPE_CHECKING:
     from hip_attention.gen3.uvm_gpu_cache import (

@@ -1,15 +1,13 @@
-import triton
-import triton.language as tl
-import torch
 import os
 import warnings
+from typing import Optional
+
+import torch
+import triton
+import triton.language as tl
 from torch import Tensor
 from triton import cdiv as cdiv_python
-from typing import Optional, Dict, List, Tuple
 
-from hip_attention.attention2_draft_sampling_extend import (
-    adjust_rope
-)
 from hip_attention.gen3.attention_metadata import (
     safe_stride,
     HiPAttentionArgs,
@@ -17,6 +15,7 @@ from hip_attention.gen3.attention_metadata import (
 from hip_attention.gen3.uvm_gpu_cache import (
     load_tokens,
 )
+from hip_attention.rope import adjust_rope
 
 DEFAULT_EXTEND_BACKEND: tl.constexpr = 'streaming'
 

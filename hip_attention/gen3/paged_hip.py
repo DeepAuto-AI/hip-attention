@@ -1,14 +1,15 @@
 import os
-import torch
 from typing import Optional, Any
 
-from hip_attention.gen3.attention_metadata import HiPAttentionOutputMetadata
-from hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
-from hip_attention.gen3.hip_config import HiPAttentionConfig
+import torch
+
 from hip_attention.gen3.attention_extend import (
     dual_stage_quadratic_hip_attention,
 )
 from hip_attention.gen3.attention_metadata import HiPAttentionArgs
+from hip_attention.gen3.attention_metadata import HiPAttentionOutputMetadata
+from hip_attention.gen3.hip_config import HiPAttentionConfig
+from hip_attention.gen3.uvm_gpu_cache import HiPOffloadCache
 
 
 def cuda_graph_capture_configs(hip_config: HiPAttentionConfig):
