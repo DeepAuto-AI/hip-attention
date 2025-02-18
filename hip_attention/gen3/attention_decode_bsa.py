@@ -1473,7 +1473,7 @@ def decode_block_sparse_attention(
     return context
 
 def test_correctness(file_path, use_cuda_graph=False):
-    from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
+    from hip_attention.gen3.attention_extend_bsa import block_sparse_attention
     args = load_saved_tensors(file_path)
 
     def run_orig(output=None):
@@ -1564,7 +1564,7 @@ def test_correctness(file_path, use_cuda_graph=False):
 
 @torch.no_grad()
 def benchmark(file_path, use_cuda_graph=False):
-    from hip.models.hip_attention.gen3.attention_extend_bsa import block_sparse_attention
+    from hip_attention.gen3.attention_extend_bsa import block_sparse_attention
     args = load_saved_tensors(file_path)
 
     def run_orig():
