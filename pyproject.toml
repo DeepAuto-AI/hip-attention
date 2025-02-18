@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hip-attention"  # Name of package when installed using pip
-version = "1.1.0"
+version = "1.2.0"
 description = "HiP Attention"
 requires-python = ">=3.10"
 dynamic = ["dependencies", "optional-dependencies"]
@@ -41,7 +41,8 @@ sglang = {file = ["requirements.sglang.txt"]}
 [tool.setuptools.packages]
 
 [tool.setuptools.packages.find]
-include = ["hip*"]
+include = ["hip_attention*"]
+exclude = ["tests*"]
 namespaces = false
 
 # Add package data
