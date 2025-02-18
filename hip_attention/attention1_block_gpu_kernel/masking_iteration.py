@@ -1,12 +1,14 @@
+import math
 import os
+from typing import Optional, Union, List
+
+import torch
 import triton
 import triton.language as tl
-import torch
 from torch import Tensor
-import math
-from typing import Optional, Union, List, Tuple
-from hip.models.hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
-    PagedKeyCacheVllmCompat, PagedValueCacheVllmCompat
+
+from hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
+    PagedKeyCacheVllmCompat
 )
 
 if hasattr(tl.math, 'round'):

@@ -1,8 +1,10 @@
 import time
+
+import torch
 import triton
 import triton.language as tl
-import torch
 from torch import Tensor
+
 
 @triton.jit
 def memory_efficient_llm_ce_cuda(

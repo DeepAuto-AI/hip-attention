@@ -1,6 +1,8 @@
+from typing import Tuple
+
 import torch
 from torch import Tensor
-from typing import Tuple, Union, Optional, List
+
 
 class VllmCompat:
     pass

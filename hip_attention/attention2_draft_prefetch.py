@@ -37,8 +37,8 @@ import triton.language as tl
 from torch import Tensor
 
 from hip_attention.attention1_block_gpu import load_checkouts, to_dense
-from hip_attention.utils.triton_argsort import argsort as tl_argsort
 from hip_attention.rope import adjust_rope
+from hip_attention.utils.triton_argsort import argsort as tl_argsort
 
 try:
     from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache

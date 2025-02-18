@@ -20,17 +20,16 @@
 import math
 from typing import List, Optional, Tuple, Union
 
-import tqdm
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import tqdm
+from flash_attn import flash_attn_func, flash_attn_with_kvcache
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
@@ -40,6 +39,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import (
     add_start_docstrings,
@@ -49,10 +49,11 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.models.llama.configuration_llama import LlamaConfig
 
-from flash_attn import flash_attn_func, flash_attn_with_kvcache
-from hip import hip_attention_11, HiPAttentionArgs11, HiPAttentionOutputMetadata11
+from hip_attention.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
+from hip_attention.attention2_draft_prefetch \
+    import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11
+from hip_attention.attention2_draft_prefetch import hip_attention as hip_attention_11
 
 logger = logging.get_logger(__name__)
 

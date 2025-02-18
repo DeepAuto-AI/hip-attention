@@ -4,7 +4,7 @@ import torch
 import time
 
 import tqdm
-from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import (
+from hip_attention.attention2_draft_causal_batch_gpu_fused_vec import (
     hip_masking, 
     block_sparse_attention,
     load_checkouts

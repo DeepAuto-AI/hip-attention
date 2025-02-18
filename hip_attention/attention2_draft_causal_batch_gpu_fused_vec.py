@@ -18,27 +18,24 @@ TODO:
 """
 
 import copy
-import cv2
-import matplotlib.pyplot as plt
-import numba
-from dataclasses import dataclass
-from importlib import metadata
-import nvtx
-import cupy as cp
-import random, os
+import math
+import os
+import random
 import warnings
+from dataclasses import dataclass
+from typing import Optional, Tuple, List
+
+import matplotlib.pyplot as plt
+import nvtx
+import torch
 import tqdm
 import triton
 import triton.language as tl
-import torch
-import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
 from torch import Tensor
+
 from hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import numpy as np
-from numpy import ndarray as NdArray
-import math
-from hip.utils.triton_argsort import argsort as tl_argsort
+from hip_attention.utils.triton_argsort import argsort as tl_argsort
+
 try:
     from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache
 except ImportError:

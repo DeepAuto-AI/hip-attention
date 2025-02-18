@@ -51,7 +51,7 @@ from transformers.utils import (
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
 
-from hip import custom_attention
+from hip_attention.attention import custom_attention
 
 logger = logging.get_logger(__name__)
 

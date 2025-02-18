@@ -32,15 +32,17 @@ TODO:
 # g8    5.5473
 
 
-import torch
-import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
-from torch import Tensor
-from hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import numpy as np
-from numpy import ndarray as NdArray
-import numba
 import math
+from typing import Optional
+
+import numba
+import numpy as np
+import torch
+from numpy import ndarray as NdArray
+from torch import Tensor
+
+from hip_attention.attention1_block_gpu import load_checkouts
+
 
 @numba.njit
 def cdiv(a, b):

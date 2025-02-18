@@ -1,9 +1,10 @@
-from hip.models.hip_attention.attention2_draft_prefetch import (
-    block_sparse_attention, 
-    HiPAttentionArgs, 
+import torch
+
+from hip_attention.attention2_draft_prefetch import (
+    block_sparse_attention,
+    HiPAttentionArgs,
     load_checkouts
 )
-import torch
 
 seq_len = 131072
 head_dim = 128

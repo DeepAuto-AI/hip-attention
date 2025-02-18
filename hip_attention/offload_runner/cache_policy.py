@@ -6,15 +6,15 @@ if __name__ == '__main__':
 import numba
 import numpy as np
 from numpy import ndarray as NdArray
-from typing import List, Union, Optional, Dict, Tuple
 import torch
-from torch import Tensor
-import math, os, time, tqdm, random
-from hip import hip_attention_11, HiPAttentionArgs11
-from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
+import math, os, tqdm, random
 import matplotlib.pyplot as plt
 import cv2
 import pandas as pd
+
+from hip_attention.attention2_draft_prefetch import hip_attention as hip_attention_11
+from hip_attention.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
+from hip_attention.load_checkouts import load_checkouts
 
 @numba.njit(parallel=True)
 def access_log_to_dense(

@@ -32,23 +32,21 @@ approximator is log N, but sparse attention is quadratic
 import math
 import os
 from typing import Tuple
-import warnings
-import numba
-import numpy as np
-import torch
-from numpy import ndarray
-from torch import Tensor
-import matplotlib.pyplot as plt
-import tqdm
-import skimage.measure
-import torch.nn.functional as F
-from torch.autograd import Function
 
+import matplotlib.pyplot as plt
+import numpy as np
+import skimage.measure
+import torch
+import torch.nn.functional as F
+import tqdm
 import triton
 import triton.language as tl
+from torch import Tensor
+from torch.autograd import Function
 
-from hip.utils import get_bench, seed
 from hip_attention.common import load_checkouts
+from hip_attention.utils.benchmarking import get_bench
+from hip_attention.tests.utils.seed import seed
 
 timer = lambda x: get_bench().region(x)
 

@@ -26,18 +26,20 @@ TODO:
 # bk 4 bkg 1 recurse 2 lv   PPL: 9.1364
 # bk 4 bkg 1 recurse 3 lv   PPL: 9.1930
 
+import math
+from typing import Optional, Union
+
+import numba
+import numpy as np
 import torch
-import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
+from numpy import ndarray as NdArray
 from torch import Tensor
+
 from hip_attention.attention1_block_gpu \
     import calc_prob_return_context \
-        as block_sparse_flash_attention
+    as block_sparse_flash_attention
 from hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import numpy as np
-from numpy import ndarray as NdArray
-import numba
-import math
+
 
 @numba.njit
 def cdiv(a, b):

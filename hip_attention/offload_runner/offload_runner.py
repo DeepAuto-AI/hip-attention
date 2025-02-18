@@ -1,26 +1,26 @@
 import argparse
 import gc
 import random
+import threading
+from math import prod
+from typing import List, Literal, Optional, Dict, Any, Tuple
+
+import cuda
 import cuda.cudart
+import os
+import pynvml
+import time
+import torch
 import torch.distributed
 import tqdm
-from transformers import AutoTokenizer
-from hip.models.hip_attention.offload_runner.llama_model import LlamaForCausalLM, LlamaDecoderLayer, LlamaAttention
-import torch, time, os
-from typing import List, Literal, Optional, Dict, Union, Any, Tuple
-from transformers.cache_utils import Cache, PretrainedConfig, is_torchdynamo_compiling
-from transformers import BitsAndBytesConfig
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear)
-import cupy
-import ctypes
-import cuda
-from hip.models.hip_attention.offload_runner.tensor_from_pointer import tensor_from_pointer
-from math import prod
-import pynvml
-import threading
-from hip import HiPAttentionArgs, HiPAttentionOutputMetadata
 import triton
 import triton.language as tl
+from transformers import AutoTokenizer
+from transformers.cache_utils import Cache, PretrainedConfig
+from vllm.model_executor.layers.linear import (QKVParallelLinear)
+
+from hip_attention.offload_runner.llama_model import LlamaForCausalLM, LlamaDecoderLayer, LlamaAttention
+from hip_attention.offload_runner.tensor_from_pointer import tensor_from_pointer
 
 torch.set_num_threads(os.cpu_count())
 
@@ -1491,7 +1491,6 @@ class StaticCache(Cache):
 
 def convert_llama_to_vllm(model: LlamaForCausalLM):
     from vllm.model_executor.layers.layernorm import RMSNorm
-    from vllm.model_executor.models.llama import LlamaMLP
     for ilayer, layer in enumerate(model.model.layers):
         layer = layer # type: LlamaDecoderLayer
         input_layernorm = RMSNorm(layer.input_layernorm.weight.shape[0]).to(model.device).half()

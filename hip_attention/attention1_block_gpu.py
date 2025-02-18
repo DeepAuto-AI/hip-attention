@@ -22,6 +22,7 @@ import os
 import warnings
 from typing import List, Literal, Optional, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numba
 import numpy as np
 import torch
@@ -31,7 +32,6 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
-import matplotlib.pyplot as plt
 
 # assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 # assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
@@ -42,7 +42,8 @@ if not hasattr(tl, 'sort'):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip.utils import get_bench, seed
+from hip_attention.utils.benchmarking import get_bench
+from hip_attention.tests.utils.seed import seed
 from hip_attention.common import load_checkouts
 from hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
     PagedKeyCacheVllmCompat, PagedValueCacheVllmCompat

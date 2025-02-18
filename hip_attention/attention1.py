@@ -30,14 +30,15 @@ approximator is log N, but sparse attention is quadratic
 """
 
 import math
-import numba
+
+import matplotlib.pyplot as plt
 import numpy as np
+import skimage.measure
 import torch
+import tqdm
 from numpy import ndarray
 from torch import Tensor
-import matplotlib.pyplot as plt
-import tqdm
-import skimage.measure
+
 
 def mask(
     queries: ndarray, 

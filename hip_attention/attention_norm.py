@@ -1,8 +1,10 @@
 import time
+
 import torch
-from torch import Tensor
 import triton
 import triton.language as tl
+from torch import Tensor
+
 
 @triton.jit
 def load_tokens(

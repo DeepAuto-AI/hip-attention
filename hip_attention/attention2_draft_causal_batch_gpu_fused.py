@@ -17,23 +17,21 @@ TODO:
 10. chunk-wise BPTT
 """
 
-import nvtx
-from torch.utils.dlpack import to_dlpack
-from torch.utils.dlpack import from_dlpack
-import cupy as cp
-import random, os
+import math
+import os
+import random
 import warnings
+from typing import Optional
+
+import nvtx
+import torch
 import triton
 import triton.language as tl
-import torch
-import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
-from torch import Tensor, bits16
+from torch import Tensor
+
 from hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import numpy as np
-from numpy import ndarray as NdArray
-import math
-from hip.utils.triton_argsort import argsort as tl_argsort
+from hip_attention.utils.triton_argsort import argsort as tl_argsort
+
 
 def cdiv_python(a, b):
     return math.ceil(a / b)

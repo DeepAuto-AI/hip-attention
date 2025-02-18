@@ -1,21 +1,14 @@
-import gc
-import json
-import math
 import os
-import warnings
-from typing import Literal, Optional, Tuple, Union
+from typing import Union
 
-import numpy as np
 import torch
-import tqdm
 import triton
 import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
 
-from hip.utils import get_bench, seed
-from hip.models.hip_attention.common import load_checkouts
+from hip_attention.utils.benchmarking import get_bench
 
 logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)

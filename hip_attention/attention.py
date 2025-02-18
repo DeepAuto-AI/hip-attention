@@ -1,11 +1,12 @@
 import os
 import warnings
-import torch
-import nvtx
 
-from hip.models.hip_attention.attention1_gpu import flash_attention
-from hip.models.hip_attention.attention1_block_gpu import hip_attention
-from hip.models.attn_l1_loss import compute_attn_lp_loss_triton
+import nvtx
+import torch
+
+from hip_attention.utils.attn_l1_loss import compute_attn_lp_loss_triton
+from hip_attention.attention1_block_gpu import hip_attention
+from hip_attention.attention1_gpu import flash_attention
 
 
 @nvtx.annotate('custom_attention')
@@ -116,7 +117,7 @@ def custom_attention(
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
         
         if is_prompt:
             if attention_method in ['none', 'fa2']:
