@@ -1,6 +1,5 @@
-import os
 import torch
-from hip import paged_hip_attention_11, HiPAttentionArgs11
+from hip_attention import paged_hip_attention_11, HiPAttentionArgs11
 
 state = torch.load(
     'cache/vllm/hip_attn/decode_example.pth', 

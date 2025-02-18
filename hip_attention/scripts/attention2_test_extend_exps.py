@@ -1,15 +1,16 @@
 import os
-import torch
+
 import numba
 import numpy as np
+import torch
 import triton
 
-from hip.models.hip_attention.attention2_draft_sampling_extend import (
+from hip_attention.v1_1.attention2_draft_sampling_extend import (
     dual_stage_quadratic_hip_attention,
-    load_checkouts,
     HiPAttentionArgs,
-    DEBUG,
 )
+from hip_attention.test.utils.load_checkouts import load_checkouts
+
 
 @numba.njit
 def convert_to_dense_numba(

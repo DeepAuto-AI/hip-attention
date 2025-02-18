@@ -1,11 +1,11 @@
+import os
+from math import prod
+from typing import Tuple
+
 import cupy
 import numpy as np
 import torch
-from math import prod
-import ctypes
-from typing import Tuple
 from torch.utils.cpp_extension import load
-import os
 
 module_path = os.path.dirname(__file__)
 ops = load(

@@ -1,7 +1,6 @@
-import torch
 import cupy
-import time
 import nvtx
+import torch
 
 x = torch.randn((32, 1024, 512), device=0)
 

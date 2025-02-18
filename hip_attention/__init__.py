@@ -1,45 +1,45 @@
 # version 1.0
-from hip_attention.attention1_block_gpu \
+from hip_attention.v1_0.attention1_block_gpu \
     import hip_attention as hip_attention_10
-from hip_attention.attention1_block_gpu \
+from hip_attention.v1_0.attention1_block_gpu \
     import paged_hip_attention as paged_hip_attention_10
 
 # version 1.1
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import hip_attention as hip_attention_11
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import paged_hip_attention as paged_hip_attention_11
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import varlen_hip_attention as varlen_hip_attention_11
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import paged_varlen_hip_attention as paged_varlen_hip_attention_11
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import HiPAttentionArgs as HiPAttentionArgs11
-from hip_attention.attention2_draft_prefetch \
+from hip_attention.v1_1.attention2_draft_prefetch \
     import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11
 
 # version 1.2
-from hip_attention.gen3.attention_extend \
+from hip_attention.v1_2.attention_extend \
     import dual_stage_quadratic_hip_attention as hip_attention_12
-from hip_attention.gen3.attention_metadata \
+from hip_attention.v1_2.attention_metadata \
     import HiPAttentionArgs as HiPAttentionArgs12
-from hip_attention.gen3.attention_metadata \
+from hip_attention.v1_2.attention_metadata \
     import HiPAttentionOutputMetadata as HiPAttentionOutputMetadata12
-from hip_attention.gen3.attention_metadata \
+from hip_attention.v1_2.attention_metadata \
     import HiPAttentionCacheAccessStatistics as HiPAttentionCacheAccessStatistics12
-from hip_attention.gen3.attention_metadata \
+from hip_attention.v1_2.attention_metadata \
     import ScanStage as ScanStage12
-from hip_attention.gen3.uvm_gpu_cache \
+from hip_attention.v1_2.uvm_gpu_cache \
     import HiPOffloadCache as HiPOffloadCache12
-from hip_attention.gen3.uvm_gpu_cache \
+from hip_attention.v1_2.uvm_gpu_cache \
     import GPUCache as GPUCache12
-from hip_attention.gen3.uvm_gpu_cache \
+from hip_attention.v1_2.uvm_gpu_cache \
     import UVMCache as UVMCache12
 
 # api
-from hip_attention.attention \
+from hip_attention.utils.attention \
     import custom_attention
-from hip_attention.modeling_llama \
+from hip_attention.models.modeling_llama \
     import LlamaForCausalLM as HipLlamaForCausalLM
 
 hip_attention = hip_attention_12

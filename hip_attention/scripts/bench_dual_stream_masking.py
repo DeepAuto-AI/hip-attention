@@ -1,8 +1,12 @@
+import argparse
+import time
+
 import torch
 import tqdm
-from hip import hip_attention_11
-from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
-import time, argparse
+
+from hip_attention import hip_attention_11
+from hip_attention.test.utils.load_checkouts import load_checkouts
+
 
 def main():
     parser = argparse.ArgumentParser()

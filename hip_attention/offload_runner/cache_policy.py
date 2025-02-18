@@ -12,9 +12,9 @@ import matplotlib.pyplot as plt
 import cv2
 import pandas as pd
 
-from hip_attention.attention2_draft_prefetch import hip_attention as hip_attention_11
-from hip_attention.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
-from hip_attention.load_checkouts import load_checkouts
+from hip_attention.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
+from hip_attention.v1_1.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
+from hip_attention.test.utils.load_checkouts import load_checkouts
 
 @numba.njit(parallel=True)
 def access_log_to_dense(

@@ -1,14 +1,13 @@
-from unittest import IsolatedAsyncioTestCase
 from torch import Tensor
 import torch
 import time
 
 import tqdm
-from hip_attention.attention2_draft_causal_batch_gpu_fused_vec import (
+from hip_attention.v1_1.attention2_draft_causal_batch_gpu_fused_vec import (
     hip_masking, 
     block_sparse_attention,
-    load_checkouts
 )
+from hip_attention.test.utils.load_checkouts import load_checkouts
 
 def test_random_shuffle(
     q: Tensor, k: Tensor, v: Tensor, 
