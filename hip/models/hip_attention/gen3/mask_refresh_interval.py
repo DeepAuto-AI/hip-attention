@@ -20,6 +20,9 @@ class HiPMaskRefreshState:
             if not require_refresh:
                 metadata_cached_stages = None
 
+        if self.decode_index == 0:
+            metadata_cached_stages = -1
+
         self.decode_index += 1
 
         return metadata_cached_stages
