@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import triton
 
-from hip_attention.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import CalcScoreAutoGradFn
+from hip_attn.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import CalcScoreAutoGradFn
 
 
 class TestScoreProb(unittest.TestCase):
@@ -249,8 +249,3 @@ def compare(name, ref, tri):
     relerr = np.quantile((torch.abs(ref - tri) / (torch.abs(ref) + 1e-6)).flatten().float().cpu().numpy(), 0.99)
     print("99% Quantile Relative Error: ", relerr)
     assert abserr < 0.05 and relerr < 0.1
-
-
-if __name__ == "__main__":
-    test_CalcScoreAutoGradFn()
-    test_CalcScoreAutoGradFn_perf()

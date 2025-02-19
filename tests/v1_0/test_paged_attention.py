@@ -5,7 +5,7 @@ import torch
 import tqdm
 from vllm.model_executor.layers.attention import _paged_attention
 
-from hip_attention.v1_0.attention1_block_gpu import paged_hip_attention
+from hip_attn.v1_0.attention1_block_gpu import paged_hip_attention
 
 
 class TestPageAttention(unittest.TestCase):

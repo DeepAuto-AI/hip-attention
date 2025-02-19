@@ -10,11 +10,11 @@ import tqdm
 import triton
 from torch import Tensor
 
-from hip_attention.test.utils.load_checkouts import load_checkouts
-from hip_attention.test.utils.seed import seed
-from hip_attention.utils.benchmarking import get_bench
-from hip_attention.v1_0.attention1_block_gpu import hip_attention, flash_attention
-from hip_attention.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
+from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_attn.test.utils.seed import seed
+from hip_attn.utils.benchmarking import get_bench
+from hip_attn.v1_0.attention1_block_gpu import hip_attention, flash_attention
+from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
 
 
 class TestAttention1BlockGpu(unittest.TestCase):
@@ -44,7 +44,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     https://arxiv.org/pdf/2305.16300.pdf
     this paper claimed, they are faster than original attetnion... but seems not?
     """
-    from hip_attention.test.baselines.landmark_attention import fused_landmark_attention
+    from hip_research.models.landmark_attention import fused_landmark_attention
 
     seqlen_k = k.shape[1]
     block_size = 64
@@ -54,7 +54,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
 
 @torch.inference_mode(True)
 def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tensor, window_size: int):
-    from hip_attention.test.baselines.sink_attention import sink_attention
+    from hip_research.models.sink_attention import sink_attention
 
     return sink_attention(q, k, v, cos, sin, window_size=window_size)
 
@@ -158,7 +158,7 @@ def main_latency_benchmark():
 
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
 
-    from hip_attention.test.baselines.hyper_attention.hyper_attn import HyperAttention
+    from hip_research.models.hyper_attention.hyper_attn import HyperAttention
     hyper_attention = HyperAttention(
         input_dim=q.shape[-1],
         lsh_num_projs=7,  # not very meaningful after 7

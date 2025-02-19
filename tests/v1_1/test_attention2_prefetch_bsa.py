@@ -1,10 +1,10 @@
 import torch
 
-from hip_attention.v1_1.attention2_draft_prefetch import (
+from hip_attn.v1_1.attention2_draft_prefetch import (
     block_sparse_attention,
     HiPAttentionArgs,
 )
-from hip_attention.test.utils.load_checkouts import load_checkouts
+from hip_attn.test.utils.load_checkouts import load_checkouts
 
 seq_len = 131072
 head_dim = 128

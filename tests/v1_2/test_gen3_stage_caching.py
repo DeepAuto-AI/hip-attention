@@ -1,12 +1,12 @@
 import torch
 import os
-from hip_attention.v1_2.attention_extend import (
+from hip_attn.v1_2.attention_extend import (
     dual_stage_quadratic_hip_attention,
     ScanStage, 
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
 )
-from hip_attention.test.utils.load_checkouts import load_checkouts
+from hip_attn.test.utils.load_checkouts import load_checkouts
 
 checkout = load_checkouts()
 

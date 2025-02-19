@@ -6,10 +6,10 @@ import torch.nn.functional as F
 import tqdm
 from torch import Tensor
 
-from hip_attention.test.utils.load_checkouts import load_checkouts
-from hip_attention.test.utils.seed import seed
-from hip_attention.utils.benchmarking import get_bench
-from hip_attention.v1_0.attention1_gpu import hip_attention
+from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_attn.test.utils.seed import seed
+from hip_attn.utils.benchmarking import get_bench
+from hip_attn.v1_0.attention1_gpu import hip_attention
 
 
 class TestAttention1GPU(unittest.TestCase):
