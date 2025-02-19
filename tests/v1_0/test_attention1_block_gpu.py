@@ -10,8 +10,8 @@ import tqdm
 import triton
 from torch import Tensor
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.load_checkouts import load_checkouts
+from hip_research.utils.seed import seed
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_block_gpu import hip_attention, flash_attention
 from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11

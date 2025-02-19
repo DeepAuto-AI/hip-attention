@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data import Subset
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
 
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 from hip_research.dataset.alpaca import AlpacaDataset
 from hip_research.dataset.booksum import BookSumDataset
 from hip_research.dataset.labdataset import LabDataset

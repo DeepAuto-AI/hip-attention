@@ -21,7 +21,7 @@ from hip_research.dataset.labdataset import LabDataset
 from hip_research.dataset.openwebtext import OpenWebTextDataset
 from hip_attn.models.modeling_llama import LlamaDecoderLayer
 from hip_research.trainer.common import TrainConfig, load_model, parse_args, load_tokenizer
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 
 
 # torch.autograd.set_detect_anomaly(True)

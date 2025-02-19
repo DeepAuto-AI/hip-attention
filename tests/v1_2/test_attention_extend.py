@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 import hip_attn.v1_2.attention_extend
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
 from hip_attn.v1_2.attention_metadata import (
     ScanStage,

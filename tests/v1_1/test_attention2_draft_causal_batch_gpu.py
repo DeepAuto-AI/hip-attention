@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_1.attention2_draft_causal_batch_gpu import hip_attention
 
 

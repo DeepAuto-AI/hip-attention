@@ -11,7 +11,7 @@ from peft import get_peft_model
 from hip_attn.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
 from hip_attn.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip_attn.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 from hip_research.main.eval_args import eval_args, ArgsType
 from hip_research.main.jobs.bench_single_layer import job_bench_single_layer
 from hip_research.main.jobs.booksum import job_booksum

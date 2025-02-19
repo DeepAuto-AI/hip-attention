@@ -6,8 +6,8 @@ import torch.nn.functional as F
 import tqdm
 from torch import Tensor
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.load_checkouts import load_checkouts
+from hip_research.utils.seed import seed
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_gpu import hip_attention
 import hip_attn.v1_0.attention1_gpu

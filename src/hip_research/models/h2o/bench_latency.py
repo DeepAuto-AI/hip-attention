@@ -16,9 +16,9 @@ if not hasattr(tl, 'sort'):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 from hip_attn.utils.benchmarking import get_bench
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 
 
 logger = logging.get_logger(__name__)

@@ -13,7 +13,6 @@ import triton.language as tl
 from matplotlib import pyplot as plt
 from torch import Tensor
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_decode_bsa import (
     decode_block_sparse_attention,

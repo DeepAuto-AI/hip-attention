@@ -7,7 +7,7 @@ from hip_attn.v1_0.attention1_gpu import (
     sparse_attention,
     attention_matrix,
 )
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 
 class TestAttention1GPUBwd(unittest.TestCase):
 

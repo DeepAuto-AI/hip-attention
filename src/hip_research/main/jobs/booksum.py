@@ -10,7 +10,7 @@ from torch.utils.data import Subset
 from tqdm import tqdm
 from transformers import LogitsProcessor, LogitsProcessorList
 
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 from hip_research.dataset.booksum import BookSumDataset
 
 

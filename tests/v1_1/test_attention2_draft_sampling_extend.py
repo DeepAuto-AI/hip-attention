@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 import hip_attn.v1_1.attention2_draft_sampling_extend
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_1.attention2_draft_prefetch import (
     hip_attention,
     HiPAttentionArgs,

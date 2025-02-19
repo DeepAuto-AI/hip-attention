@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_0.attention1_block_gpu import hip_attention, hip_attention_mask, sparse_attention
 
 

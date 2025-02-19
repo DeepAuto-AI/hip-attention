@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
 from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
 from hip_attn.v1_1.offload_runner.cache_policy import (

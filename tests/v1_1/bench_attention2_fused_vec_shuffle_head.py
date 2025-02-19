@@ -7,7 +7,7 @@ from hip_attn.v1_1.attention2_draft_causal_batch_gpu_fused_vec import (
     hip_masking, 
     block_sparse_attention,
 )
-from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_research.utils.load_checkouts import load_checkouts
 
 def test_random_shuffle(
     q: Tensor, k: Tensor, v: Tensor, 

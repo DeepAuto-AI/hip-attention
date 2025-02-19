@@ -8,7 +8,7 @@ import tqdm
 import transformers
 from datasets import load_dataset
 
-from hip_attn.test.utils.seed import seed
+from hip_research.utils.seed import seed
 
 MMLU_FORMAT = """> The following are multiple choice questions (with answers) about {subject_name}.
 
