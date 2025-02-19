@@ -1,31 +1,37 @@
 import copy
+import dataclasses
 import gc
+import json
 import math
-import threading
-import time
 import os
 import random
+import threading
 import traceback
+from typing import List, Literal, Tuple
+
+import matplotlib.pyplot as plt
 import numpy as np
-import torch, transformers
-from transformers import AutoTokenizer
-from typing import List, Literal, Tuple, Dict, Optional
-import dataclasses, json
+import torch
 import tqdm
+import transformers
 import triton
 import wandb
-import json
-from hip.dataset.calib_loft_rag import (
+
+from hip_attn import HiPAttentionArgs11
+from hip_attn.v1_1.attention2_draft_sampling_extend import (
+    ScanStage,
+    dual_stage_quadratic_hip_attention
+)
+from hip_research.dataset.calib_loft_rag import (
     rag_prefix,
     rag_qa_pairs,
 )
-from hip.dataset.calib_loft_retrieval import (
+from hip_research.dataset.calib_loft_retrieval import (
     retrieval_prefix,
     retrieval_qa_pairs,
     retrieval_pid_to_id,
 )
-from hip import HiPAttentionArgs11
-import matplotlib.pyplot as plt
+
 
 def load_loft_rag_chat_corpus() -> List[Tuple[str, str]]:
     lines = []
@@ -305,10 +311,6 @@ class TextDataset:
         
         return ds
 
-from hip.models.hip_attention.attention2_draft_sampling_extend import (
-    ScanStage, 
-    dual_stage_quadratic_hip_attention
-)
 
 @torch.inference_mode
 def job_ga(
@@ -666,8 +668,8 @@ def job_ga(
         return ret
     
     def evaluate_population_inner(population, model, evaluate_ds: List[TextDataset]):
-        import threading, queue
-        
+        import threading
+
         n_threads = torch.cuda.device_count()
         jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
         results = []

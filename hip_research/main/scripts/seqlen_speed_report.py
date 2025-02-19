@@ -1,9 +1,12 @@
+import json
+import os
 import subprocess
-import os, json
 
-from matplotlib import pyplot as plt
 import seaborn as sns
-from hip.utils import setup_seaborn
+from matplotlib import pyplot as plt
+
+from hip_research.utils import setup_seaborn
+
 setup_seaborn(legend_fontsize=6)
 
 dups = range(1, 17)

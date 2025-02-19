@@ -14,14 +14,16 @@
 
 
 import os
-import warnings
 import shutil
+import warnings
 
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 import torch
-from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from hip.models.llava.llava_llama import LlavaLlamaForCausalLM
+from llava.model import *
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+
+from hip_attn.models.llava.llava_llama import LlavaLlamaForCausalLM
+
 
 def load_pretrained_model(model_path, model_base, model_name, use_hip_attn=True, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
     kwargs = {"device_map": device_map, **kwargs}

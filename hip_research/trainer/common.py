@@ -10,8 +10,8 @@ import transformers
 from transformers import LlamaForCausalLM
 from peft import LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
+from hip_attn.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from hip_attn.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 
 
 @dataclass

@@ -30,7 +30,6 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
@@ -41,6 +40,7 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import (
     add_start_docstrings,
@@ -50,9 +50,8 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.models.llama.configuration_llama import LlamaConfig
-from hip.models.attention import custom_attention
 
+from hip_attn.utils.attention import custom_attention
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -787,7 +786,7 @@ class LlamaCustomAttention(LlamaAttention):
                 logger.error("Please install performer-pytorch to use Performer attention.")
                 raise
         
-        from hip.models.hyper_attention.hyper_attn import HyperAttention
+        from hip_research.models.hyper_attention.hyper_attn import HyperAttention
         self.hyper_attention = HyperAttention(
             input_dim=self.hidden_size // config.num_attention_heads,
             lsh_num_projs=7, # not very meaningful after 7
@@ -1514,7 +1513,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         
         if not self.training and not output_logits:
             if labels is not None:
-                from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
+                from hip_attn.utils.memory_efficient_llm_ce import memory_efficient_llm_ce
                 
                 # Shift so that tokens < n predict n
                 shift_states = hidden_states[..., :-1, :].contiguous()

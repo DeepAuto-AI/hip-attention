@@ -1,7 +1,9 @@
-import os
-import json
 import argparse
-from hip.main.jobs.mmlu import MMLU_SUBJECTS
+import json
+import os
+
+from hip_research.main.jobs.mmlu import MMLU_SUBJECTS
+
 
 def main():
     parser = argparse.ArgumentParser()

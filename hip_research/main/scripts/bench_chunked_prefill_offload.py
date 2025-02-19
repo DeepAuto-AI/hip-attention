@@ -1,13 +1,14 @@
 import time
+
 import torch
 import tqdm
-from hip.models.hip_attention.attention2_draft_sampling_extend import (
+from flash_attn import flash_attn_func
+
+from hip_attn.v1_1.attention2_draft_sampling_extend import (
     dual_stage_quadratic_hip_attention,
-    load_checkouts,
     HiPAttentionArgs,
     ScanStage,
 )
-from flash_attn import flash_attn_func
 
 SAMPLE_SIZE = 10
 DTYPE = torch.float8_e5m2

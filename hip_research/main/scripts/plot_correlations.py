@@ -1,13 +1,16 @@
 from typing import Literal
-from matplotlib import pyplot as plt
+
 import numpy as np
 import torch
-from scipy.stats import spearmanr
 import triton
+from matplotlib import pyplot as plt
+from scipy.stats import spearmanr
 
-from hip.models.hip_attention.gen3.attention_extend import(
-    load_checkouts, chunk_controllable_sampling_mask_cuda, safe_stride
+from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_attn.v1_2.attention_extend import (
+    chunk_controllable_sampling_mask_cuda, safe_stride
 )
+
 
 # X: chunk size
 # Y: correlation

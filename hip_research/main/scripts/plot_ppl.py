@@ -1,6 +1,10 @@
 import math
-import matplotlib.pyplot as plt
 import os
+
+import matplotlib.pyplot as plt
+
+from hip_research.utils import setup_seaborn
+
 
 def proc_copy_paste(t: str, scale: float = 1):
     return list(map(lambda x: float(x) * scale, t.split()))
@@ -72,7 +76,6 @@ wt2_data = {
     }
 }
 
-from hip.utils import setup_seaborn
 setup_seaborn(
     label_fontsize=11,
     legend_fontsize=8,

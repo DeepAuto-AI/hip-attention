@@ -1,11 +1,15 @@
+import itertools
 import json
-import math
-import sys, subprocess, os, itertools, tqdm
-import seaborn as sns
-import pypareto
-import matplotlib.pyplot as plt
+import os
+import subprocess
+import tqdm
 
-from hip.utils import setup_seaborn
+import matplotlib.pyplot as plt
+import pypareto
+import seaborn as sns
+
+from hip_research.utils import setup_seaborn
+
 setup_seaborn()
 
 os.environ['PYTHONPATH'] = './'

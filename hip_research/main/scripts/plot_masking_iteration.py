@@ -1,10 +1,13 @@
 import os
-import torch
-import matplotlib.pyplot as plt
-import numpy as np
+
 import cv2
+import matplotlib.pyplot as plt
 import numba
-from hip.utils import setup_seaborn
+import numpy as np
+import torch
+
+from hip_research.utils import setup_seaborn
+
 setup_seaborn(axis_below=True)
 
 TDST = 2048
@@ -24,7 +27,6 @@ def convert_to_dense(indices, ks, TDST, TSRC, BQ, BK, MASK_K):
                 mask[i*BQ:i*BQ+BQ, t:t+BK] = 1
     return mask
 
-import matplotlib.cm as cm
 
 def render_plot(cache_path, name, iteration):
     data = torch.load(cache_path, map_location='cpu')

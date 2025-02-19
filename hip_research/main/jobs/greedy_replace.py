@@ -1,4 +1,4 @@
-from hip.main.jobs import ppl
+from hip_research.main.jobs import ppl
 
 def job_greedy_replace(args, model, tokenizer, device):
     num_layers = len(model.model.layers)

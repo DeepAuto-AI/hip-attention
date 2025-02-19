@@ -1,4 +1,3 @@
-import gc
 import json
 import math
 import os
@@ -9,10 +8,7 @@ import torch
 import tqdm
 import triton
 import triton.language as tl
-from torch import Tensor
-from torch.autograd import Function
 from transformers.utils import logging
-
 
 if not hasattr(tl, 'sort'):
     warnings.warn(
@@ -20,8 +16,9 @@ if not hasattr(tl, 'sort'):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip.utils import get_bench, seed
-from hip.models.hip_attention.common import load_checkouts
+from hip_attn.test.utils.seed import seed
+from hip_attn.utils.benchmarking import get_bench
+from hip_attn.test.utils.load_checkouts import load_checkouts
 
 
 logger = logging.get_logger(__name__)
@@ -129,10 +126,10 @@ def main_latency_benchmark():
         q_quant = q
         k_quant = k
     
-    from hip.models.h2o.h2o_llama import H2OLlamaAttention
+    from hip_research.models.h2o.h2o_llama import H2OLlamaAttention
     from transformers.models.llama.configuration_llama import LlamaConfig
     
-    from hip.main.model_eval import MODELS
+    from hip_research.main.model_eval import MODELS
     config = LlamaConfig.from_pretrained(MODELS[args.h2o_model])
     
     config.hh_size = args.k // 2
@@ -166,7 +163,7 @@ def main_latency_benchmark():
             past_key_value.key_cache.append(k[:, :, -mask_k:, :].clone())
             past_key_value.value_cache.append(v[:, :, -mask_k:, :].clone())
         
-        from hip.models.h2o.h2o_llama import repeat_kv
+        from hip_research.models.h2o.h2o_llama import repeat_kv
         k = repeat_kv(k, num_key_value_groups)
         v = repeat_kv(v, num_key_value_groups)
     

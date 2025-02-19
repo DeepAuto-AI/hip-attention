@@ -1,20 +1,15 @@
+import json
 import math
 import os
 import pathlib
 import time
-import traceback
 import warnings
+
 import torch
 import transformers
 from datasets import load_dataset
 from tqdm import tqdm
-import argparse, json
-from transformers import TextStreamer
 
-from peft import LoraConfig, TaskType
-from peft import get_peft_model, prepare_model_for_kbit_training
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.utils import seed, get_bench
 
 def safe_name(txt: str):
     return txt.replace('\\', '_').replace('/', '_').replace('.', '_')
@@ -114,7 +109,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 }
                                 
                                 past_key_values = None
-                                from hip.models.tova.tova_cache import TOVACache
+                                from hip_research.models.tova.tova_cache import TOVACache
                                 past_key_values = TOVACache(args.k)
                                 del kwargs['output_logits']
                                 prompt_ids = input_ids[:, :2]

@@ -21,7 +21,7 @@ import torch.nn as nn
 # from transformers import AutoConfig, AutoModelForCausalLM, \
 #                          LlamaConfig, LlamaModel, LlamaForCausalLM
 
-from hip.models.modeling_llama import LlamaConfig, LlamaModel, LlamaForCausalLM
+from hip_attn.models.modeling_llama import LlamaConfig, LlamaModel, LlamaForCausalLM
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput

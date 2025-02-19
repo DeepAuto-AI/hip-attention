@@ -1,40 +1,30 @@
 import math
 from typing import Optional, Tuple
 
-import pdb
 import torch
-from torch import nn
-import torch.utils.checkpoint
-
 import torch.nn.functional as F
-
+import torch.utils.checkpoint
 # from transformers.models.llama.configuration_llama import LlamaConfig
 import tqdm
+from torch import nn
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
     rotate_half,
-    apply_rotary_pos_emb,
     LlamaRotaryEmbedding,
-    apply_rotary_pos_emb,
     # LlamaForCausalLM,
 )
-from hip.models.modeling_llama_legacy import (
-    LlamaLinearScalingRotaryEmbedding, 
-    LlamaDynamicNTKScalingRotaryEmbedding,
+from transformers.utils import (
+    logging,
 )
-from hip.models.modeling_llama import (
-    # LlamaLinearScalingRotaryEmbedding, 
+
+from hip_attn.models.modeling_llama import LlamaCustomAttention
+from hip_attn.models.modeling_llama import (
+    # LlamaLinearScalingRotaryEmbedding,
     # LlamaDynamicNTKScalingRotaryEmbedding,
     LlamaForCausalLM
 )
-import types
-
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_flash_attn_greater_or_equal_2_10,
-    logging,
-    replace_return_docstrings,
+from hip_research.models.modeling_llama_legacy import (
+    LlamaLinearScalingRotaryEmbedding,
+    LlamaDynamicNTKScalingRotaryEmbedding,
 )
 
 __all__ = ["H2OLlamaForCausalLM", "H2OLlamaAttention",
@@ -253,7 +243,7 @@ def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1, is_d
     x_embed = (x * cos) + (rotate_half(x) * sin) # [bs, head, pos_t, dim]
     return x_embed
 
-import os
+
 class H2OKVCache_LayerWise:
     def __init__(
         self,
@@ -854,8 +844,6 @@ class H2OLlamaAttention(nn.Module):
                 sin=sin
             )
         return attn_output, attn_weights, past_key_value
-    
-from hip.models.modeling_llama import LlamaCustomAttention
 
 class H2OLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config):

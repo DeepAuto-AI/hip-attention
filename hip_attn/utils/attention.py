@@ -288,7 +288,7 @@ def custom_attention(
                     num_sink=16,
                 )
             else:
-                # from hip import hip_attention_11, HiPAttentionArgs11
+                # from hip_attn import hip_attention_11, HiPAttentionArgs11
                 from hip_attn.v1_1.attention2_draft_sampling import (
                     sampling_only_attention, 
                     dual_stage_sub_quadratic_hip_attention,

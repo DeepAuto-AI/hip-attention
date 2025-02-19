@@ -1,12 +1,14 @@
 import json
-import os, torch
+import os
 import time
+import torch
+
 import datasets
 import tqdm
 import transformers
 
-from hip.utils import get_bench
-from hip.main.eval_args import eval_args, ArgsType
+from hip_attn.utils.benchmarking import get_bench
+from hip_research.main.eval_args import ArgsType
 
 MMMU_SUBJECT = [
     'Accounting', 'Agriculture', 'Architecture_and_Engineering', 

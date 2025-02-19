@@ -1,19 +1,14 @@
 import os
 import time
 import traceback
-import torch
-import transformers
-from datasets import load_dataset
-from tqdm import tqdm
-import argparse
-from transformers import TextStreamer
 
-from peft import LoraConfig, TaskType
-from peft import get_peft_model, prepare_model_for_kbit_training
+import torch
+from transformers import TextStreamer
 from transformers.models.auto import AutoTokenizer
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.utils import seed, get_bench
-from hip.models.sglang_model import SglangModel
+
+from hip_attn.utils.benchmarking import get_bench
+from hip_research.models.sglang_model import SglangModel
+
 
 class BatchedStreamer(TextStreamer):
     def __init__(self, tokenizer: AutoTokenizer, skip_prompt: bool = False, **decode_kwargs):

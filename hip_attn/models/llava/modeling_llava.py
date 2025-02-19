@@ -19,23 +19,20 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
-
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import ModelOutput
+from transformers.models.auto import AutoModel
+from transformers.models.llava.configuration_llava import LlavaConfig
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     logging,
     replace_return_docstrings,
 )
-from transformers.models.auto import AutoModel, AutoModelForCausalLM
-from transformers.models.llava.configuration_llava import LlavaConfig
 
-# from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig, LlamaDecoderLayer
-from hip.models.llava.llava_llama import LlavaLlamaForCausalLM, LlavaLlamaConfig, LlavaLlamaDecoderLayer
-
+from hip_attn.models.llava.llava_llama import LlavaLlamaForCausalLM
 
 logger = logging.get_logger(__name__)
 
@@ -249,7 +246,7 @@ class LlavaForConditionalGeneration(LlavaPreTrainedModel):
         #     config.text_config, attn_implementation=config._attn_implementation
         # )
         self.language_model = LlavaLlamaForCausalLM.from_config(
-            config.text_config, attn_implementation=config._attn_implementation
+            config.text_config, attn_implementation=config._attn_implementation)
 
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self.post_init()

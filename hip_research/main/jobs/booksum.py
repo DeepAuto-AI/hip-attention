@@ -1,20 +1,18 @@
 import json
+import logging
 import os
 import pathlib
+import subprocess
 
-import numpy as np
 import torch
-
 from sklearn.model_selection import train_test_split
+from torch.utils.data import Subset
 from tqdm import tqdm
 from transformers import LogitsProcessor, LogitsProcessorList
 
-from hip.dataset.booksum import BookSumDataset
-from hip.utils import seed, get_bench
-from torch.utils.data import Subset
+from hip_attn.test.utils.seed import seed
+from hip_research.dataset.booksum import BookSumDataset
 
-import subprocess
-import logging
 
 class StopAfterStringIsGenerated(LogitsProcessor):
     def __init__(self, base_len: int, tokenizer):

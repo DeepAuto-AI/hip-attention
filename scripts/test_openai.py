@@ -56,15 +56,16 @@ if not hasattr(tl, 'sort'):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip.utils import get_bench, seed
-from hip.models.hip_attention.common import load_checkouts
-from hip.models.hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
+from hip_attn.utils.benchmarking import get_bench
+from hip_attn.test.utils.seed import set_seed
+from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_attn.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
     PagedKeyCacheVllmCompat, PagedValueCacheVllmCompat
 )
-from hip.models.hip_attention.attention1_block_gpu_kernel.masking_iteration import masking_iteration
-from hip.models.hip_attention.attention1_block_gpu_kernel.safe_indices import safe_indices
-from hip.models.hip_attention.attention1_block_gpu_kernel.calc_prob_return_context import calc_prob_return_context
-from hip.models.hip_attention.attention1_block_gpu_kernel.calc_score_return_prob import calc_score_return_prob
+from hip_attn.v1_0.attention1_block_gpu_kernel.masking_iteration import masking_iteration
+from hip_attn.v1_0.attention1_block_gpu_kernel.safe_indices import safe_indices
+from hip_attn.v1_0.attention1_block_gpu_kernel.calc_prob_return_context import calc_prob_return_context
+from hip_attn.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import calc_score_return_prob
 
 logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)
@@ -1482,7 +1483,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     # https://arxiv.org/pdf/2305.16300.pdf
     # this paper claimed, they are faster than original attetnion... but seems not?
 
-    from hip.models.landmark_attention import fused_landmark_attention
+    from hip_research.models.landmark_attention import fused_landmark_attention
 
     seqlen_k = k.shape[1]
     block_size = 64
@@ -1490,7 +1491,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     return fused_landmark_attention(q, k, v, is_mem, block_size=block_size)
 
 def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tensor, window_size: int):
-    from hip.models.sink_attention.sink_attention import sink_attention
+    from hip_research.models.sink_attention.sink_attention import sink_attention
 
     return sink_attention(q, k, v, cos, sin, window_size=window_size)
 
@@ -1580,7 +1581,7 @@ def main_latency_benchmark():
 
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
 
-    from hip.models.hyper_attention.hyper_attn import HyperAttention
+    from hip_research.models.hyper_attention.hyper_attn import HyperAttention
     hyper_attention = HyperAttention(
         input_dim=q.shape[-1],
         lsh_num_projs=7, # not very meaningful after 7

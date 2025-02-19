@@ -1,17 +1,16 @@
-import matplotlib.pyplot as plt
-import os
-import numpy as np
 import math
+import os
 
-from hip.utils import setup_seaborn
+import matplotlib.pyplot as plt
+
+from hip_research.utils import setup_seaborn
+
 setup_seaborn(
     label_fontsize=11,
     legend_fontsize=8,
     axes_label_fontsize=8,
     axis_below=True,
 )
-
-import seaborn as sb
 
 HIP_CUDA = 'HiP w/o Offload'
 HIP_UVM = 'HiP UVM w/o Cache'

@@ -13,14 +13,13 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data import Subset
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
 
-from hip.dataset.alpaca import AlpacaDataset
-from hip.dataset.booksum import BookSumDataset
-from hip.dataset.labdataset import LabDataset
-from hip.dataset.lmsys import LmsysChatDataset
-from hip.dataset.openwebtext import OpenWebTextDataset
-from hip.trainer.common import TrainConfig, parse_args, load_model, load_tokenizer
-from hip.utils import seed
-
+from hip_attn.test.utils.seed import seed
+from hip_research.dataset.alpaca import AlpacaDataset
+from hip_research.dataset.booksum import BookSumDataset
+from hip_research.dataset.labdataset import LabDataset
+from hip_research.dataset.lmsys import LmsysChatDataset
+from hip_research.dataset.openwebtext import OpenWebTextDataset
+from hip_research.trainer.common import TrainConfig, parse_args, load_model, load_tokenizer
 
 # torch.autograd.set_detect_anomaly(True)
 torch.set_float32_matmul_precision('high')

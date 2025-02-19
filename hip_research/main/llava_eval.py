@@ -1,19 +1,9 @@
-from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
-from transformers.generation import GenerationConfig
-from transformers.models.llava.configuration_llava import LlavaConfig
-from hip.models.qwen.modeling_qwen import QWenLMHeadModel
-import torch
-
 from llava.mm_utils import get_model_name_from_path
 
-from hip.main.jobs.mmmu import job_mmmu
-from hip.utils import seed
-from hip.main.eval_args import eval_args, ArgsType
-
-from hip.models.llava.modeling_llava import LlavaForConditionalGeneration
-
-from hip.models.llava.builder import load_pretrained_model
-
+from hip_attn.models.llava.builder import load_pretrained_model
+from hip_attn.test.utils import seed
+from hip_research.main.eval_args import eval_args, ArgsType
+from hip_research.main.jobs.mmmu import job_mmmu
 
 """
         Example:

@@ -1,12 +1,10 @@
-import os
 import torch
-from datasets import load_dataset
 from tqdm import tqdm
-import json
-import numpy as np
-from hip.dataset.passkey import Passkey
 from vllm import LLM, SamplingParams
-from hip.models.sglang_model import SglangModel
+
+from hip_research.dataset.passkey import Passkey
+from hip_research.models.sglang_model import SglangModel
+
 
 def get_numbers(s, cnt):
     lst = [c for c in s if c.isdigit()]

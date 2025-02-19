@@ -1,5 +1,10 @@
 import os
 
+import matplotlib.pyplot as plt
+import numpy as np
+
+from hip_research.utils import setup_seaborn
+
 DATA_LONGBENCH = {
     'row_headers': [
         'Qwen1.5 7B', 
@@ -142,9 +147,6 @@ DATA_LONGBENCH_QWEN_14B = {
     'ymin': 30.0,
 }
 
-import numpy as np
-import matplotlib.pyplot as plt
-from hip.utils import setup_seaborn
 
 setup_seaborn(
     legend_fontsize=5,

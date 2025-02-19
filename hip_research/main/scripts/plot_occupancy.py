@@ -1,13 +1,7 @@
-from typing import Literal
-from matplotlib import pyplot as plt
 import numpy as np
 import torch
-from scipy.stats import spearmanr
-import triton
 
-from hip.models.hip_attention.gen3.attention_extend import(
-    load_checkouts, chunk_controllable_sampling_mask_cuda, safe_stride
-)
+from hip_attn.test.utils.load_checkouts import load_checkouts
 
 # X: top-k occupancy
 # Y: occurance

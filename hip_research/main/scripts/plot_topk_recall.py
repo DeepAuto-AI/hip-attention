@@ -1,22 +1,16 @@
 import json
 import os
-from typing import Literal
-from matplotlib import pyplot as plt
+
 import numpy as np
 import torch
-from scipy.stats import spearmanr
-import triton
-
-from hip.models.hip_attention.gen3.attention_extend import(
-    load_checkouts, 
-    safe_stride,
+from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
+from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
+from hip_attn.v1_2.attention_extend import HiPAttentionArgs as HiPAttentionArgs12
+from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention as hip_attention_12
+from hip_attn.test.utils.load_checkouts import (
+    load_checkouts,
 )
 
-from hip.models.hip_attention.gen3.attention_extend import dual_stage_quadratic_hip_attention as hip_attention_12
-from hip.models.hip_attention.gen3.attention_extend import HiPAttentionArgs as HiPAttentionArgs12
-
-from hip.models.hip_attention.attention2_draft_prefetch import hip_attention as hip_attention_11
-from hip.models.hip_attention.attention2_draft_prefetch import HiPAttentionArgs as HiPAttentionArgs11
 
 # X: topk k
 # Y: recall

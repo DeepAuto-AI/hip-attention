@@ -50,7 +50,7 @@ from transformers.utils import (
 )
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 import torch.nn.functional as F
-from hip import custom_attention
+from hip_attn.utils.attention import custom_attention
 
 class Gemma2RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -306,7 +306,7 @@ class Gemma2CustomAttention(Gemma2Attention):
 
         self.tree_reformer = self.tree_performer = None
         
-        from hip.models.hyper_attention.hyper_attn import HyperAttention
+        from hip_research.models.hyper_attention.hyper_attn import HyperAttention
         self.hyper_attention = HyperAttention(
             input_dim=self.hidden_size // config.num_attention_heads,
             lsh_num_projs=7, # not very meaningful after 7
@@ -1337,7 +1337,7 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         if not self.training and not output_logits and past_key_values is None:
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
-                from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
+                from hip_attn.utils.memory_efficient_llm_ce import memory_efficient_llm_ce
                 
                 # Shift so that tokens < n predict n
                 shift_states = hidden_states[..., :-1, :].contiguous()

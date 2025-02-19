@@ -1,9 +1,10 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
-from hip.utils import setup_seaborn
-import numpy as np
 import os
-import pandas
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+from hip_research.utils import setup_seaborn
 
 setup_seaborn(axis_below=True)
 

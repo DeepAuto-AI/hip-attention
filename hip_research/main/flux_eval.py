@@ -1,12 +1,12 @@
 import math
-import torch
-from diffusers import FluxPipeline
-from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
-from diffusers.models.attention_processor import Attention, apply_rope
 from typing import Optional
-import torch.nn.functional as F
 
-from hip import hip_attention, HiPAttentionArgs
+import torch
+import torch.nn.functional as F
+from diffusers import FluxPipeline
+from diffusers.models.attention_processor import Attention, apply_rope
+
+from hip_attn import hip_attention, HiPAttentionArgs
 
 
 class CustomFluxSingleAttnProcessor2_0:

@@ -1,16 +1,8 @@
 import os
 import time
 import traceback
-import torch
-import transformers
-from datasets import load_dataset
-from tqdm import tqdm
-import argparse
-from transformers import TextStreamer
 
-from transformers.models.auto import AutoTokenizer
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.utils import seed, get_bench
+from tqdm import tqdm
 
 decoded_tokens = 0
 decoded_latency = 0
@@ -124,8 +116,7 @@ def generate_stream(
 
 def job_stream_demo(args, model, tokenizer, device):
     from vllm import LLM, SamplingParams
-    from vllm.transformers_utils import config as vllm_transformers_config
-    
+
     input_text = args.input
     assert input_text is not None
     

@@ -4,30 +4,26 @@ import warnings
 
 import torch
 import transformers
-from peft import LoraConfig, TaskType, PeftModel
+from peft import LoraConfig, TaskType
+from peft import PeftModel
 from peft import get_peft_model
 
-from peft import LoraConfig, TaskType
-from peft import get_peft_model, prepare_model_for_kbit_training
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.utils import seed, get_bench
-
-from hip.main.eval_args import eval_args, ArgsType
-from hip.main.jobs.bench_single_layer import job_bench_single_layer
-from hip.main.jobs.booksum import job_booksum
-from hip.main.jobs.merge_lora import job_merge_lora
-from hip.main.jobs.mmlu import job_mmlu
-from hip.main.jobs.ppl import job_ppl
-from hip.main.jobs.stream import job_stream
-from hip.main.jobs.stream_demo import job_stream_demo
-from hip.main.jobs.greedy_replace import job_greedy_replace
-from hip.main.jobs.passkey import job_passkey
-from hip.main.jobs.ga import job_ga
-from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
-from hip.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
-from hip.models.sglang_model import SglangModel
-from hip.utils import seed
+from hip_attn.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
+from hip_attn.models.modeling_llama import LlamaForCausalLM, LlamaConfig
+from hip_attn.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
+from hip_attn.test.utils.seed import seed
+from hip_research.main.eval_args import eval_args, ArgsType
+from hip_research.main.jobs.bench_single_layer import job_bench_single_layer
+from hip_research.main.jobs.booksum import job_booksum
+from hip_research.main.jobs.ga import job_ga
+from hip_research.main.jobs.greedy_replace import job_greedy_replace
+from hip_research.main.jobs.merge_lora import job_merge_lora
+from hip_research.main.jobs.mmlu import job_mmlu
+from hip_research.main.jobs.passkey import job_passkey
+from hip_research.main.jobs.ppl import job_ppl
+from hip_research.main.jobs.stream import job_stream
+from hip_research.main.jobs.stream_demo import job_stream_demo
+from hip_research.models.sglang_model import SglangModel
 
 MODELS = {
     'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
@@ -94,8 +90,7 @@ OBSOLATED_VLLM_MODELS = {
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
-    from vllm.config import ObservabilityConfig
-    
+
     if int(os.getenv('HIP_K', '512')) != args.k:
         warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
     
@@ -203,7 +198,7 @@ def load_model(args):
         infer_dtype = torch.float32
         
     if args.method in ['h2o', 'h2o_stream']:
-        from hip.models.h2o.h2o_llama import H2OLlamaForCausalLM
+        from hip_research.models.h2o.h2o_llama import H2OLlamaForCausalLM
         ModelClass = H2OLlamaForCausalLM
         
         if args.method == 'h2o_stream':
@@ -247,8 +242,7 @@ def load_model(args):
     )
     
     if args.method == 'tova':
-        from hip.models.tova.tova_cache import TOVACache
-        from hip.models.tova.convert_tova import enable_tova_caching
+        from hip_research.models.tova.convert_tova import enable_tova_caching
         enable_tova_caching(model)
     
     for m in model.modules():

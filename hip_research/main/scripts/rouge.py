@@ -1,4 +1,11 @@
+import os
+import re
+
+import matplotlib.pyplot as plt
+import numpy as np
 from rouge_score import rouge_scorer
+
+from hip_research.utils import setup_seaborn
 
 GOVREPORT_TRUTH = "Multiyear procurement (MYP) and block buy contracting (BBC) are special contracting mechanisms that Congress permits the Department of Defense (DOD) to use for a limited number of defense acquisition programs. Compared to the standard or default approach of annual contracting, MYP and BBC have the potential for reducing weapon procurement costs by a few or several percent. Under annual contracting, DOD uses one or more contracts for each year's worth of procurement of a given kind of item. Under MYP, DOD instead uses a single contract for two to five years' worth of procurement of a given kind of item without having to exercise a contract option for each year after the first year. DOD needs congressional approval for each use of MYP. There is a permanent statute governing MYP contracting—10 U.S.C. 2306b. Under this statute, a program must meet several criteria to qualify for MYP. Compared with estimated costs under annual contracting, estimated savings for programs being proposed for MYP have ranged from less than 5% to more than 15%, depending on the particulars of the program in question, with many estimates falling in the range of 5% to 10%. In practice, actual savings from using MYP rather than annual contracting can be difficult to observe or verify because of cost growth during the execution of the contract due to changes in the program independent of the use of MYP rather than annual contracting. BBC is similar to MYP in that it permits DOD to use a single contract for more than one year's worth of procurement of a given kind of item without having to exercise a contract option for each year after the first year. BBC is also similar to MYP in that DOD needs congressional approval for each use of BBC. BBC differs from MYP in the following ways: There is no permanent statute governing the use of BBC. There is no requirement that BBC be approved in both a DOD appropriations act and an act other than a DOD appropriations act. Programs being considered for BBC do not need to meet any legal criteria to qualify for BBC, because there is no permanent statute governing the use of BBC that establishes such criteria. A BBC contract can cover more than five years of planned procurements. Economic order quantity (EOQ) authority—the authority to bring forward selected key components of the items to be procured under the contract and purchase the components in batch form during the first year or two of the contract—does not come automatically as part of BBC authority because there is no permanent statute governing the use of BBC that includes EOQ authority as an automatic feature. BBC contracts are less likely to include cancellation penalties. Potential issues for Congress concerning MYP and BBC include whether to use MYP and BBC in the future more frequently, less frequently, or about as frequently as they are currently used; whether to create a permanent statute to govern the use of BBC, analogous to the permanent statute that governs the use of MYP; and whether the Coast Guard should begin making use of MYP and BBC."
 GOVREPORT_SLLM = "The report analyzes the implementation of multiyear procurements (MYP) in the Department of Defense (DOD) since 1990, focusing on the FY2011-FY2021 period. It highlights the evolution of MYP policies, the role of the Under Secretary of Defense for Acquisition, Logistics, and Technology, and the impact of MYP on procurement processes. The report finds that MYP has grown significantly, with a total value of $145 billion in FY2021, representing 40% of DOD acquisitions. It identifies key factors contributing to MYP's success, such as improved planning, reduced administrative burden, and enhanced competition. However, challenges remain, including the need for better data management, increased transparency, and the potential for unintended consequences. The report also examines the impact of MYP on specific programs, with a focus on major systems, and provides a list of programs approved for MYP in annual DOD appropriations acts since FY1990. Overall, the study underscores the importance of MYP in streamlining defense procurement while recognizing the need for ongoing evaluation and improvement."
@@ -382,8 +389,6 @@ le B-1 covers FY2011 to the present, and Table B-2 covers FY1990 through FY2010.
 
 keywords = ['MYP', 'DOD', 'BBC', '10 U.S.C. 2306b.']
 
-import re
-
 occurances = {}
 
 for keyword in keywords:
@@ -395,11 +400,6 @@ for keyword in keywords:
 tokens_location_512_window = len(GOVREPORT_CONTENT) - len(' '.join(GOVREPORT_CONTENT.split()[-256:]))
 tokens_location_1024_window = len(GOVREPORT_CONTENT) - len(' '.join(GOVREPORT_CONTENT.split()[-512:]))
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-import os
-from hip.utils import setup_seaborn
-import numpy as np
 
 setup_seaborn(axis_below=True)
 

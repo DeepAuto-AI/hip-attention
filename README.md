@@ -31,7 +31,7 @@ After installation, you can access the `hip` package from any project. `hip` is 
 
 ```py
 import torch
-from hip import hip_attention_12, HiPAttentionArgs12
+from hip_attn import hip_attention_12, HiPAttentionArgs12
 
 device = 'cuda'
 

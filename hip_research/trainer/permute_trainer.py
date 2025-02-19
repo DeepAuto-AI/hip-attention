@@ -1,8 +1,17 @@
+import math
+import os
 import random
+
 import datasets
+import torch
+import torch.nn.functional as F
+import transformers
 from torch.utils.data import Dataset
 from tqdm import tqdm
-import math
+
+from hip_research.dataset.wikitext2 import Wikitext2Dataset
+from hip_research.models.modeling_llama_permute import LlamaForCausalLM as PermuteLlama
+
 
 class RedPajamaDataset(Dataset):
     def __init__(self, tokenizer, stride):
@@ -28,15 +37,6 @@ class RedPajamaDataset(Dataset):
         ids = self.tokenizer("\n\n".join(text), return_tensors='pt', truncation=True, max_length=self.stride).input_ids
         labels = ids.clone()
         return ids[0], labels[0]
-
-import os
-from pathlib import Path
-
-from hip.dataset.wikitext2 import Wikitext2Dataset
-import torch
-import transformers 
-from hip.models.modeling_llama_permute import LlamaForCausalLM as PermuteLlama
-import torch.nn.functional as F
 
 class Trainer:
     def __init__(

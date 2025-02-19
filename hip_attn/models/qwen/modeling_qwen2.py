@@ -28,14 +28,15 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from hip import custom_attention
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
+from transformers import Qwen2Config
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, \
+    _prepare_4d_causal_attention_mask_for_sdpa
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, \
+    SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
@@ -45,8 +46,8 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers import Qwen2Config
 
+from hip_attn.utils.attention import custom_attention
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -1507,7 +1508,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         if not self.training and not output_logits and past_key_values is None and num_logits_to_keep == 0:
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
-                from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
+                from hip_attn.utils.memory_efficient_llm_ce import memory_efficient_llm_ce
                 
                 first_skip = 0
                 # Shift so that tokens < n predict n

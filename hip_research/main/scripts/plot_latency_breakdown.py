@@ -1,10 +1,11 @@
-import math
-import matplotlib.pyplot as plt
 import os
-import seaborn as sns
+
+import matplotlib.pyplot as plt
 import numpy as np
-from hip.utils import setup_seaborn
+import seaborn as sns
 from matplotlib.patches import Patch
+
+from hip_research.utils import setup_seaborn
 
 setup_seaborn(axis_below=True)
 
