@@ -6,7 +6,6 @@ import unittest
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 import tqdm
 import triton
 from torch import Tensor
