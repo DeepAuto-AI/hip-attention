@@ -1,6 +1,8 @@
-from datasets import load_dataset, load_metric
-import random, torch
 import os
+import random
+import torch
+
+from datasets import load_dataset
 
 TASK_TO_VALID = {
     "cola": "validation",

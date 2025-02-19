@@ -1,7 +1,7 @@
 import torch
 import gc
 import time
-from . import get_bench
+from hip_attn.utils.benchmarking import get_bench
 
 def bench(name, fn, t_warmup, t_sample, timeunit='ms', tracetree=False):
     sample_count = 0

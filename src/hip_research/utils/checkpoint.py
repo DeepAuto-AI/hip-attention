@@ -1,10 +1,9 @@
 import gc
-from math import sin
-from sympy import is_increasing
-import torch
 import warnings
 import weakref
 from typing import Any, Iterable, List, Tuple
+
+import torch
 
 from ..utils import batch_to, get_all_allocated_tensors, strify
 
