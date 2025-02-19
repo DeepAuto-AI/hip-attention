@@ -41,8 +41,6 @@ import torch
 from numpy import ndarray as NdArray
 from torch import Tensor
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
-
 
 @numba.njit
 def cdiv(a, b):
@@ -547,36 +545,3 @@ def hip_attention(
     context = torch.tensor(context, device=q.device)
     
     return context, None
-
-if __name__ == '__main__':
-    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=4096, return_cos_sin=True, dtype=torch.float32)
-    
-    # q = q[:, -32:, :]
-    # out = out[:, -32:, :]
-    
-    context, _ = hip_attention(
-        q, k, v, 
-        
-        mask_k=512, 
-        
-        block_size_k=4,
-        block_size_k_group=1,
-        block_size_q=32,
-        
-        using_sliding_window=False,
-        sliding_window_size=128,
-        
-        using_extend=False,
-        rope_cos=cos,
-        rope_sin=sin,
-        self_extend_neighboor_window=1024,
-        self_extend_group_size=8,
-        
-        topk_head_group_size=4,
-    )
-    
-    if context is not None:
-        stderr = (out - context).abs().mean().item()
-        stdcontext = torch.std_mean(out)[0].item()
-        
-        print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')

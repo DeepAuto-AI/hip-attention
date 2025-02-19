@@ -15,6 +15,7 @@ from hip_attn.test.utils.seed import seed
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_block_gpu import hip_attention, flash_attention
 from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
+import hip_attn.v1_0.attention1_block_gpu
 
 
 class TestAttention1BlockGpu(unittest.TestCase):
@@ -60,8 +61,6 @@ def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tenso
 
 
 def main_latency_benchmark():
-    global DEBUG
-
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--trace', action='store_true')
@@ -87,7 +86,7 @@ def main_latency_benchmark():
     if args.query_size > 1:
         args.refresh_interval = -1
 
-    DEBUG = args.debug
+    hip_attn.v1_0.attention1_block_gpu.DEBUG = args.debug
     TRACE = args.trace
     BSIZE = args.batch_size
     DUPS = args.dups
@@ -96,7 +95,7 @@ def main_latency_benchmark():
     n_samples = args.samples
     is_causal = not args.not_causal
 
-    if DEBUG:
+    if hip_attn.v1_0.attention1_block_gpu.DEBUG:
         seed()
 
     get_bench().disabled = not TRACE
@@ -326,8 +325,7 @@ def main_latency_benchmark():
 
 
 def main_debug():
-    global DEBUG
-    DEBUG = True
+    hip_attn.v1_0.attention1_block_gpu.DEBUG = True
 
     block = 1024
     # block = 256
@@ -415,8 +413,7 @@ def main_debug():
 
 
 def main_debug_mask():
-    global DEBUG
-    DEBUG = True
+    hip_attn.v1_0.attention1_block_gpu.DEBUG = True
 
     seed()
     q, k, v, out = load_checkouts(dtype=torch.float16, seq_len=1024 * 2, idx=24, window=1)
@@ -444,8 +441,7 @@ def main_debug_mask():
 
 def main_debug_max_ks():
     import nvtx
-    global DEBUG
-    DEBUG = False
+    hip_attn.v1_0.attention1_block_gpu.DEBUG = False
 
     block = 1024
     # block = 256

@@ -1,10 +1,29 @@
+import unittest
+
 import torch
 
+from hip_attn.test.utils.load_checkouts import load_checkouts
 from hip_attn.v1_1.attention2_draft_prefetch import (
     block_sparse_attention,
     HiPAttentionArgs,
 )
-from hip_attn.test.utils.load_checkouts import load_checkouts
+
+
+class TestAttention2PrefetchBsa(unittest.TestCase):
+
+    def test_indices(self):
+        _, _, _, _, cos, sin = load_checkouts(
+            idx=0,
+            window=40,
+            seq_len=seq_len,
+            return_cos_sin=True,
+            derope=True,
+            dtype=torch.bfloat16
+        )
+
+        for i in range(0, seq_len, 371):
+            test_index(i, cos, sin)
+
 
 seq_len = 131072
 head_dim = 128
@@ -12,16 +31,8 @@ num_heads = 32
 num_heads_kv = 8
 bsz = 2
 
-_, _, _, _, cos, sin = load_checkouts(
-    idx=0, 
-    window=40, 
-    seq_len=seq_len, 
-    return_cos_sin=True, 
-    derope=True,
-    dtype=torch.bfloat16
-)
 
-def test_index(target_idx):
+def test_index(target_idx, cos, sin):
     device = 0
     dtype = torch.bfloat16
     q = torch.zeros((bsz, 1, num_heads, head_dim), device=device, dtype=dtype)
@@ -68,6 +79,3 @@ def test_index(target_idx):
     lookup_idx = out[0, 0, 0, 0].item()
     lookup_canary = out[0, 0, 0, -1].item()
     print(target_idx, lookup_idx, lookup_canary)
-
-for i in range(0, seq_len, 371):
-    test_index(i)

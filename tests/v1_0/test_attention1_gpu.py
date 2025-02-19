@@ -10,6 +10,7 @@ from hip_attn.test.utils.load_checkouts import load_checkouts
 from hip_attn.test.utils.seed import seed
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_gpu import hip_attention
+import hip_attn.v1_0.attention1_gpu
 
 
 class TestAttention1GPU(unittest.TestCase):
@@ -22,8 +23,7 @@ class TestAttention1GPU(unittest.TestCase):
 
 
 def main_debug():
-    global DEBUG
-    DEBUG = True
+    hip_attn.v1_0.attention1_gpu.DEBUG = True
 
     q, k, v, out = load_checkouts(window=1)
 
@@ -67,8 +67,6 @@ def flash_attention(q: Tensor, k: Tensor, v: Tensor, attention_mask: Tensor = No
 
 
 def main_latency_benchmark():
-    global DEBUG
-
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--trace', action='store_true')
@@ -80,7 +78,7 @@ def main_latency_benchmark():
     parser.add_argument('--samples', type=int, default=200)
     args = parser.parse_args()
 
-    DEBUG = args.debug
+    hip_attn.v1_0.attention1_gpu.DEBUG = args.debug
     TRACE = args.trace
     BSIZE = args.batch_size
     DUPS = args.dups
@@ -88,7 +86,7 @@ def main_latency_benchmark():
     METHOD = args.method
     n_samples = args.samples
 
-    if DEBUG:
+    if hip_attn.v1_0.attention1_gpu.DEBUG:
         seed()
 
     get_bench().disabled = not TRACE
