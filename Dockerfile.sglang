@@ -30,12 +30,10 @@ WORKDIR /sgl-workspace
 COPY . .
 
 RUN python3 -m pip install --upgrade pip setuptools wheel
-RUN python3 -m pip install "."
+RUN python3 -m pip install ".[sglang]" \
+    --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 RUN python3 -m pip install ".[no_build_iso]" \
     --no-build-isolation
-RUN python3 -m pip install ".[sglang]" \
-    --no-build-isolation \
-    --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 
 RUN python3 -m pip cache purge
 

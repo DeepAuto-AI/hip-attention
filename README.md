@@ -66,27 +66,34 @@ print(output.shape)
 ### Building from source (Recommended)
 
 ```bash
+# Clone this repository
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
+# Make new conda environment
 conda create --name hip python=3.11
 conda activate hip
 
+# Default install
 pip install -e "."
-# Optional for development
-pip install -e ".[dev]"
+# (Optional) For running unit tests
+pip install -e ".[test]"
+# (Optional) For research benchmarks
+pip install -e ".[research]"
+# (Optional) Install the full suite
+pip install -e ".[all]"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
+
 # Dependencies that requires --no-build-isolation
 pip install -e ".[no_build_iso]" \
 --no-build-isolation \
 --verbose
-# SGLang with OpenAI API support for serving
+
+# Install SGLang with support for HiP Attention
 pip install -e ".[sglang]" \
---no-build-isolation \
---verbose \
---find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 
 ### Running

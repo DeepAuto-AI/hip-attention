@@ -1,54 +1,78 @@
-# ##############################################################################
-# PEP 518 [build-system] table
-#
-# We are using setuptools as the build backend, not poetry, flit, or etc.
-#
-# - https://setuptools.pypa.io/en/latest/index.html
-# - https://peps.python.org/pep-0518/#build-system-table
-# ##############################################################################
 [build-system]
 requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
-# ##############################################################################
-# PEP 621 [project] table
-# - https://peps.python.org/pep-0621/
-# - https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
-# ##############################################################################
 # Basic package info
-
 [project]
 name = "hip-attn"  # Name of package when installed using pip
 version = "1.2.0"
 description = "HiP Attention"
 requires-python = ">=3.10"
-dynamic = ["dependencies", "optional-dependencies"]
+dependencies = [
+    # Build dependencies.
+    "cmake>=3.21",
+    "ninja",
+    "packaging",
+    "setuptools>=49.4.0",
+    "torch==2.5.1",
+    "wheel",
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+    # Required
+    "numba",
+    "performer_pytorch",
+    "peft",
+    "seaborn",
+    "sympy",
+    "bitsandbytes",
 
-[tool.setuptools.dynamic.optional-dependencies]
-dev = {file = ["requirements.dev.txt"]}
-no_build_iso = {file = ["requirements.no_build_iso.txt"]}
-sglang = {file = ["requirements.sglang.txt"]}
-
-# ##############################################################################
-# PEP 518 [tool] table
-# - https://peps.python.org/pep-0518/#tool-table
-# ##############################################################################
-# We use src-layout
-# - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
-[tool.setuptools.packages]
-
-[tool.setuptools.packages.find]
-include = ["hip_attn*"]
-exclude = ["tests*"]
-namespaces = false
-
-# Add package data
-# - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
-[tool.setuptools.package-data]
-"*" = [
-  # required by mypy
-  "py.typed",
+    # CUDA 12
+    "cupy-cuda12x",
+    "nvtx",
 ]
+
+[project.optional-dependencies]
+test = [  # Packages required for running the tests
+    # TODO: Add test dependencies
+]
+research = [
+    # Trainer
+    "torchmetrics",
+    "deepspeed",
+    "lightning",
+    "pytorch_lightning",
+    "scikit-learn",
+
+    # Dataset
+    "torchtext",
+    "datasets",
+
+    # Eval
+    "pypareto",
+    "pyrouge",
+
+    # Other dependencies
+    "requests",
+    "tqdm",
+    "matplotlib",
+    "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
+    "scikit-image",
+]
+sglang = [
+    "sgl-kernel",
+
+    # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
+    "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/feat/update-imports#subdirectory=python",
+]
+all = ["hip_attn[test]", "hip_attn[research]", "hip_attn[sglang]"]
+
+# Packages required building from source with `--no-build-isolation`.
+# Install this with `--no-build-isolation` after installing the rest of the dependencies.
+no_build_iso = [
+    "flash-attn",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools]
+packages = ["hip_attn", "hip_research"]
