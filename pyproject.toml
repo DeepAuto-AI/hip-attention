@@ -31,9 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [  # Packages required for running the tests
-    # TODO: Add test dependencies
-]
 research = [
     # Trainer
     "torchmetrics",
@@ -57,12 +54,18 @@ research = [
     "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
     "scikit-image",
 ]
+
+test = [  # Packages required for running the tests
+    "hip-attn[research]",
+]
+
 sglang = [
     "sgl-kernel",
 
     # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
     "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/feat/update-imports#subdirectory=python",
 ]
+
 all = ["hip_attn[test]", "hip_attn[research]", "hip_attn[sglang]"]
 
 # Packages required building from source with `--no-build-isolation`.
