@@ -35,10 +35,11 @@ import torch
 from numpy import ndarray as NdArray
 from torch import Tensor
 
+from hip_attn.test.utils.load_checkouts import load_checkouts
 from hip_attn.v1_0.attention1_block_gpu \
     import calc_prob_return_context \
     as block_sparse_flash_attention
-from hip_attn.v1_0.attention1_block_gpu import load_checkouts, to_dense
+from hip_attn.v1_0.attention1_block_gpu import to_dense
 
 
 @numba.njit

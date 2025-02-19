@@ -6,7 +6,7 @@ import torch
 
 from hip_attn.utils.attn_l1_loss import compute_attn_lp_loss_triton
 from hip_attn.v1_0.attention1_block_gpu import hip_attention
-from hip_attn.v1_0.attention1_gpu import flash_attention
+from hip_attn.v1_0.attention1_block_gpu import flash_attention
 
 
 @nvtx.annotate('custom_attention')
@@ -628,7 +628,7 @@ def custom_attention(
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
 
     elif attention_method == 'streaming_llm':
-        from hip_research.models.sink_attention.sink_attention import sink_attention
+        from hip_research.models.sink_attention import sink_attention
         
         q = query_states # / (query_states.shape[-1] ** 0.5)
         if sm_scaler is not None:

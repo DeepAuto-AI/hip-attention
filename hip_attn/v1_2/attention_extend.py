@@ -13,7 +13,8 @@ import triton.language as tl
 from matplotlib import pyplot as plt
 from torch import Tensor
 
-from hip_attn.common import load_checkouts
+from hip_attn.test.utils.load_checkouts import load_checkouts
+from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_decode_bsa import (
     decode_block_sparse_attention,
 )
@@ -34,7 +35,6 @@ from hip_attn.v1_2.attention_metadata import (
 from hip_attn.v1_2.uvm_gpu_cache import (
     load_tokens,
 )
-from hip_attn.utils.rope import adjust_rope
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 def num_streaming_multiprocessor():

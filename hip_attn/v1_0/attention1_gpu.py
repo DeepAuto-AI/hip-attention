@@ -37,16 +37,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import skimage.measure
 import torch
-import torch.nn.functional as F
-import tqdm
 import triton
 import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 
-from hip_attn.test.utils.load_checkouts import load_checkouts
 from hip_attn.utils.benchmarking import get_bench
-from hip_attn.test.utils.seed import seed
 
 timer = lambda x: get_bench().region(x)
 

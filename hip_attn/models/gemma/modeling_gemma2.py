@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, HybridCache
 from transformers.generation import GenerationMixin
@@ -39,6 +38,7 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -48,9 +48,9 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
-import torch.nn.functional as F
+
 from hip_attn.utils.attention import custom_attention
+
 
 class Gemma2RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
