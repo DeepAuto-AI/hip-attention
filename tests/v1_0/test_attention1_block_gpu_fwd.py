@@ -1,12 +1,21 @@
 import os
+import unittest
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import Tensor
 
-from hip_attention.v1_0.attention1_block_gpu import hip_attention, hip_attention_mask, sparse_attention
 from hip_attention.test.utils.load_checkouts import load_checkouts
+from hip_attention.v1_0.attention1_block_gpu import hip_attention, hip_attention_mask, sparse_attention
+
+
+class TestAttention1BlockGPUFwd(unittest.TestCase):
+
+    def test_main(self):
+        print('='*80)
+        main()
+        print('='*80)
 
 
 def to_dense(
@@ -148,9 +157,3 @@ def main():
         N, TDST, TSRC, BLOCKSIZE_Q, BLOCKSIZE_K
     ).to(indices.device)
     imsave(probs_dense_hip, 'probs_dense_hip')
-
-if __name__ == '__main__':
-    for i in range(1):
-        print('='*80)
-        main()
-        print('='*80)

@@ -1,6 +1,9 @@
 import unittest
+
 import torch
+
 from hip_attention.v1_0.attention1 import attention
+
 
 class TestAttention1(unittest.TestCase):
 

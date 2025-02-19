@@ -1,8 +1,19 @@
+import unittest
+
 import numpy as np
 import torch
 import triton
 
 from hip_attention.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import CalcScoreAutoGradFn
+
+
+class TestScoreProb(unittest.TestCase):
+
+    def test_CalcScoreAutoGradFn(self):
+        test_CalcScoreAutoGradFn()
+
+    def test_CalcScoreAutoGradFn_perf(self):
+        test_CalcScoreAutoGradFn_perf()
 
 
 def test_CalcScoreAutoGradFn():

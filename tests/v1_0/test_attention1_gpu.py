@@ -1,9 +1,11 @@
+import unittest
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
 from torch import Tensor
-import unittest
+
 from hip_attention.test.utils.load_checkouts import load_checkouts
 from hip_attention.test.utils.seed import seed
 from hip_attention.utils.benchmarking import get_bench
@@ -12,10 +14,10 @@ from hip_attention.v1_0.attention1_gpu import hip_attention
 
 class TestAttention1GPU(unittest.TestCase):
 
-    def test_attention1_gpu_main_debug(self):
+    def test_main_debug(self):
         main_debug()
 
-    def test_attention1_gpu_main_latency_benchmark(self):
+    def test_main_latency_benchmark(self):
         main_latency_benchmark()
 
 

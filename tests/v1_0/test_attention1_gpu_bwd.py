@@ -1,3 +1,4 @@
+import unittest
 import torch
 import warnings
 from torch import nn
@@ -7,6 +8,14 @@ from hip_attention.v1_0.attention1_gpu import (
     attention_matrix,
 )
 from hip_attention.test.utils.load_checkouts import load_checkouts
+
+class TestAttention1GPUBwd(unittest.TestCase):
+
+    def test_sparse_attention(self):
+        test_sparse_attention()
+
+    def test_attention_mask(self):
+        test_attention_mask()
 
 
 def test_sparse_attention():
@@ -103,7 +112,3 @@ def test_attention_mask():
     
     assert loss.item() < 3.5
     print('[pass] test_attention_mask')
-
-if __name__ == '__main__':
-    test_sparse_attention()
-    test_attention_mask()

@@ -1,9 +1,23 @@
+import unittest
+
 import numpy as np
 import torch
 import tqdm
 from vllm.model_executor.layers.attention import _paged_attention
 
 from hip_attention.v1_0.attention1_block_gpu import paged_hip_attention
+
+
+class TestPageAttention(unittest.TestCase):
+
+    def test_vllm(self):
+        test_vllm()
+
+    def test_vllm_compat(self):
+        test_vllm_compat()
+
+    def test_vllm_compat_cpu(self):
+        test_vllm_compat_cpu()
 
 
 def load_states():
@@ -155,11 +169,3 @@ def test_vllm_compat():
     
     error = torch.abs(output - output_truth).mean()
     print(torch.std_mean(output_truth), torch.std_mean(output), error, sep='\n')
-
-def main():
-    test_vllm()
-    test_vllm_compat()
-    test_vllm_compat_cpu()
-    
-if __name__ == '__main__':
-    main()

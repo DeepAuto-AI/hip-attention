@@ -19,16 +19,16 @@ from hip_attention.v1_1.attention2_draft_prefetch import hip_attention as hip_at
 
 class TestAttention1BlockGpu(unittest.TestCase):
 
-    def test_attention1_block_gpu_debug(self):
+    def test_main_debug(self):
         main_debug()
 
-    def test_attention1_block_gpu_debug_mask(self):
+    def test_main_debug_mask(self):
         main_debug_mask()
 
-    def test_attention1_block_gpu_debug_max_ks(self):
+    def test_main_debug_max_ks(self):
         main_debug_max_ks()
 
-    def test_attention1_block_gpu_main_latency_benchmark(self):
+    def test_main_latency_benchmark(self):
         main_latency_benchmark()
 
 
