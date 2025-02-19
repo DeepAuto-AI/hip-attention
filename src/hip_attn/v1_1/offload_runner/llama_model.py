@@ -824,7 +824,7 @@ class LlamaSdpaAttention(LlamaAttention):
 
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, None, past_key_valueㄹ
+        return attn_output, None, past_key_value
 
 
 LLAMA_ATTENTION_CLASSES = {

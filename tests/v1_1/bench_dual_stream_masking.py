@@ -92,5 +92,6 @@ def main():
     elapsed = t_end - t_start
     print(elapsed * 1000)
 
+
 if __name__ == '__main__':
     main()
