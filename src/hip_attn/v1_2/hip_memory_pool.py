@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
 import torch
@@ -168,7 +168,7 @@ class HiPMetadataCachePool:
                         "B,1,H",
                         torch.bfloat16,
                     )
-        
+
         self.num_delays = int(os.getenv("HIP_DEBUG_DELAYED_STAGE0", "0"))
         self.delayed_first_stage = [[] for _ in range(self.layer_num)]
 
@@ -176,7 +176,7 @@ class HiPMetadataCachePool:
         logger.info(
             f"Allocated HiP metadata cache pool size: {self.allocated_gpu_bytes / 1024 / 1024:.2f} MB"
         )
-    
+
     def reset_decode_phase(self):
         # This function is called in sglang/srt/model_executor/forward_batch_info.py
         for layer in self.delayed_first_stage:
@@ -349,10 +349,7 @@ class HiPMetadataCachePool:
                 if i_stage == 0:
                     pass
                 elif i_stage == 1:
-                    if (
-                        torch.cuda.is_current_stream_capturing()
-                        and self.num_delays > 0
-                    ):
+                    if torch.cuda.is_current_stream_capturing() and self.num_delays > 0:
                         raise Exception(
                             "delayed stage is only supported on eager mode for research purpose."
                         )

@@ -6,9 +6,9 @@ import torch
 import tqdm
 from torch.utils.data import Dataset
 
-IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
-IS_EXAONE = os.getenv('IS_EXAONE', '0') == '1'
-IS_CHAT = os.getenv('IS_CHAT', '0') == '1'
+IS_GEMMA = os.getenv("IS_GEMMA", "0") == "1"
+IS_EXAONE = os.getenv("IS_EXAONE", "0") == "1"
+IS_CHAT = os.getenv("IS_CHAT", "0") == "1"
 
 if IS_EXAONE:
     PREFIX = """[BOS][|system|][|endofturn|]
@@ -57,6 +57,7 @@ In previous text, you have seen the secret keyword. You had to remember that sec
 <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
+
 
 def interpolate_passkey(k):
     keyline = f"HERE IS THE SECRET KEYWORD! The secret keyword is ${k}$. ${k}$ is the secret keyword. **the secret keyword is ${k}$** LOOK BEHIND FOR SECRET KEYWORD"

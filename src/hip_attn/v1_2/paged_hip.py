@@ -23,6 +23,7 @@ except ImportError as ex:
 
 _CHECKOUT_COUNTER = 0
 
+
 def cuda_graph_capture_configs(hip_config: HiPAttentionConfig):
     num_stages = len(hip_config.layers[0].stages)
     cache_configs = [(None,)]  # (num_stage_cached,)
@@ -348,10 +349,9 @@ def _forward_paged_hip(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
-    
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
-    
+
     N, num_heads, hidden_dims = query.shape
     dst_seq_len = N // batch_size
 
@@ -651,9 +651,7 @@ def _forward_paged_hip(
 
         if is_decode or (
             (not is_decode)
-            and (
-                dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-            )
+            and (dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
         ):
             torch.save(
                 {
@@ -679,6 +677,6 @@ def _forward_paged_hip(
             )
             if is_decode and (layer_id == max(layers_to_capture)):
                 _CHECKOUT_COUNTER += 1
-            print(f'saved {filename}')
+            print(f"saved {filename}")
 
     return context.view(N, num_heads, hidden_dims), metadata

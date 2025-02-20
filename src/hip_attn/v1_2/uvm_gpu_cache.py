@@ -15,13 +15,13 @@ from hip_attn.v1_1.offload_runner.tensor_from_pointer import (
     sizeof,
 )
 from hip_attn.v1_2.attention_metadata import (
-    HiPAttentionOutputMetadata,
     HiPAttentionCacheAccessStatistics,
     HiPAttentionOutputMetadata,
 )
 
 MAX_INT: tl.constexpr = tl.constexpr(90000000)
 MAX_INT_ACQUIRED: tl.constexpr = tl.constexpr(90000001)
+
 
 def format_size_bytes(tensor: Union[Tensor, Union[float, int]]) -> str:
     if isinstance(tensor, Tensor):
@@ -110,7 +110,7 @@ class UVMCache:
 
     def alloc_uvm(self, shape, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
         t_gpu, t_cpu = alloc_managed_tensor(shape, dtype, self.device)
-        
+
         uvm_note_cpu(t_gpu)
         t_cpu.fill_(0)
 

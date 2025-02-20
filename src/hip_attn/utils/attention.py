@@ -445,7 +445,7 @@ def custom_attention(
                 sin = rope_sin.squeeze(0) if rope_sin is not None else None
                 block_size = 64
                 HiPAttentionArgs = HiPAttentionArgs12
-                
+
                 k_mask = k
                 k_group_size = int(os.getenv("K_GROUP_SIZE", "1"))
                 _N, _T, _H, _D = k.shape

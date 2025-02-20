@@ -13,12 +13,12 @@ from hip_research.main.eval_args import ArgsType, eval_args
 from hip_research.main.jobs.bench_single_layer import job_bench_single_layer
 from hip_research.main.jobs.booksum import job_booksum
 from hip_research.main.jobs.ga import job_ga
-from hip_research.main.jobs.sample_diag import job_sample_diag
 from hip_research.main.jobs.greedy_replace import job_greedy_replace
 from hip_research.main.jobs.merge_lora import job_merge_lora
 from hip_research.main.jobs.mmlu import job_mmlu
 from hip_research.main.jobs.passkey import job_passkey
 from hip_research.main.jobs.ppl import job_ppl
+from hip_research.main.jobs.sample_diag import job_sample_diag
 from hip_research.main.jobs.stream import job_stream
 from hip_research.main.jobs.stream_demo import job_stream_demo
 from hip_research.models.sglang_model import SglangModel
@@ -337,30 +337,30 @@ def load_model(args):
 
 
 JOBS = {
-    'ppl': job_ppl,
-    'stream': job_stream,
-    'mmlu': job_mmlu,
-    'bench_single_layer': job_bench_single_layer,
-    'booksum': job_booksum,
-    'merge_lora': job_merge_lora,
-    'stream_demo': job_stream_demo,
-    'greedy_replace': job_greedy_replace,
-    'passkey': job_passkey,
-    'ga': job_ga,
-    'sample_diag': job_sample_diag,
+    "ppl": job_ppl,
+    "stream": job_stream,
+    "mmlu": job_mmlu,
+    "bench_single_layer": job_bench_single_layer,
+    "booksum": job_booksum,
+    "merge_lora": job_merge_lora,
+    "stream_demo": job_stream_demo,
+    "greedy_replace": job_greedy_replace,
+    "passkey": job_passkey,
+    "ga": job_ga,
+    "sample_diag": job_sample_diag,
 }
 
 
 def main():
     args = eval_args()
     seed(seed=args.seed)
-    
+
     assert args.job in JOBS.keys()
-    
+
     model, tokenizer, device = load_model(args)
-    
+
     JOBS[args.job](args, model, tokenizer, device)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

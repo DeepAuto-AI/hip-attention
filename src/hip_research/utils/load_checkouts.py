@@ -2,25 +2,25 @@ import torch
 
 
 def load_checkouts(
-    idx = 24, 
-    window = 1, 
-    seq_len = 4096, 
-    dtype = torch.float16, 
-    return_cos_sin = False,
-    derope = False,
-    sm_scale = None,
-    device = 0,
-    checkout_path = './cache/llama/qkvout.pth',
+    idx=24,
+    window=1,
+    seq_len=4096,
+    dtype=torch.float16,
+    return_cos_sin=False,
+    derope=False,
+    sm_scale=None,
+    device=0,
+    checkout_path="./cache/llama/qkvout.pth",
 ):
     q_name = "q"
     k_name = "k"
     if derope:
-        q_name = 'q_derope'
-        k_name = 'k_derope'
-    
-    data_source = 'llama'
-    if data_source == 'llama':
-        state = torch.load(checkout_path, map_location='cpu', weights_only=False)
+        q_name = "q_derope"
+        k_name = "k_derope"
+
+    data_source = "llama"
+    if data_source == "llama":
+        state = torch.load(checkout_path, map_location="cpu", weights_only=False)
         if sm_scale is None:
             sm_scale = 1 / (state[q_name].shape[-1] ** 0.5)
         q = state[q_name] * sm_scale

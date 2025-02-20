@@ -293,7 +293,10 @@ class LlamaMLP(nn.Module):
             down_proj = torch.empty_like(x)
             for i_start in range(0, x.shape[1], chunked_prefill):
                 i_end = i_start + chunked_prefill
-                down_proj_chunk = self.down_proj(self.act_fn(self.gate_proj(x[:, i_start: i_end])) * self.up_proj(x[:, i_start: i_end]))
+                down_proj_chunk = self.down_proj(
+                    self.act_fn(self.gate_proj(x[:, i_start:i_end]))
+                    * self.up_proj(x[:, i_start:i_end])
+                )
                 down_proj[:, i_start:i_end] = down_proj_chunk
 
         return down_proj
@@ -579,35 +582,38 @@ class LlamaCustomAttention(LlamaAttention):
             min_seq_len=32,  # this factor is kind of random. usually smaller better
             cuda=True,
         )
-        
+
         self.hooks = []
-        
-        self.diag_info_path = os.getenv('HIP_DIAG_INFO', None)
+
+        self.diag_info_path = os.getenv("HIP_DIAG_INFO", None)
         if self.diag_info_path is not None:
             chunk_size = 8
             block_size_q = 64
             exclude_window_size = 8192
-            self.diag_info = torch.load(
-                self.diag_info_path, 
-                map_location='cuda:0'
-            )['prob_avg'][self.layer_idx] # type: torch.Tensor
+            self.diag_info = torch.load(self.diag_info_path, map_location="cuda:0")[
+                "prob_avg"
+            ][
+                self.layer_idx
+            ]  # type: torch.Tensor
             assert self.diag_info.ndim == 2
             self.diag_info[:, -exclude_window_size:].fill_(-32000.0)
             self.diag_info = torch.nn.functional.max_pool1d(
-                self.diag_info, 
-                kernel_size=max(chunk_size, block_size_q) + 1, 
+                self.diag_info,
+                kernel_size=max(chunk_size, block_size_q) + 1,
                 stride=1,
-                padding=max(chunk_size, block_size_q) // 2
+                padding=max(chunk_size, block_size_q) // 2,
             )
             self.diag_info = self.diag_info[:, ::chunk_size]
-            _ , indices = self.diag_info.topk(k=2048 // chunk_size, dim=-1)
-            self.sliding_window_indices = (indices - self.diag_info.shape[-1]) * chunk_size
+            _, indices = self.diag_info.topk(k=2048 // chunk_size, dim=-1)
+            self.sliding_window_indices = (
+                indices - self.diag_info.shape[-1]
+            ) * chunk_size
         else:
             self.sliding_window_indices = self.diag_info = None
-    
+
     def register_hook(self, fn):
         self.hooks.append(fn)
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -826,7 +832,7 @@ class LlamaCustomAttention(LlamaAttention):
                 model_context_length=model_context_length,
                 layer_idx=self.layer_idx,
                 extend_stages=self.tree_extend_stages,
-                sliding_window_indices=self.sliding_window_indices
+                sliding_window_indices=self.sliding_window_indices,
             )
         else:
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -886,34 +892,39 @@ class LlamaCustomAttention(LlamaAttention):
                 sliding_window_indices=self.sliding_window_indices,
             )
 
-        if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
-            os.makedirs('./cache/llama/', exist_ok=True)
-            torch.save({
-                'q': query_states,
-                'k': key_states,
-                'v': value_states,
-                'q_derope': query_states_derope,
-                'k_derope': key_states_derope,
-                'out': attn_output,
-                'cos': cos_all,
-                'sin': sin_all,
-            }, './cache/llama/qkvout.pth')
-            input('stored. press enter to continue >>> ')
-        
+        if os.environ.get("CHECKOUT_STATES_DEROPE", "0") == "1":
+            os.makedirs("./cache/llama/", exist_ok=True)
+            torch.save(
+                {
+                    "q": query_states,
+                    "k": key_states,
+                    "v": value_states,
+                    "q_derope": query_states_derope,
+                    "k_derope": key_states_derope,
+                    "out": attn_output,
+                    "cos": cos_all,
+                    "sin": sin_all,
+                },
+                "./cache/llama/qkvout.pth",
+            )
+            input("stored. press enter to continue >>> ")
+
         if len(self.hooks) > 0:
             for fn in self.hooks:
-                fn({
-                    'q': query_states,
-                    'k': key_states,
-                    'v': value_states,
-                    'q_derope': query_states_derope,
-                    'k_derope': key_states_derope,
-                    'out': attn_output,
-                    'cos': cos_all,
-                    'sin': sin_all,
-                    'layer_idx': self.layer_idx
-                })
-        
+                fn(
+                    {
+                        "q": query_states,
+                        "k": key_states,
+                        "v": value_states,
+                        "q_derope": query_states_derope,
+                        "k_derope": key_states_derope,
+                        "out": attn_output,
+                        "cos": cos_all,
+                        "sin": sin_all,
+                        "layer_idx": self.layer_idx,
+                    }
+                )
+
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
@@ -1863,10 +1874,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
     def get_decoder(self):
         return self.model
-    
-    def register_hook_on(self, target: Literal['attention'], hook):
+
+    def register_hook_on(self, target: Literal["attention"], hook):
         for module in self.modules():
-            if isinstance(module, LlamaCustomAttention) and target == 'attention':
+            if isinstance(module, LlamaCustomAttention) and target == "attention":
                 module.register_hook(hook)
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
