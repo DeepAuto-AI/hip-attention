@@ -178,7 +178,7 @@ class HiPMetadataCachePool:
         )
     
     def reset_decode_phase(self):
-        # BUG: this function should be called somewhere!!!
+        # This function is called in sglang/srt/model_executor/forward_batch_info.py
         for layer in self.delayed_first_stage:
             layer.clear()
 

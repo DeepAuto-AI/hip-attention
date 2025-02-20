@@ -23,7 +23,6 @@ from hip_attn.v1_2.attention_metadata import (
 MAX_INT: tl.constexpr = tl.constexpr(90000000)
 MAX_INT_ACQUIRED: tl.constexpr = tl.constexpr(90000001)
 
-
 def format_size_bytes(tensor: Union[Tensor, Union[float, int]]) -> str:
     if isinstance(tensor, Tensor):
         byte_size = sizeof(tensor)
