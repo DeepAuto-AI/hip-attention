@@ -31,9 +31,9 @@ def indexing(x, indices, chunk_size=-1):
         x = x.gather(2, indices.unsqueeze(-1).expand(-1, -1, -1, x.shape[-1]))
         new_n = math.ceil(x.shape[2] / chunk_size) * chunk_size
         if new_n <= 0 or new_n - x.shape[2] <= 0:
-            import pdb
-
-            pdb.set_trace()
+            raise ValueError("new_n <= 0 or new_n - x.shape[2] <= 0")
+        #    import pdb
+        #    pdb.set_trace()
         return torch.nn.functional.pad(
             x, (0, 0, 0, new_n - x.shape[2]), mode="constant", value=0.0
         )

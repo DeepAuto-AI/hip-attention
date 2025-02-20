@@ -266,7 +266,7 @@ class TestCachePolicy(unittest.TestCase):
             plt.imshow(img)
             plt.colorbar()
             plt.title(
-                f"Average Access Count\(T={TSRC}, bq={args.block_size_q}, bk={args.block_size_k})"
+                f"Average Access Count\\(T={TSRC}, bq={args.block_size_q}, bk={args.block_size_k})"
             )
             plt.tight_layout()
             path = os.path.join(root, "access.png")

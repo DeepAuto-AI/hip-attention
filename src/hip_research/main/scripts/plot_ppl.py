@@ -186,7 +186,7 @@ plt.title("Decode Latency", fontsize=13)
 plt.ylim(10, 42)
 plt.legend(loc="upper right")
 plt.xlabel("$T$ (k)")
-plt.ylabel("Latency ($\mu$s)")
+plt.ylabel("Latency ($\\mu$s)")
 plt.savefig(
     os.path.join(working_directory, "plot_ppl_decode.png"),
     bbox_inches="tight",
