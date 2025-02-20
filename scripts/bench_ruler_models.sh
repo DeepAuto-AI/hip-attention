@@ -4,8 +4,8 @@ if [[ "${CUDA_VISIBLE_DEVICES}" == "" ]]; then
     export CUDA_VISIBLE_DEVICES=1
 fi
 export HIP_DISABLE_AUTOTUNE_WARNINGS=1
-export HIP_DEBUG=0 
-export HIP_DISABLE_AUTOTUNE=0 
+export HIP_DEBUG=0
+export HIP_DISABLE_AUTOTUNE=0
 
 function bench {
     echo "bench prefill=$1 decode=$2 k=$3 T=${4}k"
@@ -105,7 +105,7 @@ function hip_AV {
     echo ==================================================
     echo HiP + AV $1
 
-    export HIP_USING_SNAP_KV=1 
+    export HIP_USING_SNAP_KV=1
     export HIP_SNAP_KV_VERT_K=$1
     export HIP_SNAP_KV_DIAG_K=$1
     export HIP_SNAP_KV_NO_OVERLAP=0
@@ -122,7 +122,7 @@ function hip_AV_custom {
     echo ==================================================
     echo HiP + AV k = $1 V = $2 D = $3 T = $4
 
-    export HIP_USING_SNAP_KV=1 
+    export HIP_USING_SNAP_KV=1
     export HIP_SNAP_KV_VERT_K=$2
     export HIP_SNAP_KV_DIAG_K=$3
     export HIP_SNAP_KV_NO_OVERLAP=0
@@ -146,12 +146,12 @@ function hyper {
 
 function bench_ruler {
     # bigbird 4096 128
-    
+
     AV 4096 128
     Aonly 2048 128
-    
+
     # hip 2048 128
-    
+
     # hip_AV_custom 2048 2048 1024 128
 
     # fa 128

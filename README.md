@@ -8,7 +8,7 @@
 | [**Paper (Arxiv, InfiniteHiP *latest*)**](https://arxiv.org/abs/2502.08910) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
-> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)! 
+> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)!
 
 > [!IMPORTANT]
 > This is **NOT yet free for commercial use**. The license is [FSL-1.1-MIT](https://fsl.software/), which is free for non-commercial use but will automatically convert to MIT license two years after each release. Please refer to the [LICENSE](./LICENSE) for more details.
@@ -31,7 +31,7 @@ After installation, you can access the `hip` package from any project. `hip` is 
 
 ```py
 import torch
-from hip import hip_attention_12, HiPAttentionArgs12
+from hip_attn import hip_attention_12, HiPAttentionArgs12
 
 device = 'cuda'
 
@@ -66,27 +66,34 @@ print(output.shape)
 ### Building from source (Recommended)
 
 ```bash
+# Clone this repository
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
+# Make new conda environment
 conda create --name hip python=3.11
 conda activate hip
 
+# Default install
 pip install -e "."
-# Optional for development
-pip install -e ".[dev]"
+# (Optional) For running unit tests
+pip install -e ".[test]"
+# (Optional) For research benchmarks
+pip install -e ".[research]"
+# (Optional) Install the full suite
+pip install -e ".[all]"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
+
 # Dependencies that requires --no-build-isolation
 pip install -e ".[no_build_iso]" \
 --no-build-isolation \
 --verbose
-# SGLang with OpenAI API support for serving
+
+# Install SGLang with support for HiP Attention
 pip install -e ".[sglang]" \
---no-build-isolation \
---verbose \
---find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 
 ### Running

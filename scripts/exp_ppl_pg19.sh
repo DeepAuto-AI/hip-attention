@@ -5,7 +5,7 @@ echo METHOD=${METHOD}
 
 EVAL_TOKENS=16777216
 
-for seq in 131072 65536 32768 16384 8192    
+for seq in 131072 65536 32768 16384 8192
 do
 count=$((EVAL_TOKENS / seq))
 

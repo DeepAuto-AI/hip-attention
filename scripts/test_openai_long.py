@@ -1,7 +1,8 @@
-from openai import OpenAI
 import os
 
-port = os.getenv('SRT_PORT', '8913')
+from openai import OpenAI
+
+port = os.getenv("SRT_PORT", "8913")
 
 client = OpenAI(
     base_url=f"http://localhost:{port}/v1",
@@ -14,7 +15,8 @@ chat_completion = client.chat.completions.create(
         {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
-            "content": "What are some highly rated restaurants in San Francisco? " * 100_000,
+            "content": "What are some highly rated restaurants in San Francisco? "
+            * 100_000,
         },
     ],
     temperature=0.01,
