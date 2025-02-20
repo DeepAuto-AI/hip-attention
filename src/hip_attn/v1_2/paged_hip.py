@@ -1,13 +1,13 @@
 import os
-from typing import Optional, Any
+from typing import Any, Optional
 
 import torch
 
-from hip_attn.v1_2.attention_extend import (
-    dual_stage_quadratic_hip_attention,
+from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
+from hip_attn.v1_2.attention_metadata import (
+    HiPAttentionArgs,
+    HiPAttentionOutputMetadata,
 )
-from hip_attn.v1_2.attention_metadata import HiPAttentionArgs
-from hip_attn.v1_2.attention_metadata import HiPAttentionOutputMetadata
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
 
@@ -178,7 +178,7 @@ def forward_paged_hip(
                     metadata_new.ks_start_end, metadata_valid.ks_start_end
                 )
                 if (metadata_valid.stage_caches is not None) and (
-                        len(metadata_valid.stage_caches) > 0
+                    len(metadata_valid.stage_caches) > 0
                 ):
                     stage1_left_err = sse(
                         metadata_new.stage_caches[1].indices_left,
@@ -267,9 +267,7 @@ def forward_paged_hip(
                 print(metadata_new.indices)
                 print(metadata_valid.indices)
 
-                assert (
-                    o_sse < err_thresh
-                ), (
+                assert o_sse < err_thresh, (
                     f"sse={o_sse}\n"
                     f"err_k (uvm_k <=> valid_k) = {err_k}\n"
                     f"err_v (uvm_v <=> valid_v) = {err_v}\n"

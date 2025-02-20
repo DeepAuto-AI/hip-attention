@@ -657,7 +657,7 @@ ID: 212 | TITLE: Clef | CONTENT: In modern Gregorian chant notation, the C clef 
 ID: 213 | TITLE: First Indochina War | CONTENT: On November 14, 1951, the French seized Hòa Bình, 25 miles (40 km) west of the De Lattre Line, by a parachute drop and extended their perimeter. | END ID: 213
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 214 | TITLE: Luminosity | CONTENT: Imagine a point source of light of luminosity 
+ID: 214 | TITLE: Luminosity | CONTENT: Imagine a point source of light of luminosity
 
 
 
@@ -1326,7 +1326,7 @@ ID: 432 | TITLE: Jason Paige | CONTENT: Jason Paige (born January 6, 1969) is an
 ID: 433 | TITLE: Artificial ventilation | CONTENT: The 1856 works of English physician and physiologist Marshall Hall recommended against using any type of bellows/positive pressure ventilation, views that held sway for several decades.[13] A common method of external manual manipulation, introduced in 1858, was the "Silvester Method" invented by Dr. Henry Robert Silvester in which a patient is laid on their back and their arms are raised above their head to aid inhalation and then pressed against their chest to aid exhalation. | END ID: 433
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 434 | TITLE: Hubble's law | CONTENT: where 
+ID: 434 | TITLE: Hubble's law | CONTENT: where
 
 
 
@@ -1340,7 +1340,7 @@ i
 
 {\displaystyle D_{i}}
 
- is the distance at which a galaxy is first measured at and 
+ is the distance at which a galaxy is first measured at and
 
 
 
@@ -1349,7 +1349,7 @@ t
 
 {\displaystyle t}
 
- is the time since said measurement, thus the velocity of a galaxy can be expressed as 
+ is the time since said measurement, thus the velocity of a galaxy can be expressed as
 
 
 
@@ -1374,7 +1374,7 @@ t
 
 {\displaystyle v={\frac {D-D_{i}}{t}}}
 
-. Solving the integral subsequently yields 
+. Solving the integral subsequently yields
 
 
 
@@ -1517,7 +1517,7 @@ ID: 470 | TITLE: Genetic drift | CONTENT: where T is the number of generations, 
 ID: 471 | TITLE: Amazon tax | CONTENT: In a 2012 editorial supporting tax equity, the Florida St. Petersburg Times wrote, "As long as Internet-only sellers such as Amazon.com can get away with not collecting state sales tax and effectively sell their products for at least 6 percent less, Florida merchants pay the price. It's past time for lawmakers to work toward a level playing field."[37] | END ID: 471
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 472 | TITLE: Time Enough at Last | CONTENT: "Time Enough at Last" was a ratings success in its initial airing and "became an instant classic".[12] It "remains one of the best-remembered and best-loved episodes of The Twilight Zone" according to Marc Zicree, author of The Twilight Zone Companion.[6] When a poll asked readers of Twilight Zone Magazine which episode of the series they remembered the most, "Time Enough at Last" was the most frequent response, with "To Serve Man" coming in a distant second.[13] In TV Land's presentation of TV Guide's "100 Most Memorable Moments in Television", "Time Enough at Last" was ranked at #25.[14] 
+ID: 472 | TITLE: Time Enough at Last | CONTENT: "Time Enough at Last" was a ratings success in its initial airing and "became an instant classic".[12] It "remains one of the best-remembered and best-loved episodes of The Twilight Zone" according to Marc Zicree, author of The Twilight Zone Companion.[6] When a poll asked readers of Twilight Zone Magazine which episode of the series they remembered the most, "Time Enough at Last" was the most frequent response, with "To Serve Man" coming in a distant second.[13] In TV Land's presentation of TV Guide's "100 Most Memorable Moments in Television", "Time Enough at Last" was ranked at #25.[14]
 In an interview, Serling cited "Time Enough at Last" as one of his two favorites from the entire series. (The other episode was "The Invaders", with Agnes Moorehead.)[15] | END ID: 472
 
 @@@@@ CHUNK (user, text/plain) @@@@@
@@ -1731,7 +1731,7 @@ ID: 541 | TITLE: Charles Durning | CONTENT: For his numerous roles on television
 
 @@@@@ CHUNK (user, text/plain) @@@@@
 ID: 542 | TITLE: Pay Commission | CONTENT: The Government of India has initiated the process to constitute the 7th Central Pay Commission along with finalisation of its Terms of Reference, the composition and the possible timeframe for submission of its Report.[18]
-On 25 September 2013 then Finance Minister P Chidambaram announced that Prime Minister Manmohan Singh has approved the constitution of the 7th Pay Commission. Its recommendations are likely to be implemented with effect from 1 January 2016. 
+On 25 September 2013 then Finance Minister P Chidambaram announced that Prime Minister Manmohan Singh has approved the constitution of the 7th Pay Commission. Its recommendations are likely to be implemented with effect from 1 January 2016.
 Justice A.K Mathur will be heading the Seventh Pay Commission, announcement of which was done on 4 February 2014.[19] On 29 June 2016, Government accepted the recommendation of 7th Pay Commission Report with meager increase in salary of 14% after six month of intense evaluation and successive discussions. The Finance Minister of India claimed it historical increase of salaries due to little knowledge of Sixth Pay Commission.[citation needed] | END ID: 542
 
 @@@@@ CHUNK (user, text/plain) @@@@@
@@ -2779,10 +2779,10 @@ ID: 882 | TITLE: Interstellar medium | CONTENT: In the series of investigations,
 ====== Example 1 ======
 < User's turn >
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
-query: 
+query:
 where did the dewey decimal system come from
 
 < Assistant's turn >
@@ -2792,10 +2792,10 @@ where did the dewey decimal system come from
 ====== Example 2 ======
 < User's turn >
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
-query: 
+query:
 where did the titanic sink at what ocean
 
 < Assistant's turn >
@@ -2805,10 +2805,10 @@ where did the titanic sink at what ocean
 ====== Example 3 ======
 < User's turn >
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
-query: 
+query:
 where does the edinburgh fringe festival take place
 
 < Assistant's turn >
@@ -2818,10 +2818,10 @@ where does the edinburgh fringe festival take place
 ====== Example 4 ======
 < User's turn >
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
-query: 
+query:
 who headed the 7th central pay commission of india
 
 < Assistant's turn >
@@ -2831,10 +2831,10 @@ who headed the 7th central pay commission of india
 ====== Example 5 ======
 < User's turn >
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
-query: 
+query:
 what was the code name of the us program to develop an atomic bomb
 
 < Assistant's turn >
@@ -2845,9 +2845,9 @@ what was the code name of the us program to develop an atomic bomb
 - From now, let's start talk.
 -------------------------------------------------------------------------------
 
-Now you have to answer my query. 
+Now you have to answer my query.
 
-Which document is most relevant to answer the query? 
+Which document is most relevant to answer the query?
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 query:
@@ -3838,12 +3838,14 @@ corpus = r"""{"pid": "doc2546781", "title_text": "English compound", "passage_te
 {"pid": "doc2268591", "title_text": "Dexter (season 3)", "passage_text": "While stalking a murderous drug dealer, \"Freebo\", Dexter stumbles upon a fight between Freebo and another man, whom he is forced to kill in self-defense. This is the first time Dexter kills someone of whose guilt he wasn't completely sure. This victim turns out to be Oscar Prado, brother of Miguel Prado (Jimmy Smits), a prominent assistant district attorney and old flame of Lt. LaGuerta. Miguel comes to confide in and trust Dexter after he helps assist with the case. Dexter tracks down Freebo and kills him, but as he leaves he encounters Miguel, who has followed a lead to Freebo's location. Dexter tells Miguel he had discovered Freebo and killed him in self-defense, but instead of reprimanding him, Miguel thanks him and offers to help him cover up the crime. As Dexter and Miguel cooperate to conceal Freebo's true demise from everyone else, the duo end up becoming close friends, as do Rita and Miguel's wife, Sylvia.", "metadata": {}}
 {"pid": "doc1778106", "title_text": "Interstellar medium", "passage_text": "In the series of investigations, Viktor Ambartsumian introduced the now commonly accepted notion that interstellar matter occurs in the form of clouds.[12]", "metadata": {}}"""
 
-retrieval_prefix = "\n".join(filter(lambda x: not x.startswith('@@@@'), prefix.split('\n')))
-retrieval_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split('\n')))
-retrieval_corpus = list(map(lambda line: json.loads(line), corpus.split('\n')))
+retrieval_prefix = "\n".join(
+    filter(lambda x: not x.startswith("@@@@"), prefix.split("\n"))
+)
+retrieval_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split("\n")))
+retrieval_corpus = list(map(lambda line: json.loads(line), corpus.split("\n")))
 retrieval_pid_to_id = {}
 for i, c in enumerate(retrieval_corpus):
-    retrieval_pid_to_id[c['pid']] = i
+    retrieval_pid_to_id[c["pid"]] = i
 
 # with open('./dummy.txt', 'w') as f:
 #     f.write(prefix)

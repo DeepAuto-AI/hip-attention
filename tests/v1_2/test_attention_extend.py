@@ -6,12 +6,9 @@ import numpy as np
 import torch
 
 import hip_attn.v1_2.attention_extend
-from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
-from hip_attn.v1_2.attention_metadata import (
-    ScanStage,
-    HiPAttentionArgs,
-)
+from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
+from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttentionExtend(unittest.TestCase):
@@ -20,16 +17,16 @@ class TestAttentionExtend(unittest.TestCase):
 
 
 def main_debug():
-    seq_len = int(os.getenv('SEQ_LEN', '131072'))
-    query_seq_dups = int(os.getenv('Q_DUPS', '-1'))
-    seq_dups = int(os.getenv('DUPS', '1'))
+    seq_len = int(os.getenv("SEQ_LEN", "131072"))
+    query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
+    seq_dups = int(os.getenv("DUPS", "1"))
     if query_seq_dups < 0:
         query_seq_dups = seq_dups
-    block_size = int(os.getenv('BLOCK_SIZE', '64'))
-    num_samples = int(os.getenv('NUM_SAMPLES', '100'))
-    batch_size = int(os.getenv('BATCH_SIZE', '1'))
-    mask_only = int(os.getenv('MASK_ONLY', '0')) == '1'
-    k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
+    block_size = int(os.getenv("BLOCK_SIZE", "64"))
+    num_samples = int(os.getenv("NUM_SAMPLES", "100"))
+    batch_size = int(os.getenv("BATCH_SIZE", "1"))
+    mask_only = int(os.getenv("MASK_ONLY", "0")) == "1"
+    k_group_size = int(os.getenv("K_GROUP_SIZE", "1"))
 
     assert seq_dups > 0
 
@@ -39,15 +36,19 @@ def main_debug():
         seq_len=seq_len,
         return_cos_sin=True,
         derope=True,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
     )
     HEAD = q.shape[0]
     HEAD_KV = k.shape[0]
     seq_len = seq_len * seq_dups
 
     q = q.repeat(1, query_seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-    k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)  # .to(torch.float8_e5m2)
-    v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)  # .to(torch.float8_e5m2)
+    k = (
+        k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    )  # .to(torch.float8_e5m2)
+    v = (
+        v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+    )  # .to(torch.float8_e5m2)
     if cos is not None:
         cos = cos.repeat(seq_dups, 1)  # .to(torch.float8_e5m2)
         sin = sin.repeat(seq_dups, 1)  # .to(torch.float8_e5m2)
@@ -65,16 +66,24 @@ def main_debug():
 
         KV_HEAD_GROUP = q.shape[2] // k.shape[2]
         q_ori = q
-        q = q.view(q.shape[0], q.shape[1], q.shape[2] // KV_HEAD_GROUP, KV_HEAD_GROUP, q.shape[3]).permute(0, 3, 1, 2,
-                                                                                                           4).flatten(0,
-                                                                                                                      1)
+        q = (
+            q.view(
+                q.shape[0],
+                q.shape[1],
+                q.shape[2] // KV_HEAD_GROUP,
+                KV_HEAD_GROUP,
+                q.shape[3],
+            )
+            .permute(0, 3, 1, 2, 4)
+            .flatten(0, 1)
+        )
 
-        t = einx.rearrange('n t h d -> h (n t) d', q).float()
+        t = einx.rearrange("n t h d -> h (n t) d", q).float()
         _, _, proj = torch.linalg.svd(t, full_matrices=False)
         proj = proj.to(q.dtype)  # type: torch.Tensor
 
-        q = einx.dot('n t h d1, h d1 d2 -> n t h d2', q, proj)
-        k = einx.dot('n t h d1, h d1 d2 -> n t h d2', k, proj)
+        q = einx.dot("n t h d1, h d1 d2 -> n t h d2", q, proj)
+        k = einx.dot("n t h d1, h d1 d2 -> n t h d2", k, proj)
 
         x_colsum = q.flatten(0, 1).abs().mean(dim=0, keepdim=False)
         y_colsum = k.flatten(0, 1).abs().mean(dim=0, keepdim=False)
@@ -88,12 +97,17 @@ def main_debug():
         for i in range(idx_hid_queries.shape[0]):
             for j in range(idx_hid_queries.shape[1]):
                 debug[i, idx_hid_queries[i, j]] = 255
-        cv2.imwrite('dummy_idx_pca.png', debug)
+        cv2.imwrite("dummy_idx_pca.png", debug)
 
         assert idx_hid_keys.ndim == 2
         assert idx_hid_keys.shape == (k.shape[2], hid), idx_hid_keys.shape
-        q = q_ori.gather(index=idx_hid_queries[None, None, :, :].expand(*q_ori.shape[:-1], -1), dim=-1)
-        k = k.gather(index=idx_hid_keys[None, None, :, :].expand(*k.shape[:-1], -1), dim=-1)
+        q = q_ori.gather(
+            index=idx_hid_queries[None, None, :, :].expand(*q_ori.shape[:-1], -1),
+            dim=-1,
+        )
+        k = k.gather(
+            index=idx_hid_keys[None, None, :, :].expand(*k.shape[:-1], -1), dim=-1
+        )
 
         return q, k, idx_hid_queries, idx_hid_keys
 
@@ -102,10 +116,12 @@ def main_debug():
     k_mask = k
     _N, _T, _H, _D = k.shape
     tk = k_mask.view(_N, _T // k_group_size, k_group_size, _H, _D)
-    k_mask = (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values).expand(_N, _T // k_group_size,
-                                                                                              k_group_size, _H,
-                                                                                              _D).contiguous().view(
-        *k.shape)
+    k_mask = (
+        (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values)
+        .expand(_N, _T // k_group_size, k_group_size, _H, _D)
+        .contiguous()
+        .view(*k.shape)
+    )
 
     if batch_size > 1:
         q = q[:, -512:, :, :].contiguous()
@@ -119,13 +135,13 @@ def main_debug():
 
     print(q.shape, k.shape, v.shape, q_mask.shape, k_mask.shape)
 
-    print('-' * 20)
+    print("-" * 20)
 
     is_decode = q.shape[1] == 1
 
-    preset = os.getenv('HIP_PRESET', 'mid')
+    preset = os.getenv("HIP_PRESET", "mid")
     config_stage = {
-        'high': [
+        "high": [
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
@@ -148,7 +164,7 @@ def main_debug():
                 stage_stride=1,
             ),
         ],
-        'mid': [
+        "mid": [
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=4,
@@ -171,7 +187,7 @@ def main_debug():
                 stage_stride=1,
             ),
         ],
-        'low': [
+        "low": [
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=4,
@@ -187,7 +203,7 @@ def main_debug():
                 stage_stride=1,
             ),
         ],
-        'debug': [
+        "debug": [
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=4,
@@ -212,16 +228,16 @@ def main_debug():
         ],
     }[preset]
     config_second_k = {
-        'high': 4096,
-        'mid': 2048,
-        'low': 2048,
-        'debug': 128,
+        "high": 4096,
+        "mid": 2048,
+        "low": 2048,
+        "debug": 128,
     }[preset]
     config_sa_extend_backend = {
-        'high': 'streaming',
-        'mid': 'streaming',
-        'low': 'streaming',
-        'debug': 'streaming',
+        "high": "streaming",
+        "mid": "streaming",
+        "low": "streaming",
+        "debug": "streaming",
     }[preset]
 
     dual_stage_kwargs = dict(
@@ -230,22 +246,20 @@ def main_debug():
         v=v,
         args=HiPAttentionArgs(
             block_size_k=64,  # BLOCK_CHUNK
-            sliding_window_size=128 if preset == 'debug' else 1024,
-            sink_token_size=64 if preset == 'debug' else 256,
+            sliding_window_size=128 if preset == "debug" else 1024,
+            sink_token_size=64 if preset == "debug" else 256,
             # position_ids=position_ids,
-
             using_extend=True,
             need_apply_rope=True,
             rope_cos=cos,
             rope_sin=sin,
-
             second_stage_k=config_second_k,
             stages=config_stage,
             block_sparse_block_size_q=block_size,
             model_context_length=65536,
             # scan_early_terminate=1,
             # stage_early_terminate=1,
-            scan_extend_backend='streaming',
+            scan_extend_backend="streaming",
             sa_extend_backend=config_sa_extend_backend,
             stage_early_terminate=k_group_size,
             mask_only=mask_only,
@@ -289,11 +303,10 @@ def main_debug():
 
         start.record()
         if i == 0:
-            hip_attn.v1_2.attention_extend.DEBUG = os.getenv('DEBUG', '0') == '1'
+            hip_attn.v1_2.attention_extend.DEBUG = os.getenv("DEBUG", "0") == "1"
 
         _, metadata = dual_stage_quadratic_hip_attention(
-            **dual_stage_kwargs,
-            cached_metadata=metadata
+            **dual_stage_kwargs, cached_metadata=metadata
         )
 
         if ((i + 1) % refresh_interval) == 0:
@@ -306,15 +319,15 @@ def main_debug():
         end.synchronize()
         print(start.elapsed_time(end))
 
-    print('-' * 20)
+    print("-" * 20)
 
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    if os.getenv('DEBUG', '0') == '1':
-        input('>>>')
+    if os.getenv("DEBUG", "0") == "1":
+        input(">>>")
 
-    dual_stage_kwargs['args'].using_extend = False
-    dual_stage_kwargs['args'].need_apply_rope = False
+    dual_stage_kwargs["args"].using_extend = False
+    dual_stage_kwargs["args"].need_apply_rope = False
 
     metadata = None
     for i in range(min(num_samples, 24)):
@@ -323,11 +336,10 @@ def main_debug():
 
         start.record()
         if i == 0:
-            hip_attn.v1_2.attention_extend.DEBUG = os.getenv('DEBUG', '0') == '1'
+            hip_attn.v1_2.attention_extend.DEBUG = os.getenv("DEBUG", "0") == "1"
 
         context, metadata = dual_stage_quadratic_hip_attention(
-            **dual_stage_kwargs,
-            cached_metadata=metadata
+            **dual_stage_kwargs, cached_metadata=metadata
         )
 
         if ((i + 1) % refresh_interval) == 0:
@@ -340,7 +352,7 @@ def main_debug():
         end.synchronize()
         print(start.elapsed_time(end))
 
-    print('-' * 20)
+    print("-" * 20)
 
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
@@ -395,12 +407,13 @@ def main_debug():
         start.record()
         if q.shape[1] == 1:
             flash_attn_with_kvcache(
-                q, k, v, causal=True,
+                q,
+                k,
+                v,
+                causal=True,
             )
         else:
-            flash_attn_func(
-                q, k, v, causal=True
-            )
+            flash_attn_func(q, k, v, causal=True)
         end.record()
 
         end.synchronize()

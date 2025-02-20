@@ -12,7 +12,9 @@ class HiPMaskRefreshState:
         if self.hip_config.mask_refresh_interval is not None:
             require_refresh = False
 
-            for i_stage, refresh_inteval in enumerate(self.hip_config.mask_refresh_interval):
+            for i_stage, refresh_inteval in enumerate(
+                self.hip_config.mask_refresh_interval
+            ):
                 if self.decode_index % refresh_inteval == 0 and not require_refresh:
                     metadata_cached_stages = i_stage
                     require_refresh = True

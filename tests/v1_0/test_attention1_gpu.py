@@ -6,11 +6,11 @@ import torch.nn.functional as F
 import tqdm
 from torch import Tensor
 
-from hip_research.utils.load_checkouts import load_checkouts
-from hip_research.utils.seed import seed
+import hip_attn.v1_0.attention1_gpu
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_gpu import hip_attention
-import hip_attn.v1_0.attention1_gpu
+from hip_research.utils.load_checkouts import load_checkouts
+from hip_research.utils.seed import seed
 
 
 class TestAttention1GPU(unittest.TestCase):
@@ -49,7 +49,9 @@ def main_debug():
     stderr = (out - context).abs().mean().item()
     stdcontext = torch.std_mean(context)[0].item()
 
-    print(f'err = {stderr:.6f} ({stderr / stdcontext:.4f} sigma), context_std = {stdcontext:.6f}')
+    print(
+        f"err = {stderr:.6f} ({stderr / stdcontext:.4f} sigma), context_std = {stdcontext:.6f}"
+    )
 
 
 def torch_attention(q: Tensor, k: Tensor, v: Tensor):
@@ -61,21 +63,27 @@ def torch_attention(q: Tensor, k: Tensor, v: Tensor):
 
 def flash_attention(q: Tensor, k: Tensor, v: Tensor, attention_mask: Tensor = None):
     context = F.scaled_dot_product_attention(
-        q, k, v, is_causal=attention_mask is None, scale=1.0, attn_mask=attention_mask,
+        q,
+        k,
+        v,
+        is_causal=attention_mask is None,
+        scale=1.0,
+        attn_mask=attention_mask,
     )
     return context, None
 
 
 def main_latency_benchmark():
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--trace', action='store_true')
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--dups', type=int, default=2)
-    parser.add_argument('--query_size', type=int, default=1)
-    parser.add_argument('--method', type=str, default='hip')
-    parser.add_argument('--samples', type=int, default=200)
+    parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--dups", type=int, default=2)
+    parser.add_argument("--query_size", type=int, default=1)
+    parser.add_argument("--method", type=str, default="hip")
+    parser.add_argument("--samples", type=int, default=200)
     args = parser.parse_args()
 
     hip_attn.v1_0.attention1_gpu.DEBUG = args.debug
@@ -105,11 +113,11 @@ def main_latency_benchmark():
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with torch.no_grad():
-            if METHOD in ['torch', 'none', 'default']:
+            if METHOD in ["torch", "none", "default"]:
                 torch_attention(q, k, v)
-            elif METHOD == 'flash':
+            elif METHOD == "flash":
                 flash_attention(q, k, v)
-            elif METHOD == 'hip':
+            elif METHOD == "hip":
                 hip_attention(
                     q,
                     k,
@@ -133,13 +141,14 @@ def main_latency_benchmark():
 
     samples = np.array(samples)
     print(
-        f'[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
+        f"[{METHOD}] {np.mean(samples):.4f}ms +- {np.std(samples):.4f}ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})"
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
 
-    if sys.argv[-1] == 'debug':
+    if sys.argv[-1] == "debug":
         main_debug()
     else:
         main_latency_benchmark()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import triton
@@ -15,42 +15,60 @@ from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 if TYPE_CHECKING:
     from hip_attn.v1_2.attention_metadata import HiPAttentionArgs
 
-DEFAULT_EXTEND_BACKEND: tl.constexpr = 'streaming'
+DEFAULT_EXTEND_BACKEND: tl.constexpr = "streaming"
 MAX_INT: tl.constexpr = 2_147_483_647
 
 
 @triton.jit
 def _fwd_kernel_stage1(
-    Q, stride_q_bsz, stride_q_tdst, stride_q_head, stride_q_hid,
-    K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
-    V, stride_v_bsz, stride_v_tsrc, stride_v_head, stride_v_hid,
-    B_Seqlen, stride_pos_bsz, stride_pos_tdst,
-
+    Q,
+    stride_q_bsz,
+    stride_q_tdst,
+    stride_q_head,
+    stride_q_hid,
+    K,
+    stride_k_bsz,
+    stride_k_tsrc,
+    stride_k_head,
+    stride_k_hid,
+    V,
+    stride_v_bsz,
+    stride_v_tsrc,
+    stride_v_head,
+    stride_v_hid,
+    B_Seqlen,
+    stride_pos_bsz,
+    stride_pos_tdst,
     INDICES,  # Warning: first dim is a flattened axis of (batch, q_head)
-    stride_indices_b, stride_indices_bdst, stride_indices_bk,
-
+    stride_indices_b,
+    stride_indices_bdst,
+    stride_indices_bk,
     KS_START_END,  # Warning: first dim is a flattened axis of (batch, q_head)
-    stride_ks_start_end_b, stride_ks_start_end_bdst, stride_ks_start_end_g,
-
+    stride_ks_start_end_b,
+    stride_ks_start_end_bdst,
+    stride_ks_start_end_g,
     ATTN_LOGITS,
-    stride_attn_logits_bsz, stride_attn_logits_head, stride_attn_logits_kv_split, stride_attn_logits_hid,
-
+    stride_attn_logits_bsz,
+    stride_attn_logits_head,
+    stride_attn_logits_kv_split,
+    stride_attn_logits_hid,
     q_head_num: tl.constexpr,
     BK: tl.constexpr,
     MAX_TDST,
     MAX_TSRC,
     kv_group_num: tl.constexpr,
-
     sliding_window_size: tl.constexpr,
     sink_token_size: tl.constexpr,
     LOGIT_SOFTCAP: tl.constexpr,
-
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
-    COS, stride_cos_t, stride_cos_hid,
-    SIN, stride_sin_t, stride_sin_hid,
+    COS,
+    stride_cos_t,
+    stride_cos_hid,
+    SIN,
+    stride_sin_t,
+    stride_sin_hid,
     model_context_length,
-
     # paged attention args template
     USING_PAGES: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
@@ -69,7 +87,6 @@ def _fwd_kernel_stage1(
     stride_block_table_page,
     CACHE_SEQ_LENS,
     stride_cache_seq_lens_b,
-
     USING_OFFLOAD_CACHE: tl.constexpr,
     OFFLOAD_CACHE_KV_PACKED: tl.constexpr,
     GPU_BANK_COUNT,
@@ -89,7 +106,6 @@ def _fwd_kernel_stage1(
     stride_offload_cache_gpu_table_head_kv,
     stride_offload_cache_gpu_table_token,
     strdie_offload_cache_gpu_table_k,
-
     ACCESS_COUNTER,
     stride_access_counter_bsz,
     stride_access_counter_head_kv,
@@ -98,15 +114,12 @@ def _fwd_kernel_stage1(
     stride_cache_miss_counter_bsz,
     stride_cache_miss_counter_head_kv,
     stride_cache_miss_counter_tsrc,
-
     TDST_NEXT_POWER_OF_2,
-
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     Lk: tl.constexpr,  # hidden dim of key
     Lv: tl.constexpr,  # hidden dim of value
-
     # autotuning parameters
     BLOCK_BK: tl.constexpr,  # = BLOCK_N / BLOCK_SIZE_K
     NUM_SPARSE_KV_SPLITS: tl.constexpr,
@@ -142,9 +155,7 @@ def _fwd_kernel_stage1(
     mask_d = offs_d < Lk
     mask_dv = offs_dv < Lv
     cur_batch_seq_len = tl.load(
-        B_Seqlen 
-        + cur_batch.to(tl.int64) * stride_pos_bsz
-        + 0 * stride_pos_tdst
+        B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
@@ -155,9 +166,7 @@ def _fwd_kernel_stage1(
         + offs_d[None, :] * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, 
-        mask=(mask_h[:, None]) & (mask_d[None, :]), 
-        other=0.0
+        Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
     )  # [BLOCK_H, BLOCK_DMODEL]
     if q.dtype == tl.float8e5:
         q = q.to(tl.float16)
@@ -172,7 +181,7 @@ def _fwd_kernel_stage1(
             + cur_head[:, None] * stride_q_head
             + ((offs_d[None, :] + Lk // 2) % Lk) * stride_q_hid,
             mask=(mask_h[:, None]) & (mask_d[None, :]),
-            other=0.0
+            other=0.0,
         )  # [BLOCK_H, BLOCK_DMODEL]
         if queries_rot.dtype == tl.float8e5:
             queries_rot = queries_rot.to(tl.float16)
@@ -182,17 +191,23 @@ def _fwd_kernel_stage1(
             + rope_tdst.to(tl.int64) * stride_cos_t
             + (offs_d[None, :] % (Lk // 2)) * stride_cos_hid,
             mask=mask_d[None, :],
-            other=0.0
-        ).to(q.dtype)  # [1, BLOCK_DMODEL]
+            other=0.0,
+        ).to(
+            q.dtype
+        )  # [1, BLOCK_DMODEL]
         sin_new = tl.load(
             SIN
             + rope_tdst.to(tl.int64) * stride_sin_t
             + (offs_d[None, :] % (Lk // 2)) * stride_sin_hid,
             mask=mask_d[None, :],
-            other=0.0
-        ).to(q.dtype)  # [1, BLOCK_DMODEL]
+            other=0.0,
+        ).to(
+            q.dtype
+        )  # [1, BLOCK_DMODEL]
 
-        queries_rot = queries_rot * (((offs_d[None, :] + Lk // 2) < Lk) * (-2) + 1).to(q.dtype)
+        queries_rot = queries_rot * (((offs_d[None, :] + Lk // 2) < Lk) * (-2) + 1).to(
+            q.dtype
+        )
 
         q = (q * cos_new + queries_rot * sin_new).to(q.dtype)
 
@@ -228,7 +243,9 @@ def _fwd_kernel_stage1(
     if (split_kv_block_end > split_kv_block_start) and True:
         for i_bk in range(split_kv_block_start, split_kv_block_end, BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)  # [BLOCK_BK]
-            mask_bk = (range_start <= idx_bk) & (idx_bk < tl.minimum(range_start + BK, range_end))  # [BLOCK_BK]
+            mask_bk = (range_start <= idx_bk) & (
+                idx_bk < tl.minimum(range_start + BK, range_end)
+            )  # [BLOCK_BK]
 
             if (range_start <= i_bk + BLOCK_BK) & (i_bk < range_end):
                 idx_tsrc_start = tl.load(
@@ -242,11 +259,23 @@ def _fwd_kernel_stage1(
                 idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC + 1)
                 idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
                 idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
-                mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
-                mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
-                mask_tsrc = ((MAX_TSRC * 0) <= idx_tsrc) & (idx_tsrc < (MAX_TSRC * 1)) & mask_tsrc_from_bk
+                mask_tsrc_from_bk = mask_bk[:, None] & tl.full(
+                    (1, BLOCK_SIZE_K), 1, dtype=tl.int1
+                )
+                mask_tsrc_from_bk = tl.reshape(
+                    mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K)
+                )
+                mask_tsrc = (
+                    ((MAX_TSRC * 0) <= idx_tsrc)
+                    & (idx_tsrc < (MAX_TSRC * 1))
+                    & mask_tsrc_from_bk
+                )
                 idx_tsrc = idx_tsrc % MAX_TSRC  # [BLOCK_BK * BLOCK_SIZE_K]
-                mask_tsrc = (sink_token_size <= idx_tsrc) & (idx_tsrc < cur_batch_seq_len) & mask_tsrc
+                mask_tsrc = (
+                    (sink_token_size <= idx_tsrc)
+                    & (idx_tsrc < cur_batch_seq_len)
+                    & mask_tsrc
+                )
 
                 keys = load_tokens(
                     K,
@@ -254,7 +283,6 @@ def _fwd_kernel_stage1(
                     stride_k_tsrc,
                     stride_k_head,
                     stride_k_hid,
-
                     USING_PAGES,
                     PAGE_SIZE,
                     K_CACHE,
@@ -267,7 +295,6 @@ def _fwd_kernel_stage1(
                     stride_block_table_page,
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
-
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
                     GPU_BANK_COUNT,
@@ -288,30 +315,24 @@ def _fwd_kernel_stage1(
                     stride_offload_cache_gpu_table_head_kv,
                     stride_offload_cache_gpu_table_token,
                     strdie_offload_cache_gpu_table_k,
-
                     ACCESS_COUNTER,
                     stride_access_counter_bsz,
                     stride_access_counter_head_kv,
                     stride_access_counter_tsrc,
-
                     CACHE_MISS_COUNTER,
                     stride_cache_miss_counter_bsz,
                     stride_cache_miss_counter_head_kv,
                     stride_cache_miss_counter_tsrc,
-
                     cur_batch,
                     idx_tsrc[None, :],
                     cur_kv_head,
                     offs_d[:, None],
                     mask_tsrc[None, :],
-
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
-                    
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
-                    
                     V_CACHE=V_CACHE,
                     stride_v_cache_page=stride_v_cache_page,
                     stride_v_cache_offset=stride_v_cache_offset,
@@ -326,7 +347,6 @@ def _fwd_kernel_stage1(
                         stride_k_tsrc,
                         stride_k_head,
                         stride_k_hid,
-
                         USING_PAGES,
                         PAGE_SIZE,
                         K_CACHE,
@@ -339,7 +359,6 @@ def _fwd_kernel_stage1(
                         stride_block_table_page,
                         CACHE_SEQ_LENS,
                         stride_cache_seq_lens_b,
-
                         USING_OFFLOAD_CACHE,
                         OFFLOAD_CACHE_KV_PACKED,
                         GPU_BANK_COUNT,
@@ -360,30 +379,24 @@ def _fwd_kernel_stage1(
                         stride_offload_cache_gpu_table_head_kv,
                         stride_offload_cache_gpu_table_token,
                         strdie_offload_cache_gpu_table_k,
-
                         ACCESS_COUNTER,
                         stride_access_counter_bsz,
                         stride_access_counter_head_kv,
                         stride_access_counter_tsrc,
-
                         CACHE_MISS_COUNTER,
                         stride_cache_miss_counter_bsz,
                         stride_cache_miss_counter_head_kv,
                         stride_cache_miss_counter_tsrc,
-
                         cur_batch,
                         idx_tsrc[None, :],
                         cur_kv_head,
                         ((offs_d[:, None] + Lk // 2) % Lk),
                         mask_tsrc[None, :],
-
                         q_head_num // kv_group_num,
                         BLOCK_SIZE_K,
                         Lk,
-                        
                         IS_BSA=True,
                         UPDATE_CACHE=UPDATE_CACHE,
-                        
                         V_CACHE=V_CACHE,
                         stride_v_cache_page=stride_v_cache_page,
                         stride_v_cache_offset=stride_v_cache_offset,
@@ -399,7 +412,6 @@ def _fwd_kernel_stage1(
                     stride_v_tsrc,
                     stride_v_head,
                     stride_v_hid,
-
                     USING_PAGES,
                     PAGE_SIZE,
                     V_CACHE,
@@ -412,7 +424,6 @@ def _fwd_kernel_stage1(
                     stride_block_table_page,
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
-
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
                     GPU_BANK_COUNT,
@@ -433,30 +444,24 @@ def _fwd_kernel_stage1(
                     stride_offload_cache_gpu_table_head_kv,
                     stride_offload_cache_gpu_table_token,
                     strdie_offload_cache_gpu_table_k,
-
                     ACCESS_COUNTER,
                     stride_access_counter_bsz,
                     stride_access_counter_head_kv,
                     stride_access_counter_tsrc,
-
                     CACHE_MISS_COUNTER,
                     stride_cache_miss_counter_bsz,
                     stride_cache_miss_counter_head_kv,
                     stride_cache_miss_counter_tsrc,
-
                     cur_batch,
                     idx_tsrc[:, None],
                     cur_kv_head,
                     offs_dv[None, :],
                     mask_tsrc[:, None],
-
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lv,
-                    
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
-                    
                     V_CACHE=K_CACHE,
                     stride_v_cache_page=stride_k_cache_page,
                     stride_v_cache_offset=stride_k_cache_offset,
@@ -469,26 +474,28 @@ def _fwd_kernel_stage1(
                     keys,
                     keys_rot,
                     values,
-
-                    idx_tsrc, mask_tsrc,
+                    idx_tsrc,
+                    mask_tsrc,
                     tl.zeros([1], dtype=tl.int32),
                     tl.full((1,), 1, dtype=tl.int1),
-
-                    acc, e_sum, e_max,
-
+                    acc,
+                    e_sum,
+                    e_max,
                     sliding_window_size,
                     sink_token_size,
                     (range_end - range_start) * BLOCK_SIZE_K,  # mask_k
                     True,
                     False,
                     LOGIT_SOFTCAP,
-
                     USING_EXTEND,
                     NEED_APPLY_ROPE,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
+                    COS,
+                    stride_cos_t,
+                    stride_cos_hid,
+                    SIN,
+                    stride_sin_t,
+                    stride_sin_hid,
                     model_context_length,
-
                     idx_bk + sink_token_size // BLOCK_SIZE_K,
                     cur_batch_seq_len,
                     offs_d,
@@ -497,7 +504,6 @@ def _fwd_kernel_stage1(
                     BLOCK_SIZE_Q,
                     BLOCK_BK * BLOCK_SIZE_K,
                     BLOCK_SIZE_K,
-
                     EXTEND_BACKEND=EXTEND_BACKEND,
                 )
             else:
@@ -506,10 +512,12 @@ def _fwd_kernel_stage1(
     # process sink tokens
     sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
     split_sink_start = sink_tokens_per_split * sink_split_kv_id
-    split_sink_end = tl.minimum(split_sink_start + sink_tokens_per_split, sink_token_size)
+    split_sink_end = tl.minimum(
+        split_sink_start + sink_tokens_per_split, sink_token_size
+    )
     if (
-        (sink_token_size > 0) 
-        & (0 <= sink_split_kv_id) 
+        (sink_token_size > 0)
+        & (0 <= sink_split_kv_id)
         & (sink_split_kv_id < NUM_SINK_KV_SPLITS)
         & (split_sink_end > split_sink_start)
     ) and True:
@@ -523,7 +531,6 @@ def _fwd_kernel_stage1(
                 stride_k_tsrc,
                 stride_k_head,
                 stride_k_hid,
-
                 USING_PAGES,
                 PAGE_SIZE,
                 K_CACHE,
@@ -536,7 +543,6 @@ def _fwd_kernel_stage1(
                 stride_block_table_page,
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
-
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
                 GPU_BANK_COUNT,
@@ -557,30 +563,24 @@ def _fwd_kernel_stage1(
                 stride_offload_cache_gpu_table_head_kv,
                 stride_offload_cache_gpu_table_token,
                 strdie_offload_cache_gpu_table_k,
-
                 ACCESS_COUNTER,
                 stride_access_counter_bsz,
                 stride_access_counter_head_kv,
                 stride_access_counter_tsrc,
-
                 CACHE_MISS_COUNTER,
                 stride_cache_miss_counter_bsz,
                 stride_cache_miss_counter_head_kv,
                 stride_cache_miss_counter_tsrc,
-
                 cur_batch,
                 idx_tsrc[None, :],
                 cur_kv_head,
                 offs_d[:, None],
                 mask_tsrc[None, :],
-
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
-                
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
-                
                 V_CACHE=V_CACHE,
                 stride_v_cache_page=stride_v_cache_page,
                 stride_v_cache_offset=stride_v_cache_offset,
@@ -595,7 +595,6 @@ def _fwd_kernel_stage1(
                     stride_k_tsrc,
                     stride_k_head,
                     stride_k_hid,
-
                     USING_PAGES,
                     PAGE_SIZE,
                     K_CACHE,
@@ -608,7 +607,6 @@ def _fwd_kernel_stage1(
                     stride_block_table_page,
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
-
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
                     GPU_BANK_COUNT,
@@ -629,30 +627,24 @@ def _fwd_kernel_stage1(
                     stride_offload_cache_gpu_table_head_kv,
                     stride_offload_cache_gpu_table_token,
                     strdie_offload_cache_gpu_table_k,
-
                     ACCESS_COUNTER,
                     stride_access_counter_bsz,
                     stride_access_counter_head_kv,
                     stride_access_counter_tsrc,
-
                     CACHE_MISS_COUNTER,
                     stride_cache_miss_counter_bsz,
                     stride_cache_miss_counter_head_kv,
                     stride_cache_miss_counter_tsrc,
-
                     cur_batch,
                     idx_tsrc[None, :],
                     cur_kv_head,
                     ((offs_d[:, None] + Lk // 2) % Lk),
                     mask_tsrc[None, :],
-
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
-                    
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
-                    
                     V_CACHE=V_CACHE,
                     stride_v_cache_page=stride_v_cache_page,
                     stride_v_cache_offset=stride_v_cache_offset,
@@ -668,7 +660,6 @@ def _fwd_kernel_stage1(
                 stride_v_tsrc,
                 stride_v_head,
                 stride_v_hid,
-
                 USING_PAGES,
                 PAGE_SIZE,
                 V_CACHE,
@@ -681,7 +672,6 @@ def _fwd_kernel_stage1(
                 stride_block_table_page,
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
-
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
                 GPU_BANK_COUNT,
@@ -702,30 +692,24 @@ def _fwd_kernel_stage1(
                 stride_offload_cache_gpu_table_head_kv,
                 stride_offload_cache_gpu_table_token,
                 strdie_offload_cache_gpu_table_k,
-
                 ACCESS_COUNTER,
                 stride_access_counter_bsz,
                 stride_access_counter_head_kv,
                 stride_access_counter_tsrc,
-
                 CACHE_MISS_COUNTER,
                 stride_cache_miss_counter_bsz,
                 stride_cache_miss_counter_head_kv,
                 stride_cache_miss_counter_tsrc,
-
                 cur_batch,
                 idx_tsrc[:, None],
                 cur_kv_head,
                 offs_dv[None, :],
                 mask_tsrc[:, None],
-
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
-                
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
-                
                 V_CACHE=K_CACHE,
                 stride_v_cache_page=stride_k_cache_page,
                 stride_v_cache_offset=stride_k_cache_offset,
@@ -738,26 +722,28 @@ def _fwd_kernel_stage1(
                 keys,
                 keys_rot,
                 values,
-
-                idx_tsrc, mask_tsrc,
+                idx_tsrc,
+                mask_tsrc,
                 tl.zeros([1], dtype=tl.int32),
                 tl.full((1,), 1, dtype=tl.int1),
-
-                acc, e_sum, e_max,
-
+                acc,
+                e_sum,
+                e_max,
                 sliding_window_size,
                 sink_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 True,
                 True,
                 LOGIT_SOFTCAP,
-
                 USING_EXTEND,
                 NEED_APPLY_ROPE,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
+                COS,
+                stride_cos_t,
+                stride_cos_hid,
+                SIN,
+                stride_sin_t,
+                stride_sin_hid,
                 model_context_length,
-
                 tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
                 cur_batch_seq_len,
                 offs_d,
@@ -766,22 +752,31 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_Q,
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
-
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
 
     # process sliding window
-    i_tsrc_range_start = tl.maximum(0, cur_batch_seq_len - sliding_window_size - BLOCK_SIZE_Q)
-    sliding_tokens_per_split = tl.cdiv(cur_batch_seq_len - i_tsrc_range_start, NUM_SLIDING_KV_SPLITS)
-    split_sliding_start = i_tsrc_range_start + sliding_tokens_per_split * sliding_split_kv_id
-    split_sliding_end = tl.minimum(split_sliding_start + sliding_tokens_per_split, cur_batch_seq_len)
+    i_tsrc_range_start = tl.maximum(
+        0, cur_batch_seq_len - sliding_window_size - BLOCK_SIZE_Q
+    )
+    sliding_tokens_per_split = tl.cdiv(
+        cur_batch_seq_len - i_tsrc_range_start, NUM_SLIDING_KV_SPLITS
+    )
+    split_sliding_start = (
+        i_tsrc_range_start + sliding_tokens_per_split * sliding_split_kv_id
+    )
+    split_sliding_end = tl.minimum(
+        split_sliding_start + sliding_tokens_per_split, cur_batch_seq_len
+    )
     if (
         (sliding_window_size > 0)
         & (0 <= sliding_split_kv_id)
         & (sliding_split_kv_id < NUM_SLIDING_KV_SPLITS)
         & (split_sliding_end > split_sliding_start)
     ) and True:
-        for i_tsrc in range(split_sliding_start, split_sliding_end, BLOCK_BK * BLOCK_SIZE_K):
+        for i_tsrc in range(
+            split_sliding_start, split_sliding_end, BLOCK_BK * BLOCK_SIZE_K
+        ):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = (0 <= idx_tsrc) & (idx_tsrc < split_sliding_end)
 
@@ -792,7 +787,6 @@ def _fwd_kernel_stage1(
                 stride_k_tsrc,
                 stride_k_head,
                 stride_k_hid,
-
                 USING_PAGES,
                 PAGE_SIZE,
                 K_CACHE,
@@ -805,7 +799,6 @@ def _fwd_kernel_stage1(
                 stride_block_table_page,
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
-
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
                 GPU_BANK_COUNT,
@@ -826,30 +819,24 @@ def _fwd_kernel_stage1(
                 stride_offload_cache_gpu_table_head_kv,
                 stride_offload_cache_gpu_table_token,
                 strdie_offload_cache_gpu_table_k,
-
                 ACCESS_COUNTER,
                 stride_access_counter_bsz,
                 stride_access_counter_head_kv,
                 stride_access_counter_tsrc,
-
                 CACHE_MISS_COUNTER,
                 stride_cache_miss_counter_bsz,
                 stride_cache_miss_counter_head_kv,
                 stride_cache_miss_counter_tsrc,
-
                 cur_batch,
                 idx_tsrc[None, :],
                 cur_kv_head,
                 offs_d[:, None],
                 mask_tsrc[None, :],
-
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lk,
-                
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
-                
                 V_CACHE=V_CACHE,
                 stride_v_cache_page=stride_v_cache_page,
                 stride_v_cache_offset=stride_v_cache_offset,
@@ -864,7 +851,6 @@ def _fwd_kernel_stage1(
                     stride_k_tsrc,
                     stride_k_head,
                     stride_k_hid,
-
                     USING_PAGES,
                     PAGE_SIZE,
                     K_CACHE,
@@ -877,7 +863,6 @@ def _fwd_kernel_stage1(
                     stride_block_table_page,
                     CACHE_SEQ_LENS,
                     stride_cache_seq_lens_b,
-
                     USING_OFFLOAD_CACHE,
                     OFFLOAD_CACHE_KV_PACKED,
                     GPU_BANK_COUNT,
@@ -898,30 +883,24 @@ def _fwd_kernel_stage1(
                     stride_offload_cache_gpu_table_head_kv,
                     stride_offload_cache_gpu_table_token,
                     strdie_offload_cache_gpu_table_k,
-
                     ACCESS_COUNTER,
                     stride_access_counter_bsz,
                     stride_access_counter_head_kv,
                     stride_access_counter_tsrc,
-
                     CACHE_MISS_COUNTER,
                     stride_cache_miss_counter_bsz,
                     stride_cache_miss_counter_head_kv,
                     stride_cache_miss_counter_tsrc,
-
                     cur_batch,
                     idx_tsrc[None, :],
                     cur_kv_head,
                     ((offs_d[:, None] + Lk // 2) % Lk),
                     mask_tsrc[None, :],
-
                     q_head_num // kv_group_num,
                     BLOCK_SIZE_K,
                     Lk,
-                    
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
-                    
                     V_CACHE=V_CACHE,
                     stride_v_cache_page=stride_v_cache_page,
                     stride_v_cache_offset=stride_v_cache_offset,
@@ -937,7 +916,6 @@ def _fwd_kernel_stage1(
                 stride_v_tsrc,
                 stride_v_head,
                 stride_v_hid,
-
                 USING_PAGES,
                 PAGE_SIZE,
                 V_CACHE,
@@ -950,7 +928,6 @@ def _fwd_kernel_stage1(
                 stride_block_table_page,
                 CACHE_SEQ_LENS,
                 stride_cache_seq_lens_b,
-
                 USING_OFFLOAD_CACHE,
                 OFFLOAD_CACHE_KV_PACKED,
                 GPU_BANK_COUNT,
@@ -971,30 +948,24 @@ def _fwd_kernel_stage1(
                 stride_offload_cache_gpu_table_head_kv,
                 stride_offload_cache_gpu_table_token,
                 strdie_offload_cache_gpu_table_k,
-
                 ACCESS_COUNTER,
                 stride_access_counter_bsz,
                 stride_access_counter_head_kv,
                 stride_access_counter_tsrc,
-
                 CACHE_MISS_COUNTER,
                 stride_cache_miss_counter_bsz,
                 stride_cache_miss_counter_head_kv,
                 stride_cache_miss_counter_tsrc,
-
                 cur_batch,
                 idx_tsrc[:, None],
                 cur_kv_head,
                 offs_dv[None, :],
                 mask_tsrc[:, None],
-
                 q_head_num // kv_group_num,
                 BLOCK_SIZE_K,
                 Lv,
-                
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
-                
                 V_CACHE=K_CACHE,
                 stride_v_cache_page=stride_k_cache_page,
                 stride_v_cache_offset=stride_k_cache_offset,
@@ -1003,35 +974,37 @@ def _fwd_kernel_stage1(
             )
 
             idx_bk = (
-                tl.arange(0, BLOCK_BK) +
-                (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K +
-                (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
+                tl.arange(0, BLOCK_BK)
+                + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
+                + (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
             )
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
                 q,  # [BLOCK_H, BLOCK_DMODEL]
                 keys,  # [BLOCK_DMODEL, BLOCK_BK * BLOCK_SIZE_K]
                 keys_rot,
                 values,
-
-                idx_tsrc, mask_tsrc,
+                idx_tsrc,
+                mask_tsrc,
                 tl.zeros([1], dtype=tl.int32),
                 tl.full((1,), 1, dtype=tl.int1),
-
-                acc, e_sum, e_max,
-
+                acc,
+                e_sum,
+                e_max,
                 sliding_window_size,
                 sink_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 False,
                 False,
                 LOGIT_SOFTCAP,
-
                 USING_EXTEND,
                 NEED_APPLY_ROPE,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
+                COS,
+                stride_cos_t,
+                stride_cos_hid,
+                SIN,
+                stride_sin_t,
+                stride_sin_hid,
                 model_context_length,
-
                 idx_bk,
                 cur_batch_seq_len,
                 offs_d,
@@ -1040,7 +1013,6 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_Q,
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
-
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
 
@@ -1076,22 +1048,18 @@ def decode_block_sparse_attention_stage1(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
-    
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
-    
     args: HiPAttentionArgs,
-    
-    head_num: int, 
-    BK: int, 
-    MAX_TDST: int, 
-    MAX_TSRC: int, 
+    head_num: int,
+    BK: int,
+    MAX_TDST: int,
+    MAX_TSRC: int,
     kv_group_num: int,
     model_context_length: int,
-    HID: int, 
-    BLOCK_BK: int, 
-    
+    HID: int,
+    BLOCK_BK: int,
     extend_backend: str,
     access_counter: Tensor,
     cache_miss_counter: Tensor,
@@ -1099,21 +1067,22 @@ def decode_block_sparse_attention_stage1(
 ):
     batch = q.shape[0]
     BLOCK_H = 16
-    
+
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
     token_chunk = triton.cdiv(total_tokens, 8)
-    NUM_SPARSE_KV_SPLITS = min(12, triton.cdiv(args.second_stage_k, token_chunk))  # TODO: apply from server args
+    NUM_SPARSE_KV_SPLITS = min(
+        12, triton.cdiv(args.second_stage_k, token_chunk)
+    )  # TODO: apply from server args
     NUM_SINK_KV_SPLITS = min(12, triton.cdiv(args.sink_token_size, token_chunk))
     NUM_SLIDING_KV_SPLITS = min(12, triton.cdiv(args.sliding_window_size, token_chunk))
 
     NUM_TOTAL_KV_SPLITS = (
-        NUM_SPARSE_KV_SPLITS
-        + NUM_SINK_KV_SPLITS
-        + NUM_SLIDING_KV_SPLITS
+        NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
     )
     temp_attn_logits = torch.zeros(
-        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32//4),
-        dtype=torch.float32, device=q.device
+        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32 // 4),
+        dtype=torch.float32,
+        device=q.device,
     )
 
     grid = (
@@ -1126,42 +1095,42 @@ def decode_block_sparse_attention_stage1(
     BLOCK_DV = triton.next_power_of_2(HID)
 
     _fwd_kernel_stage1[grid](
-        q, *safe_stride(q, 4),
-        k, *safe_stride(k, 4),
-        v, *safe_stride(v, 4),
-        seq_lens, *safe_stride(seq_lens, 2),
-
-        indices, *safe_stride(indices, 3),
-
-        ks_start_end, *safe_stride(ks_start_end, 3),
-
-        temp_attn_logits, *safe_stride(temp_attn_logits, 4),
-
-        head_num, 
-        BK, 
-        MAX_TDST, 
-        MAX_TSRC, 
+        q,
+        *safe_stride(q, 4),
+        k,
+        *safe_stride(k, 4),
+        v,
+        *safe_stride(v, 4),
+        seq_lens,
+        *safe_stride(seq_lens, 2),
+        indices,
+        *safe_stride(indices, 3),
+        ks_start_end,
+        *safe_stride(ks_start_end, 3),
+        temp_attn_logits,
+        *safe_stride(temp_attn_logits, 4),
+        head_num,
+        BK,
+        MAX_TDST,
+        MAX_TSRC,
         kv_group_num,
-
         args.sliding_window_size,
         args.sink_token_size,
         args.logit_softcap,
-
         *args.args_extend(),
         model_context_length,
         *args.args_paged_kv_cache(),
         *args.args_offload_cache(is_masking=False),
-
-        access_counter, *safe_stride(access_counter, 3),
-        cache_miss_counter, *safe_stride(cache_miss_counter, 3),
-
+        access_counter,
+        *safe_stride(access_counter, 3),
+        cache_miss_counter,
+        *safe_stride(cache_miss_counter, 3),
         triton.next_power_of_2(MAX_TDST),
-
         args.is_causal,
         args.block_size_q,
         args.block_size_k,
-        Lk=HID, Lv=HID,
-
+        Lk=HID,
+        Lv=HID,
         BLOCK_BK=BLOCK_BK,
         NUM_SPARSE_KV_SPLITS=NUM_SPARSE_KV_SPLITS,
         NUM_SINK_KV_SPLITS=NUM_SINK_KV_SPLITS,
@@ -1179,21 +1148,18 @@ def decode_block_sparse_attention_stage1(
 @triton.jit
 def _fwd_kernel_stage2(
     ATTN_LOGITS,
-    stride_attn_logits_bsz, 
-    stride_attn_logits_head, 
-    stride_attn_logits_kv_split, 
+    stride_attn_logits_bsz,
+    stride_attn_logits_head,
+    stride_attn_logits_kv_split,
     stride_attn_logits_hid,
-
-    O, 
-    stride_o_bsz, 
-    stride_o_tdst, 
-    stride_o_head, 
+    O,
+    stride_o_bsz,
+    stride_o_tdst,
+    stride_o_head,
     stride_o_hid,
-    
-    B_SEQ_LEN, 
-    stride_pos_bsz, 
+    B_SEQ_LEN,
+    stride_pos_bsz,
     stride_pos_tdst,
-
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
@@ -1202,9 +1168,7 @@ def _fwd_kernel_stage2(
     cur_head = tl.program_id(1).to(tl.int64)
 
     cur_batch_seq_len = tl.load(
-        B_SEQ_LEN 
-        + cur_batch.to(tl.int64) * stride_pos_bsz 
-        + 0 * stride_pos_tdst
+        B_SEQ_LEN + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
     )
 
     offs_d = tl.arange(0, BLOCK_DV)
@@ -1231,7 +1195,7 @@ def _fwd_kernel_stage2(
             + offs_v.to(tl.int64)
             + split_kv_id * stride_attn_logits_kv_split,
             mask=mask_d,
-            other=0.0
+            other=0.0,
         )
         tlogic = tl.load(
             ATTN_LOGITS
@@ -1240,7 +1204,7 @@ def _fwd_kernel_stage2(
         )
         n_e_max = tl.maximum(tlogic, e_max)
 
-        n_e_max_valid = (n_e_max > -1e50)
+        n_e_max_valid = n_e_max > -1e50
         old_scale = tl.math.exp2(e_max - n_e_max)
         exp_logic = tl.math.exp2(tlogic - n_e_max)
         acc = tl.where(n_e_max_valid, acc * old_scale + exp_logic * tv, acc)
@@ -1260,6 +1224,7 @@ def _fwd_kernel_stage2(
         mask=mask_d,
     )
 
+
 def decode_block_sparse_attention_stage2(
     logits,
     q,
@@ -1276,9 +1241,12 @@ def decode_block_sparse_attention_stage2(
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
-        logits, *safe_stride(logits, 4),
-        o, *safe_stride(o, 4),
-        b_seq_len, *safe_stride(b_seq_len, 2),
+        logits,
+        *safe_stride(logits, 4),
+        o,
+        *safe_stride(o, 4),
+        b_seq_len,
+        *safe_stride(b_seq_len, 2),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
@@ -1286,30 +1254,24 @@ def decode_block_sparse_attention_stage2(
         num_stages=2,
     )
 
+
 def decode_block_sparse_attention_impl(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
-    
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
-    
     context: Tensor,
-    
     args: HiPAttentionArgs,
-    
-    HEAD: int, 
-    BK: int, 
-    MAX_TDST: int, 
-    MAX_TSRC: int, 
+    HEAD: int,
+    BK: int,
+    MAX_TDST: int,
+    MAX_TSRC: int,
     KV_HEAD_REPEAT: int,
-    
     model_context_length: int,
-    
-    HID: int, 
-    BLOCK_BK: int, 
-    
+    HID: int,
+    BLOCK_BK: int,
     extend_backend: str,
     access_counter: Tensor,
     cache_miss_counter: Tensor,
@@ -1323,61 +1285,58 @@ def decode_block_sparse_attention_impl(
     :param ks_start_end: (BSZ, BSRC, 2)
     :param context: (BSZ, TDST, HEAD, HID)
     """
-    
+
     attn_logits, NUM_TOTAL_KV_SPLITS = decode_block_sparse_attention_stage1(
-        q, k, v,
-        
+        q,
+        k,
+        v,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
-        
         args=args,
-        
-        head_num=HEAD, 
+        head_num=HEAD,
         BK=BK,
-        MAX_TDST=MAX_TDST, 
+        MAX_TDST=MAX_TDST,
         MAX_TSRC=MAX_TSRC,
         kv_group_num=KV_HEAD_REPEAT,
         model_context_length=model_context_length,
-        HID=HID, 
+        HID=HID,
         BLOCK_BK=BLOCK_BK,
-        
         extend_backend=extend_backend,
         access_counter=access_counter,
         cache_miss_counter=cache_miss_counter,
         offload_update_cache=offload_update_cache,
     )
-    
+
     decode_block_sparse_attention_stage2(
-        attn_logits, 
-        q, 
-        context, 
+        attn_logits,
+        q,
+        context,
         (
-            args.v_cache 
-            if args.v_cache is not None else 
-            (
+            args.v_cache
+            if args.v_cache is not None
+            else (
                 args.offload_cache.v_uvm.bank_cpu
-                if args.offload_cache is not None else
-                v
+                if args.offload_cache is not None
+                else v
             )
-        ), 
-        seq_lens, 
-        NUM_TOTAL_KV_SPLITS
+        ),
+        seq_lens,
+        NUM_TOTAL_KV_SPLITS,
     )
-    
+
     return attn_logits
+
 
 def decode_block_sparse_attention(
     q: Tensor,  # [1, 1 (TDST), 32 (Q_HEAD), 128]
     k: Optional[Tensor],  # None
     v: Optional[Tensor],  # None
     seq_lens: Tensor,  # [1, 1 (TDST)], tensor([34089])
-
     indices: Tensor,  # [32 (BSZ*Q_HEAD), 1 (BDST), 512]
     ks: Tensor,  # [32 (BSZ*Q_HEAD), 1 (BDST)]
     ks_count: Tensor,  # [32 (BSZ*Q_HEAD), 1 (BDST), 1]
     ks_start_end: Tensor,  # [32 (BSZ*Q_HEAD), 1 (BDST), 2]
-
     args: HiPAttentionArgs,
     # args.block_table: [1 (BSZ), 196612]
     # args.cache_seq_lens: [1 (BSZ)], tensor([34089])
@@ -1386,10 +1345,8 @@ def decode_block_sparse_attention(
     # args.position_ids: [1, 1 (TDST)]
     # args.rope_cos: [196608, 128 (Lk)]
     # args.rope_sin: [196608, 128 (Lk)]
-
     access_counter: Tensor,  # [1, 8, 109527]
     cache_miss_counter: Tensor,  # [1, 8, 109527]
-
     EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,  # 'streaming'
     model_context_length: int = 131072,  # 131072
     extend_context_length: int = 131072,  # 196608
@@ -1415,11 +1372,11 @@ def decode_block_sparse_attention(
 
     context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
-    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '16'))
+    max_block_size = int(os.getenv("SA_BLOCK_SIZE", "16"))
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
-    if 'SA_BLOCK_BK' in os.environ:
-        BLOCK_BK = int(os.environ['SA_BLOCK_BK'])
+    if "SA_BLOCK_BK" in os.environ:
+        BLOCK_BK = int(os.environ["SA_BLOCK_BK"])
 
     assert BLOCK_BK > 0, BLOCK_BK
 
@@ -1451,17 +1408,22 @@ def decode_block_sparse_attention(
     torch.set_default_device(q.device)
 
     decode_block_sparse_attention_impl(
-        q, k, v,
+        q,
+        k,
+        v,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
         context=context,
         args=args,
-        HEAD=HEAD, BK=BK,
-        MAX_TDST=TDST, MAX_TSRC=MAX_TSRC,
+        HEAD=HEAD,
+        BK=BK,
+        MAX_TDST=TDST,
+        MAX_TSRC=MAX_TSRC,
         KV_HEAD_REPEAT=KV_HEAD_REPEAT,
         model_context_length=model_context_length,
-        HID=HID, BLOCK_BK=BLOCK_BK,
+        HID=HID,
+        BLOCK_BK=BLOCK_BK,
         extend_backend=EXTEND_BACKEND,
         access_counter=access_counter,
         cache_miss_counter=cache_miss_counter,

@@ -1,13 +1,12 @@
 import json
-import time
-
 import os
+import time
 
 import requests
 
-port = os.getenv('SRT_PORT', '8913')
+port = os.getenv("SRT_PORT", "8913")
 
-url = 'http://localhost:{port}/v1'
+url = "http://localhost:{port}/v1"
 
 
 PROMPT = r"""
@@ -1810,6 +1809,7 @@ Now, Let's start.
 First, please summarize the previous provided code!
 """
 
+
 def run():
     prompt = PROMPT[:]
     # prompt = ''.join(filter(str.isalpha, PROMPT))
@@ -1818,7 +1818,7 @@ def run():
         {"role": "system", "content": "You are a helpful assistant"},
         {"role": "user", "content": prompt},
     ]
-    model = 'meta-llama/Llama-3.1-8B-Instruct'
+    model = "meta-llama/Llama-3.1-8B-Instruct"
     body = {
         "model": model,
         "messages": message,
@@ -1840,7 +1840,7 @@ def run():
     address = url
     if not address:
         raise ValueError("the environment variable OPENAI_API_BASE must be set.")
-    key = 'sk-1248'
+    key = "sk-1248"
     if not key:
         raise ValueError("the environment variable OPENAI_API_KEY must be set.")
     headers = {"Authorization": f"Bearer {key}"}
@@ -1889,7 +1889,7 @@ def run():
                         )
                     most_recent_received_token_time = time.monotonic()
                     generated_text += delta["content"]
-                    print(delta['content'], end='', flush=True)
+                    print(delta["content"], end="", flush=True)
 
         total_request_time = time.monotonic() - start_time
         output_throughput = tokens_received / total_request_time
@@ -1898,5 +1898,6 @@ def run():
         print(f"Warning Or Error: {e}")
         print(error_response_code)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run()

@@ -3,8 +3,8 @@ import unittest
 
 import torch
 
+from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs, hip_attention
 from hip_research.utils.load_checkouts import load_checkouts
-from hip_attn.v1_1.attention2_draft_prefetch import hip_attention, HiPAttentionArgs
 
 
 class TestAttention2DraftPrefetch(unittest.TestCase):
@@ -14,7 +14,7 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
         seq_len = 1024 * 128
         seq_repeat = 1
         batch_repeat = 1
-        if os.getenv('HIP_DEBUG', '1') == '0':
+        if os.getenv("HIP_DEBUG", "1") == "0":
             seq_len = 32768
             # seq_len = 16384
             # seq_len = 131072
@@ -23,11 +23,7 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
             debug_only = False
 
         q, k, v, out, cos, sin = load_checkouts(
-            idx=0,
-            window=40,
-            seq_len=seq_len,
-            return_cos_sin=True,
-            dtype=torch.bfloat16
+            idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.bfloat16
         )
         HEAD = q.shape[0]
         HEAD_KV = k.shape[0]
@@ -42,10 +38,12 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
 
         def reshape(x, HEAD):
             N, T, H = x.shape
-            x = x.contiguous() \
-                .view(N // HEAD, HEAD, T, H) \
-                .permute(0, 2, 1, 3) \
+            x = (
+                x.contiguous()
+                .view(N // HEAD, HEAD, T, H)
+                .permute(0, 2, 1, 3)
                 .contiguous()
+            )
             assert x.shape == (N // HEAD, T, HEAD, H)
             assert x.is_contiguous()
             return x
@@ -75,66 +73,53 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
 
         def fn():
             return hip_attention(
-                q, k, v,
-
+                q,
+                k,
+                v,
                 args=HiPAttentionArgs(
                     mask_k=2048,
-
                     block_size_q=64,
                     block_stride_q=2,
                     block_size_k=2,
                     block_stride_k=1,
                     block_size_k_group=1,
                     block_size_k_after_masking=-1,
-
                     group_size_q=1,
-
                     add_snap_kv=True,
                     snap_kv_vert_k=2048,
                     snap_kv_diag_k=2048,
-
                     is_causal=True,
-
                     sliding_window_size=1024,
                     sink_token_size=16,
-
                     using_extend=False,
                     rope_cos=cos,
                     rope_sin=sin,
                     self_extend_neighboor_window=1024,
                     self_extend_group_size=4,
-
                     topk_head_group_size=1,
-                    sample_method='center',
-                    branch_method='half',
-
+                    sample_method="center",
+                    branch_method="half",
                     traverse_from_last_step=False,
                     step_size=None,
                     num_samples=1,
                     chunk_size=None,
                     num_unions=1,
-
                     score_head_group_size=1,
-
                     using_sparq=False,
                     sparq_hid=64,
-
                     low_res_sample_scale=1,
                     low_res_oversample_rate=1,
                     low_res_oversample_block_stride_k=4,
-
                     q_quant=q_quant,
                     k_quant=k_quant,
-
                     randomize_mask=False,
-
                     # NOTE: change this to True to simulate key cache algorithms
                     output_key_access_log=False,
-                )
+                ),
             )
 
-        if 'HIP_DEBUG' not in os.environ:
-            os.environ['HIP_DEBUG'] = '1'
+        if "HIP_DEBUG" not in os.environ:
+            os.environ["HIP_DEBUG"] = "1"
 
         context, metadata = fn()
 
@@ -142,12 +127,14 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
             stderr = (out - context).abs().mean().item()
             stdcontext = torch.std_mean(out)[0].item()
 
-            print(f'err = {stderr:.8f} ({stderr / stdcontext:.6f} sigma), out_std = {stdcontext:.8f}')
+            print(
+                f"err = {stderr:.8f} ({stderr / stdcontext:.6f} sigma), out_std = {stdcontext:.8f}"
+            )
 
         if debug_only:
             return
 
-        os.environ['HIP_DEBUG'] = '0'
+        os.environ["HIP_DEBUG"] = "0"
 
         torch.cuda.synchronize()
 
@@ -165,7 +152,7 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
                 with torch.cuda.graph(graph):
                     fn()
 
-                print('graph compiled')
+                print("graph compiled")
 
             if i > 3:
                 start.record()
@@ -179,4 +166,4 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
                 sample += 1
 
         if sample > 0:
-            print(f'latency: {elapsed / sample:.6f} ms')
+            print(f"latency: {elapsed / sample:.6f} ms")

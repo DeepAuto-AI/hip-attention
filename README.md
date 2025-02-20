@@ -8,7 +8,7 @@
 | [**Paper (Arxiv, InfiniteHiP *latest*)**](https://arxiv.org/abs/2502.08910) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
-> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)! 
+> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)!
 
 > [!IMPORTANT]
 > This is **NOT yet free for commercial use**. The license is [FSL-1.1-MIT](https://fsl.software/), which is free for non-commercial use but will automatically convert to MIT license two years after each release. Please refer to the [LICENSE](./LICENSE) for more details.

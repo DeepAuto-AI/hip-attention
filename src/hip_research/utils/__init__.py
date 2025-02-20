@@ -1,25 +1,28 @@
 import copy
 import gc
 import os
+import random
 import threading
 from typing import Dict, List, TextIO, Tuple
+
 import numpy as np
 import torch
-import random
 
 # from .profiler import Profiler
 
+
 def indent_string(s):
-    return ("  " + s).replace('\n', '\n  ')
+    return ("  " + s).replace("\n", "\n  ")
+
 
 def strify(d):
-    newline = '\n'
+    newline = "\n"
     if isinstance(d, torch.Tensor):
         return f"Tensor({d.shape})"
     elif isinstance(d, (float, int)):
-        return f'Num({d})'
+        return f"Num({d})"
     elif isinstance(d, (str)):
-        return f'Str({d})'
+        return f"Str({d})"
     elif isinstance(d, (list, tuple)):
         return f'[\n{indent_string(f", {newline}".join([strify(i) for i in d]))}\n]({len(d)})'
     elif isinstance(d, dict):
@@ -27,22 +30,26 @@ def strify(d):
     elif hasattr(d, "strify"):
         return d.strify()
     else:
-        return f'{type(d)}'
+        return f"{type(d)}"
 
-cuda_copy_lock = None # type: threading.RLock
+
+cuda_copy_lock = None  # type: threading.RLock
+
+
 def register_copy_lock(lock):
     global cuda_copy_lock
     assert cuda_copy_lock is None
-    
+
     cuda_copy_lock = lock
+
 
 def tensor_buffer_to(v, device):
     if isinstance(v, torch.Tensor):
         if not isinstance(device, torch.device) and not isinstance(device, torch.dtype):
             device = torch.device(device)
-        op_type = 'device' if isinstance(device, torch.device) else 'dtype'
-        
-        if op_type == 'device':
+        op_type = "device" if isinstance(device, torch.device) else "dtype"
+
+        if op_type == "device":
             if v.device == device:
                 return v
 
@@ -50,14 +57,14 @@ def tensor_buffer_to(v, device):
             if cuda_copy_lock is not None:
                 cuda_copy_lock.acquire()
                 acquired = True
-            
+
             new_v = v.to(device, non_blocking=True)
-            
+
             if acquired:
                 cuda_copy_lock.release()
-            
+
             return new_v
-        elif op_type == 'dtype':
+        elif op_type == "dtype":
             if v.dtype == device:
                 return v
             return v.to(device)
@@ -66,13 +73,14 @@ def tensor_buffer_to(v, device):
     elif isinstance(v, list):
         return list([tensor_buffer_to(i, device) for i in v])
     elif isinstance(v, dict):
-        return dict({k:tensor_buffer_to(vv, device) for k,vv in v.items()})
+        return dict({k: tensor_buffer_to(vv, device) for k, vv in v.items()})
     elif isinstance(v, (float, int, str)):
         return v
     elif v is None:
         return v
     else:
         raise Exception(type(v))
+
 
 def batch_to(batch, device):
     if isinstance(batch, dict):
@@ -92,21 +100,27 @@ def batch_to(batch, device):
     else:
         raise Exception(type(batch))
 
+
 def get_device_name(device):
     name = torch.cuda.get_device_name(device=device)
     name = name.lower()
-    name = name.replace('nvidia', '').replace('geforce', '').replace('rtx', '')
+    name = name.replace("nvidia", "").replace("geforce", "").replace("rtx", "")
     name = name.strip()
-    name = name.replace(' ', '_')
+    name = name.replace(" ", "_")
     return name
+
 
 def model_hash(model):
     import hashlib
+
     flt = hashlib.shake_256()
     for name, param in sorted(model.named_parameters(), key=lambda x: x[0]):
         flt.update(name.encode())
-        flt.update(param.data.view(-1)[:min(16, param.data.numel())].cpu().numpy().tobytes())
+        flt.update(
+            param.data.view(-1)[: min(16, param.data.numel())].cpu().numpy().tobytes()
+        )
     return flt.hexdigest(16)
+
 
 class NanException(Exception):
     def __init__(self, *args: object) -> None:
@@ -114,71 +128,85 @@ class NanException(Exception):
 
         self.args = args
 
+
 nan_check = True
+
+
 def set_global_nan_check(v):
     global nan_check
     nan_check = v
+
 
 def raise_if_nan(tensor):
     global nan_check
     if not nan_check:
         return tensor
-    
+
     if torch.isinf(tensor).any():
-        torch.save(tensor, 'utils_inf.pth')
-        print('Has INF in here raise_if_nan. check utils_inf.pth')
+        torch.save(tensor, "utils_inf.pth")
+        print("Has INF in here raise_if_nan. check utils_inf.pth")
         raise NanException()
-    
+
     if torch.isnan(tensor).any():
         # print('Has NAN in here', tensor)
-        torch.save(tensor, 'utils_nan.pth')
-        print('Has NAN in here raise_if_nan. check utils_nan.pth')
+        torch.save(tensor, "utils_nan.pth")
+        print("Has NAN in here raise_if_nan. check utils_nan.pth")
         raise NanException()
     return tensor
 
-import pickle
+
 import io
+import pickle
+
 
 def module_clone(module: torch.nn.Module, device=None):
     is_training = copy.deepcopy(module.training)
     if device is None:
         device = copy.deepcopy(get_module_device(module))
-    
+
     # cloned_module = pickle.loads(pickle.dumps(module)) # type: torch.nn.Module
     buffer = io.BytesIO()
     try:
-        torch.save(module, buffer, _use_new_zipfile_serialization=False, pickle_protocol=5)
+        torch.save(
+            module, buffer, _use_new_zipfile_serialization=False, pickle_protocol=5
+        )
         buffer.seek(0)
-        cloned_module = torch.load(buffer, map_location='cpu') # type: torch.nn.Module
+        cloned_module = torch.load(buffer, map_location="cpu")  # type: torch.nn.Module
     finally:
         buffer.close()
     # cloned_module = copy.deepcopy(module)
-    
+
     cloned_module = cloned_module.train(is_training)
     if device is not None:
         cloned_module = cloned_module.to(device)
     return cloned_module
 
-def human_readable(value, unit='B', unit_size=1024):
+
+def human_readable(value, unit="B", unit_size=1024):
     if value < 0:
-        return f'-{human_readable(-value)}'
+        return f"-{human_readable(-value)}"
     if value >= (unit_size**5):
-        return f'{value / (unit_size**5):.1f} P{unit}'
+        return f"{value / (unit_size**5):.1f} P{unit}"
     elif value >= (unit_size**4):
-        return f'{value / (unit_size**4):.1f} T{unit}'
+        return f"{value / (unit_size**4):.1f} T{unit}"
     elif value >= (unit_size**3):
-        return f'{value / (unit_size**3):.1f} G{unit}'
+        return f"{value / (unit_size**3):.1f} G{unit}"
     elif value >= (unit_size**2):
-        return f'{value / (unit_size**2):.1f} M{unit}'
+        return f"{value / (unit_size**2):.1f} M{unit}"
     elif value >= unit_size:
-        return f'{value / unit_size:.1f} K{unit}'
+        return f"{value / unit_size:.1f} K{unit}"
     else:
-        return f'{value:.1f} {unit}'
+        return f"{value:.1f} {unit}"
+
 
 def compute_internal_fragmentation():
     # https://github.com/pytorch/pytorch/issues/29554
     snapshot = torch.cuda.memory_snapshot()
-    return 1 - (sum(b['allocated_size'] for b in snapshot if b['allocated_size'] > 0) / sum(b['total_size'] for b in snapshot if b['allocated_size'] > 0))
+    return 1 - (
+        sum(b["allocated_size"] for b in snapshot if b["allocated_size"] > 0)
+        / sum(b["total_size"] for b in snapshot if b["allocated_size"] > 0)
+    )
+
 
 def compact_cuda_memory():
     """
@@ -189,21 +217,21 @@ def compact_cuda_memory():
     if cuda_copy_lock is not None:
         cuda_copy_lock.acquire()
         acquired = True
-    
+
     try:
         # wait for all computation is finished
         torch.cuda.synchronize()
-        
+
         # Run a full garbage collect first so any dangling tensors are released
         gc.collect()
 
         # Then move all tensors to the CPU
-        locations = {} # type: Dict[torch.Tensor, str]
-        cpu_device = torch.device('cpu')
+        locations = {}  # type: Dict[torch.Tensor, str]
+        cpu_device = torch.device("cpu")
         for obj in gc.get_objects():
             if not isinstance(obj, torch.Tensor):
                 continue
-            
+
             obj_device = obj.device
             if obj_device != cpu_device:
                 locations[obj] = obj_device
@@ -226,11 +254,12 @@ def compact_cuda_memory():
             if (isinstance(tensor, torch.nn.Parameter)) and tensor.grad is not None:
                 tensor.grad.data = tensor.grad.data.to(device, non_blocking=True)
                 assert tensor.grad.device == tensor.data.device
-        
+
         torch.cuda.synchronize()
     finally:
         if acquired:
             cuda_copy_lock.release()
+
 
 def get_module_device(m: torch.nn.Module):
     dev = None
@@ -242,7 +271,10 @@ def get_module_device(m: torch.nn.Module):
             dev = new_dev
     return dev
 
+
 warmup_finished = False
+
+
 def warmup_torch_stream(job, warmup_steps=3, force_rewarmup=False):
     global warmup_finished
     if (not force_rewarmup) and warmup_finished:
@@ -254,10 +286,12 @@ def warmup_torch_stream(job, warmup_steps=3, force_rewarmup=False):
             job()
     torch.cuda.current_stream().wait_stream(s)
     warmup_finished = True
-    
+
+
 # default_profiler = Profiler()
 # def get_profiler():
 #     return default_profiler
+
 
 def copy_batch(from_batch, to_batch):
     if isinstance(from_batch, torch.Tensor):
@@ -273,15 +307,20 @@ def copy_batch(from_batch, to_batch):
     else:
         raise Exception(type(from_batch))
 
+
 def unzip(lst, dim=0):
     return [i[dim] for i in lst]
 
+
 import contextlib
 import sys
+
 import tqdm
+
 
 class TqdmWriteDummyFile(object):
     file = None
+
     def __init__(self, file: TextIO):
         self.file = file
 
@@ -289,13 +328,14 @@ class TqdmWriteDummyFile(object):
         # # Avoid print() second call (useless \n)
         # if len(x.rstrip()) > 0:
         #     tqdm.tqdm.write(x, file=self.file)
-        tqdm.tqdm.write(x, file=self.file, end='')
-    
+        tqdm.tqdm.write(x, file=self.file, end="")
+
     def flush(self):
         self.file.flush()
-    
+
     def close(self):
         self.file.close()
+
 
 @contextlib.contextmanager
 def using_tqdm_write():
@@ -303,11 +343,14 @@ def using_tqdm_write():
     sys.stdout = TqdmWriteDummyFile(sys.stdout)
     yield
     sys.stdout = save_stdout
-    
+
+
 import multiprocessing as mp
+
 
 def __query_available_devices(q):
     import torch
+
     num_gpus = torch.cuda.device_count()
     available_devices = []
     avail_mem = []
@@ -316,9 +359,12 @@ def __query_available_devices(q):
         available = (free_mem / (total_mem + 1e-8)) > 0.5
         if available:
             available_devices.append(i)
-        avail_mem.append(f'[{i}({available})]={free_mem / (total_mem + 1e-8) * 100:.1f}%')
-    print('QueryDevice: Available Memories,', *avail_mem)
+        avail_mem.append(
+            f"[{i}({available})]={free_mem / (total_mem + 1e-8) * 100:.1f}%"
+        )
+    print("QueryDevice: Available Memories,", *avail_mem)
     q.put(available_devices)
+
 
 def query_available_devices() -> list[int]:
     q = mp.Queue()
@@ -329,26 +375,27 @@ def query_available_devices() -> list[int]:
     q.close()
     return available_devices
 
+
 class Metric:
-    def __init__(self, method='moving_average', window_size=50):
+    def __init__(self, method="moving_average", window_size=50):
         self.method = method
         self.window_size = window_size
-        
+
         self.sum = {}
         self.count = {}
         self.buf = {}
-        
-    def update(self, x, name='', weight=1):
+
+    def update(self, x, name="", weight=1):
         if isinstance(x, torch.Tensor):
             x = x.item()
-        
-        if self.method == 'mean':
+
+        if self.method == "mean":
             if not name in self.sum:
                 self.sum[name] = 0
                 self.count[name] = 0
             self.sum[name] += x * weight
             self.count[name] += weight
-        elif self.method == 'moving_average':
+        elif self.method == "moving_average":
             buf = self.buf.get(name, [])
             buf.append(x)
             if len(buf) > self.window_size:
@@ -356,10 +403,10 @@ class Metric:
             self.buf[name] = buf
         return self.get(name)
 
-    def get(self, name=''):
-        if self.method == 'mean':
+    def get(self, name=""):
+        if self.method == "mean":
             return self.sum[name] / self.count[name]
-        elif self.method == 'moving_average':
+        elif self.method == "moving_average":
             return sum(self.buf[name]) / len(self.buf[name])
         raise Exception(self.method)
 
@@ -369,19 +416,28 @@ class Metric:
             r[key] = self.get(key)
         return r
 
+
 def trace_referrers(obj, live_count=2):
     if live_count <= 0:
         return str(type(obj))
     parent = gc.get_referrers(obj)
     return f"[{[trace_referrers(p, live_count=live_count-1) for p in parent]}]({type(obj)})"
 
+
 def get_all_allocated_tensors() -> List[Tuple[torch.Tensor, list]]:
     tensors = []
     for obj in gc.get_objects():
         try:
-            if isinstance(obj, torch.Tensor) and (not isinstance(obj, torch.nn.Parameter)) and (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))):
-                if obj.device != torch.device('cpu'):
-                    obj = obj #type: torch.Tensor
+            if (
+                isinstance(obj, torch.Tensor)
+                and (not isinstance(obj, torch.nn.Parameter))
+                and (
+                    torch.is_tensor(obj)
+                    or (hasattr(obj, "data") and torch.is_tensor(obj.data))
+                )
+            ):
+                if obj.device != torch.device("cpu"):
+                    obj = obj  # type: torch.Tensor
                     # referrers = gc.get_referrers(obj)
                     referrers = trace_referrers(obj)
                     tensors.append((obj, referrers))
@@ -389,35 +445,36 @@ def get_all_allocated_tensors() -> List[Tuple[torch.Tensor, list]]:
             pass
     return tensors
 
+
 def setup_seaborn(
-    label_fontsize = 8,
-    legend_fontsize = 7,
-    axes_label_fontsize = 6,
-    font_weight = 500,
-    axes_label_weight = 600,
-    axis_below = False,
+    label_fontsize=8,
+    legend_fontsize=7,
+    axes_label_fontsize=6,
+    font_weight=500,
+    axes_label_weight=600,
+    axis_below=False,
 ):
     import seaborn as sns
-    
+
     sns.set_theme(
-        context='paper',
-        style='whitegrid',
-        palette='bright',
-        font='Noto Sans, Sans Serif',
+        context="paper",
+        style="whitegrid",
+        palette="bright",
+        font="Noto Sans, Sans Serif",
         font_scale=1.0,
         color_codes=True,
         rc={
-            'axes.titlesize': str(label_fontsize),
-            'font.weight': font_weight,
-            'axes.labelweight': axes_label_weight,
-            'axes.titleweight': '600',
-            'legend.fontsize': str(legend_fontsize),
-            'axes.grid.which': 'both',
-            'ytick.labelsize': str(axes_label_fontsize),
-            'xtick.labelsize': str(axes_label_fontsize),
-            'axes.labelsize': str(label_fontsize),
-            'ytick.major.pad': '1.0',
-            'xtick.major.pad': '1.0',
-            'axes.axisbelow': axis_below,
-        }
+            "axes.titlesize": str(label_fontsize),
+            "font.weight": font_weight,
+            "axes.labelweight": axes_label_weight,
+            "axes.titleweight": "600",
+            "legend.fontsize": str(legend_fontsize),
+            "axes.grid.which": "both",
+            "ytick.labelsize": str(axes_label_fontsize),
+            "xtick.labelsize": str(axes_label_fontsize),
+            "axes.labelsize": str(label_fontsize),
+            "ytick.major.pad": "1.0",
+            "xtick.major.pad": "1.0",
+            "axes.axisbelow": axis_below,
+        },
     )

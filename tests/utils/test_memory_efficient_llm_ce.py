@@ -19,19 +19,21 @@ class TestMemoryEfficientLLMCE(unittest.TestCase):
 
         t = time.time()
         for i in range(100):
-            if i == 3: t = time.time()
+            if i == 3:
+                t = time.time()
             logits = torch.nn.functional.linear(
-                hidden, weight, None,
+                hidden,
+                weight,
+                None,
             )
-            losses_torch = torch.nn.CrossEntropyLoss(reduction='none')(logits, labels)
+            losses_torch = torch.nn.CrossEntropyLoss(reduction="none")(logits, labels)
         elapsed_torch = time.time() - t
 
         t = time.time()
         for i in range(100):
-            if i == 3: t = time.time()
-            losses_triton = memory_efficient_llm_ce(
-                hidden, weight, labels, 'none'
-            )
+            if i == 3:
+                t = time.time()
+            losses_triton = memory_efficient_llm_ce(hidden, weight, labels, "none")
         elapsed_triton = time.time() - t
 
         print(losses_torch[:10])

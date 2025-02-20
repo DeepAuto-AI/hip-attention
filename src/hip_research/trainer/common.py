@@ -7,11 +7,17 @@ import torch.autograd
 import torch.onnx
 import torch.utils.checkpoint
 import transformers
+from peft import (
+    LoraConfig,
+    PeftModel,
+    TaskType,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+)
 from transformers import LlamaForCausalLM
-from peft import LoraConfig, TaskType, prepare_model_for_kbit_training, PeftModel, get_peft_model
 
-from hip_attn.models.modeling_llama import LlamaForCausalLM, LlamaConfig
-from hip_attn.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
+from hip_attn.models.modeling_llama import LlamaConfig, LlamaForCausalLM
+from hip_attn.models.qwen.modeling_qwen2 import Qwen2Config, Qwen2ForCausalLM
 
 
 @dataclass
@@ -29,19 +35,19 @@ class TrainConfig:
     seq_len: int = 4096
     max_steps: int = 1000000
     model_checkpoint_dir: str = "./saves/dev/checkpoint"
-    dataset: str = 'wikitext103'
+    dataset: str = "wikitext103"
     load_from_checkpoint: str = None
     k: int = 512
     block_size_q: int = 8
     block_size_k: int = 8
     init_from_checkpoint: str = None
-    method: str = 'hip'
-    model: str = 'llama32k'
+    method: str = "hip"
+    model: str = "llama32k"
     disable_global_context: bool = False
     warmup_steps: int = 5
     sparsity_reg: float = 0.0
     dense_layers: int = 0
-    name: str = 'default'
+    name: str = "default"
     enable_sparq: bool = False
     enable_flash: bool = False
     use_sliding_window: bool = False
@@ -53,32 +59,32 @@ def parse_args():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model', default='llama32k', type=str)
-    parser.add_argument('--method', default='hip', type=str)
-    parser.add_argument('--dense_queries', default=None, type=int)
-    parser.add_argument('--using_fsdp', action='store_true')
-    parser.add_argument('--using_deepspeed', action='store_true')
-    parser.add_argument('--disable_kd', action='store_true')
-    parser.add_argument('--disable_global_context', action='store_true')
-    parser.add_argument('--gradient_accumulation_steps', default=-1, type=int)
-    parser.add_argument('--batch_size', default=-1, type=int)
-    parser.add_argument('--lora_r', default=-1, type=int)
-    parser.add_argument('--lr', default=-1, type=float)
-    parser.add_argument('--max_steps', default=-1, type=int)
-    parser.add_argument('--dataset', default='wikitext103', type=str)
-    parser.add_argument('--seq_len', default=-1, type=int)
-    parser.add_argument('--save_steps', default=-1, type=int)
-    parser.add_argument('--init_checkpoint', default=None, type=str)
-    parser.add_argument('--checkpoint', default=None, type=str)
-    parser.add_argument('--k', default=512, type=int)
-    parser.add_argument('--block_size_q', default=16, type=int)
-    parser.add_argument('--block_size_k', default=2, type=int)
-    parser.add_argument('--warmup_steps', default=None, type=int)
-    parser.add_argument('--sparsity_reg', default=None, type=float)
-    parser.add_argument('--dense_layers', type=int, default=None)
-    parser.add_argument('--name', type=str, default='default')
-    parser.add_argument('--model_parallel', default=None, type=int)
-    parser.add_argument('--local-rank', default=None, type=int)
+    parser.add_argument("--model", default="llama32k", type=str)
+    parser.add_argument("--method", default="hip", type=str)
+    parser.add_argument("--dense_queries", default=None, type=int)
+    parser.add_argument("--using_fsdp", action="store_true")
+    parser.add_argument("--using_deepspeed", action="store_true")
+    parser.add_argument("--disable_kd", action="store_true")
+    parser.add_argument("--disable_global_context", action="store_true")
+    parser.add_argument("--gradient_accumulation_steps", default=-1, type=int)
+    parser.add_argument("--batch_size", default=-1, type=int)
+    parser.add_argument("--lora_r", default=-1, type=int)
+    parser.add_argument("--lr", default=-1, type=float)
+    parser.add_argument("--max_steps", default=-1, type=int)
+    parser.add_argument("--dataset", default="wikitext103", type=str)
+    parser.add_argument("--seq_len", default=-1, type=int)
+    parser.add_argument("--save_steps", default=-1, type=int)
+    parser.add_argument("--init_checkpoint", default=None, type=str)
+    parser.add_argument("--checkpoint", default=None, type=str)
+    parser.add_argument("--k", default=512, type=int)
+    parser.add_argument("--block_size_q", default=16, type=int)
+    parser.add_argument("--block_size_k", default=2, type=int)
+    parser.add_argument("--warmup_steps", default=None, type=int)
+    parser.add_argument("--sparsity_reg", default=None, type=float)
+    parser.add_argument("--dense_layers", type=int, default=None)
+    parser.add_argument("--name", type=str, default="default")
+    parser.add_argument("--model_parallel", default=None, type=int)
+    parser.add_argument("--local-rank", default=None, type=int)
 
     args = parser.parse_args()
 
@@ -127,28 +133,28 @@ def parse_args():
 
 
 MODELS = {
-    'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-    'llama13b': 'meta-llama/Llama-2-13b-hf',
-    'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
-    'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
-    'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-    'yi6b': '01-ai/Yi-6B-200K',
-    'yi34b': '01-ai/Yi-34B-200K',
-    'giraffe13b': 'abacusai/Giraffe-13b-32k-v3',
+    "llama32k": "togethercomputer/LLaMA-2-7B-32K",
+    "llama13b": "meta-llama/Llama-2-13b-hf",
+    "llama13b_32k": "Yukang/Llama-2-13b-longlora-32k-ft",
+    "qwen7b": "Qwen/Qwen1.5-7B-Chat",
+    "qwen14b": "Qwen/Qwen1.5-14B-Chat",
+    "yi6b": "01-ai/Yi-6B-200K",
+    "yi34b": "01-ai/Yi-34B-200K",
+    "giraffe13b": "abacusai/Giraffe-13b-32k-v3",
 }
 
 
 def load_model(
-        train_config: TrainConfig = None,
-        method='hip',
-        device=None,
-        is_teacher=False,
+    train_config: TrainConfig = None,
+    method="hip",
+    device=None,
+    is_teacher=False,
 ):
     device_map = "auto"
     max_memory = None
 
-    if os.environ.get('LOCAL_RANK', None) is not None:
-        train_config.local_rank = int(os.environ['LOCAL_RANK'])
+    if os.environ.get("LOCAL_RANK", None) is not None:
+        train_config.local_rank = int(os.environ["LOCAL_RANK"])
 
     if device is None:
         if train_config.local_rank is not None:
@@ -159,26 +165,28 @@ def load_model(
                     for i in range(train_config.model_parallel)
                 }
             else:
-                device_map = {"": f'cuda:{train_config.local_rank}'}
+                device_map = {"": f"cuda:{train_config.local_rank}"}
         else:
             device_map = {"": torch.cuda.current_device()}
     if train_config.using_fsdp:
-        device_map = 'cpu'
+        device_map = "cpu"
     print("Device map:", device_map, "max_memory:", max_memory)
 
     assert train_config.model in MODELS, MODELS.keys()
     model_id = MODELS[train_config.model]
 
     ConfigClass = LlamaConfig
-    if 'qwen' in train_config.model:
+    if "qwen" in train_config.model:
         ConfigClass = Qwen2Config
 
     config = ConfigClass.from_pretrained(model_id)
-    config._attn_implementation = config.attn_implementation = 'eager' if 'qwen' in train_config.model else 'sdpa'
+    config._attn_implementation = config.attn_implementation = (
+        "eager" if "qwen" in train_config.model else "sdpa"
+    )
 
     quant_config = transformers.BitsAndBytesConfig(
         load_in_4bit=True,
-        llm_int8_skip_modules=['tree_avgpool_scaler'],
+        llm_int8_skip_modules=["tree_avgpool_scaler"],
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
@@ -187,7 +195,7 @@ def load_model(
         quant_config = None
 
     ModelClass = LlamaForCausalLM
-    if 'qwen' in train_config.model:
+    if "qwen" in train_config.model:
         ModelClass = Qwen2ForCausalLM
 
     model = ModelClass.from_pretrained(
@@ -203,7 +211,7 @@ def load_model(
     )
 
     for m in model.modules():
-        if hasattr(m, 'attention_method'):
+        if hasattr(m, "attention_method"):
             m.attention_method = method
             m.tree_k = train_config.k
             m.tree_block_size_q = train_config.block_size_q
@@ -215,12 +223,13 @@ def load_model(
             m.tree_enable_sparq = train_config.enable_sparq
             m.tree_enable_flash = train_config.enable_flash
             m.tree_use_sliding_window = train_config.use_sliding_window
-        if hasattr(m, 'gradient_checkpointing'):
+        if hasattr(m, "gradient_checkpointing"):
             m.gradient_checkpointing = True
             if train_config.using_fsdp:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
             elif train_config.using_deepspeed:
                 import deepspeed
+
                 m._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
             else:
                 m._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
@@ -233,14 +242,20 @@ def load_model(
             lora_alpha=train_config.lora_r // 2,
             lora_dropout=0.05,
             target_modules=[
-                'q_proj', 'k_proj', 'v_proj', 'o_proj',
-                'gate_proj', 'up_proj', 'down_proj',
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
                 # 'input_layernorm', 'post_attention_layernorm'
             ],
             modules_to_save=[
-                'tree_avgpool_scaler',
-                'input_layernorm', 'post_attention_layernorm'
-            ]
+                "tree_avgpool_scaler",
+                "input_layernorm",
+                "post_attention_layernorm",
+            ],
         )
 
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
@@ -250,28 +265,32 @@ def load_model(
             print(f"Loading peft model from {train_config.init_from_checkpoint}")
 
             if pathlib.Path(train_config.init_from_checkpoint).is_dir():
-                model = PeftModel.from_pretrained(model, train_config.init_from_checkpoint)
+                model = PeftModel.from_pretrained(
+                    model, train_config.init_from_checkpoint
+                )
                 model.print_trainable_parameters()
 
             else:
                 model = get_peft_model(model, peft_config)
                 model.print_trainable_parameters()
 
-                print('loading from', train_config.init_from_checkpoint)
-                state_dict = torch.load(train_config.init_from_checkpoint, map_location='cpu')
-                if 'state_dict' in state_dict:
-                    state_dict = state_dict['state_dict']
+                print("loading from", train_config.init_from_checkpoint)
+                state_dict = torch.load(
+                    train_config.init_from_checkpoint, map_location="cpu"
+                )
+                if "state_dict" in state_dict:
+                    state_dict = state_dict["state_dict"]
                 keys = list(state_dict.keys())
                 for key in keys:
                     x = state_dict[key]
-                    state_dict[key.strip('model.')] = x
+                    state_dict[key.strip("model.")] = x
                     del state_dict[key]
                 try:
                     result = model.load_state_dict(state_dict, strict=False)
-                    print('load result', result)
+                    print("load result", result)
                 except RuntimeError as e:
                     pass
-                print('lora checkpoint loaded from', train_config.init_from_checkpoint)
+                print("lora checkpoint loaded from", train_config.init_from_checkpoint)
 
         else:
             model = get_peft_model(model, peft_config)
@@ -285,6 +304,5 @@ def load_tokenizer(model):
     model_id = MODELS[model]
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = 'right'
+    tokenizer.padding_side = "right"
     return tokenizer
-

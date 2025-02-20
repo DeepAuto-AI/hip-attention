@@ -1,12 +1,13 @@
-import os
 import math
-import torch
-from torch.utils.data import Dataset
-import numpy as np
-import tqdm
+import os
 
-IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
-IS_EXAONE = os.getenv('IS_EXAONE', '0') == '1'
+import numpy as np
+import torch
+import tqdm
+from torch.utils.data import Dataset
+
+IS_GEMMA = os.getenv("IS_GEMMA", "0") == "1"
+IS_EXAONE = os.getenv("IS_EXAONE", "0") == "1"
 
 if (not IS_GEMMA) and (not IS_EXAONE):
     PREFIX = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
@@ -27,7 +28,7 @@ In previous text, you have seen the secret keyword. You had to remember that sec
 """
 elif IS_EXAONE:
     PREFIX = """[BOS][|system|][|endofturn|]
-[|user|]You are a helpful assistant. 
+[|user|]You are a helpful assistant.
 There is a secret keyword hidden inside a lot of irrelevant text. Find the secret keyword and memorize it. I will quiz you about the the secret keyword.
 
 """
@@ -49,6 +50,7 @@ There is a pass key hidden inside a lot of irrelevant text. Find the pass key an
 """
 else:
     raise Exception()
+
 
 def interpolate_passkey(k):
     keyline = f"HERE IS THE SECRET KEYWORD! The secret keyword is ${k}$. ${k}$ is the secret keyword. **the secret keyword is ${k}$** LOOK BEHIND FOR SECRET KEYWORD"
@@ -78,16 +80,17 @@ REPEAT THE INFORMATION
 
 """
 
+
 def gen_text():
     prefix_len = int(len(PREFIX[:-1].split(" ")) * 1.275)
     filler_len = int(len(FILLER_TEXT[:-1].split(" ")) * 1.275)
     query_len = int(len(QUERY[:-1].split(" ")) * 1.275)
 
-    step_size = int(os.getenv('PASSKEY_STEP_SIZE', '32'))
-    n_samples = int(os.getenv('PASSKEY_SAMPLES', '100'))
+    step_size = int(os.getenv("PASSKEY_STEP_SIZE", "32"))
+    n_samples = int(os.getenv("PASSKEY_SAMPLES", "100"))
     inputs, targets = [], []
-    if os.getenv('PASSKEY_MAX_LEN', '0') != '0':
-        start_seq = int(os.getenv('PASSKEY_MAX_LEN', '0'))
+    if os.getenv("PASSKEY_MAX_LEN", "0") != "0":
+        start_seq = int(os.getenv("PASSKEY_MAX_LEN", "0"))
         prompt_lens = []
         while int(start_seq) >= 4:
             prompt_lens.append(int(start_seq) * 1000)
@@ -95,7 +98,7 @@ def gen_text():
                 start_seq = max(start_seq - step_size, step_size)
             else:
                 start_seq /= 2
-        print('passkey sequences', prompt_lens)
+        print("passkey sequences", prompt_lens)
     else:
         # prompt_lens = [2000, 4000, 8000, 16000, 32000, 64000]
         # prompt_lens = [2000, 4000, 8000, 16000, 32000]
@@ -126,15 +129,22 @@ def gen_text():
 
     return inputs, targets
 
+
 def gen_dataset(tokenizer):
     inputs, targets = gen_text()
 
     x, y = [], []
-    for inp, tgt in tqdm.tqdm(list(zip(inputs, targets)), dynamic_ncols=True, leave=False, delay=3, desc='passkey'):
+    for inp, tgt in tqdm.tqdm(
+        list(zip(inputs, targets)),
+        dynamic_ncols=True,
+        leave=False,
+        delay=3,
+        desc="passkey",
+    ):
         x += [
             tokenizer(
-                inp, 
-                return_tensors="pt", 
+                inp,
+                return_tensors="pt",
                 truncation=False,
                 add_special_tokens=False,
             ).input_ids
@@ -147,7 +157,7 @@ def gen_dataset(tokenizer):
                 add_special_tokens=False,
             ).input_ids
         ]
-        
+
     return x, y
 
 
@@ -162,25 +172,26 @@ class Passkey(Dataset):
         self.targets = self.dataset[1]
 
     def __len__(self):
-        return (len(self.inputs) // self.batch_size)
+        return len(self.inputs) // self.batch_size
 
     def __getitem__(self, idx) -> int:
         if idx >= len(self):
             raise IndexError("Index out of range")
 
-        inputs = self.inputs[idx * self.batch_size:(idx + 1) * self.batch_size]
-        targets = self.targets[idx * self.batch_size:(idx + 1) * self.batch_size]
+        inputs = self.inputs[idx * self.batch_size : (idx + 1) * self.batch_size]
+        targets = self.targets[idx * self.batch_size : (idx + 1) * self.batch_size]
 
         return torch.cat(inputs, dim=0), torch.cat(targets, dim=0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import transformers
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        'togethercomputer/LLaMA-2-7B-32K')
 
-    token_prefix = tokenizer(PREFIX, return_tensors="pt",
-                             truncation=False).input_ids
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        "togethercomputer/LLaMA-2-7B-32K"
+    )
+
+    token_prefix = tokenizer(PREFIX, return_tensors="pt", truncation=False).input_ids
     print(f"{token_prefix.size()=}")
     ds = Passkey(tokenizer)
 

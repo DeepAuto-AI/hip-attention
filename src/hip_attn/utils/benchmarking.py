@@ -1,4 +1,5 @@
 import time
+
 import torch
 
 
@@ -11,7 +12,8 @@ class BenchmarkRegion:
         self.children = []
 
     def __enter__(self):
-        if self.benchmark.disabled: return
+        if self.benchmark.disabled:
+            return
         # if self.benchmark.synchronize: torch.cuda.synchronize()
         self.t = time.time()
         self.start = torch.cuda.Event(enable_timing=True)
@@ -26,7 +28,8 @@ class BenchmarkRegion:
                 self.benchmark.current_region_context = self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.benchmark.disabled: return
+        if self.benchmark.disabled:
+            return
 
         self.end = torch.cuda.Event(enable_timing=True)
         if self.benchmark.synchronize:
@@ -63,13 +66,15 @@ class BenchmarkMemRegion:
         self.name = name
 
     def __enter__(self):
-        if self.benchmark.disabled: return
+        if self.benchmark.disabled:
+            return
 
         # if self.benchmark.synchronize: torch.cuda.synchronize()
         self.t = torch.cuda.memory_allocated()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.benchmark.disabled: return
+        if self.benchmark.disabled:
+            return
 
         # if self.benchmark.synchronize: torch.cuda.synchronize()
         self.t = torch.cuda.memory_allocated() - self.t
@@ -125,9 +130,11 @@ class Benchmark:
         return data
 
     def register_temp_buffer(self, name, v, lazy=None):
-        if not self.activate_temp_buffers: return
+        if not self.activate_temp_buffers:
+            return
         buffer = self.buffers.get(name, [])
-        if (v is None) and (lazy is not None): v = lazy()
+        if (v is None) and (lazy is not None):
+            v = lazy()
         buffer.append(v)
         self.buffers[name] = buffer
 
@@ -140,7 +147,8 @@ class Benchmark:
     def format_tracetree(self):
         data = self.todict()
         root = self.traced_callstack
-        if root is None: return ""
+        if root is None:
+            return ""
 
         total_time = data[root.name]
 
@@ -151,7 +159,8 @@ class Benchmark:
             elif indent > 1:
                 spaces = "  " * (indent - 1) + "╰─"
             messages = [
-                f"{spaces}> {item.name} ({data[item.name] * 1000:.2f} ms, {data[item.name] / total_time * 100:.2f}%)"]
+                f"{spaces}> {item.name} ({data[item.name] * 1000:.2f} ms, {data[item.name] / total_time * 100:.2f}%)"
+            ]
             for child in item.children:
                 messages.append(format_tree_percent(child, indent + 1))
             return "\n".join(messages)

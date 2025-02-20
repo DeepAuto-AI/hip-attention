@@ -18,12 +18,13 @@ class TestTensorFromPointer(unittest.TestCase):
         numel = prod(shape)
         byte_size = elem_size * numel
         pointer = cupy.cuda.malloc_managed(byte_size)
-        print(f'manged alloc {pointer.ptr}')
+        print(f"manged alloc {pointer.ptr}")
 
         ret = tensor_from_pointer(pointer.ptr, shape, dtype, 0)
         print(ret)
 
         from cupy.cuda.memory import MemoryPointer, UnownedMemory
+
         def device_ptr_2_cupy(pDevice: int, span: int, dtype: type, owner=None):
             sizeByte = span * 2
             mem = UnownedMemory(pDevice, sizeByte, owner)
@@ -43,4 +44,4 @@ class TestTensorFromPointer(unittest.TestCase):
 
         assert np.all(ret.view(-1).cpu().numpy() == cupy.asnumpy(ret_cupy))
 
-        print('pass')
+        print("pass")

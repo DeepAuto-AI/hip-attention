@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from diffusers import FluxPipeline
 from diffusers.models.attention_processor import Attention, apply_rope
 
-from hip_attn import hip_attention, HiPAttentionArgs
+from hip_attn import HiPAttentionArgs, hip_attention
 
 
 class CustomFluxSingleAttnProcessor2_0:
@@ -16,7 +16,9 @@ class CustomFluxSingleAttnProcessor2_0:
 
     def __init__(self):
         if not hasattr(F, "scaled_dot_product_attention"):
-            raise ImportError("AttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+            raise ImportError(
+                "AttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0."
+            )
 
     def __call__(
         self,
@@ -26,14 +28,20 @@ class CustomFluxSingleAttnProcessor2_0:
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        print('asdfadsf')
+        print("asdfadsf")
         input_ndim = hidden_states.ndim
 
         if input_ndim == 4:
             batch_size, channel, height, width = hidden_states.shape
-            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+            hidden_states = hidden_states.view(
+                batch_size, channel, height * width
+            ).transpose(1, 2)
 
-        batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        batch_size, _, _ = (
+            hidden_states.shape
+            if encoder_hidden_states is None
+            else encoder_hidden_states.shape
+        )
 
         query = attn.to_q(hidden_states)
         if encoder_hidden_states is None:
@@ -67,25 +75,36 @@ class CustomFluxSingleAttnProcessor2_0:
         # TODO: add support for attn.scale when we move to Torch 2.1
         # hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
         print(query.shape, key.shape, value.shape)
-        hidden_states, _ = hip_attention(query.transpose(1, 2) / math.sqrt(query.shape[-1]), key.transpose(1, 2), value.transpose(1, 2), args=HiPAttentionArgs(mask_k=256))
+        hidden_states, _ = hip_attention(
+            query.transpose(1, 2) / math.sqrt(query.shape[-1]),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            args=HiPAttentionArgs(mask_k=256),
+        )
         hidden_states = hidden_states.transpose(1, 2)
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.transpose(1, 2).reshape(
+            batch_size, -1, attn.heads * head_dim
+        )
         hidden_states = hidden_states.to(query.dtype)
 
         if input_ndim == 4:
-            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
+            hidden_states = hidden_states.transpose(-1, -2).reshape(
+                batch_size, channel, height, width
+            )
 
         return hidden_states
 
+
 pipe = FluxPipeline.from_pretrained(
-    "black-forest-labs/FLUX.1-dev", 
+    "black-forest-labs/FLUX.1-dev",
     torch_dtype=torch.bfloat16,
-).to('cuda')
+).to("cuda")
 
 for name, module in pipe.transformer.named_modules():
     if isinstance(module, Attention):
         from diffusers.models.attention_processor import FluxSingleAttnProcessor2_0
+
         if isinstance(module.processor, FluxSingleAttnProcessor2_0):
             module.processor = CustomFluxSingleAttnProcessor2_0()
 
@@ -99,6 +118,6 @@ image = pipe(
     guidance_scale=3.5,
     num_inference_steps=50,
     max_sequence_length=512,
-    generator=torch.Generator("cpu").manual_seed(0)
+    generator=torch.Generator("cpu").manual_seed(0),
 ).images[0]
 image.save("flux-dev.png")

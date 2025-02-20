@@ -13,11 +13,9 @@ ops = load(
     ],
 )
 
+
 def tensor_from_pointer(
-    ptr: int, 
-    shape: Tuple[int], 
-    dtype: torch.dtype, 
-    device_index: int
+    ptr: int, shape: Tuple[int], dtype: torch.dtype, device_index: int
 ) -> torch.Tensor:
     if dtype == torch.float16:
         elem_size = 16
@@ -30,10 +28,7 @@ def tensor_from_pointer(
     else:
         raise NotImplementedError()
     tensor = ops.tensor_from_pointer(
-        ptr, 
-        prod(shape), 
-        elem_size, 
-        device_index
-    ) # type: torch.Tensor
+        ptr, prod(shape), elem_size, device_index
+    )  # type: torch.Tensor
     tensor = tensor.view(shape).view(dtype)
     return tensor

@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from typing import Dict, Tuple, Any, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -29,10 +29,7 @@ class HiPModelOffloadCache:
         device: torch.device,
         hip_config: HiPAttentionConfig,
     ):
-        from hip_attn.v1_2.uvm_gpu_cache import (
-            HiPOffloadCache,
-            format_size_bytes,
-        )
+        from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache, format_size_bytes
 
         assert isinstance(device, torch.device)
         assert device.index is not None
@@ -139,7 +136,9 @@ class HiPModelOffloadCache:
     ) -> Tuple[HiPOffloadCache, Any]:
         # Use this function for decode, pass this to `k`
         if self.require_validation:
-            return self.layer_buffer[layer_id], self.validation_cache.get_kv_buffer(layer_id)
+            return self.layer_buffer[layer_id], self.validation_cache.get_kv_buffer(
+                layer_id
+            )
         return self.layer_buffer[layer_id], None
 
     def get_fetched_prefix_kv_buffer(
@@ -306,13 +305,9 @@ class HiPModelOffloadCache:
             # FIXME: find better way to detect this.
             is_first_chunk = extend_prefix_lens_cpu[0] == 0
             # FIXME: find better way to detect this.
-            is_inter_chunk = extend_seq_lens_cpu[0] in map(
-                lambda x: 2**x, range(0, 20)
-            )
+            is_inter_chunk = extend_seq_lens_cpu[0] in map(lambda x: 2**x, range(0, 20))
             # BUG(heejun): at the last chunk of prefill, prefetch layer sometimes failes... so disable async
-            if not (
-                batch_size == 1 and (is_first_chunk or is_inter_chunk)
-            ):
+            if not (batch_size == 1 and (is_first_chunk or is_inter_chunk)):
                 self.onetime_disable = self.enable_async
                 self.enable_async = False
             else:
@@ -377,9 +372,10 @@ class HiPModelOffloadCache:
         extend_seq_lens_cpu: np.array,
     ):
         for ibatch in range(batch_size):
-            req_pool_indices = req_pool_indices[ibatch:ibatch + 1]
+            req_pool_indices = req_pool_indices[ibatch : ibatch + 1]
             block_table = req_to_token.index_select(dim=0, index=req_pool_indices)[
-                0, :extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch],
+                0,
+                : extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch],
             ]
             # print(block_table, block_table.shape)
             self._prefetch_prefix_kv_buffer(

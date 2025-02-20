@@ -12,5 +12,5 @@ def seed(seed=42):
     np.random.seed(seed)
     random.seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # if use multi-GPU
+    torch.cuda.manual_seed_all(seed)  # if use multi-GPU
     os.environ["PYTHONHASHSEED"] = str(seed)

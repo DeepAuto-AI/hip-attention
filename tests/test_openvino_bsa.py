@@ -1,5 +1,5 @@
-from intel_npu_acceleration_library.backend import MatMul
 import numpy as np
+from intel_npu_acceleration_library.backend import MatMul
 
 inC, outC, batch = 4096, 4096, 32
 

@@ -1,8 +1,8 @@
 # sort
 
+from triton.language import core, math, zeros_like
 from triton.runtime.jit import jit
-from triton.language import core, math
-from triton.language import zeros_like, core
+
 
 @jit
 def _indicator(n_dims: core.constexpr, idx: core.constexpr, pos: core.constexpr):
@@ -17,13 +17,21 @@ def _indicator(n_dims: core.constexpr, idx: core.constexpr, pos: core.constexpr)
             y = core.expand_dims(y, n)
     return y
 
+
 @jit
-def _take_slice(x, n_dims: core.constexpr, idx: core.constexpr, pos: core.constexpr, keep_dim: core.constexpr = True):
+def _take_slice(
+    x,
+    n_dims: core.constexpr,
+    idx: core.constexpr,
+    pos: core.constexpr,
+    keep_dim: core.constexpr = True,
+):
     y = sum(x * _indicator(n_dims, idx, pos), n_dims - 1 - idx)
     if keep_dim:
         y = core.expand_dims(y, n_dims - 1 - idx)
 
     return y
+
 
 @jit
 def _compare_and_swap(x, desc_mask, n_dims: core.constexpr, idx: core.constexpr):
@@ -51,13 +59,16 @@ def _compare_and_swap(x, desc_mask, n_dims: core.constexpr, idx: core.constexpr)
     y = y.to(x.dtype, bitcast=True)
     return y
 
+
 @jit
-def _bitonic_merge(x, n_dims: core.constexpr, active_dims: core.constexpr, order_type: core.constexpr):
-    '''
+def _bitonic_merge(
+    x, n_dims: core.constexpr, active_dims: core.constexpr, order_type: core.constexpr
+):
+    """
     order_type 0 == ascending
     order_type 1 == descending
     order_type 2 == alternating
-    '''
+    """
     core.static_assert(active_dims <= n_dims)
 
     if order_type == 2:
@@ -70,6 +81,7 @@ def _bitonic_merge(x, n_dims: core.constexpr, active_dims: core.constexpr, order
 
     return x
 
+
 def _log2(i: core.constexpr):
     log2 = 0
     n = i.value
@@ -78,12 +90,15 @@ def _log2(i: core.constexpr):
         log2 += 1
     return core.constexpr(log2)
 
+
 def _is_power_of_two(i: core.constexpr):
     n = i.value
     return core.constexpr((n & (n - 1)) == 0 and n != 0)
 
+
 def _unwrap_if_constexpr(o):
     return o.value if isinstance(o, core.constexpr) else o
+
 
 def _get_sort_dim(dim, shape):
     dim = _unwrap_if_constexpr(dim)
@@ -92,6 +107,7 @@ def _get_sort_dim(dim, shape):
         dim = len(shape) - 1
     assert dim == len(shape) - 1, "Currently only support sorting on the last dimension"
     return core.constexpr(dim)
+
 
 @jit
 def sort(x, dim=None, descending: core.constexpr = 0):
@@ -102,10 +118,10 @@ def sort(x, dim=None, descending: core.constexpr = 0):
     y = core.reshape(x, [2] * _log2(x.numel))
     for i in core.static_range(1, _log2(x.shape[_get_sort_dim(dim, x.shape)]) + 1):
         y = _bitonic_merge(
-            y, 
-            _log2(x.numel), 
-            i, 
-            (descending if (i == _log2(x.shape[_get_sort_dim(dim, x.shape)])) else 2)
+            y,
+            _log2(x.numel),
+            i,
+            (descending if (i == _log2(x.shape[_get_sort_dim(dim, x.shape)])) else 2),
         )
 
     x = core.reshape(y, x.shape)

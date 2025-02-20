@@ -4,35 +4,37 @@ Code is adapted from the PyTorch examples at
 https://github.com/pytorch/examples/blob/main/word_language_model
 
 """
+
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import requests
 import torch
+import tqdm
 from torch import Tensor
 from torch.utils.data import Dataset
-import tqdm
 from transformers import AutoTokenizer
+
 
 class LabDataset(Dataset):
     """Mini version of WikiText2."""
 
     def __init__(
-        self, 
-        data_dir: Path = './cache/wikitext2', 
-        block_size: int = 4096, 
+        self,
+        data_dir: Path = "./cache/wikitext2",
+        block_size: int = 4096,
         download: bool = True,
         tokenizer: AutoTokenizer = None,
-        dataset: str = 'wikitext103',
+        dataset: str = "wikitext103",
     ) -> None:
         super().__init__()
-        
+
         self.dataset = dataset
-        os.makedirs('./cache/wikitext2', exist_ok=True)
-        cache_path = './cache/wikitext2/tokenized.pth'
-        if self.dataset != 'wikitext103':
-            cache_path = f'./cache/wikitext2/tokenized_{self.dataset}.pth'
+        os.makedirs("./cache/wikitext2", exist_ok=True)
+        cache_path = "./cache/wikitext2/tokenized.pth"
+        if self.dataset != "wikitext103":
+            cache_path = f"./cache/wikitext2/tokenized_{self.dataset}.pth"
         if os.path.exists(cache_path):
             data = torch.load(cache_path)
         else:
@@ -40,15 +42,15 @@ class LabDataset(Dataset):
             if download:
                 self.download(self.path)
             document = tokenize(self.path)
-            print('tokenizing')
+            print("tokenizing")
             lines = []
             for line in tqdm.tqdm(document, dynamic_ncols=True, leave=False):
-                data = tokenizer(line, return_tensors='pt').input_ids.view(-1)
+                data = tokenizer(line, return_tensors="pt").input_ids.view(-1)
                 lines.append(data)
             data = torch.cat(lines)
             torch.save(data, cache_path)
-            print('tokenized')
-        
+            print("tokenized")
+
         self.data = data
         self.block_size = block_size
 
@@ -64,20 +66,21 @@ class LabDataset(Dataset):
 
     def download(self, destination: Path) -> None:
         os.makedirs(destination.parent, exist_ok=True)
-        
+
         dataset = self.dataset
-        if dataset == 'wikitext2':
+        if dataset == "wikitext2":
             url = "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt"
             if os.path.exists(destination):
                 return
             data = requests.get(url).text
-        elif dataset == 'wikitext103':
+        elif dataset == "wikitext103":
             from datasets import load_dataset
+
             test = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
             data = "\n\n".join(test["text"])
         else:
             raise Exception()
-        
+
         with open(destination, "w") as f:
             f.write(data)
 
@@ -105,7 +108,7 @@ def tokenize(path: Path) -> Tuple[Tensor, Dictionary]:
     lines = []
     with open(path, encoding="utf8") as f:
         for line in f:
-            lines.append(line + '\n')
+            lines.append(line + "\n")
     return lines
     #         words = line.split()
     #         for word in words:

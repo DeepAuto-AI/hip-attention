@@ -26,7 +26,7 @@ class CachedBuffer:
         if self.buffer.shape[0] < batch_size:
             raise ValueError(
                 f"Buffer batch size {self.buffer.shape[0]} is smaller than the requested batch size {batch_size}.\n"
-                f"Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{\"metadata_cache_max_batch_size\"}}."
+                f'Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{"metadata_cache_max_batch_size"}}.'
             )
         if self.batch_format == "BH":
             return self.buffer[: batch_size * head_size].to(self.dtype, copy=True)
@@ -39,7 +39,7 @@ class CachedBuffer:
         if self.buffer.shape[0] < value.shape[0]:
             raise ValueError(
                 f"Buffer batch size {self.buffer.shape[0]} is smaller than value batch size {value.shape[0]}.\n"
-                f"Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{\"metadata_cache_max_batch_size\"}}."
+                f'Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{"metadata_cache_max_batch_size"}}.'
             )
         if self.batch_format == "BH":
             self.buffer[: value.shape[0]].copy_(value.to(self.buffer.dtype))
@@ -85,18 +85,34 @@ class HiPMetadataCachePool:
             )
 
             num_q_blocks = 1
-            self.init_buffer(layer_idx, "indices", [num_q_blocks, n_chunks], torch.int64, store_dtype=torch.uint32)
+            self.init_buffer(
+                layer_idx,
+                "indices",
+                [num_q_blocks, n_chunks],
+                torch.int64,
+                store_dtype=torch.uint32,
+            )
             self.init_buffer(layer_idx, "ks", [num_q_blocks], torch.int64)
             self.init_buffer(layer_idx, "ks_count", [num_q_blocks, 1], torch.int64)
             self.init_buffer(layer_idx, "ks_start_end", [num_q_blocks, 2], torch.int64)
 
-            self.init_buffer(layer_idx, "mask_access_count", [num_q_blocks], torch.int64)
-            self.init_buffer(layer_idx, "mask_unique_access_count", [num_q_blocks], torch.int64)
-            self.init_buffer(layer_idx, "mask_cache_miss_count", [num_q_blocks], torch.int64)
+            self.init_buffer(
+                layer_idx, "mask_access_count", [num_q_blocks], torch.int64
+            )
+            self.init_buffer(
+                layer_idx, "mask_unique_access_count", [num_q_blocks], torch.int64
+            )
+            self.init_buffer(
+                layer_idx, "mask_cache_miss_count", [num_q_blocks], torch.int64
+            )
 
             self.init_buffer(layer_idx, "sa_access_count", [num_q_blocks], torch.int64)
-            self.init_buffer(layer_idx, "sa_unique_access_count", [num_q_blocks], torch.int64)
-            self.init_buffer(layer_idx, "sa_cache_miss_count", [num_q_blocks], torch.int64)
+            self.init_buffer(
+                layer_idx, "sa_unique_access_count", [num_q_blocks], torch.int64
+            )
+            self.init_buffer(
+                layer_idx, "sa_cache_miss_count", [num_q_blocks], torch.int64
+            )
 
             for i_stage, stage in enumerate(layer_config.stages):
                 if i_stage > 0:

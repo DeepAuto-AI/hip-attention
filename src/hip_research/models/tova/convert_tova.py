@@ -1,10 +1,19 @@
 import types
 
-from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaAttention
-from transformers.models.mistral.modeling_mistral import MistralForCausalLM, MistralAttention
+from transformers.models.llama.modeling_llama import LlamaAttention, LlamaForCausalLM
+from transformers.models.mistral.modeling_mistral import (
+    MistralAttention,
+    MistralForCausalLM,
+)
 
-from .llama_custom import tova_llama_attention_forward, tova_llama_prepare_inputs_for_generation_generation
-from .mistral_custom import tova_mistral_attention_forward, tova_mistral_prepare_inputs_for_generation_generation
+from .llama_custom import (
+    tova_llama_attention_forward,
+    tova_llama_prepare_inputs_for_generation_generation,
+)
+from .mistral_custom import (
+    tova_mistral_attention_forward,
+    tova_mistral_prepare_inputs_for_generation_generation,
+)
 
 
 def enable_tova_caching(model):
@@ -17,7 +26,7 @@ def enable_tova_caching(model):
         model.prepare_inputs_for_generation = types.MethodType(
             tova_mistral_prepare_inputs_for_generation_generation, model
         )
-    
+
     for name, module in reversed(model._modules.items()):
         if len(list(module.children())) > 0:
             enable_tova_caching(
@@ -33,5 +42,3 @@ def enable_tova_caching(model):
             model._modules[name].forward = types.MethodType(
                 tova_mistral_attention_forward, model._modules[name]
             )
-
-        

@@ -3,8 +3,8 @@
 
 // write function that will be called from python
 torch::Tensor tensor_from_pointer(
-    const long ptr, 
-    const long size, 
+    const long ptr,
+    const long size,
     const long elem_size,
     const long device_index
 ) {

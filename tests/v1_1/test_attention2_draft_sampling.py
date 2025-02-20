@@ -3,29 +3,20 @@ import unittest
 
 import torch
 
-from hip_research.utils.load_checkouts import load_checkouts
-from hip_attn.v1_1.attention2_draft_prefetch import (
-    hip_attention,
-    HiPAttentionArgs,
-)
-from hip_attn.v1_1.attention2_draft_sampling import (
-    dual_stage_quadratic_hip_attention,
-)
 import hip_attn.v1_1.attention2_draft_sampling
+from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs, hip_attention
+from hip_attn.v1_1.attention2_draft_sampling import dual_stage_quadratic_hip_attention
+from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2DraftSampling(unittest.TestCase):
 
     def test_attention(self):
         seq_len = 131072
-        seq_dups = int(os.getenv('DUPS', '1'))
+        seq_dups = int(os.getenv("DUPS", "1"))
 
         q, k, v, out, cos, sin = load_checkouts(
-            idx=0,
-            window=40,
-            seq_len=seq_len,
-            return_cos_sin=True,
-            dtype=torch.bfloat16
+            idx=0, window=40, seq_len=seq_len, return_cos_sin=True, dtype=torch.bfloat16
         )
         HEAD = q.shape[0]
         HEAD_KV = k.shape[0]
@@ -37,22 +28,20 @@ class TestAttention2DraftSampling(unittest.TestCase):
 
         from flash_attn import flash_attn_func
 
-        print('-' * 20)
+        print("-" * 20)
 
         for i in range(3):
             start = torch.cuda.Event(True)
             end = torch.cuda.Event(True)
 
             start.record()
-            flash_attn_func(
-                q, k, v, causal=True
-            )
+            flash_attn_func(q, k, v, causal=True)
             end.record()
 
             end.synchronize()
             print(start.elapsed_time(end))
 
-        print('-' * 20)
+        print("-" * 20)
 
         for i in range(10):
             start = torch.cuda.Event(True)
@@ -60,7 +49,9 @@ class TestAttention2DraftSampling(unittest.TestCase):
 
             start.record()
             hip_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 args=HiPAttentionArgs(
                     mask_k=512,
                     block_size_q=64,
@@ -75,7 +66,7 @@ class TestAttention2DraftSampling(unittest.TestCase):
             end.synchronize()
             print(start.elapsed_time(end))
 
-        print('-' * 20)
+        print("-" * 20)
 
         for i in range(10):
             start = torch.cuda.Event(True)
@@ -83,7 +74,9 @@ class TestAttention2DraftSampling(unittest.TestCase):
 
             start.record()
             if i == 0:
-                hip_attn.v1_1.attention2_draft_sampling.DEBUG = os.getenv('DEBUG', '0') == '1'
+                hip_attn.v1_1.attention2_draft_sampling.DEBUG = (
+                    os.getenv("DEBUG", "0") == "1"
+                )
 
             # dual_stage_hip_attention(
             #     q, k, v,
@@ -121,7 +114,9 @@ class TestAttention2DraftSampling(unittest.TestCase):
             # )
 
             dual_stage_quadratic_hip_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 args=HiPAttentionArgs(
                     mask_k=256,
                     block_size_q=64,

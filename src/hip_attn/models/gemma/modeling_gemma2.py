@@ -97,21 +97,32 @@ class Gemma2RotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim))
+        inv_freq = 1.0 / (
+            self.base
+            ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim)
+        )
         self.register_buffer("inv_freq", tensor=inv_freq, persistent=False)
 
     @torch.no_grad()
     def forward(self, x, position_ids, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         self.inv_freq.to(x.device)
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        inv_freq_expanded = (
+            self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        )
         position_ids_expanded = position_ids[:, None, :].float()
         # Force float32 since bfloat16 loses precision on long contexts
         # See https://github.com/huggingface/transformers/pull/29285
         device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        device_type = (
+            device_type
+            if isinstance(device_type, str) and device_type != "mps"
+            else "cpu"
+        )
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            freqs = (
+                inv_freq_expanded.float() @ position_ids_expanded.float()
+            ).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
@@ -125,7 +136,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1) -> Tuple[torch.Tensor, torch.Tensor]:
+def apply_rotary_pos_emb(
+    q, k, cos, sin, position_ids=None, unsqueeze_dim=1
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -160,7 +173,9 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -195,10 +210,22 @@ class Gemma2Attention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias,
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias
+        )
         self.sliding_window = config.sliding_window if not bool(layer_idx % 2) else None
         self.rotary_emb = Gemma2RotaryEmbedding(
             self.head_dim,
@@ -222,12 +249,20 @@ class Gemma2Attention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -237,12 +272,16 @@ class Gemma2Attention(nn.Module):
                 "sliding_window": self.sliding_window,
                 "cache_position": cache_position,
             }
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
+        attn_weights = (
+            torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
+        )
 
         if self.config.attn_logit_softcapping is not None:
             attn_weights = attn_weights / self.config.attn_logit_softcapping
@@ -253,8 +292,12 @@ class Gemma2Attention(nn.Module):
             attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.attention_dropout, training=self.training
+        )
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -275,14 +318,10 @@ class Gemma2Attention(nn.Module):
 
 
 class Gemma2CustomAttention(Gemma2Attention):
-    def __init__(
-        self, 
-        config: Gemma2Config, 
-        layer_idx: Optional[int] = None
-    ):
+    def __init__(self, config: Gemma2Config, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
 
-        self.attention_method = 'none'
+        self.attention_method = "none"
         self.tree_k = 512
         self.tree_block_size_q = 64
         self.tree_block_stride_q = 2
@@ -295,27 +334,28 @@ class Gemma2CustomAttention(Gemma2Attention):
         self.tree_high_k_layers = {
             # 0:4, 1:4, 2:4, 3:4,
         }
-        self.tree_rope_method = 'none'
+        self.tree_rope_method = "none"
         self.tree_enable_sparq = False
         self.tree_enable_flash = True
         self.tree_use_sliding_window = True
-        self.tree_sampling_method = 'center'
+        self.tree_sampling_method = "center"
         self.tree_lp_norm_coeff = 0.5
         self.tree_sliding_window_size = 1024
         self.tree_sink_token_size = 256
 
         self.tree_reformer = self.tree_performer = None
-        
+
         from hip_research.models.hyper_attention.hyper_attn import HyperAttention
+
         self.hyper_attention = HyperAttention(
             input_dim=self.hidden_size // config.num_attention_heads,
-            lsh_num_projs=7, # not very meaningful after 7
-            block_size=64, # smaller better
-            sample_size=1024, # larger better
-            min_seq_len=32, # this factor is kind of random. usually smaller better
-            cuda=True, 
+            lsh_num_projs=7,  # not very meaningful after 7
+            block_size=64,  # smaller better
+            sample_size=1024,  # larger better
+            min_seq_len=32,  # this factor is kind of random. usually smaller better
+            cuda=True,
         )
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -325,11 +365,13 @@ class Gemma2CustomAttention(Gemma2Attention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # will become mandatory in v4.45
         output_attn_sparsity_loss: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        se_group_size = int(os.getenv('SE_GROUP_SIZE', '16'))
+        se_group_size = int(os.getenv("SE_GROUP_SIZE", "16"))
         force_dense = False
         disalbe_sliding_window = False
         using_self_extend = True
@@ -340,8 +382,8 @@ class Gemma2CustomAttention(Gemma2Attention):
                 self.tree_k = 1024
                 self.tree_sliding_window_size = 1024
                 self.tree_dense_layers.clear()
-            self.tree_rope_method = 'self_extend'
-            
+            self.tree_rope_method = "self_extend"
+
             if self.sliding_window != None:
                 force_dense = True
             else:
@@ -350,28 +392,38 @@ class Gemma2CustomAttention(Gemma2Attention):
         else:
             if self.sliding_window != None:
                 force_dense = True
-        
+
         bsz, q_len, _ = hidden_states.size()
-        
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+
         # if self.sliding_window != None and disalbe_sliding_window:
         #     position_ids = position_ids // 2
-        
+
         # seq_len = attention_mask.shape[-1]
         seq_len = position_ids.max().item() + 1
         # print(seq_len, cache_position)
-        
+
         cos, sin = self.rotary_emb(value_states, position_ids)
-        cos_full, sin_full = self.rotary_emb(value_states, torch.arange(0, seq_len, device=query_states.device)[None, :])
+        cos_full, sin_full = self.rotary_emb(
+            value_states, torch.arange(0, seq_len, device=query_states.device)[None, :]
+        )
         if not need_apply_rope:
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
 
         # print(cos.shape, cos_full.shape, self.attention_method, force_dense)
 
@@ -383,17 +435,19 @@ class Gemma2CustomAttention(Gemma2Attention):
                 "sliding_window": self.sliding_window,
                 "cache_position": cache_position,
             }
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
             query_states = query_states.to(key_states.dtype)
             assert key_states.dtype == value_states.dtype
             assert query_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
-        
+
         # if self.sliding_window != None:
         #     self.tree_k = self.sliding_window
         #     self.attention_method = 'streaming_llm'
-        
+
         # NOTE: HiP, FA2 supports GQA, MQA natively.
-        if self.attention_method not in ['hip', 'fa2', 'none', 'hip1.1', 'hip1.0']:
+        if self.attention_method not in ["hip", "fa2", "none", "hip1.1", "hip1.0"]:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -407,7 +461,7 @@ class Gemma2CustomAttention(Gemma2Attention):
         # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         # attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         # attn_output = torch.matmul(attn_weights, value_states)
-        
+
         causal_mask = attention_mask
         # if attention_mask is not None and cache_position is not None:
         causal_mask = attention_mask = None
@@ -417,14 +471,14 @@ class Gemma2CustomAttention(Gemma2Attention):
         mask_k = self.tree_k
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
-        
+
         q_repeat = 1
-        
+
         if force_dense:
             from flash_attn import flash_attn_func
-            
+
             assert self.sliding_window is not None
-            
+
             attn_output = flash_attn_func(
                 q=query_states.permute(0, 2, 1, 3),
                 k=key_states.permute(0, 2, 1, 3),
@@ -436,41 +490,40 @@ class Gemma2CustomAttention(Gemma2Attention):
             ).permute(0, 2, 1, 3)
         else:
             attn_output, _, _ = custom_attention(
-                query_states=query_states.repeat_interleave(q_repeat, 2), 
-                key_states=key_states[:,:,:seq_len], 
-                value_states=value_states[:,:,:seq_len],
-                attention_mask=attention_mask, 
+                query_states=query_states.repeat_interleave(q_repeat, 2),
+                key_states=key_states[:, :, :seq_len],
+                value_states=value_states[:, :, :seq_len],
+                attention_mask=attention_mask,
                 causal_mask=causal_mask,
                 attention_dropout=self.attention_dropout if self.training else 0.0,
-
                 # Attention method
-                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) or force_dense) else self.attention_method,
+                attention_method=(
+                    "fa2"
+                    if ((self.layer_idx in self.tree_dense_layers) or force_dense)
+                    else self.attention_method
+                ),
                 tree_reformer=self.tree_reformer,
                 tree_performer=self.tree_performer,
-
                 # hip parameters
                 tree_k=mask_k,
                 tree_block_size_q=self.tree_block_size_q,
-                tree_block_stride_q=self.tree_block_stride_q, 
+                tree_block_stride_q=self.tree_block_stride_q,
                 tree_block_size_k=self.tree_block_size_k,
-                tree_block_stride_k=self.tree_block_stride_k, 
+                tree_block_stride_k=self.tree_block_stride_k,
                 tree_dense_queries=self.tree_dense_queries,
                 tree_last_dense_queries=self.tree_last_dense_queries,
                 tree_sampling_method=self.tree_sampling_method,
                 tree_sliding_window_size=self.tree_sliding_window_size,
-
                 # Latency optimization tweaks
                 tree_enable_flash=self.tree_enable_flash,
                 tree_enable_sparq=self.tree_enable_sparq,
                 tree_use_sliding_window=self.tree_use_sliding_window,
                 tree_sink_token_size=self.tree_sink_token_size,
-
                 # Context averaging parameters
                 tree_using_context_avg=False,
                 tree_avgpool_scaler=None,
                 last_cumsum=None,
                 hidden_states=hidden_states,
-
                 # RoPE parameters
                 tree_rope_method=self.tree_rope_method,
                 rope_cos=cos_full,
@@ -478,17 +531,16 @@ class Gemma2CustomAttention(Gemma2Attention):
                 position_ids=position_ids[:, :q_len].repeat_interleave(q_repeat, 1),
                 self_extend_group_size=se_group_size,
                 need_apply_rope=need_apply_rope,
-
                 # Attention sparsity loss
                 output_attn_sparsity_loss=output_attn_sparsity_loss,
                 tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-                
                 # Hyper attention states
                 hyper_attention=self.hyper_attention,
-                
                 sm_scaler=self.scaling,
                 attn_logit_softcapping=self.config.attn_logit_softcapping,
-                model_sliding_window=self.sliding_window if not disalbe_sliding_window else None,
+                model_sliding_window=(
+                    self.sliding_window if not disalbe_sliding_window else None
+                ),
                 model_context_length=model_context_length,
             )
         attn_output = attn_output[:, :, :q_len]
@@ -499,18 +551,19 @@ class Gemma2CustomAttention(Gemma2Attention):
                 f" {attn_output.size()}"
             )
 
-        attn_output = attn_output.transpose(1, 2) # type: torch.Tensor
+        attn_output = attn_output.transpose(1, 2)  # type: torch.Tensor
         if not attn_output.is_contiguous():
             attn_output = attn_output.contiguous()
 
         attn_output = attn_output.view(bsz, q_len, -1)
-        
+
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
 
 class Gemma2FlashAttention2(Gemma2Attention):
     """
@@ -548,12 +601,20 @@ class Gemma2FlashAttention2(Gemma2Attention):
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
         # therefore we just need to keep the original shape
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -563,7 +624,9 @@ class Gemma2FlashAttention2(Gemma2Attention):
                 "sliding_window": self.sliding_window,
                 "cache_position": cache_position,
             }
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         if attention_mask is not None:
             seq_len = attention_mask.shape[1]
@@ -615,7 +678,11 @@ class Gemma2FlashAttention2(Gemma2Attention):
             is_causal=self.is_causal,
             sliding_window=self.sliding_window,
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
-            softcap=self.config.attn_logit_softcapping if is_flash_attn_greater_or_equal("2.6.0") else None,
+            softcap=(
+                self.config.attn_logit_softcapping
+                if is_flash_attn_greater_or_equal("2.6.0")
+                else None
+            ),
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -667,12 +734,20 @@ class Gemma2SdpaAttention(Gemma2Attention):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -682,7 +757,9 @@ class Gemma2SdpaAttention(Gemma2Attention):
                 "sliding_window": self.sliding_window,
                 "cache_position": cache_position,
             }
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -756,21 +833,33 @@ def _prepare_4d_causal_attention_mask_with_cache_position(
         # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
         causal_mask = attention_mask
     else:
-        causal_mask = torch.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
+        causal_mask = torch.full(
+            (sequence_length, target_length),
+            fill_value=min_dtype,
+            dtype=dtype,
+            device=device,
+        )
         if sequence_length != 1:
             causal_mask = torch.triu(causal_mask, diagonal=1)
-        causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
+        causal_mask *= torch.arange(
+            target_length, device=device
+        ) > cache_position.reshape(-1, 1)
         causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
         if attention_mask is not None:
-            causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+            causal_mask = (
+                causal_mask.clone()
+            )  # copy to contiguous memory for in-place edit
             mask_length = attention_mask.shape[-1]
-            padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
-            padding_mask = padding_mask == 0
-            causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-                padding_mask, min_dtype
+            padding_mask = (
+                causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
             )
+            padding_mask = padding_mask == 0
+            causal_mask[:, :, :, :mask_length] = causal_mask[
+                :, :, :, :mask_length
+            ].masked_fill(padding_mask, min_dtype)
 
     return causal_mask
+
 
 GEMMA2_ATTENTION_CLASSES = {
     "eager": Gemma2Attention,
@@ -784,15 +873,25 @@ class Gemma2DecoderLayer(nn.Module):
     def __init__(self, config: Gemma2Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = GEMMA2_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = GEMMA2_ATTENTION_CLASSES[config._attn_implementation](
+            config=config, layer_idx=layer_idx
+        )
         self.mlp = Gemma2MLP(config)
-        self.input_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
         self.config = config
         self.is_sliding = not bool(layer_idx % 2)
-        self.pre_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
         self.sliding_window = config.sliding_window
-        self.post_attention_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -803,7 +902,9 @@ class Gemma2DecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -823,7 +924,9 @@ class Gemma2DecoderLayer(nn.Module):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
         """
-        if self.is_sliding and attention_mask is not None:  # efficient SDPA and no padding
+        if (
+            self.is_sliding and attention_mask is not None
+        ):  # efficient SDPA and no padding
             # Flash-attn is a 2D tensor
             if self.config._attn_implementation == "flash_attention_2":
                 if past_key_value is not None:  # when decoding
@@ -831,9 +934,12 @@ class Gemma2DecoderLayer(nn.Module):
             else:
                 min_dtype = torch.finfo(hidden_states.dtype).min
                 sliding_window_mask = torch.tril(
-                    torch.ones_like(attention_mask, dtype=torch.bool), diagonal=-self.sliding_window
+                    torch.ones_like(attention_mask, dtype=torch.bool),
+                    diagonal=-self.sliding_window,
                 )
-                attention_mask = torch.where(sliding_window_mask, min_dtype, attention_mask)
+                attention_mask = torch.where(
+                    sliding_window_mask, min_dtype, attention_mask
+                )
                 if attention_mask.shape[-1] <= 1:  # when decoding
                     attention_mask = attention_mask[:, :, :, -self.sliding_window :]
 
@@ -1025,9 +1131,14 @@ class Gemma2Model(Gemma2PreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
         self.layers = nn.ModuleList(
-            [Gemma2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                Gemma2DecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self.norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
@@ -1055,12 +1166,20 @@ class Gemma2Model(Gemma2PreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -1087,16 +1206,24 @@ class Gemma2Model(Gemma2PreTrainedModel):
             )
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
             cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
         )
 
         # embed positions
@@ -1105,7 +1232,9 @@ class Gemma2Model(Gemma2PreTrainedModel):
         # normalized
         # Gemma2 downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5
         # See https://github.com/huggingface/transformers/pull/29402
-        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype)
+        normalizer = torch.tensor(
+            self.config.hidden_size**0.5, dtype=hidden_states.dtype
+        )
         hidden_states = hidden_states * normalizer
 
         # decoder layers
@@ -1151,7 +1280,11 @@ class Gemma2Model(Gemma2PreTrainedModel):
         next_cache = past_key_values if use_cache else None
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -1183,7 +1316,11 @@ class Gemma2Model(Gemma2PreTrainedModel):
         if isinstance(past_key_values, HybridCache):
             target_length = past_key_values.get_max_length()
         else:
-            target_length = attention_mask.shape[-1] if attention_mask is not None else input_tensor.shape[1]
+            target_length = (
+                attention_mask.shape[-1]
+                if attention_mask is not None
+                else input_tensor.shape[1]
+            )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
         causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
@@ -1230,7 +1367,9 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         return self.model
 
     @add_start_docstrings_to_model_forward(GEMMA2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(
+        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+    )
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1277,7 +1416,7 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "What is your favorite condiment?"
         ```"""
-        
+
         # print(attention_mask.shape,'ipguhe3')
 
         if self.training and self.config._attn_implementation != "eager":
@@ -1285,11 +1424,19 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
                 "It is strongly recommended to train Gemma2 models with the `eager` attention implementation "
                 f"instead of `{self.config._attn_implementation}`. Use `eager` with `AutoModelForCausalLM.from_pretrained('<path-to-checkpoint>', attn_implementation='eager')`."
             )
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1337,8 +1484,10 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         if not self.training and not output_logits and past_key_values is None:
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
-                from hip_attn.utils.memory_efficient_llm_ce import memory_efficient_llm_ce
-                
+                from hip_attn.utils.memory_efficient_llm_ce import (
+                    memory_efficient_llm_ce,
+                )
+
                 # Shift so that tokens < n predict n
                 shift_states = hidden_states[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
@@ -1347,13 +1496,13 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_states.device)
-                
+
                 loss = memory_efficient_llm_ce(
                     shift_states,
                     self.lm_head.weight,
                     shift_labels,
                     softcap=self.config.final_logit_softcapping,
-                    reduction='none'
+                    reduction="none",
                 )
             logits = None
         else:
@@ -1363,9 +1512,11 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
             #     logits = torch.cat(logits, dim=-1)
             # else:
             #     logits = self.lm_head(hidden_states)
-            
+
             if num_logits_to_keep < 0:
-                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:-num_logits_to_keep+1, :])
+                logits = self.lm_head(
+                    hidden_states[:, -num_logits_to_keep : -num_logits_to_keep + 1, :]
+                )
             else:
                 logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
             if self.config.final_logit_softcapping is not None:
@@ -1417,7 +1568,9 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
         if past_key_values is not None:
             if inputs_embeds is not None:  # Exception 1
                 input_ids = input_ids[:, -cache_position.shape[0] :]
-            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+            elif (
+                input_ids.shape[1] != cache_position.shape[0]
+            ):  # Default case (the "else", a no op, is Exception 2)
                 input_ids = input_ids[:, cache_position]
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -1437,7 +1590,10 @@ class Gemma2ForCausalLM(Gemma2PreTrainedModel, GenerationMixin):
             model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
         else:
             # The clone here is for the same reason as for `position_ids`.
-            model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
+            model_inputs = {
+                "input_ids": input_ids.clone(memory_format=torch.contiguous_format),
+                "inputs_embeds": None,
+            }
 
         if (
             isinstance(past_key_values, HybridCache)
@@ -1530,7 +1686,9 @@ class Gemma2ForSequenceClassification(Gemma2PreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         transformer_outputs = self.model(
             input_ids,
@@ -1552,19 +1710,25 @@ class Gemma2ForSequenceClassification(Gemma2PreTrainedModel):
             batch_size = inputs_embeds.shape[0]
 
         if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined."
+            )
         if self.config.pad_token_id is None:
             sequence_lengths = -1
         else:
             if input_ids is not None:
                 # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
-                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                sequence_lengths = (
+                    torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                )
                 sequence_lengths = sequence_lengths % input_ids.shape[-1]
                 sequence_lengths = sequence_lengths.to(logits.device)
             else:
                 sequence_lengths = -1
 
-        pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
+        pooled_logits = logits[
+            torch.arange(batch_size, device=logits.device), sequence_lengths
+        ]
 
         loss = None
         if labels is not None:
@@ -1572,7 +1736,9 @@ class Gemma2ForSequenceClassification(Gemma2PreTrainedModel):
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                elif self.num_labels > 1 and (
+                    labels.dtype == torch.long or labels.dtype == torch.int
+                ):
                     self.config.problem_type = "single_label_classification"
                 else:
                     self.config.problem_type = "multi_label_classification"
@@ -1585,7 +1751,9 @@ class Gemma2ForSequenceClassification(Gemma2PreTrainedModel):
                     loss = loss_fct(pooled_logits, labels)
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(
+                    pooled_logits.view(-1, self.num_labels), labels.view(-1)
+                )
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
@@ -1652,7 +1820,9 @@ class Gemma2ForTokenClassification(Gemma2PreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         outputs = self.model(
             input_ids,

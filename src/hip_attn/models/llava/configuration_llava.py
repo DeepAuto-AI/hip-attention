@@ -14,9 +14,8 @@
 """ Llava model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
 from transformers.models.auto import CONFIG_MAPPING
-
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
@@ -102,9 +101,13 @@ class LlavaConfig(PretrainedConfig):
 
         if isinstance(self.vision_config, dict):
             vision_config["model_type"] = (
-                vision_config["model_type"] if "model_type" in vision_config else "clip_vision_model"
+                vision_config["model_type"]
+                if "model_type" in vision_config
+                else "clip_vision_model"
             )
-            self.vision_config = CONFIG_MAPPING[vision_config["model_type"]](**vision_config)
+            self.vision_config = CONFIG_MAPPING[vision_config["model_type"]](
+                **vision_config
+            )
         elif vision_config is None:
             self.vision_config = CONFIG_MAPPING["clip_vision_model"](
                 intermediate_size=4096,
@@ -121,7 +124,9 @@ class LlavaConfig(PretrainedConfig):
         self.text_config = text_config
 
         if isinstance(self.text_config, dict):
-            text_config["model_type"] = text_config["model_type"] if "model_type" in text_config else "llama"
+            text_config["model_type"] = (
+                text_config["model_type"] if "model_type" in text_config else "llama"
+            )
             self.text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
             self.vocab_size = self.text_config.vocab_size
         elif text_config is None:

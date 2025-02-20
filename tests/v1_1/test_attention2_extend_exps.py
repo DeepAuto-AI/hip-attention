@@ -6,19 +6,19 @@ import numpy as np
 import torch
 import triton
 
-from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_1.attention2_draft_sampling_extend import (
-    dual_stage_quadratic_hip_attention,
     HiPAttentionArgs,
+    dual_stage_quadratic_hip_attention,
 )
+from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2ExtendExps(unittest.TestCase):
 
     def test_attention_extend_exps(self):
         seq_len = 131072
-        seq_dups = int(os.getenv('DUPS', '1'))
-        batch_size = int(os.getenv('BATCH_SIZE', '1'))
+        seq_dups = int(os.getenv("DUPS", "1"))
+        batch_size = int(os.getenv("BATCH_SIZE", "1"))
 
         assert seq_dups > 0
 
@@ -28,15 +28,19 @@ class TestAttention2ExtendExps(unittest.TestCase):
             seq_len=seq_len,
             return_cos_sin=True,
             derope=True,
-            dtype=torch.bfloat16
+            dtype=torch.bfloat16,
         )
         HEAD = q.shape[0]
         HEAD_KV = k.shape[0]
         seq_len = seq_len * seq_dups
 
         q = q.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)  # .to(torch.float8_e5m2)
-        v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)  # .to(torch.float8_e5m2)
+        k = (
+            k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+        )  # .to(torch.float8_e5m2)
+        v = (
+            v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+        )  # .to(torch.float8_e5m2)
         if cos is not None:
             cos = cos.repeat(seq_dups, 1)  # .to(torch.float8_e5m2)
             sin = sin.repeat(seq_dups, 1)  # .to(torch.float8_e5m2)
@@ -50,7 +54,9 @@ class TestAttention2ExtendExps(unittest.TestCase):
         print(q.shape, k.shape, v.shape)
 
         _, high_res_metadata = dual_stage_quadratic_hip_attention(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             args=HiPAttentionArgs(
                 mask_k=128,
                 block_size_q=64,
@@ -60,7 +66,6 @@ class TestAttention2ExtendExps(unittest.TestCase):
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
-
                 using_extend=True,
                 rope_cos=cos,
                 rope_sin=sin,
@@ -78,12 +83,14 @@ class TestAttention2ExtendExps(unittest.TestCase):
             scan_early_terminate=1,
             stage_early_terminate=1,
             mask_only=False,
-            scan_extend_backend='streaming',
-            sa_extend_backend='streaming'
+            scan_extend_backend="streaming",
+            sa_extend_backend="streaming",
         )
 
         _, low_res_metadata = dual_stage_quadratic_hip_attention(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             args=HiPAttentionArgs(
                 mask_k=256,
                 block_size_q=64,
@@ -93,7 +100,6 @@ class TestAttention2ExtendExps(unittest.TestCase):
                 sliding_window_size=1024,
                 sink_token_size=256,
                 # position_ids=position_ids,
-
                 using_extend=True,
                 rope_cos=cos,
                 rope_sin=sin,
@@ -111,8 +117,8 @@ class TestAttention2ExtendExps(unittest.TestCase):
             scan_early_terminate=1,
             stage_early_terminate=1,
             mask_only=False,
-            scan_extend_backend='streaming',
-            sa_extend_backend='streaming'
+            scan_extend_backend="streaming",
+            sa_extend_backend="streaming",
         )
 
 
@@ -120,7 +126,10 @@ class TestAttention2ExtendExps(unittest.TestCase):
 def convert_to_dense_numba(
     indices,
     mask,
-    TDST, TSRC, BQ, BK,
+    TDST,
+    TSRC,
+    BQ,
+    BK,
 ):
     target_batch = 0
     BDST = indices.shape[1]
@@ -130,23 +139,19 @@ def convert_to_dense_numba(
             k = indices[target_batch, ibdst, iks]
             mask[ibdst]
 
+
 def convert_to_dense(
     indices,
-    TDST, TSRC,
+    TDST,
+    TSRC,
     block_size_q,
     block_size_k,
 ):
     mask = np.zeros(
-        (
-            triton.cdiv(TDST, block_size_q), 
-            triton.cdiv(TSRC, block_size_k)
-        ),
+        (triton.cdiv(TDST, block_size_q), triton.cdiv(TSRC, block_size_k)),
         dtype=np.uint8,
     )
-    
-    convert_to_dense_numba(
-        indices, mask,
-        TDST, TSRC, block_size_q, block_size_k
-    )
-    
+
+    convert_to_dense_numba(indices, mask, TDST, TSRC, block_size_q, block_size_k)
+
     return mask

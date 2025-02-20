@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+
 import torch
 
 from hip_attn.v1_2.attention_decode_bsa import decode_block_sparse_attention
@@ -22,20 +23,20 @@ def test_correctness(file_path, use_cuda_graph=False):
 
     def run_orig(output=None):
         result = block_sparse_attention(
-            args['q'],
-            args['k'],
-            args['v'],
-            args['seq_lens'],
-            args['indices'],
-            args['ks'],
-            args['ks_count'],
-            args['ks_start_end'],
-            args['args'],
-            args['access_counter'],
-            args['cache_miss_counter'],
-            args['EXTEND_BACKEND'],
-            args['model_context_length'],
-            args['extend_context_length'],
+            args["q"],
+            args["k"],
+            args["v"],
+            args["seq_lens"],
+            args["indices"],
+            args["ks"],
+            args["ks_count"],
+            args["ks_start_end"],
+            args["args"],
+            args["access_counter"],
+            args["cache_miss_counter"],
+            args["EXTEND_BACKEND"],
+            args["model_context_length"],
+            args["extend_context_length"],
         )
         if output is not None:
             output.copy_(result)
@@ -43,27 +44,27 @@ def test_correctness(file_path, use_cuda_graph=False):
 
     def run_flash(output=None):
         result = decode_block_sparse_attention(
-            args['q'],
-            args['k'],
-            args['v'],
-            args['seq_lens'],
-            args['indices'],
-            args['ks'],
-            args['ks_count'],
-            args['ks_start_end'],
-            args['args'],
-            args['access_counter'],
-            args['cache_miss_counter'],
-            args['EXTEND_BACKEND'],
-            args['model_context_length'],
-            args['extend_context_length'],
+            args["q"],
+            args["k"],
+            args["v"],
+            args["seq_lens"],
+            args["indices"],
+            args["ks"],
+            args["ks_count"],
+            args["ks_start_end"],
+            args["args"],
+            args["access_counter"],
+            args["cache_miss_counter"],
+            args["EXTEND_BACKEND"],
+            args["model_context_length"],
+            args["extend_context_length"],
         )
         if output is not None:
             output.copy_(result)
         return result
 
     if use_cuda_graph:
-        gt_output = torch.zeros_like(args['q'])
+        gt_output = torch.zeros_like(args["q"])
 
         # Warmup
         s = torch.cuda.Stream()
@@ -81,7 +82,7 @@ def test_correctness(file_path, use_cuda_graph=False):
         gt_output.zero_()
         g_orig.replay()
 
-        output = torch.zeros_like(args['q'])
+        output = torch.zeros_like(args["q"])
 
         # Warmup
         s = torch.cuda.Stream()
@@ -103,44 +104,49 @@ def test_correctness(file_path, use_cuda_graph=False):
         gt_output = run_orig()
         output = run_flash()
 
-    print('context diff', (output - gt_output).abs().mean() / gt_output.abs().mean())
+    print("context diff", (output - gt_output).abs().mean() / gt_output.abs().mean())
 
 
 @torch.no_grad()
 def benchmark(file_path, use_cuda_graph=False):
     from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
+
     args = load_saved_tensors(file_path)
 
     def run_orig():
         return block_sparse_attention(
-            args['q'], args['k'], args['v'],
-            args['seq_lens'],
-            args['indices'],
-            args['ks'],
-            args['ks_count'],
-            args['ks_start_end'],
-            args['args'],
-            args['access_counter'],
-            args['cache_miss_counter'],
-            args['EXTEND_BACKEND'],
-            args['model_context_length'],
-            args['extend_context_length'],
+            args["q"],
+            args["k"],
+            args["v"],
+            args["seq_lens"],
+            args["indices"],
+            args["ks"],
+            args["ks_count"],
+            args["ks_start_end"],
+            args["args"],
+            args["access_counter"],
+            args["cache_miss_counter"],
+            args["EXTEND_BACKEND"],
+            args["model_context_length"],
+            args["extend_context_length"],
         )
 
     def run_flash():
         return decode_block_sparse_attention(
-            args['q'], args['k'], args['v'],
-            args['seq_lens'],
-            args['indices'],
-            args['ks'],
-            args['ks_count'],
-            args['ks_start_end'],
-            args['args'],
-            args['access_counter'],
-            args['cache_miss_counter'],
-            args['EXTEND_BACKEND'],
-            args['model_context_length'],
-            args['extend_context_length'],
+            args["q"],
+            args["k"],
+            args["v"],
+            args["seq_lens"],
+            args["indices"],
+            args["ks"],
+            args["ks_count"],
+            args["ks_start_end"],
+            args["args"],
+            args["access_counter"],
+            args["cache_miss_counter"],
+            args["EXTEND_BACKEND"],
+            args["model_context_length"],
+            args["extend_context_length"],
         )
 
     if use_cuda_graph:
@@ -157,7 +163,7 @@ def benchmark(file_path, use_cuda_graph=False):
         with torch.cuda.graph(g_orig):
             run_orig()
 
-        run_orig = (lambda: g_orig.replay())
+        run_orig = lambda: g_orig.replay()
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(0)
@@ -185,7 +191,7 @@ def benchmark(file_path, use_cuda_graph=False):
         with torch.cuda.graph(g_flash):
             run_flash()
 
-        run_flash = (lambda: g_flash.replay())
+        run_flash = lambda: g_flash.replay()
 
     else:
         # Warmup
@@ -205,18 +211,20 @@ def benchmark(file_path, use_cuda_graph=False):
     elapsed_flash = start_time.elapsed_time(end_time)
 
     print(f"Time: orig={elapsed_orig:.2f}ms, flash={elapsed_flash:.2f}ms")
-    print(f"Peak memory: orig={peak_mem_orig / 10 ** 6:.3f}MB, flash={peak_mem_flash / 10 ** 6:.3f}MB")
+    print(
+        f"Peak memory: orig={peak_mem_orig / 10 ** 6:.3f}MB, flash={peak_mem_flash / 10 ** 6:.3f}MB"
+    )
 
 
 # Test
 def load_saved_tensors(file_path):
-    args = torch.load(file_path, map_location='cuda:0')
+    args = torch.load(file_path, map_location="cuda:0")
 
     # FIXME: current implementation is incorrect across heads
-    for i in range(args['indices'].shape[0]):
-        args['indices'][i] = args['indices'][0]
-        args['ks'][i] = args['ks'][0]
-        args['ks_count'][i] = args['ks_count'][0]
-        args['ks_start_end'][i] = args['ks_start_end'][0]
+    for i in range(args["indices"].shape[0]):
+        args["indices"][i] = args["indices"][0]
+        args["ks"][i] = args["ks"][0]
+        args["ks_count"][i] = args["ks_count"][0]
+        args["ks_start_end"][i] = args["ks_start_end"][0]
 
     return args

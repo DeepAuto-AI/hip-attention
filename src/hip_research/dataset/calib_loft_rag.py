@@ -657,7 +657,7 @@ ID: 212 | TITLE: Clef | CONTENT: In modern Gregorian chant notation, the C clef 
 ID: 213 | TITLE: First Indochina War | CONTENT: On November 14, 1951, the French seized Hòa Bình, 25 miles (40 km) west of the De Lattre Line, by a parachute drop and extended their perimeter. | END ID: 213
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 214 | TITLE: Luminosity | CONTENT: Imagine a point source of light of luminosity 
+ID: 214 | TITLE: Luminosity | CONTENT: Imagine a point source of light of luminosity
 
 
 
@@ -1326,7 +1326,7 @@ ID: 432 | TITLE: Jason Paige | CONTENT: Jason Paige (born January 6, 1969) is an
 ID: 433 | TITLE: Artificial ventilation | CONTENT: The 1856 works of English physician and physiologist Marshall Hall recommended against using any type of bellows/positive pressure ventilation, views that held sway for several decades.[13] A common method of external manual manipulation, introduced in 1858, was the "Silvester Method" invented by Dr. Henry Robert Silvester in which a patient is laid on their back and their arms are raised above their head to aid inhalation and then pressed against their chest to aid exhalation. | END ID: 433
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 434 | TITLE: Hubble's law | CONTENT: where 
+ID: 434 | TITLE: Hubble's law | CONTENT: where
 
 
 
@@ -1340,7 +1340,7 @@ i
 
 {\displaystyle D_{i}}
 
- is the distance at which a galaxy is first measured at and 
+ is the distance at which a galaxy is first measured at and
 
 
 
@@ -1349,7 +1349,7 @@ t
 
 {\displaystyle t}
 
- is the time since said measurement, thus the velocity of a galaxy can be expressed as 
+ is the time since said measurement, thus the velocity of a galaxy can be expressed as
 
 
 
@@ -1374,7 +1374,7 @@ t
 
 {\displaystyle v={\frac {D-D_{i}}{t}}}
 
-. Solving the integral subsequently yields 
+. Solving the integral subsequently yields
 
 
 
@@ -1517,7 +1517,7 @@ ID: 470 | TITLE: Genetic drift | CONTENT: where T is the number of generations, 
 ID: 471 | TITLE: Amazon tax | CONTENT: In a 2012 editorial supporting tax equity, the Florida St. Petersburg Times wrote, "As long as Internet-only sellers such as Amazon.com can get away with not collecting state sales tax and effectively sell their products for at least 6 percent less, Florida merchants pay the price. It's past time for lawmakers to work toward a level playing field."[37] | END ID: 471
 
 @@@@@ CHUNK (user, text/plain) @@@@@
-ID: 472 | TITLE: Time Enough at Last | CONTENT: "Time Enough at Last" was a ratings success in its initial airing and "became an instant classic".[12] It "remains one of the best-remembered and best-loved episodes of The Twilight Zone" according to Marc Zicree, author of The Twilight Zone Companion.[6] When a poll asked readers of Twilight Zone Magazine which episode of the series they remembered the most, "Time Enough at Last" was the most frequent response, with "To Serve Man" coming in a distant second.[13] In TV Land's presentation of TV Guide's "100 Most Memorable Moments in Television", "Time Enough at Last" was ranked at #25.[14] 
+ID: 472 | TITLE: Time Enough at Last | CONTENT: "Time Enough at Last" was a ratings success in its initial airing and "became an instant classic".[12] It "remains one of the best-remembered and best-loved episodes of The Twilight Zone" according to Marc Zicree, author of The Twilight Zone Companion.[6] When a poll asked readers of Twilight Zone Magazine which episode of the series they remembered the most, "Time Enough at Last" was the most frequent response, with "To Serve Man" coming in a distant second.[13] In TV Land's presentation of TV Guide's "100 Most Memorable Moments in Television", "Time Enough at Last" was ranked at #25.[14]
 In an interview, Serling cited "Time Enough at Last" as one of his two favorites from the entire series. (The other episode was "The Invaders", with Agnes Moorehead.)[15] | END ID: 472
 
 @@@@@ CHUNK (user, text/plain) @@@@@
@@ -1731,7 +1731,7 @@ ID: 541 | TITLE: Charles Durning | CONTENT: For his numerous roles on television
 
 @@@@@ CHUNK (user, text/plain) @@@@@
 ID: 542 | TITLE: Pay Commission | CONTENT: The Government of India has initiated the process to constitute the 7th Central Pay Commission along with finalisation of its Terms of Reference, the composition and the possible timeframe for submission of its Report.[18]
-On 25 September 2013 then Finance Minister P Chidambaram announced that Prime Minister Manmohan Singh has approved the constitution of the 7th Pay Commission. Its recommendations are likely to be implemented with effect from 1 January 2016. 
+On 25 September 2013 then Finance Minister P Chidambaram announced that Prime Minister Manmohan Singh has approved the constitution of the 7th Pay Commission. Its recommendations are likely to be implemented with effect from 1 January 2016.
 Justice A.K Mathur will be heading the Seventh Pay Commission, announcement of which was done on 4 February 2014.[19] On 29 June 2016, Government accepted the recommendation of 7th Pay Commission Report with meager increase in salary of 14% after six month of intense evaluation and successive discussions. The Finance Minister of India claimed it historical increase of salaries due to little knowledge of Sixth Pay Commission.[citation needed] | END ID: 542
 
 @@@@@ CHUNK (user, text/plain) @@@@@
@@ -2779,9 +2779,9 @@ ID: 882 | TITLE: Interstellar medium | CONTENT: In the series of investigations,
 ====== Example 1 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
-query: 
+query:
 where did the dewey decimal system come from
 
 < Assistant's turn >
@@ -2791,9 +2791,9 @@ Melvil Dewey
 ====== Example 2 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
-query: 
+query:
 where did the titanic sink at what ocean
 
 < Assistant's turn >
@@ -2803,9 +2803,9 @@ North Atlantic Ocean
 ====== Example 3 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
-query: 
+query:
 where does the edinburgh fringe festival take place
 
 < Assistant's turn >
@@ -2815,9 +2815,9 @@ in Edinburgh, Scotland
 ====== Example 4 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
-query: 
+query:
 who headed the 7th central pay commission of india
 
 < Assistant's turn >
@@ -2827,9 +2827,9 @@ Justice A.K Mathur
 ====== Example 5 ======
 < User's turn >
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
-query: 
+query:
 what was the code name of the us program to develop an atomic bomb
 
 < Assistant's turn >
@@ -2840,7 +2840,7 @@ Development of Substitute Materials
 - From now, let's start talk.
 -------------------------------------------------------------------------------
 
-What is the answer of the query? Print out the answer of the query. 
+What is the answer of the query? Print out the answer of the query.
 If there is no perfect answer output the closest one. Do not give an empty final answer.
 
 Here is some rules you have to follow, before answer.
@@ -2951,8 +2951,8 @@ rag_qa_pairs = r"""{"qid": "test1032", "query_text": "when did season 4 of glee 
 {"qid": "test971", "query_text": "where was the remake of dirty dancing filmed", "metadata": {"qrels": [["doc34207", 1]]}, "answers": ["Hendersonville, North Carolina", "Hendersonville", "High Hampton Inn in Cashiers", "western North Carolina"]}
 {"qid": "test999", "query_text": "where did huntington's disease get its name", "metadata": {"qrels": [["doc35283", 1]]}, "answers": ["the physician George Huntington", "George Huntington"]}"""
 
-rag_prefix = "\n".join(filter(lambda x: not x.startswith('@@@@'), prefix.split('\n')))
-rag_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split('\n')))
+rag_prefix = "\n".join(filter(lambda x: not x.startswith("@@@@"), prefix.split("\n")))
+rag_qa_pairs = list(map(lambda line: json.loads(line), rag_qa_pairs.split("\n")))
 
 # with open('./dummy.txt', 'w') as f:
 #     f.write(prefix)

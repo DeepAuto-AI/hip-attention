@@ -1,2 +1,2 @@
-WANDB_KEY = '_'
-USER_NAME = '_'
+WANDB_KEY = "_"
+USER_NAME = "_"

@@ -1,53 +1,94 @@
+import math
+
 import torch
 import torch.nn.functional as F
-
 import triton
 import triton.language as tl
-
-import math
 
 
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, sm_scale, 
+    Q,
+    K,
+    V,
+    sm_scale,
     Out,
-    sqz, sqh, sqm, sqd, # shape = (Z,H,N_CTX_Q,D)
-    skz, skh, skn, skd, # shape = (Z,H,N_CTX_KV,D)
-    svz, svh, svn, svd, # shape = (Z,H,N_CTX_KV,D)
-    soz, soh, som, sod, # shape = (Z,H,N_CTX_Q,D)
-    Q_idx, K_idx, 
-    sqiz, sqih, sqim,  # shape = (Z,H,N_CTX_Q)
-    skiz, skih, skin,  # shape = (Z,H,N_CTX_KV)
-    Q_hash, K_hash, 
-    sqhz, sqhh, sqhm,  # shape = (Z,H,N_CTX_Q)
-    skhz, skhh, skhn,  # shape = (Z,H,N_CTX_KV)
-    L, M,
-    Z, H, N_CTX_Q, N_CTX_KV, 
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, # will load BLOCK_M queries, and compute self attention by blocks of BLOCK_N keys
-    BLOCK_DMODEL: tl.constexpr # dimensionality of heads: D
+    sqz,
+    sqh,
+    sqm,
+    sqd,  # shape = (Z,H,N_CTX_Q,D)
+    skz,
+    skh,
+    skn,
+    skd,  # shape = (Z,H,N_CTX_KV,D)
+    svz,
+    svh,
+    svn,
+    svd,  # shape = (Z,H,N_CTX_KV,D)
+    soz,
+    soh,
+    som,
+    sod,  # shape = (Z,H,N_CTX_Q,D)
+    Q_idx,
+    K_idx,
+    sqiz,
+    sqih,
+    sqim,  # shape = (Z,H,N_CTX_Q)
+    skiz,
+    skih,
+    skin,  # shape = (Z,H,N_CTX_KV)
+    Q_hash,
+    K_hash,
+    sqhz,
+    sqhh,
+    sqhm,  # shape = (Z,H,N_CTX_Q)
+    skhz,
+    skhh,
+    skhn,  # shape = (Z,H,N_CTX_KV)
+    L,
+    M,
+    Z,
+    H,
+    N_CTX_Q,
+    N_CTX_KV,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # will load BLOCK_M queries, and compute self attention by blocks of BLOCK_N keys
+    BLOCK_DMODEL: tl.constexpr,  # dimensionality of heads: D
 ):
-    start_m = tl.program_id(0) # idx of sequence length chunk of size 128 (BLOCK_N)
-    off_hz = tl.program_id(1) # idx of head_batch (unique idx for each head in each batch)
+    start_m = tl.program_id(0)  # idx of sequence length chunk of size 128 (BLOCK_N)
+    off_hz = tl.program_id(
+        1
+    )  # idx of head_batch (unique idx for each head in each batch)
 
     # initialize offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M) # indices of queries we want to process
-    offs_n = tl.arange(0, BLOCK_N) # indices of keys we want to process, we start from [0, BLOCK_N-1] and update in the loop
-    offs_d = tl.arange(0, BLOCK_DMODEL) # we want to process all the dimensions of a given head
+    offs_m = start_m * BLOCK_M + tl.arange(
+        0, BLOCK_M
+    )  # indices of queries we want to process
+    offs_n = tl.arange(
+        0, BLOCK_N
+    )  # indices of keys we want to process, we start from [0, BLOCK_N-1] and update in the loop
+    offs_d = tl.arange(
+        0, BLOCK_DMODEL
+    )  # we want to process all the dimensions of a given head
 
-    offs_q = off_hz * sqh + offs_m[:, None] * sqm + offs_d[None, :] * sqd # Q.view(Z*H,N_CTX_Q,D)[off_hz, start_m*BLOCK_M:(start_m+1)*BLOCK_M, :].squeeze() that's a BLOCK_M*D matrix
-    offs_qi = off_hz * sqih + offs_m * sqim # Q_idx.view(Z*H,N_CTX_Q)[off_hz, start_m*BLOCK_M:(start_m+1)*BLOCK_M] a vector of BLOCK_M indices 
-    offs_qh = off_hz * sqhh + offs_m * sqhm  
-    offs_kh = off_hz * skhh + offs_n * skhn 
+    offs_q = (
+        off_hz * sqh + offs_m[:, None] * sqm + offs_d[None, :] * sqd
+    )  # Q.view(Z*H,N_CTX_Q,D)[off_hz, start_m*BLOCK_M:(start_m+1)*BLOCK_M, :].squeeze() that's a BLOCK_M*D matrix
+    offs_qi = (
+        off_hz * sqih + offs_m * sqim
+    )  # Q_idx.view(Z*H,N_CTX_Q)[off_hz, start_m*BLOCK_M:(start_m+1)*BLOCK_M] a vector of BLOCK_M indices
+    offs_qh = off_hz * sqhh + offs_m * sqhm
+    offs_kh = off_hz * skhh + offs_n * skhn
 
     # pointers to m and l
-    m_prev = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf") 
+    m_prev = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_prev = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     # Load values
     qi_vals = tl.load(Q_idx + offs_qi, mask=offs_m < N_CTX_Q, other=-1)
-    q_vals = tl.load(Q + offs_q, mask=qi_vals[:, None] >= 0) 
-    qh_vals = tl.load(Q_hash + offs_qh, mask=offs_m < N_CTX_Q, other=1e9) #, other=-1)
+    q_vals = tl.load(Q + offs_q, mask=qi_vals[:, None] >= 0)
+    qh_vals = tl.load(Q_hash + offs_qh, mask=offs_m < N_CTX_Q, other=1e9)  # , other=-1)
     min_q_hash = tl.min(qh_vals, axis=0)
     qh_vals = tl.where(offs_m < N_CTX_Q, qh_vals, -1)
     max_q_hash = tl.max(qh_vals, axis=0)
@@ -55,7 +96,7 @@ def _fwd_kernel(
     end_n = 0
     start_n = 0
 
-    # Increment the start and end to find start and end blocks 
+    # Increment the start and end to find start and end blocks
     for _ in range(0, N_CTX_KV, BLOCK_N):
         kh_vals = tl.load(K_hash + offs_kh, mask=offs_n < N_CTX_KV, other=+1e9)
         min_kh = tl.min(kh_vals, axis=0)
@@ -72,7 +113,7 @@ def _fwd_kernel(
     causal_end_n = end_n
     offs_n = BLOCK_N * start_n + tl.arange(0, BLOCK_N)
     offs_ki = off_hz * skih + offs_n * skin
-    max_qi = tl.max(qi_vals, axis=0) # largest query index in block
+    max_qi = tl.max(qi_vals, axis=0)  # largest query index in block
     for i in range(start_n, end_n):
         ki_vals = tl.load(K_idx + offs_ki, mask=offs_n < N_CTX_KV, other=1e9)
         min_ki = tl.min(ki_vals, axis=0)
@@ -82,14 +123,22 @@ def _fwd_kernel(
         offs_n += BLOCK_N
 
     # re-initialize offsets
-    offs_n = BLOCK_N * start_n + tl.arange(0, BLOCK_N) # indices of keys we want to process, we start from [0, BLOCK_N-1] and update in the loop
-    offs_k = off_hz * skh + offs_n[None, :] * skn + offs_d[:, None] * skd # K.view(Z*H,N_CTX_KV,D)[off_hz, 0:BLOCK_N, :].transpose(1,2).squeeze() that's a D*BLOCK_N matrix
-    offs_v = off_hz * svh + offs_n[:, None] * svn + offs_d[None, :] * svd # V.view(Z*H,N_CTX_KV,D)[off_hz, 0:BLOCK_N, :].squeeze() that's a BLOCK_N*D matrix
-    offs_ki = off_hz * skih + offs_n * skin # K_idx.view(Z*H,N_CTX_KV)[off_hz, 0:BLOCK_N] a vector of BLOCK_N indices
-    offs_kh = off_hz * skhh + offs_n * skhn 
+    offs_n = BLOCK_N * start_n + tl.arange(
+        0, BLOCK_N
+    )  # indices of keys we want to process, we start from [0, BLOCK_N-1] and update in the loop
+    offs_k = (
+        off_hz * skh + offs_n[None, :] * skn + offs_d[:, None] * skd
+    )  # K.view(Z*H,N_CTX_KV,D)[off_hz, 0:BLOCK_N, :].transpose(1,2).squeeze() that's a D*BLOCK_N matrix
+    offs_v = (
+        off_hz * svh + offs_n[:, None] * svn + offs_d[None, :] * svd
+    )  # V.view(Z*H,N_CTX_KV,D)[off_hz, 0:BLOCK_N, :].squeeze() that's a BLOCK_N*D matrix
+    offs_ki = (
+        off_hz * skih + offs_n * skin
+    )  # K_idx.view(Z*H,N_CTX_KV)[off_hz, 0:BLOCK_N] a vector of BLOCK_N indices
+    offs_kh = off_hz * skhh + offs_n * skhn
 
     for _ in range(start_n, causal_end_n):
-        
+
         # Load values for K and K_idx
         ki_vals = tl.load(K_idx + offs_ki, mask=offs_n < N_CTX_KV, other=1e9)
         kh_vals = tl.load(K_hash + offs_kh, mask=offs_n < N_CTX_KV, other=-1e9)
@@ -101,18 +150,23 @@ def _fwd_kernel(
         qk *= sm_scale
 
         # causal masking
-        qk = tl.where((qi_vals[:,None] > ki_vals[None,:]) & (qh_vals[:,None] == kh_vals[None,:]), qk, float("-inf"))
+        qk = tl.where(
+            (qi_vals[:, None] > ki_vals[None, :])
+            & (qh_vals[:, None] == kh_vals[None, :]),
+            qk,
+            float("-inf"),
+        )
 
         # compute attention weights
-        m_curr = tl.maximum(tl.max(qk, 1), m_prev) # compute new m
-        m_curr_ = tl.where(m_curr != float('-inf'), m_curr, float(0.0))
-        l_prev *= tl.exp(m_prev - m_curr_) # correct old l
+        m_curr = tl.maximum(tl.max(qk, 1), m_prev)  # compute new m
+        m_curr_ = tl.where(m_curr != float("-inf"), m_curr, float(0.0))
+        l_prev *= tl.exp(m_prev - m_curr_)  # correct old l
         p = tl.exp(qk - m_curr_[:, None])
-        l_curr = tl.sum(p, 1) + l_prev 
-        l_rcp = 1. / l_curr # rescale operands of matmuls
-        l_rcp = tl.where((l_rcp == float('inf')), 0, l_rcp)
+        l_curr = tl.sum(p, 1) + l_prev
+        l_rcp = 1.0 / l_curr  # rescale operands of matmuls
+        l_rcp = tl.where((l_rcp == float("inf")), 0, l_rcp)
         p *= l_rcp[:, None]
-        acc *= (l_prev * l_rcp)[:, None] # weight for each value vector
+        acc *= (l_prev * l_rcp)[:, None]  # weight for each value vector
 
         # update acc
         p = p.to(Q.dtype.element_ty)
@@ -131,7 +185,9 @@ def _fwd_kernel(
         offs_kh += BLOCK_N * skhn
 
     # store L and M
-    offs_L = off_hz * N_CTX_Q + offs_m # L is of shape (Z*H, N_CTX_Q), here we point to L[off_hz, start_m*Block_M:(start_m+1)*Block_M]
+    offs_L = (
+        off_hz * N_CTX_Q + offs_m
+    )  # L is of shape (Z*H, N_CTX_Q), here we point to L[off_hz, start_m*Block_M:(start_m+1)*Block_M]
     offs_M = off_hz * N_CTX_Q + offs_m
     tl.store(L + offs_L, l_prev, mask=offs_m < N_CTX_Q)
     tl.store(M + offs_M, m_prev, mask=offs_m < N_CTX_Q)
@@ -142,10 +198,20 @@ def _fwd_kernel(
 
 @triton.jit
 def _bwd_preprocess(
-    Out, soz, soh, som, sod,
-    DO, L, slzh, slm,
-    NewDO, Delta, N_CTX_Q,
-    BLOCK_M: tl.constexpr, D_HEAD: tl.constexpr,
+    Out,
+    soz,
+    soh,
+    som,
+    sod,
+    DO,
+    L,
+    slzh,
+    slm,
+    NewDO,
+    Delta,
+    N_CTX_Q,
+    BLOCK_M: tl.constexpr,
+    D_HEAD: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
@@ -169,25 +235,57 @@ def _bwd_preprocess(
 
 @triton.jit
 def _bwd_kernel(
-    Q, K, V, sm_scale, Out, DO,
-    DQ, DK, DV,
-    Q_idx, K_idx,
-    sqiz, sqih, sqim,  # shape = (Z,H,N_CTX_Q)
-    skiz, skih, skin,  # shape = (Z,H,N_CTX_KV)
-    Q_hash, K_hash,
-    sqhz, sqhh, sqhm,  # shape = (Z,H,N_CTX_Q)
-    skhz, skhh, skhn,  # shape = (Z,H,N_CTX_KV)
-    L, M,
+    Q,
+    K,
+    V,
+    sm_scale,
+    Out,
+    DO,
+    DQ,
+    DK,
+    DV,
+    Q_idx,
+    K_idx,
+    sqiz,
+    sqih,
+    sqim,  # shape = (Z,H,N_CTX_Q)
+    skiz,
+    skih,
+    skin,  # shape = (Z,H,N_CTX_KV)
+    Q_hash,
+    K_hash,
+    sqhz,
+    sqhh,
+    sqhm,  # shape = (Z,H,N_CTX_Q)
+    skhz,
+    skhh,
+    skhn,  # shape = (Z,H,N_CTX_KV)
+    L,
+    M,
     D,
-    sqz, sqh, sqm, sqd,
-    skz, skh, skn, skd,
-    svz, svh, svn, svd,
-    Z, H, N_CTX_Q, N_CTX_KV,
-    num_block_q, num_block_kv,
-    BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
+    sqz,
+    sqh,
+    sqm,
+    sqd,
+    skz,
+    skh,
+    skn,
+    skd,
+    svz,
+    svh,
+    svn,
+    svd,
+    Z,
+    H,
+    N_CTX_Q,
+    N_CTX_KV,
+    num_block_q,
+    num_block_kv,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    
+
     off_hz = tl.program_id(0)
     off_z = off_hz // H
     off_h = off_hz % H
@@ -202,10 +300,10 @@ def _bwd_kernel(
     DV += off_z * svz + off_h * svh
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
-    
+
     # pointer to row-wise quantities in value-like data
-    D_ptrs = D + off_hz * N_CTX_Q # pointer to D.view(Z*H,N_CTX_Q)[off_hz]
-    m_ptrs = M + off_hz * N_CTX_Q # pointer to m.view(Z*H,N_CTX_Q)[off_hz]
+    D_ptrs = D + off_hz * N_CTX_Q  # pointer to D.view(Z*H,N_CTX_Q)[off_hz]
+    m_ptrs = M + off_hz * N_CTX_Q  # pointer to m.view(Z*H,N_CTX_Q)[off_hz]
 
     for block_id_n in range(0, num_block_kv):
 
@@ -216,7 +314,7 @@ def _bwd_kernel(
         ki_vals = tl.load(K_idx + offs_ki, mask=offs_n < N_CTX_KV, other=1e9)
         min_ki = tl.min(ki_vals, axis=0)
         ki_vals = tl.where(offs_n < N_CTX_KV, ki_vals, -1)
-        
+
         # pointers for keys and values
         k_ptrs = K + (offs_n[:, None] * skn + offs_d[None, :] * skd)
         v_ptrs = V + (offs_n[:, None] * svn + offs_d[None, :] * svd)
@@ -225,10 +323,10 @@ def _bwd_kernel(
         dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
         dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-        # Find start and end block for those keys 
+        # Find start and end block for those keys
         offs_kh = off_hz * skhh + offs_n * skhn
         kh_vals = tl.load(K_hash + offs_kh, mask=offs_n < N_CTX_KV, other=1e9)
-        
+
         min_k_hash = tl.min(kh_vals, axis=0)
         kh_vals = tl.where(offs_n < N_CTX_KV, kh_vals, -1)
         max_k_hash = tl.max(kh_vals, axis=0)
@@ -236,9 +334,9 @@ def _bwd_kernel(
         start_blockidx_m = 0
         end_blockidx_m = 0
 
-        # Increment the start and end to find start and end blocks 
+        # Increment the start and end to find start and end blocks
         offs_m = tl.arange(0, BLOCK_M)
-        offs_qh = off_hz * sqhh + offs_m * sqhm 
+        offs_qh = off_hz * sqhh + offs_m * sqhm
         for _ in range(0, N_CTX_Q, BLOCK_M):
             qh_vals = tl.load(Q_hash + offs_qh, mask=offs_m < N_CTX_Q, other=+1e9)
             min_qh = tl.min(qh_vals, axis=0)
@@ -263,29 +361,35 @@ def _bwd_kernel(
             offs_qi += BLOCK_N * skin
             offs_m += BLOCK_N
 
-        k = tl.load(k_ptrs, mask=offs_n[:, None] < N_CTX_KV)  
-        v = tl.load(v_ptrs, mask=offs_n[:, None] < N_CTX_KV)  
+        k = tl.load(k_ptrs, mask=offs_n[:, None] < N_CTX_KV)
+        v = tl.load(v_ptrs, mask=offs_n[:, None] < N_CTX_KV)
 
-        for start_m in range(causal_start_n * BLOCK_M, end_blockidx_m * BLOCK_M, BLOCK_M):
-            offs_m = (start_m + tl.arange(0, BLOCK_M))
+        for start_m in range(
+            causal_start_n * BLOCK_M, end_blockidx_m * BLOCK_M, BLOCK_M
+        ):
+            offs_m = start_m + tl.arange(0, BLOCK_M)
 
             q_ptrs = Q + (offs_m[:, None] * sqm + offs_d[None, :] * sqd)
             do_ptrs = DO + (offs_m[:, None] * sqm + offs_d[None, :] * sqd)
             dq_ptrs = DQ + (offs_m[:, None] * sqm + offs_d[None, :] * sqd)
             qi_ptrs = Q_idx + (off_hz * sqih + offs_m * sqim)
-            qh_ptrs = Q_hash + (off_hz * sqhh  + offs_m * sqhm)
-            
+            qh_ptrs = Q_hash + (off_hz * sqhh + offs_m * sqhm)
+
             qi = tl.load(qi_ptrs, mask=offs_m < N_CTX_Q, other=1e9)
             qh = tl.load(qh_ptrs, mask=offs_m < N_CTX_Q, other=1e9)
-            q = tl.load(q_ptrs, mask=offs_m[:,None] < N_CTX_Q)  
+            q = tl.load(q_ptrs, mask=offs_m[:, None] < N_CTX_Q)
             qk = tl.dot(q, tl.trans(k))
-            qk = tl.where((qi[:,None] > ki_vals[None,:]) & (qh[:,None] == kh_vals[None,:]), qk, float("-inf"))
+            qk = tl.where(
+                (qi[:, None] > ki_vals[None, :]) & (qh[:, None] == kh_vals[None, :]),
+                qk,
+                float("-inf"),
+            )
 
             m = tl.load(m_ptrs + offs_m, mask=offs_m < N_CTX_Q)
-            m_ = tl.where(m != float('-inf'), m, 0.0)
+            m_ = tl.where(m != float("-inf"), m, 0.0)
             p = tl.exp(qk * sm_scale - m_[:, None])
 
-            do = tl.load(do_ptrs, mask=offs_m[:,None] < N_CTX_Q)  
+            do = tl.load(do_ptrs, mask=offs_m[:, None] < N_CTX_Q)
             # compute dv
             dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
 
@@ -317,7 +421,9 @@ class _attention(torch.autograd.Function):
         # only support for Ampere now
         capability = torch.cuda.get_device_capability()
         if capability[0] < 8:
-            raise RuntimeError("Flash attention currently only supported for compute capability >= 80")
+            raise RuntimeError(
+                "Flash attention currently only supported for compute capability >= 80"
+            )
         BLOCK = 256
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -326,27 +432,63 @@ class _attention(torch.autograd.Function):
         # assert Lk in {64,}  # TODO: fix other cases
         o = torch.empty_like(q)
         grid = (triton.cdiv(q.shape[2], BLOCK), q.shape[0] * q.shape[1], 1)
-        L = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-        m = torch.empty((q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
+        L = torch.empty(
+            (q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
+        )
+        m = torch.empty(
+            (q.shape[0] * q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
+        )
         num_warps = 4 if Lk <= 64 else 8
 
         _fwd_kernel[grid](
-            q, k, v, sm_scale,
+            q,
+            k,
+            v,
+            sm_scale,
             o,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-            q_idx, k_idx, 
-            q_idx.stride(0), q_idx.stride(1), q_idx.stride(2), 
-            k_idx.stride(0), k_idx.stride(1), k_idx.stride(2),
-            q_hash, k_hash, 
-            q_hash.stride(0), q_hash.stride(1), q_hash.stride(2), 
-            k_hash.stride(0), k_hash.stride(1), k_hash.stride(2),
-            L, m,
-            q.shape[0], q.shape[1], N_CTX_Q=q.shape[2], N_CTX_KV=k.shape[2],
-            BLOCK_M=BLOCK, BLOCK_N=BLOCK, BLOCK_DMODEL=Lk,
-            num_warps=num_warps, num_stages=1
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            o.stride(3),
+            q_idx,
+            k_idx,
+            q_idx.stride(0),
+            q_idx.stride(1),
+            q_idx.stride(2),
+            k_idx.stride(0),
+            k_idx.stride(1),
+            k_idx.stride(2),
+            q_hash,
+            k_hash,
+            q_hash.stride(0),
+            q_hash.stride(1),
+            q_hash.stride(2),
+            k_hash.stride(0),
+            k_hash.stride(1),
+            k_hash.stride(2),
+            L,
+            m,
+            q.shape[0],
+            q.shape[1],
+            N_CTX_Q=q.shape[2],
+            N_CTX_KV=k.shape[2],
+            BLOCK_M=BLOCK,
+            BLOCK_N=BLOCK,
+            BLOCK_DMODEL=Lk,
+            num_warps=num_warps,
+            num_stages=1,
         )
 
         ctx.save_for_backward(q, k, v, o, L, m, q_idx, k_idx, q_hash, k_hash)
@@ -354,7 +496,6 @@ class _attention(torch.autograd.Function):
         ctx.sm_scale = sm_scale
         ctx.BLOCK_DMODEL = Lk
         return o
-
 
     @staticmethod
     def backward(ctx, do):
@@ -368,37 +509,80 @@ class _attention(torch.autograd.Function):
         do_scaled = torch.empty_like(do)
         delta = torch.empty_like(l)
         _bwd_preprocess[(ctx.grid[0], ctx.grid[1])](
-            o, o.stride(0), o.stride(1), o.stride(2), o.stride(3), do, l, l.stride(0), l.stride(1),
-            do_scaled, delta, q.shape[2],
-            BLOCK_M=BLOCK, D_HEAD=ctx.BLOCK_DMODEL,
+            o,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            o.stride(3),
+            do,
+            l,
+            l.stride(0),
+            l.stride(1),
+            do_scaled,
+            delta,
+            q.shape[2],
+            BLOCK_M=BLOCK,
+            D_HEAD=ctx.BLOCK_DMODEL,
         )
 
         num_block_q = ctx.grid[0]
         num_block_kv = math.ceil(k.shape[2] / BLOCK)
 
         _bwd_kernel[(ctx.grid[1],)](
-            q, k, v, ctx.sm_scale,
-            o, do_scaled,
-            dq, dk, dv,
-            q_idx, k_idx,
-            q_idx.stride(0), q_idx.stride(1), q_idx.stride(2), 
-            k_idx.stride(0), k_idx.stride(1), k_idx.stride(2),
-            q_hash, k_hash,
-            q_hash.stride(0), q_hash.stride(1), q_hash.stride(2), 
-            k_hash.stride(0), k_hash.stride(1), k_hash.stride(2),
-            l, m,
+            q,
+            k,
+            v,
+            ctx.sm_scale,
+            o,
+            do_scaled,
+            dq,
+            dk,
+            dv,
+            q_idx,
+            k_idx,
+            q_idx.stride(0),
+            q_idx.stride(1),
+            q_idx.stride(2),
+            k_idx.stride(0),
+            k_idx.stride(1),
+            k_idx.stride(2),
+            q_hash,
+            k_hash,
+            q_hash.stride(0),
+            q_hash.stride(1),
+            q_hash.stride(2),
+            k_hash.stride(0),
+            k_hash.stride(1),
+            k_hash.stride(2),
+            l,
+            m,
             delta,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            q.shape[0], q.shape[1], q.shape[2], k.shape[2],
-            num_block_q, num_block_kv,
-            BLOCK_M=BLOCK, BLOCK_N=BLOCK,
-            BLOCK_DMODEL=ctx.BLOCK_DMODEL, num_warps=8,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            q.shape[0],
+            q.shape[1],
+            q.shape[2],
+            k.shape[2],
+            num_block_q,
+            num_block_kv,
+            BLOCK_M=BLOCK,
+            BLOCK_N=BLOCK,
+            BLOCK_DMODEL=ctx.BLOCK_DMODEL,
+            num_warps=8,
             num_stages=1,
         )
         return dq, dk, dv, None, None, None, None, None
-    
+
 
 attention = _attention.apply
 
