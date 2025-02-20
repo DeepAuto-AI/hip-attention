@@ -2395,7 +2395,6 @@ def dual_stage_quadratic_hip_attention(
                     SCAN_STRIDE=stage_info.stage_stride,
                     BLOCK_CHUNK=stage_info.block_chunk,
                 )
-                )
             elif isinstance(stage_info, EnsembleScoreStage):
                 raise Exception()
             elif isinstance(stage_info, NopStage):

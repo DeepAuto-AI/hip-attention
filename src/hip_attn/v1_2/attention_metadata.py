@@ -1,5 +1,6 @@
 import copy
 import os
+import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
