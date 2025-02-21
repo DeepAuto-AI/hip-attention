@@ -9,6 +9,8 @@ def load_checkouts(
     return_cos_sin=False,
     derope=False,
     sm_scale=None,
+    device=0,
+    checkout_path="./cache/llama/qkvout.pth",
 ):
     q_name = "q"
     k_name = "k"
@@ -17,11 +19,8 @@ def load_checkouts(
         k_name = "k_derope"
 
     data_source = "llama"
-    device = 0
     if data_source == "llama":
-        state = torch.load(
-            "./cache/llama/qkvout.pth", map_location="cpu", weights_only=False
-        )
+        state = torch.load(checkout_path, map_location="cpu", weights_only=False)
         if sm_scale is None:
             sm_scale = 1 / (state[q_name].shape[-1] ** 0.5)
         q = state[q_name] * sm_scale

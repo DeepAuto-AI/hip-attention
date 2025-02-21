@@ -15,6 +15,7 @@ class SglangModel:
         verbose=True,
         need_chat_prompt=False,
         system_message="You are helpful assistant.",
+        handle_deepseek=False,
     ) -> str:
         if input_text is None:
             assert input_ids is not None
@@ -50,7 +51,7 @@ class SglangModel:
             else:
                 responses = response.json()[0]["text"]
 
-            return responses
+            final_response = responses
         else:
             assert isinstance(input_text, (str, list))
 
@@ -62,6 +63,8 @@ class SglangModel:
                     },
                     {"role": "user", "content": input_text},
                 ]
+                if system_message is None:
+                    input_text.pop(0)
 
             response = requests.post(
                 f"{self.endpoint}/v1/chat/completions",
@@ -76,4 +79,13 @@ class SglangModel:
             if verbose:
                 print(response.json())
 
-            return response.json()["choices"][0]["message"]["content"]
+            final_response = response.json()["choices"][0]["message"]["content"]
+
+        if handle_deepseek:
+            eothink = "</think>"
+            if eothink in final_response:
+                final_response = final_response[
+                    final_response.find(eothink) + len(eothink) :
+                ]
+
+        return final_response

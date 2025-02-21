@@ -108,7 +108,7 @@ See the following pages for more details:
 ```bash
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
-docker build -t hip-sglang:latest -f Dockerfile.sglang .
+docker build -t hip-sglang:latest -t hip-sglang:$(git rev-parse --short HEAD) -f Dockerfile.sglang .
 ```
 
 ## Experiment Reproduce

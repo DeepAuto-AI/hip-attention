@@ -18,6 +18,7 @@ from hip_research.main.jobs.merge_lora import job_merge_lora
 from hip_research.main.jobs.mmlu import job_mmlu
 from hip_research.main.jobs.passkey import job_passkey
 from hip_research.main.jobs.ppl import job_ppl
+from hip_research.main.jobs.sample_diag import job_sample_diag
 from hip_research.main.jobs.stream import job_stream
 from hip_research.main.jobs.stream_demo import job_stream_demo
 from hip_research.models.sglang_model import SglangModel
@@ -335,48 +336,30 @@ def load_model(args):
     return model, tokenizer, device
 
 
+JOBS = {
+    "ppl": job_ppl,
+    "stream": job_stream,
+    "mmlu": job_mmlu,
+    "bench_single_layer": job_bench_single_layer,
+    "booksum": job_booksum,
+    "merge_lora": job_merge_lora,
+    "stream_demo": job_stream_demo,
+    "greedy_replace": job_greedy_replace,
+    "passkey": job_passkey,
+    "ga": job_ga,
+    "sample_diag": job_sample_diag,
+}
+
+
 def main():
     args = eval_args()
-
     seed(seed=args.seed)
 
-    assert args.job in [
-        "ppl",
-        "stream",
-        "mmlu",
-        "bench_single_layer",
-        "booksum",
-        "merge_lora",
-        "stream_demo",
-        "greedy_replace",
-        "passkey",
-        "ga",
-    ]
+    assert args.job in JOBS.keys()
 
     model, tokenizer, device = load_model(args)
 
-    if args.job == "ppl":
-        job_ppl(args, model, tokenizer, device)
-    elif args.job == "stream":
-        job_stream(args, model, tokenizer, device)
-    elif args.job == "mmlu":
-        job_mmlu(args, model, tokenizer, device)
-    elif args.job == "bench_single_layer":
-        job_bench_single_layer(args, model, tokenizer, device)
-    elif args.job == "booksum":
-        job_booksum(args, model, tokenizer, device)
-    elif args.job == "merge_lora":
-        job_merge_lora(args, model, tokenizer, device)
-    elif args.job == "stream_demo":
-        job_stream_demo(args, model, tokenizer, device)
-    elif args.job == "greedy_replace":
-        job_greedy_replace(args, model, tokenizer, device)
-    elif args.job == "passkey":
-        job_passkey(args, model, tokenizer, device)
-    elif args.job == "ga":
-        job_ga(args, model, tokenizer, device)
-    else:
-        raise Exception()
+    JOBS[args.job](args, model, tokenizer, device)
 
 
 if __name__ == "__main__":

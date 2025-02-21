@@ -10,7 +10,10 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from hip_attn.v1_1.offload_runner import tensor_from_pointer
+from hip_attn.v1_1.offload_runner.tensor_from_pointer import (
+    alloc_managed_tensor,
+    sizeof,
+)
 from hip_attn.v1_2.attention_metadata import (
     HiPAttentionCacheAccessStatistics,
     HiPAttentionOutputMetadata,
@@ -18,42 +21,6 @@ from hip_attn.v1_2.attention_metadata import (
 
 MAX_INT: tl.constexpr = tl.constexpr(90000000)
 MAX_INT_ACQUIRED: tl.constexpr = tl.constexpr(90000001)
-
-
-def sizeof(dtype: Union[Tensor, torch.dtype]) -> int:
-    if isinstance(dtype, Tensor):
-        return dtype.numel() * sizeof(dtype.dtype)
-
-    if dtype in [
-        torch.uint8,
-        torch.int8,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-    ]:
-        return 1
-    elif dtype in [
-        torch.uint16,
-        torch.int16,
-        torch.float16,
-        torch.bfloat16,
-    ]:
-        return 2
-    elif dtype in [
-        torch.uint32,
-        torch.int32,
-        torch.float32,
-    ]:
-        return 4
-    elif dtype in [
-        torch.uint64,
-        torch.int64,
-        torch.float64,
-    ]:
-        return 8
-    else:
-        raise Exception()
 
 
 def format_size_bytes(tensor: Union[Tensor, Union[float, int]]) -> str:
@@ -142,22 +109,7 @@ class UVMCache:
         # debug_print(f'UVMCache: bank={format_size_bytes(self.bank_cpu)}, metadata={format_size_bytes(self.metadata)}')
 
     def alloc_uvm(self, shape, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
-        device = self.device
-        if isinstance(device, str):
-            device = torch.device(device)
-
-        elem_size = sizeof(dtype)
-        numel = math.prod(shape)
-        align = 4096
-        byte_size = elem_size * numel
-        byte_size = byte_size + byte_size % align
-
-        _result_code, pointer = cuda.cudart.cudaMallocManaged(
-            byte_size, cuda.cudart.cudaMemAttachGlobal
-        )
-
-        t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
-        t_cpu = tensor_from_pointer(pointer, shape, dtype, -1)
+        t_gpu, t_cpu = alloc_managed_tensor(shape, dtype, self.device)
 
         uvm_note_cpu(t_gpu)
         t_cpu.fill_(0)
