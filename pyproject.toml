@@ -63,7 +63,7 @@ sglang = [
     "sgl-kernel",
 
     # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
-    "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/feat/update-imports#subdirectory=python",
+    "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/dev#subdirectory=python",
 ]
 
 all = ["hip_attn[test]", "hip_attn[research]", "hip_attn[sglang]"]
