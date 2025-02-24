@@ -2,29 +2,19 @@ import torch
 from torch import Tensor
 from torch_xla.core import xla_model as xm
 import os
-from neuronxcc import nki
-import neuronxcc.nki.language as nl
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
 from hip_research.utils.load_checkouts import load_checkouts
 from typing import Optional
 import triton
 from dataclasses import dataclass
 
+from hip_attn.v1_2.neuron.kernels.scan_stage_neuron import scan_stage_neuron
+
 @dataclass
 class ScanStageKernelOutput:
     indices_left: Tensor
     indices_right: Tensor
     chunk_scores: Tensor
-
-@nki.jit
-def scan_stage_neuron(
-    q, 
-    k,
-    indices_left,
-    indices_right,
-    chunk_scores,
-):
-    pass
 
 def scan_stage(
     q: torch.Tensor,
@@ -46,7 +36,8 @@ def scan_stage(
             0, 
             TSRC, 
             stage_info.stage_chunk_size, 
-            device=q.device
+            device=q.device, 
+            dtype=torch.int32,
         )[None, None, None, :]\
             .expand(BSZ, BDST, HEAD, -1)\
                 .contiguous()
@@ -66,18 +57,34 @@ def scan_stage(
     else:
         raise Exception()
     
-    scan_stage_neuron(
+    N_CHUNK = indices_left.shape[-1]
+    BN_CHUNK = triton.cdiv(N_CHUNK, 64)
+    
+    position_ids = torch.arange(0, TDST, device=q.device, dtype=torch.int32)[None, :,].expand(BSZ, -1)
+    
+    (
+        out_indices_left, 
+        out_indices_right, 
+        out_chunk_scores
+    ) = scan_stage_neuron[BSZ, BDST, HEAD, BN_CHUNK](
         q,
         k,
         mask.indices_left,
         mask.indices_right,
         mask.chunk_scores,
+        position_ids,
+        
+        stage_info.stage_block_size_q,
     )
     
-    return mask
+    return ScanStageKernelOutput(
+        indices_left=out_indices_left,
+        indices_right=out_indices_right,
+        chunk_scores=out_chunk_scores,
+    )
 
 def main_debug():
-    seq_len = int(os.getenv("SEQ_LEN", "131072"))
+    seq_len = int(os.getenv("SEQ_LEN", "32768"))
     query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
     seq_dups = int(os.getenv("DUPS", "1"))
     if query_seq_dups < 0:
