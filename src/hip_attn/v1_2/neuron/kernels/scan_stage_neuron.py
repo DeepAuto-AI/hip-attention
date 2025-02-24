@@ -12,6 +12,7 @@ def scan_stage_neuron(
     POS_TDST,
     
     BLOCK_SIZE_Q,
+    BLOCK_CHUNK,
 ):
     BSZ, TDST, HEAD, HID = Q.shape
     _, TSRC, HEAD_KV, _ = K.shape
@@ -20,7 +21,6 @@ def scan_stage_neuron(
     assert INDICES_LEFT.shape == CHUNK_SCORES.shape
     HEAD_GROUP = HEAD // HEAD_KV
     
-    BLOCK_CHUNK = 64
     BN_CHUNK = N_CHUNK // BLOCK_CHUNK
     
     out_indices_left = nl.ndarray(
@@ -116,8 +116,8 @@ def scan_stage_neuron(
     )
     mask_left_lhs = nl.zeros((BLOCK_CHUNK, BLOCK_SIZE_Q), dtype=indices_left.dtype) + ((indices_left + indices_center) // 2)
     mask_left_rhs = nl.zeros((BLOCK_SIZE_Q, BLOCK_CHUNK), dtype=indices_left.dtype) + pos_tdst
-    mask_left = nl.transpose(mask_left_lhs) <= mask_left_rhs
-    scores_left = nl.where(mask_left, scores_left, -32000.0) 
+    mask_left = mask_left_lhs <= nl.transpose(mask_left_rhs)
+    scores_left = nl.where(mask_left, nl.transpose(scores_left), -32000.0) 
     scores_left = nl.max(scores_left, axis=-1)
     
     k_right = nl.load(
@@ -137,8 +137,8 @@ def scan_stage_neuron(
     )
     mask_right_lhs = nl.zeros((BLOCK_CHUNK, BLOCK_SIZE_Q), dtype=indices_left.dtype) + ((indices_center + indices_right) // 2)
     mask_right_rhs = nl.zeros((BLOCK_SIZE_Q, BLOCK_CHUNK), dtype=indices_left.dtype) + pos_tdst
-    mask_right = nl.transpose(mask_right_lhs) <= mask_right_rhs
-    scores_right = nl.where(mask_right, scores_right, -32000.0) 
+    mask_right = mask_right_lhs <= nl.transpose(mask_right_rhs)
+    scores_right = nl.where(mask_right, nl.transpose(scores_right), -32000.0) 
     scores_right = nl.max(scores_right, axis=-1)
     
     indices_left = nl.where(

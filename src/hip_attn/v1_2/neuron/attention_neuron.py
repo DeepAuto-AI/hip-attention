@@ -58,30 +58,38 @@ def scan_stage(
         raise Exception()
     
     N_CHUNK = indices_left.shape[-1]
-    BN_CHUNK = triton.cdiv(N_CHUNK, 64)
+    BLOCK_CHUNK = 128
+    BN_CHUNK = triton.cdiv(N_CHUNK, BLOCK_CHUNK)
     
     position_ids = torch.arange(0, TDST, device=q.device, dtype=torch.int32)[None, :,].expand(BSZ, -1)
     
-    (
-        out_indices_left, 
-        out_indices_right, 
-        out_chunk_scores
-    ) = scan_stage_neuron[BSZ, BDST, HEAD, BN_CHUNK](
-        q,
-        k,
-        mask.indices_left,
-        mask.indices_right,
-        mask.chunk_scores,
-        position_ids,
-        
-        stage_info.stage_block_size_q,
-    )
+    max_chunk_size = stage_info.stage_chunk_size
     
-    return ScanStageKernelOutput(
-        indices_left=out_indices_left,
-        indices_right=out_indices_right,
-        chunk_scores=out_chunk_scores,
-    )
+    while max_chunk_size >= 1:
+        max_chunk_size /= 2
+        (
+            out_indices_left, 
+            out_indices_right, 
+            out_chunk_scores
+        ) = scan_stage_neuron[BSZ, BDST, HEAD, BN_CHUNK](
+            q,
+            k,
+            mask.indices_left,
+            mask.indices_right,
+            mask.chunk_scores,
+            position_ids,
+            
+            stage_info.stage_block_size_q,
+            BLOCK_CHUNK,
+            
+        )
+        mask = ScanStageKernelOutput(
+            indices_left=out_indices_left,
+            indices_right=out_indices_right,
+            chunk_scores=out_chunk_scores,
+        )
+    
+    return mask
 
 def main_debug():
     seq_len = int(os.getenv("SEQ_LEN", "32768"))
@@ -122,7 +130,7 @@ def main_debug():
     output = scan_stage(
         q, k,
         stage_info=ScanStage(
-            stage_block_size_q=64, 
+            stage_block_size_q=128, 
             stage_block_stride_q=4, 
             stage_chunk_size=256,
             stage_k=None,
