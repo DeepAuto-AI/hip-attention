@@ -43,7 +43,10 @@ from hip_attn.v1_0.attention1_block_gpu import to_dense
 try:
     from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache
 except ImportError:
-    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    try:
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    except ImportError:
+        flash_attn_func = flash_attn_with_kvcache = None
 
 
 def cdiv_python(a, b):
@@ -2775,7 +2778,7 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
     if autotune_disabled:
-        device_name = torch.cuda.get_device_name()
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "nocuda"
         defaults = {
             "NVIDIA A100-SXM4-80GB": dict(
                 num_warps=4,
@@ -5403,7 +5406,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
     if autotune_disabled:
-        device_name = torch.cuda.get_device_name()
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "nocuda"
         defaults = {
             "NVIDIA A100-SXM4-80GB": dict(
                 num_warps=4,
