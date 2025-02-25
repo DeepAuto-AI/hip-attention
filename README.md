@@ -3,19 +3,19 @@
   <img src="docs/demo_vllm.gif" width="49%" />
 </p>
 
-:sunglasses: **HiP Attention** could extend the model context length in a training-free manner and can serve 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
+:sunglasses: **HiP Attention** could extend the model context length training-free and can serve 3 million tokens with a single L40S 48GB GPU while achieving a 7.24 estimated speedup.
 
-| [**Paper (Arxiv, latest)**](https://arxiv.org/abs/2406.09827) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
+| [**Paper (Arxiv, InfiniteHiP *latest*)**](https://arxiv.org/abs/2502.08910) | [**Paper (ICLR 2025)**](https://openreview.net/forum?id=PTcMzQgKmn) | [**SGlang Integration**](https://github.com/DeepAuto-AI/sglang) |
 
 > [!NOTE]
-> You can try it in our [Liteai.io LLMOps](https://www.deepauto.ai/litellmops) platform!
+> You can try it in our [DeepAuto Chat](https://chat.deepauto.ai)!
 
 > [!IMPORTANT]
 > This is **NOT yet free for commercial use**. The license is [FSL-1.1-MIT](https://fsl.software/), which is free for non-commercial use but will automatically convert to MIT license two years after each release. Please refer to the [LICENSE](./LICENSE) for more details.
 
 ## News
 
-- 2025.01.26: Version 1.2 is now ready! The preprint will be relased soon.
+- 2025.01.26: Version 1.2 is now ready! The preprint is now prepared in [arxiv](https://arxiv.org/abs/2502.08910).
 - 2025.01.22: HiP Attention is **accepted in ICLR 2025**!
 <details>
 <summary>... More News ...</summary>
@@ -31,7 +31,7 @@ After installation, you can access the `hip` package from any project. `hip` is 
 
 ```py
 import torch
-from hip import hip_attention_12, HiPAttentionArgs12
+from hip_attn import hip_attention_12, HiPAttentionArgs12
 
 device = 'cuda'
 
@@ -63,30 +63,37 @@ print(output.shape)
 
 ## Getting Started
 
-### Building from source (Recommanded)
+### Building from source (Recommended)
 
 ```bash
+# Clone this repository
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
+# Make new conda environment
 conda create --name hip python=3.11
 conda activate hip
 
+# Default install
 pip install -e "."
-# Optional for development
-pip install -e ".[dev]"
+# (Optional) For running unit tests
+pip install -e ".[test]"
+# (Optional) For research benchmarks
+pip install -e ".[research]"
+# (Optional) Install the full suite
+pip install -e ".[all]"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
+
 # Dependencies that requires --no-build-isolation
 pip install -e ".[no_build_iso]" \
 --no-build-isolation \
 --verbose
-# SGLang with OpenAI API support for serving
+
+# Install SGLang with support for HiP Attention
 pip install -e ".[sglang]" \
---no-build-isolation \
---verbose \
---find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 
 ### Running
@@ -110,14 +117,22 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ## Citation
 
-```
-@misc{lee2024_hip_attention,
-      title={A Training-free Sub-quadratic Cost Transformer Model Serving Framework With Hierarchically Pruned Attention},
-      author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyoung Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
-      year={2024},
-      eprint={2406.09827},
+```bibtex
+@misc{lee2025_infinite_hip,
+      title={InfiniteHiP: Extending Language Model Context Up to 3 Million Tokens on a Single GPU},
+      author={Heejun Lee and Geon Park and Jaduk Suh and Sung Ju Hwang},
+      year={2025},
+      eprint={2502.08910},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2406.09827},
+      url={https://arxiv.org/abs/2502.08910},
+}
+
+@inproceedings{lee2025_hip_attention,
+      title={A Training-Free Sub-quadratic Cost Transformer Model Serving Framework with Hierarchically Pruned Attention},
+      author={Heejun Lee and Geon Park and Youngwan Lee and Jaduk Suh and Jina Kim and Wonyong Jeong and Bumsik Kim and Hyemin Lee and Myeongjae Jeon and Sung Ju Hwang},
+      booktitle={The Thirteenth International Conference on Learning Representations},
+      year={2025},
+      url={https://openreview.net/forum?id=PTcMzQgKmn}
 }
 ```

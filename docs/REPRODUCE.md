@@ -24,7 +24,7 @@ python -m sglang.launch_server \
     --max-running-requests 1 \
     --cuda-graph-bs 1 \
     --enable-hip-attention
-    
+
     # if running out of GPU memory, you can turn on InfiniteHiP's offloading
     --enable-hip-offload \
     --hip-max-mask-cache-token-size 32000 \ # adjust this
@@ -47,8 +47,8 @@ git clone git@github.com:gmlwns2000/InfiniteBench-hip.git
 cd InfiniteBench-hip/src
 
 # > Run experiment (generation)
-export SGLANG_PORT=$SRT_PORT 
-export USING_SGLANG=1 
+export SGLANG_PORT=$SRT_PORT
+export USING_SGLANG=1
 export SEQ_LEN=SEQ_LEN
 
 # For Llama 3.1
@@ -98,8 +98,8 @@ git clone git@github.com:gmlwns2000/LongBench-hip.git
 cd LongBench-hip
 
 # > Run generation
-export IS_INFLLM=1 
-export SGLANG_ENDPOINT="http://localhost:$SRT_PORT/" 
+export IS_INFLLM=1
+export SGLANG_ENDPOINT="http://localhost:$SRT_PORT/"
 python pred.py --model sglang-256k --name $EXPERIMENT_NAME
 
 # > Run evaluation

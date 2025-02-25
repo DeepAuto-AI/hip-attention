@@ -1,4 +1,0 @@
-# Please update sglang version to the latest commit hash.
-# See https://github.com/DeepAuto-AI/sglang to track commit hash.
-sglang[all] @ git+https://github.com/DeepAuto-AI/sglang@06fafb06657f18103886956995da5ecbdc5f1817#subdirectory=python
-vllm==0.6.4.post1
