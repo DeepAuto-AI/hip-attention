@@ -4,7 +4,7 @@ from torch_xla.core import xla_model as xm
 import os
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
 from hip_research.utils.load_checkouts import load_checkouts
-from typing import Optional
+from typing import Optional, List
 import triton
 from dataclasses import dataclass
 
@@ -48,17 +48,19 @@ def scan_stage(
             device=q.device,
             fill_value=-32000.0,
         )
-        
-        mask = ScanStageKernelOutput(
-            indices_left=indices_left,
-            indices_right=indices_right,
-            chunk_scores=chunk_scores,
-        )
     else:
-        raise Exception()
+        indices_left = previous_output.indices_left
+        indices_right = previous_output.indices_right
+        chunk_scores = previous_output.chunk_scores
+        
+    mask = ScanStageKernelOutput(
+        indices_left=indices_left,
+        indices_right=indices_right,
+        chunk_scores=chunk_scores,
+    )
     
     N_CHUNK = indices_left.shape[-1]
-    BLOCK_CHUNK = 128
+    BLOCK_CHUNK = 256
     BN_CHUNK = triton.cdiv(N_CHUNK, BLOCK_CHUNK)
     
     position_ids = torch.arange(0, TDST, device=q.device, dtype=torch.int32)[None, :,].expand(BSZ, -1)
@@ -81,7 +83,6 @@ def scan_stage(
             
             stage_info.stage_block_size_q,
             BLOCK_CHUNK,
-            
         )
         mask = ScanStageKernelOutput(
             indices_left=out_indices_left,
@@ -90,6 +91,64 @@ def scan_stage(
         )
     
     return mask
+
+def hip_masking(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    
+    stages: List[ScanStage],
+):
+    scan_state = None
+    previous_stage = None
+    for stage in stages:
+        if scan_state is not None:
+            assert previous_stage.stage_block_size_q == stage.stage_block_size_q
+            assert (previous_stage.stage_chunk_size % stage.stage_chunk_size) == 0
+            
+            num_chunk_div = previous_stage.stage_chunk_size // stage.stage_chunk_size
+            
+            indices_left = (
+                scan_state.indices_left
+                // previous_stage.stage_chunk_size 
+                * previous_stage.stage_chunk_size
+            )
+            indices_left = (
+                indices_left[:, :, :, :, None] 
+                + torch.arange(0, num_chunk_div, dtype=indices_left.dtype)[None, None, None, None, :]
+                * stage.stage_chunk_size
+            )
+            indices_left = indices_left.flatten(-2, -1)
+            indices_right = indices_left + stage.stage_chunk_size
+            chunk_scores = scan_state.chunk_scores.repeat_interleave(dim=-1, repeats=num_chunk_div)
+            
+            _, topk_indices = torch.topk(
+                chunk_scores, 
+                dim=-1, 
+                k=stage.stage_k // stage.stage_chunk_size,
+                sorted=False,
+            )
+            indices_left = indices_left.gather(
+                dim=-1, index=topk_indices
+            )
+            indices_right = indices_right.gather(
+                dim=-1, index=topk_indices
+            )
+            chunk_scores = chunk_scores.gather(
+                dim=-1, index=topk_indices
+            )
+            scan_state = ScanStageKernelOutput(
+                indices_left=indices_left,
+                indices_right=indices_right,
+                chunk_scores=chunk_scores,
+            )
+        
+        previous_stage = stage
+        
+        scan_state = scan_stage(
+            q, k, stage, scan_state
+        )
+    
+    return scan_state
 
 def main_debug():
     seq_len = int(os.getenv("SEQ_LEN", "32768"))
@@ -127,15 +186,31 @@ def main_debug():
 
     print(q.shape, k.shape, v.shape)
     
-    output = scan_stage(
+    output = hip_masking(
         q, k,
-        stage_info=ScanStage(
-            stage_block_size_q=128, 
-            stage_block_stride_q=4, 
-            stage_chunk_size=256,
-            stage_k=None,
-            stage_stride=1,
-        ),
+        stages=[
+            ScanStage(
+                stage_block_size_q=128, 
+                stage_block_stride_q=4, 
+                stage_chunk_size=128,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=128, 
+                stage_block_stride_q=4, 
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=128, 
+                stage_block_stride_q=1, 
+                stage_chunk_size=8,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ]
     )
     
     print(output)

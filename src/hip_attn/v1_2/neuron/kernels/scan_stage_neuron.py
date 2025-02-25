@@ -50,13 +50,13 @@ def scan_stage_neuron(
     #             for idx_bchunk in nl.sequential_range(BN_CHUNK):
     
     idx_tdst = nl.arange(BLOCK_SIZE_Q)[:, None] + idx_bdst * BLOCK_SIZE_Q
-    idx_hid = nl.arange(0, HID)[None, :]
+    idx_hid = nl.arange(0, HID)
     queries = nl.load(
         Q[
             idx_bsz,
             idx_tdst,
             idx_head,
-            idx_hid
+            idx_hid[None, :]
         ]
     )
     pos_tdst = nl.load(
@@ -66,7 +66,7 @@ def scan_stage_neuron(
         ]
     )
     
-    idx_chunk = nl.arange(0, BLOCK_CHUNK)[:, None] + idx_bchunk * BLOCK_CHUNK
+    idx_chunk = nl.arange(0, BLOCK_CHUNK)[None, :] + idx_bchunk * BLOCK_CHUNK
     indices_left = nl.load(
         INDICES_LEFT[
             idx_bsz,
@@ -104,7 +104,7 @@ def scan_stage_neuron(
             idx_bsz,
             ((indices_left + indices_center) // 2),
             idx_head // HEAD_GROUP,
-            idx_hid,
+            idx_hid[:, None],
         ]
     )
     scores_left_psum = nl.matmul(
@@ -125,7 +125,7 @@ def scan_stage_neuron(
             idx_bsz,
             ((indices_center + indices_right) // 2),
             idx_head // HEAD_GROUP,
-            idx_hid,
+            idx_hid[:, None],
         ]
     )
     scores_right_psum = nl.matmul(
@@ -138,7 +138,7 @@ def scan_stage_neuron(
     mask_right_lhs = nl.zeros((BLOCK_CHUNK, BLOCK_SIZE_Q), dtype=indices_left.dtype) + ((indices_center + indices_right) // 2)
     mask_right_rhs = nl.zeros((BLOCK_SIZE_Q, BLOCK_CHUNK), dtype=indices_left.dtype) + pos_tdst
     mask_right = mask_right_lhs <= nl.transpose(mask_right_rhs)
-    scores_right = nl.where(mask_right, nl.transpose(scores_right), -32000.0) 
+    scores_right = nl.where(mask_right, nl.transpose(scores_right), -32000.0)
     scores_right = nl.max(scores_right, axis=-1)
     
     indices_left = nl.where(
