@@ -89,7 +89,9 @@ flashinfer-python = [
 ]
 hip-attn = { workspace = true }
 sglang = [
-    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" }
+    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" },
+    # For local devs, you can use this instead:
+    # { path = "../sglang/python", editable = true },
 ]
 
 [tool.uv]
