@@ -61,8 +61,10 @@ test = [  # Packages required for running the tests
 
 sglang = [
     "sgl-kernel",
-
     # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
+    # For uv, see tool.uv.sources and tool.uv.index sections
+    "flashinfer-python",
+
     "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python",
 ]
 
@@ -79,3 +81,13 @@ no_build_iso = [
 
 [tool.setuptools]
 packages = ["hip_attn", "hip_research"]
+
+[tool.uv.sources]
+flashinfer-python = [
+  { index = "flashinfer_cu124_torch25" },
+]
+
+[[tool.uv.index]]
+name = "flashinfer_cu124_torch25"
+url = "https://flashinfer.ai/whl/cu124/torch2.5/"
+explicit = true
