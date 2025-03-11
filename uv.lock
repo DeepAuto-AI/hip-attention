@@ -761,12 +761,20 @@ wheels = [
 [[package]]
 name = "flash-attn"
 version = "2.7.4.post1"
-source = { registry = "https://pypi.org/simple" }
+source = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
 dependencies = [
     { name = "einops" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/34/9bf60e736ed7bbe15055ac2dab48ec67d9dbd088d2b4ae318fd77190ab4e/flash_attn-2.7.4.post1.tar.gz", hash = "sha256:f03485c9a49a4d68d0733acdcad80ab0e72afa025a777fdc2966ceccf9d51765", size = 5986610 }
+wheels = [
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", hash = "sha256:d944fc7d2f962bce83fc4708c2fc0c21eaf8255962a0b350ae919362a51b7ef2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "torch" },
+]
 
 [[package]]
 name = "flashinfer-python"
@@ -1016,12 +1024,14 @@ dependencies = [
     { name = "performer-pytorch" },
     { name = "seaborn" },
     { name = "sympy" },
+    { name = "torch" },
 ]
 
 [package.optional-dependencies]
 all = [
     { name = "datasets" },
     { name = "deepspeed" },
+    { name = "flash-attn" },
     { name = "flashinfer-python" },
     { name = "lightning" },
     { name = "matplotlib" },
@@ -1037,9 +1047,6 @@ all = [
     { name = "torchmetrics" },
     { name = "torchtext" },
     { name = "tqdm" },
-]
-no-build-iso = [
-    { name = "flash-attn" },
 ]
 research = [
     { name = "datasets" },
@@ -1058,6 +1065,7 @@ research = [
     { name = "tqdm" },
 ]
 sglang = [
+    { name = "flash-attn" },
     { name = "flashinfer-python" },
     { name = "sgl-kernel" },
     { name = "sglang", extra = ["all"] },
@@ -1081,7 +1089,7 @@ test = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "hip-attn", extra = ["all", "no-build-iso"] },
+    { name = "hip-attn", extra = ["all"] },
 ]
 
 [package.metadata]
@@ -1090,7 +1098,7 @@ requires-dist = [
     { name = "cupy-cuda12x" },
     { name = "datasets", marker = "extra == 'research'" },
     { name = "deepspeed", marker = "extra == 'research'" },
-    { name = "flash-attn", marker = "extra == 'no-build-iso'" },
+    { name = "flash-attn", marker = "extra == 'sglang'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", index = "https://flashinfer.ai/whl/cu124/torch2.5/" },
     { name = "hip-attn", extras = ["research"], marker = "extra == 'test'", editable = "." },
     { name = "hip-attn", extras = ["test", "research", "sglang"], marker = "extra == 'all'", editable = "." },
@@ -1111,14 +1119,15 @@ requires-dist = [
     { name = "sgl-kernel", marker = "extra == 'sglang'" },
     { name = "sglang", extras = ["all"], marker = "extra == 'sglang'", git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Frelease" },
     { name = "sympy" },
+    { name = "torch", specifier = "==2.5.1" },
     { name = "torchmetrics", marker = "extra == 'research'" },
     { name = "torchtext", marker = "extra == 'research'" },
     { name = "tqdm", marker = "extra == 'research'" },
 ]
-provides-extras = ["research", "test", "sglang", "all", "no-build-iso"]
+provides-extras = ["research", "test", "sglang", "all"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "hip-attn", extras = ["all", "no-build-iso"], editable = "." }]
+dev = [{ name = "hip-attn", extras = ["all"], editable = "." }]
 
 [[package]]
 name = "hjson"

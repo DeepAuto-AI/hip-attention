@@ -75,17 +75,8 @@ Please follow the documentation to install [uv](https://docs.astral.sh/uv/gettin
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
-# Optional, depends on your CUDA environment
-export CUDACXX=/usr/local/cuda/bin/nvcc
-
-# This install all dependencies in .venv/
-uv sync --no-install-package flash-attn  # Install all without flash-attn first
-uv sync # Then install flash-attn
-
-# Or, If you want to rebuild everything without cache
-uv sync --no-install-package flash-attn --verbose --reinstall --refresh
-uv cache clean flash-attn
-uv sync --verbose
+# This install all dev dependencies in .venv/
+uv sync
 ```
 
 Then you can run any python program with `uv run`. `uv run` automatically picks up .venv/ virtual environment:
