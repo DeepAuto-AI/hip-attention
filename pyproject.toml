@@ -1,5 +1,15 @@
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
+requires = [
+    "setuptools>=49.4.0",
+    "setuptools-scm",
+
+    # Build dependencies. (Especially for flash-attn)
+    "cmake>=3.21",
+    "ninja",
+    "packaging",
+    "torch==2.5.1",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 # Basic package info
@@ -9,14 +19,6 @@ version = "1.2.0"
 description = "HiP Attention"
 requires-python = ">=3.10, <3.13"
 dependencies = [
-    # Build dependencies.
-    "cmake>=3.21",
-    "ninja",
-    "packaging",
-    "setuptools>=49.4.0",
-    "torch==2.5.1",
-    "wheel",
-
     # Required
     "numba",
     "performer_pytorch",
@@ -99,5 +101,5 @@ explicit = true
 
 [dependency-groups]
 dev = [
-    "hip-attn[all,no-build-iso]",
+    "hip-attn[all,no_build_iso]",
 ]
