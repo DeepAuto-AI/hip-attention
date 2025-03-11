@@ -1,4 +1,4 @@
 *
 !src
-!requirements.*
 !pyproject.toml
+!uv.lock
