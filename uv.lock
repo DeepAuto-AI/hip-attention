@@ -1111,6 +1111,11 @@ test = [
     { name = "tqdm" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "hip-attn", extra = ["all", "no-build-iso"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "bitsandbytes" },
@@ -1120,10 +1125,8 @@ requires-dist = [
     { name = "deepspeed", marker = "extra == 'research'" },
     { name = "flash-attn", marker = "extra == 'no-build-iso'" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", index = "https://flashinfer.ai/whl/cu124/torch2.5/" },
-    { name = "hip-attn", extras = ["research"], marker = "extra == 'all'" },
-    { name = "hip-attn", extras = ["research"], marker = "extra == 'test'" },
-    { name = "hip-attn", extras = ["sglang"], marker = "extra == 'all'" },
-    { name = "hip-attn", extras = ["test"], marker = "extra == 'all'" },
+    { name = "hip-attn", extras = ["research"], marker = "extra == 'test'", editable = "." },
+    { name = "hip-attn", extras = ["test", "research", "sglang"], marker = "extra == 'all'", editable = "." },
     { name = "lightning", marker = "extra == 'research'" },
     { name = "matplotlib", marker = "extra == 'research'" },
     { name = "ninja" },
@@ -1151,6 +1154,9 @@ requires-dist = [
     { name = "wheel" },
 ]
 provides-extras = ["research", "test", "sglang", "all", "no-build-iso"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "hip-attn", extras = ["all", "no-build-iso"], editable = "." }]
 
 [[package]]
 name = "hjson"

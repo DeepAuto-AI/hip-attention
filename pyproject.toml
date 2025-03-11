@@ -68,7 +68,8 @@ sglang = [
     "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python",
 ]
 
-all = ["hip_attn[test]", "hip_attn[research]", "hip_attn[sglang]"]
+# You still need to install hip-attn[no_build_iso]
+all = ["hip_attn[test,research,sglang]"]
 
 # Packages required building from source with `--no-build-isolation`.
 # Install this with `--no-build-isolation` after installing the rest of the dependencies.
@@ -86,8 +87,17 @@ packages = ["hip_attn", "hip_research"]
 flashinfer-python = [
   { index = "flashinfer_cu124_torch25" },
 ]
+hip-attn = { workspace = true }
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
 
 [[tool.uv.index]]
 name = "flashinfer_cu124_torch25"
 url = "https://flashinfer.ai/whl/cu124/torch2.5/"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "hip-attn[all,no-build-iso]",
+]
