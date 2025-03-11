@@ -48,7 +48,7 @@ export SRT_SERVED_MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
 SRT_WARMUP_PASSKEY_LENGTH=1024000 \
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-python -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path $SRT_MODEL_PATH \
@@ -91,7 +91,7 @@ export SRT_SERVED_MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
 SRT_WARMUP_PASSKEY_LENGTH=1024000 \
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-python -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path $SRT_MODEL_PATH \
@@ -130,7 +130,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 export CACHE_SIZE=2048000
 
 SRT_WARMUP_PASSKEY_LENGTH=1024000 \
-python -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
@@ -215,7 +215,7 @@ SRT_WARMUP_PASSKEY_LENGTH=1024000 \
 CUDA_VISIBLE_DEVICES=0 \
 HIP_HEAD_REDUCE=1 \
 SRT_MAX_BATCH=1 \
-python -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path $SRT_MODEL_PATH \
@@ -302,7 +302,7 @@ export CONTEXT_LENGTH=1048576;
 export SRT_MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 export SRT_SERVED_MODEL_NAME="deepauto/DeepSeek-R1-Distill-Qwen-14B-1B-Ctx"
 
-$(which python) -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path $SRT_MODEL_PATH \
@@ -343,7 +343,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=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" \
+--env "HF_TOKEN=<secret>" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
@@ -399,7 +399,7 @@ export CONTEXT_LENGTH=1048576;
 export SRT_MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 export SRT_SERVED_MODEL_NAME="deepauto/deepseek-r1-distill-qwen-32b-1m-ctx"
 
-$(which python) -m sglang.launch_server \
+uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
 --model-path $SRT_MODEL_PATH \
@@ -440,7 +440,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=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" \
+--env "HF_TOKEN=<secret>" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
@@ -473,7 +473,7 @@ python3 \
 ## Testing
 
 ```bash
-SRT_PORT=8921 python scripts/test_openai.py
+SRT_PORT=8921 uv run scripts/test_openai.py
 # 1M tokens
-SRT_PORT=8921 python scripts/test_openai_long.py
+SRT_PORT=8921 uv run scripts/test_openai_long.py
 ```
