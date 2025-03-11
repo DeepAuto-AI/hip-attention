@@ -27,7 +27,6 @@ dependencies = [
     "seaborn",
     "sympy",
     "bitsandbytes",
-
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",
@@ -69,7 +68,7 @@ sglang = [
     # For uv, see tool.uv.sources and tool.uv.index sections
     "flashinfer-python",
 
-    "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python",
+    "sglang[all]",
 
     # flash-attn
     "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl",
@@ -89,6 +88,9 @@ flashinfer-python = [
   { index = "flashinfer_cu124_torch25" },
 ]
 hip-attn = { workspace = true }
+sglang = [
+    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" }
+]
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn"]
