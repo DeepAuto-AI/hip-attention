@@ -107,13 +107,11 @@ pip install -e ".[all]"
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
 
-# Dependencies that requires --no-build-isolation
-pip install -e ".[no_build_iso]" \
---no-build-isolation \
---verbose
-
 # Install SGLang with support for HiP Attention
 pip install -e ".[sglang]" \
+"sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python" \
+--no-build-isolation \
+--verbose \
 --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 
