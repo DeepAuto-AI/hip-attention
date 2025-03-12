@@ -6,7 +6,7 @@ import requests
 
 port = os.getenv("SRT_PORT", "8913")
 
-url = "http://localhost:{port}/v1"
+url = f"http://localhost:{port}/v1"
 
 
 PROMPT = r"""

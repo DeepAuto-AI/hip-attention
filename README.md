@@ -63,7 +63,28 @@ print(output.shape)
 
 ## Getting Started
 
-### Building from source (Recommended)
+### Local development
+
+#### Using uv (Recommended)
+
+It’s recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments.
+Please follow the documentation to install [uv](https://docs.astral.sh/uv/getting-started/installation/). After installing uv, you can create a new Python environment and install hip-attention using the following commands:
+
+```bash
+# Clone this repository
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+
+# This install all dev dependencies in .venv/
+uv sync
+```
+
+Then you can run any python program with `uv run`. `uv run` automatically picks up .venv/ virtual environment:
+
+- Script: `uv run src/hip_research/main/model_eval.py`
+- Module: `uv run -m src.hip_research.main.model_eval`
+
+#### Using pip and conda
 
 ```bash
 # Clone this repository
@@ -86,13 +107,11 @@ pip install -e ".[all]"
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc
 
-# Dependencies that requires --no-build-isolation
-pip install -e ".[no_build_iso]" \
---no-build-isolation \
---verbose
-
 # Install SGLang with support for HiP Attention
 pip install -e ".[sglang]" \
+"sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python" \
+--no-build-isolation \
+--verbose \
 --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 

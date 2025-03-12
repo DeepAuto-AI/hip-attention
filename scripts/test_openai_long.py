@@ -21,7 +21,7 @@ chat_completion = client.chat.completions.create(
     ],
     temperature=0.01,
     stream=True,
-    max_tokens=100,
+    max_tokens=10000,
 )
 
 for chat in chat_completion:
