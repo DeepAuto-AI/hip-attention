@@ -369,7 +369,7 @@ class GPUCache:
         ), f"{gpu_page_count} <= {(uvm_page_count * self.head_num)}"
 
         # cache_miss = ((stats.cache_miss_counter > 0) * stats.access_counter).sum(0).view(-1)
-        if stats.cache_miss_counter.shape[0 == 1]:
+        if stats.cache_miss_counter.shape[0] == 1:
             cache_miss = stats.cache_miss_counter.view(-1)
         else:
             cache_miss = (

@@ -372,8 +372,8 @@ class HiPModelOffloadCache:
         extend_seq_lens_cpu: np.array,
     ):
         for ibatch in range(batch_size):
-            req_pool_indices = req_pool_indices[ibatch : ibatch + 1]
-            block_table = req_to_token.index_select(dim=0, index=req_pool_indices)[
+            curr_req_pool_indices = req_pool_indices[ibatch : ibatch + 1]
+            block_table = req_to_token.index_select(dim=0, index=curr_req_pool_indices)[
                 0,
                 : extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch],
             ]
