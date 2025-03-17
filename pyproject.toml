@@ -21,6 +21,7 @@ requires-python = ">=3.10, <3.13"
 dependencies = [
     # Required
     "torch==2.5.1",
+    "setuptools",  # Required by triton amd backend
     "numba",
     "performer_pytorch",
     "peft",
