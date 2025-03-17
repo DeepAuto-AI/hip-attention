@@ -1,5 +1,6 @@
 import os
 
+import httpx
 from openai import OpenAI
 
 port = os.getenv("SRT_PORT", "8913")
@@ -7,6 +8,7 @@ port = os.getenv("SRT_PORT", "8913")
 client = OpenAI(
     base_url=f"http://localhost:{port}/v1",
     api_key="API_KEY",
+    http_client=httpx.Client(timeout=60 * 60),  # 60 min timeout
 )
 chat_completion = client.chat.completions.create(
     model="meta-llama/Llama-3.1-8B-Instruct",

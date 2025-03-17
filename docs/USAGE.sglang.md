@@ -1,6 +1,7 @@
 # Running HiP Attention with SGLang OpenAI server
 
 - [Running HiP Attention with SGLang OpenAI server](#running-hip-attention-with-sglang-openai-server)
+  - [Testing](#testing)
   - [`meta-llama/Llama-3.1-8B-Instruct`](#meta-llamallama-31-8b-instruct)
     - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading)
       - [Local](#local)
@@ -20,7 +21,18 @@
     - [Multi GPU (with cache offloading)](#multi-gpu-with-cache-offloading-2)
       - [Local](#local-5)
       - [Docker](#docker-3)
-  - [Testing](#testing)
+  - [`Qwen/QwQ-32B`](#qwenqwq-32b)
+    - [Multi GPU (with cache offloading)](#multi-gpu-with-cache-offloading-3)
+      - [Local](#local-6)
+      - [Docker](#docker-4)
+
+## Testing
+
+```bash
+SRT_PORT=8921 uv run scripts/test_openai.py
+# 1M tokens
+SRT_PORT=8921 uv run scripts/test_openai_long.py
+```
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
 
@@ -168,7 +180,7 @@ docker run --rm --runtime nvidia \
 --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=1024000" \
 hip-sglang:latest \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -256,7 +268,7 @@ docker run --rm --runtime nvidia \
 --env "HIP_HEAD_REDUCE=1" \
 --env "SRT_MAX_BATCH=1" \
 hip-sglang:latest \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -338,7 +350,7 @@ export SRT_MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 export SRT_SERVED_MODEL_NAME="deepauto/DeepSeek-R1-Distill-Qwen-14B-1M-Ctx"
 
 docker run --rm --runtime nvidia \
---gpus '"device=4,5,6,7"' \
+--gpus '"device=0,1,2,3"' \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
@@ -350,7 +362,7 @@ docker run --rm --runtime nvidia \
 --env "TOTAL_TOKENS=$TOTAL_TOKENS" \
 --env "CONTEXT_LENGTH=$CONTEXT_LENGTH" \
 hip-sglang:1f34639 \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -447,7 +459,7 @@ docker run --rm --runtime nvidia \
 --env "TOTAL_TOKENS=$TOTAL_TOKENS" \
 --env "CONTEXT_LENGTH=$CONTEXT_LENGTH" \
 hip-sglang:1f34639 \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -470,10 +482,88 @@ python3 \
 --disable-custom-all-reduce
 ```
 
-## Testing
+## `Qwen/QwQ-32B`
+
+### Multi GPU (with cache offloading)
+
+- 1M context length
+- Cache offloading enabled
+- Tested model: `Qwen/QwQ-32B`
+- Testwd GPU: 4x A100 40GB
+- Tested at: 2025-03-17
+- Tested version:
+  - `hip-attention`: `169938fd1f3d529f184c421edec6fdb1a614a3d1`
+  - `sglang`: `cf7158db50590ef4fe98c5b5d17d15946a6eef87`
+
+#### Local
 
 ```bash
-SRT_PORT=8921 uv run scripts/test_openai.py
-# 1M tokens
-SRT_PORT=8921 uv run scripts/test_openai_long.py
+export SRT_PORT=8921
+export CUDA_VISIBLE_DEVICES=0,1,2,3;
+export TOTAL_TOKENS=1048576;
+export CONTEXT_LENGTH=1048576;
+export SRT_MODEL_PATH="Qwen/QwQ-32B"
+export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx"
+
+uv run -m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
+--kv-cache-dtype auto \
+--tp-size 4 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $TOTAL_TOKENS \
+--max-running-requests 1 \
+--cuda-graph-bs 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--disable-custom-all-reduce \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 5000 \
+--hip-max-mask-cache-token-size 64000
+```
+
+#### Docker
+
+```bash
+export SRT_PORT=8921
+export TOTAL_TOKENS=1048576;
+export CONTEXT_LENGTH=1048576;
+export DOCKER_NAME="qwen-32b-1b-ctx"
+export SRT_MODEL_PATH="Qwen/QwQ-32B"
+export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx"
+
+docker run --rm --runtime nvidia \
+--gpus '"device=0,1,2,3"' \
+--name $DOCKER_NAME \
+-p $SRT_PORT:$SRT_PORT \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=<secret>" \
+hip-sglang:latest \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port $SRT_PORT \
+--model-path $SRT_MODEL_PATH \
+--served-model-name $SRT_SERVED_MODEL_NAME \
+--kv-cache-dtype auto \
+--tp-size 4 \
+--chunked-prefill-size 32768 \
+--max-prefill-tokens 32768 \
+--stream-interval 1 \
+--context-length $CONTEXT_LENGTH \
+--max-total-tokens $TOTAL_TOKENS \
+--max-running-requests 1 \
+--cuda-graph-bs 1 \
+--enable-hip-attention \
+--hip-attention-config '{"mask_refresh_interval": [96, 24, 8]}' \
+--disable-custom-all-reduce \
+--enable-hip-offload \
+--hip-max-sa-cache-token-size 5000 \
+--hip-max-mask-cache-token-size 64000
 ```
