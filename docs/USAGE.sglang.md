@@ -180,7 +180,7 @@ docker run --rm --runtime nvidia \
 --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=1024000" \
 hip-sglang:latest \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -268,7 +268,7 @@ docker run --rm --runtime nvidia \
 --env "HIP_HEAD_REDUCE=1" \
 --env "SRT_MAX_BATCH=1" \
 hip-sglang:latest \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -362,7 +362,7 @@ docker run --rm --runtime nvidia \
 --env "TOTAL_TOKENS=$TOTAL_TOKENS" \
 --env "CONTEXT_LENGTH=$CONTEXT_LENGTH" \
 hip-sglang:1f34639 \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -459,7 +459,7 @@ docker run --rm --runtime nvidia \
 --env "TOTAL_TOKENS=$TOTAL_TOKENS" \
 --env "CONTEXT_LENGTH=$CONTEXT_LENGTH" \
 hip-sglang:1f34639 \
-python3 \
+python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
