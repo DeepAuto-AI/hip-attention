@@ -107,6 +107,9 @@ name = "flashinfer_cu124_torch25"
 url = "https://flashinfer.ai/whl/cu124/torch2.5/"
 explicit = true
 
+[tool.uv.workspace]
+members = ["hip-research"]
+
 [dependency-groups]
 dev = [
     "hip-attn[all]",
