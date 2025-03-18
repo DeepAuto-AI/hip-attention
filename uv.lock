@@ -16,6 +16,12 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform != 'darwin' and sys_platform != 'linux'",
 ]
 
+[manifest]
+members = [
+    "hip-attn",
+    "hip-research",
+]
+
 [[package]]
 name = "accelerate"
 version = "1.4.0"
@@ -1133,6 +1139,7 @@ test = [
 [package.dev-dependencies]
 dev = [
     { name = "hip-attn", extra = ["all"] },
+    { name = "hip-research" },
 ]
 
 [package.metadata]
@@ -1172,7 +1179,15 @@ requires-dist = [
 provides-extras = ["research", "test", "sglang", "all"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "hip-attn", extras = ["all"], editable = "." }]
+dev = [
+    { name = "hip-attn", extras = ["all"], editable = "." },
+    { name = "hip-research", editable = "hip-research" },
+]
+
+[[package]]
+name = "hip-research"
+version = "0.1.0"
+source = { editable = "hip-research" }
 
 [[package]]
 name = "hjson"

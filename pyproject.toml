@@ -81,7 +81,7 @@ all = ["hip_attn[test,research,sglang]"]
 "" = "src"
 
 [tool.setuptools]
-packages = ["hip_attn", "hip_research"]
+packages = ["hip_attn"]
 
 [tool.uv.sources]
 hip-attn = { workspace = true }
@@ -98,6 +98,7 @@ sglang = [
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },
 ]
+hip-research = { workspace = true }
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn"]
@@ -113,4 +114,5 @@ members = ["hip-research"]
 [dependency-groups]
 dev = [
     "hip-attn[all]",
+    "hip-research",
 ]
