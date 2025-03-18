@@ -1,16 +1,32 @@
 [project]
 name = "hip-research"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-authors = [
-    { name = "Bumsik Kim", email = "k.bumsik@gmail.com" }
-]
+description = "HiP Attention Research Folder"
 requires-python = ">=3.10, <3.13"
-dependencies = []
+dependencies = [
+    # Trainer
+    "torchmetrics",
+    "deepspeed",
+    "lightning",
+    "pytorch_lightning",
+    "scikit-learn",
 
-[project.scripts]
-hip-research = "hip_research:main"
+    # Dataset
+    "torchtext",
+    "datasets",
+
+    # Eval
+    "pypareto",
+    "pyrouge",
+
+    # Other dependencies
+    "requests",
+    "tqdm",
+    "matplotlib",
+    "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
+    "scikit-image",
+    "wandb",
+]
 
 [build-system]
 requires = ["setuptools>=61"]

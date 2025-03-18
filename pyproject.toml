@@ -34,35 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-research = [
-    # Trainer
-    "torchmetrics",
-    "deepspeed",
-    "lightning",
-    "pytorch_lightning",
-    "scikit-learn",
-
-    # Dataset
-    "torchtext",
-    "datasets",
-
-    # Eval
-    "pypareto",
-    "pyrouge",
-
-    # Other dependencies
-    "requests",
-    "tqdm",
-    "matplotlib",
-    "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
-    "scikit-image",
-    "wandb",
-]
-
-test = [  # Packages required for running the tests
-    "hip-attn[research]",
-]
-
 sglang = [
     "sgl-kernel",
     # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
@@ -73,15 +44,6 @@ sglang = [
     # See tool.uv.sources section
     "sglang[all]",
 ]
-
-# You still need to install hip-attn[no_build_iso]
-all = ["hip_attn[test,research,sglang]"]
-
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.setuptools]
-packages = ["hip_attn"]
 
 [tool.uv.sources]
 hip-attn = { workspace = true }
@@ -113,6 +75,6 @@ members = ["hip-research"]
 
 [dependency-groups]
 dev = [
-    "hip-attn[all]",
+    "hip-attn[sglang]",
     "hip-research",
 ]

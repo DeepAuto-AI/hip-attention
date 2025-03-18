@@ -1074,71 +1074,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-all = [
-    { name = "datasets" },
-    { name = "deepspeed" },
-    { name = "flash-attn" },
-    { name = "flashinfer-python" },
-    { name = "lightning" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pypareto" },
-    { name = "pyrouge" },
-    { name = "pytorch-lightning" },
-    { name = "requests" },
-    { name = "scikit-image" },
-    { name = "scikit-learn" },
-    { name = "sgl-kernel" },
-    { name = "sglang", extra = ["all"] },
-    { name = "torchmetrics" },
-    { name = "torchtext" },
-    { name = "tqdm" },
-    { name = "wandb" },
-]
-research = [
-    { name = "datasets" },
-    { name = "deepspeed" },
-    { name = "lightning" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pypareto" },
-    { name = "pyrouge" },
-    { name = "pytorch-lightning" },
-    { name = "requests" },
-    { name = "scikit-image" },
-    { name = "scikit-learn" },
-    { name = "torchmetrics" },
-    { name = "torchtext" },
-    { name = "tqdm" },
-    { name = "wandb" },
-]
 sglang = [
     { name = "flash-attn" },
     { name = "flashinfer-python" },
     { name = "sgl-kernel" },
     { name = "sglang", extra = ["all"] },
 ]
-test = [
-    { name = "datasets" },
-    { name = "deepspeed" },
-    { name = "lightning" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pypareto" },
-    { name = "pyrouge" },
-    { name = "pytorch-lightning" },
-    { name = "requests" },
-    { name = "scikit-image" },
-    { name = "scikit-learn" },
-    { name = "torchmetrics" },
-    { name = "torchtext" },
-    { name = "tqdm" },
-    { name = "wandb" },
-]
 
 [package.dev-dependencies]
 dev = [
-    { name = "hip-attn", extra = ["all"] },
+    { name = "hip-attn", extra = ["sglang"] },
     { name = "hip-research" },
 ]
 
@@ -1146,41 +1091,24 @@ dev = [
 requires-dist = [
     { name = "bitsandbytes" },
     { name = "cupy-cuda12x" },
-    { name = "datasets", marker = "extra == 'research'" },
-    { name = "deepspeed", marker = "extra == 'research'" },
     { name = "flash-attn", marker = "extra == 'sglang'", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "extra == 'sglang'", index = "https://flashinfer.ai/whl/cu124/torch2.5/" },
-    { name = "hip-attn", extras = ["research"], marker = "extra == 'test'", editable = "." },
-    { name = "hip-attn", extras = ["test", "research", "sglang"], marker = "extra == 'all'", editable = "." },
-    { name = "lightning", marker = "extra == 'research'" },
-    { name = "matplotlib", marker = "extra == 'research'" },
     { name = "numba" },
-    { name = "numpy", marker = "extra == 'research'", specifier = "<2.0.0" },
     { name = "nvtx" },
     { name = "peft" },
     { name = "performer-pytorch" },
-    { name = "pypareto", marker = "extra == 'research'" },
-    { name = "pyrouge", marker = "extra == 'research'" },
-    { name = "pytorch-lightning", marker = "extra == 'research'" },
-    { name = "requests", marker = "extra == 'research'" },
-    { name = "scikit-image", marker = "extra == 'research'" },
-    { name = "scikit-learn", marker = "extra == 'research'" },
     { name = "seaborn" },
     { name = "setuptools" },
     { name = "sgl-kernel", marker = "extra == 'sglang'" },
     { name = "sglang", extras = ["all"], marker = "extra == 'sglang'", git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Frelease" },
     { name = "sympy" },
     { name = "torch", specifier = "==2.5.1" },
-    { name = "torchmetrics", marker = "extra == 'research'" },
-    { name = "torchtext", marker = "extra == 'research'" },
-    { name = "tqdm", marker = "extra == 'research'" },
-    { name = "wandb", marker = "extra == 'research'" },
 ]
-provides-extras = ["research", "test", "sglang", "all"]
+provides-extras = ["sglang"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "hip-attn", extras = ["all"], editable = "." },
+    { name = "hip-attn", extras = ["sglang"], editable = "." },
     { name = "hip-research", editable = "hip-research" },
 ]
 
@@ -1188,6 +1116,42 @@ dev = [
 name = "hip-research"
 version = "0.1.0"
 source = { editable = "hip-research" }
+dependencies = [
+    { name = "datasets" },
+    { name = "deepspeed" },
+    { name = "lightning" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pypareto" },
+    { name = "pyrouge" },
+    { name = "pytorch-lightning" },
+    { name = "requests" },
+    { name = "scikit-image" },
+    { name = "scikit-learn" },
+    { name = "torchmetrics" },
+    { name = "torchtext" },
+    { name = "tqdm" },
+    { name = "wandb" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasets" },
+    { name = "deepspeed" },
+    { name = "lightning" },
+    { name = "matplotlib" },
+    { name = "numpy", specifier = "<2.0.0" },
+    { name = "pypareto" },
+    { name = "pyrouge" },
+    { name = "pytorch-lightning" },
+    { name = "requests" },
+    { name = "scikit-image" },
+    { name = "scikit-learn" },
+    { name = "torchmetrics" },
+    { name = "torchtext" },
+    { name = "tqdm" },
+    { name = "wandb" },
+]
 
 [[package]]
 name = "hjson"
