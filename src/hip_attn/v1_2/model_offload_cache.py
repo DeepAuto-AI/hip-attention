@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import threading
 import time
@@ -20,14 +21,16 @@ class HiPModelOffloadCache:
     def __init__(
         self,
         max_token_size: int,
-        max_mask_cache_token_size: int,
-        max_sa_cache_token_size: int,
         dtype: torch.dtype,
         head_num: int,
         head_dim: int,
         layer_num: int,
         device: torch.device,
         hip_config: HiPAttentionConfig,
+        max_mask_cache_token_size: Optional[int] = None,
+        max_sa_cache_token_size: Optional[int] = None,
+        max_mask_cache_factor: Optional[float] = None,
+        max_sa_cache_factor: Optional[float] = None,
     ):
         from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache, format_size_bytes
 
@@ -51,37 +54,50 @@ class HiPModelOffloadCache:
         self.head_num = head_num
         self.head_dim = head_dim
         self.layer_num = layer_num
-        self.max_mask_cache_token_size = max_mask_cache_token_size * head_num
-        self.max_sa_cache_token_size = max_sa_cache_token_size * head_num
-
         self.online_update_cache = os.getenv("DEBUG_ONLINE", "0") == "1"
         self.layer_buffer = []
         for layer_id in range(layer_num):
+            is_dense = layer_id in hip_config.dense_layers
+            if len(hip_config.layers) == 2:
+                layer_config = hip_config.layers[0 if is_dense else 1]
+            else:
+                layer_config = hip_config.layers[layer_id]
+
+            if max_mask_cache_factor is None:
+                cur_max_mask_cache_token_size = max_mask_cache_token_size * head_num
+                if layer_id in hip_config.dense_layers:
+                    cur_max_mask_cache_token_size *= 2
+            else:
+                base_mask_cache_tokens = (
+                    layer_config.sink_token_size
+                    + layer_config.sliding_window_size
+                    + layer_config.second_stage_k
+                )
+                cur_max_mask_cache_token_size = math.ceil(
+                    max_mask_cache_factor * base_mask_cache_tokens
+                )
+
+            if max_sa_cache_factor is None:
+                cur_max_sa_cache_token_size = max_sa_cache_token_size * head_num
+                if layer_id in hip_config.dense_layers:
+                    cur_max_sa_cache_token_size *= 2
+            else:
+                base_sa_cache_tokens = (
+                    max_token_size / layer_config.stages[0].stage_chunk_size
+                )
+                cur_max_sa_cache_token_size = math.ceil(
+                    max_sa_cache_factor * base_sa_cache_tokens
+                )
+
             self.layer_buffer.append(
                 HiPOffloadCache(
                     layer_id=layer_id,
                     max_token_size=max_token_size + 1,
                     max_mask_cache_token_size=min(
-                        max_token_size * head_num, self.max_mask_cache_token_size
+                        max_token_size * head_num, cur_max_mask_cache_token_size
                     ),
                     max_sa_cache_token_size=min(
-                        max_token_size * head_num, self.max_sa_cache_token_size
-                    ),
-                    head_num=head_num,
-                    head_dim=head_dim,
-                    dtype=dtype,
-                    device=device,
-                    online_cache_update=self.online_update_cache,
-                )
-                if layer_id not in hip_config.dense_layers
-                else HiPOffloadCache(
-                    layer_id=layer_id,
-                    max_token_size=max_token_size + 1,
-                    max_mask_cache_token_size=min(
-                        max_token_size * head_num, self.max_mask_cache_token_size * 2
-                    ),
-                    max_sa_cache_token_size=min(
-                        max_token_size * head_num, self.max_sa_cache_token_size * 2
+                        max_token_size * head_num, cur_max_sa_cache_token_size
                     ),
                     head_num=head_num,
                     head_dim=head_dim,
