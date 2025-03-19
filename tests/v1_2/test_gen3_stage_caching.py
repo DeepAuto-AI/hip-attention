@@ -2,6 +2,7 @@ import os
 import unittest
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_2.attention_extend import (
     HiPAttentionArgs,
@@ -9,7 +10,6 @@ from hip_attn.v1_2.attention_extend import (
     ScanStage,
     dual_stage_quadratic_hip_attention,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestGen3StageCaching(unittest.TestCase):

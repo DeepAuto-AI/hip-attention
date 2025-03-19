@@ -3,9 +3,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from matplotlib.patches import Patch
-
 from hip_research.utils import setup_seaborn
+from matplotlib.patches import Patch
 
 setup_seaborn(axis_below=True)
 

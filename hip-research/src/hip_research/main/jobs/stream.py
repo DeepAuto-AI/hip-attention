@@ -3,11 +3,11 @@ import time
 import traceback
 
 import torch
+from hip_research.models.sglang_model import SglangModel
 from transformers import TextStreamer
 from transformers.models.auto import AutoTokenizer
 
 from hip_attn.utils.benchmarking import get_bench
-from hip_research.models.sglang_model import SglangModel
 
 
 class BatchedStreamer(TextStreamer):

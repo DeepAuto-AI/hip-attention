@@ -2,10 +2,10 @@ import unittest
 import warnings
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 from torch import nn
 
 from hip_attn.v1_0.attention1_gpu import attention_matrix, sparse_attention
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention1GPUBwd(unittest.TestCase):

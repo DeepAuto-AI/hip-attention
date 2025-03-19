@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import pypareto
 import seaborn as sns
 import tqdm
-
 from hip_research.utils import setup_seaborn
 
 setup_seaborn()

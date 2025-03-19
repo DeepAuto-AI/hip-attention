@@ -8,14 +8,14 @@ import numpy as np
 import torch
 import tqdm
 import triton
+from hip_research.utils.load_checkouts import load_checkouts
+from hip_research.utils.seed import seed
 from torch import Tensor
 
 import hip_attn.v1_0.attention1_block_gpu
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_block_gpu import flash_attention, hip_attention
 from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
-from hip_research.utils.load_checkouts import load_checkouts
-from hip_research.utils.seed import seed
 
 
 class TestAttention1BlockGpu(unittest.TestCase):

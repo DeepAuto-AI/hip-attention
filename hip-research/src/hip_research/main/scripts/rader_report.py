@@ -2,7 +2,6 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-
 from hip_research.utils import setup_seaborn
 
 DATA_LONGBENCH = {

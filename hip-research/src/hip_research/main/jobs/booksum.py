@@ -5,13 +5,12 @@ import pathlib
 import subprocess
 
 import torch
+from hip_research.dataset.booksum import BookSumDataset
+from hip_research.utils.seed import seed
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Subset
 from tqdm import tqdm
 from transformers import LogitsProcessor, LogitsProcessorList
-
-from hip_research.dataset.booksum import BookSumDataset
-from hip_research.utils.seed import seed
 
 
 class StopAfterStringIsGenerated(LogitsProcessor):

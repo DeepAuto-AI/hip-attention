@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import torch
 import tqdm
 import transformers
+from hip_research.main.jobs.ppl import job_ppl
 
 from hip_attn.models.modeling_llama import LlamaConfig, LlamaForCausalLM
-from hip_research.main.jobs.ppl import job_ppl
 
 
 def log(*args):

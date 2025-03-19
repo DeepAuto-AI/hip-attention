@@ -3,7 +3,6 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-
 from hip_research.utils import setup_seaborn
 
 setup_seaborn(axis_below=True)

@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_1.attention2_draft_prefetch import (
     HiPAttentionArgs as HiPAttentionArgs11,
@@ -12,7 +13,6 @@ from hip_attn.v1_2.attention_extend import HiPAttentionArgs as HiPAttentionArgs1
 from hip_attn.v1_2.attention_extend import (
     dual_stage_quadratic_hip_attention as hip_attention_12,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 # X: topk k
 # Y: recall

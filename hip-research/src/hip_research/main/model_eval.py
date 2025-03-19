@@ -4,11 +4,6 @@ import warnings
 
 import torch
 import transformers
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-
-from hip_attn.models.gemma.modeling_gemma2 import Gemma2Config, Gemma2ForCausalLM
-from hip_attn.models.modeling_llama import LlamaConfig, LlamaForCausalLM
-from hip_attn.models.qwen.modeling_qwen2 import Qwen2Config, Qwen2ForCausalLM
 from hip_research.main.eval_args import ArgsType, eval_args
 from hip_research.main.jobs.bench_single_layer import job_bench_single_layer
 from hip_research.main.jobs.booksum import job_booksum
@@ -23,6 +18,11 @@ from hip_research.main.jobs.stream import job_stream
 from hip_research.main.jobs.stream_demo import job_stream_demo
 from hip_research.models.sglang_model import SglangModel
 from hip_research.utils.seed import seed
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+
+from hip_attn.models.gemma.modeling_gemma2 import Gemma2Config, Gemma2ForCausalLM
+from hip_attn.models.modeling_llama import LlamaConfig, LlamaForCausalLM
+from hip_attn.models.qwen.modeling_qwen2 import Qwen2Config, Qwen2ForCausalLM
 
 MODELS = {
     "llama1b": "princeton-nlp/Sheared-LLaMA-1.3B",

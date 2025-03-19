@@ -3,9 +3,9 @@ import time
 
 import torch
 import tqdm
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn import hip_attention_11
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 def main():

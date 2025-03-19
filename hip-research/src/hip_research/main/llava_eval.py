@@ -1,9 +1,9 @@
-from llava.mm_utils import get_model_name_from_path
-
-from hip_attn.models.llava.builder import load_pretrained_model
 from hip_research.main.eval_args import ArgsType, eval_args
 from hip_research.main.jobs.mmmu import job_mmmu
 from hip_research.utils import seed
+from llava.mm_utils import get_model_name_from_path
+
+from hip_attn.models.llava.builder import load_pretrained_model
 
 """
         Example:

@@ -5,12 +5,12 @@ import numba
 import numpy as np
 import torch
 import triton
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_1.attention2_draft_sampling_extend import (
     HiPAttentionArgs,
     dual_stage_quadratic_hip_attention,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2ExtendExps(unittest.TestCase):

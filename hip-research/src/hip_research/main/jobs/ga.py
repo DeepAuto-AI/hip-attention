@@ -16,17 +16,17 @@ import tqdm
 import transformers
 import triton
 import wandb
-
-from hip_attn import HiPAttentionArgs11
-from hip_attn.v1_1.attention2_draft_sampling_extend import (
-    ScanStage,
-    dual_stage_quadratic_hip_attention,
-)
 from hip_research.dataset.calib_loft_rag import rag_prefix, rag_qa_pairs
 from hip_research.dataset.calib_loft_retrieval import (
     retrieval_pid_to_id,
     retrieval_prefix,
     retrieval_qa_pairs,
+)
+
+from hip_attn import HiPAttentionArgs11
+from hip_attn.v1_1.attention2_draft_sampling_extend import (
+    ScanStage,
+    dual_stage_quadratic_hip_attention,
 )
 
 

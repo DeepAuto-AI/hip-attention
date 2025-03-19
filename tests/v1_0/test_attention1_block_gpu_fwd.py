@@ -4,6 +4,7 @@ import unittest
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 from torch import Tensor
 
 from hip_attn.v1_0.attention1_block_gpu import (
@@ -11,7 +12,6 @@ from hip_attn.v1_0.attention1_block_gpu import (
     hip_attention_mask,
     sparse_attention,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention1BlockGPUFwd(unittest.TestCase):

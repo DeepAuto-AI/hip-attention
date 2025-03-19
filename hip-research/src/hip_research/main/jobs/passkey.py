@@ -1,9 +1,8 @@
 import torch
-from tqdm import tqdm
-from vllm import LLM, SamplingParams
-
 from hip_research.dataset.passkey import Passkey
 from hip_research.models.sglang_model import SglangModel
+from tqdm import tqdm
+from vllm import LLM, SamplingParams
 
 
 def get_numbers(s, cnt):

@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-
 from hip_research.utils.load_checkouts import load_checkouts
 
 # X: top-k occupancy

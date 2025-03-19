@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import tqdm
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_1.attention2_draft_prefetch import (
     HiPAttentionArgs as HiPAttentionArgs11,
@@ -31,7 +32,6 @@ from hip_attn.v1_1.offload_runner.cache_policy import (
     perform_lru_tie_break_lfu,
     perform_lru_tie_break_lre,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestCachePolicy(unittest.TestCase):

@@ -6,11 +6,10 @@ import datasets
 import torch
 import torch.nn.functional as F
 import transformers
-from torch.utils.data import Dataset
-from tqdm import tqdm
-
 from hip_research.dataset.wikitext2 import Wikitext2Dataset
 from hip_research.models.modeling_llama_permute import LlamaForCausalLM as PermuteLlama
+from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
 class RedPajamaDataset(Dataset):

@@ -7,6 +7,10 @@ import torch.utils.checkpoint
 
 # from transformers.models.llama.configuration_llama import LlamaConfig
 import tqdm
+from hip_research.models.modeling_llama_legacy import (
+    LlamaDynamicNTKScalingRotaryEmbedding,
+    LlamaLinearScalingRotaryEmbedding,
+)
 from torch import nn
 from transformers.models.llama.modeling_llama import (  # LlamaForCausalLM,
     LlamaRotaryEmbedding,
@@ -17,10 +21,6 @@ from transformers.utils import logging
 from hip_attn.models.modeling_llama import (  # LlamaLinearScalingRotaryEmbedding,; LlamaDynamicNTKScalingRotaryEmbedding,
     LlamaCustomAttention,
     LlamaForCausalLM,
-)
-from hip_research.models.modeling_llama_legacy import (
-    LlamaDynamicNTKScalingRotaryEmbedding,
-    LlamaLinearScalingRotaryEmbedding,
 )
 
 __all__ = [

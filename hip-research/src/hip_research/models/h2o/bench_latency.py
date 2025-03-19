@@ -16,9 +16,10 @@ if not hasattr(tl, "sort"):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip_attn.utils.benchmarking import get_bench
 from hip_research.utils.load_checkouts import load_checkouts
 from hip_research.utils.seed import seed
+
+from hip_attn.utils.benchmarking import get_bench
 
 logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)
@@ -143,10 +144,9 @@ def main_latency_benchmark():
         q_quant = q
         k_quant = k
 
-    from transformers.models.llama.configuration_llama import LlamaConfig
-
     from hip_research.main.model_eval import MODELS
     from hip_research.models.h2o.h2o_llama import H2OLlamaAttention
+    from transformers.models.llama.configuration_llama import LlamaConfig
 
     config = LlamaConfig.from_pretrained(MODELS[args.h2o_model])
 

@@ -2,7 +2,6 @@ import math
 import os
 
 import matplotlib.pyplot as plt
-
 from hip_research.utils import setup_seaborn
 
 

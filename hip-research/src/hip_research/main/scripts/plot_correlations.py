@@ -3,6 +3,7 @@ from typing import Literal
 import numpy as np
 import torch
 import triton
+from hip_research.utils.load_checkouts import load_checkouts
 from matplotlib import pyplot as plt
 from scipy.stats import spearmanr
 
@@ -10,7 +11,6 @@ from hip_attn.v1_2.attention_extend import (
     chunk_controllable_sampling_mask_cuda,
     safe_stride,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 # X: chunk size
 # Y: correlation

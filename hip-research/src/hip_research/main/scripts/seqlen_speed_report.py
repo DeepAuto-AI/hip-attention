@@ -3,9 +3,8 @@ import os
 import subprocess
 
 import seaborn as sns
-from matplotlib import pyplot as plt
-
 from hip_research.utils import setup_seaborn
+from matplotlib import pyplot as plt
 
 setup_seaborn(legend_fontsize=6)
 

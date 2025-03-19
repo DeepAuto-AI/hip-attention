@@ -6,9 +6,9 @@ import datasets
 import torch
 import tqdm
 import transformers
+from hip_research.main.eval_args import ArgsType
 
 from hip_attn.utils.benchmarking import get_bench
-from hip_research.main.eval_args import ArgsType
 
 MMMU_SUBJECT = [
     "Accounting",
