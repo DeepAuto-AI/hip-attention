@@ -10,16 +10,15 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
-from matplotlib import pyplot as plt
-from torch import Tensor
-
-from hip_attn.v1_1.attention2_draft_prefetch import (
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
     adjust_rope,
     block_sparse_attention,
     load_tokens,
 )
+from matplotlib import pyplot as plt
+from torch import Tensor
 
 
 @dataclass

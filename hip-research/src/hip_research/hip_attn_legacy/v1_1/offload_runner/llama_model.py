@@ -25,6 +25,15 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 import tqdm
 from flash_attn import flash_attn_func, flash_attn_with_kvcache
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
+    HiPAttentionArgs as HiPAttentionArgs11,
+)
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
+    HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11,
+)
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
+    hip_attention as hip_attention_11,
+)
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
@@ -49,14 +58,6 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-
-from hip_attn.v1_1.attention2_draft_prefetch import (
-    HiPAttentionArgs as HiPAttentionArgs11,
-)
-from hip_attn.v1_1.attention2_draft_prefetch import (
-    HiPAttentionOutputMetadata as HiPAttentionOutputMetadata11,
-)
-from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
 
 logger = logging.get_logger(__name__)
 

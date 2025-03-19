@@ -42,11 +42,11 @@ import nvtx
 import torch
 import triton
 import triton.language as tl
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu import to_dense
 from numpy import ndarray as NdArray
 from torch import Tensor
 
 from hip_attn.utils.triton_argsort import argsort as tl_argsort
-from hip_attn.v1_0.attention1_block_gpu import to_dense
 
 
 def cdiv_python(a, b):

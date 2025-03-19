@@ -4,12 +4,11 @@ from typing import Optional, Union
 import torch
 import triton
 import triton.language as tl
-from torch import Tensor
-
-from hip_attn.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
     PagedKeyCacheVllmCompat,
     PagedValueCacheVllmCompat,
 )
+from torch import Tensor
 
 
 def next_multiple_of(x: int, multiple_by: int = 16):
@@ -266,7 +265,7 @@ def _calc_prob_return_context_acc_compute(
     else:
         qk += (~(mask_tdst[:, None] & mask_tsrc[None, :])) * (-1.0e6)
     if CONTEXT_LENGTH is not None:
-        qk += ((idx_tsrc[None, :] >= context_length)) * (-1.0e6)
+        qk += (idx_tsrc[None, :] >= context_length) * (-1.0e6)
 
     if RETURN_SCORES:
         tl.store(

@@ -5,11 +5,10 @@ from typing import List, Optional, Union
 import torch
 import triton
 import triton.language as tl
-from torch import Tensor
-
-from hip_attn.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
     PagedKeyCacheVllmCompat,
 )
+from torch import Tensor
 
 if hasattr(tl.math, "round"):
     tl_device_round = tl.math.round

@@ -2,13 +2,15 @@ import numpy as np
 import nvtx
 import torch
 from flash_attn import flash_attn_func
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
+    HiPAttentionArgs as HiPAttentionArgs11,
+)
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
+    hip_attention as hip_attention_11,
+)
 from inf_llm.attention import inf_llm_forward
 from inf_llm.attention.rope import RotaryEmbeddingESM
 
-from hip_attn.v1_1.attention2_draft_prefetch import (
-    HiPAttentionArgs as HiPAttentionArgs11,
-)
-from hip_attn.v1_1.attention2_draft_prefetch import hip_attention as hip_attention_11
 from hip_attn.v1_2.attention_extend import HiPAttentionArgs as HiPAttentionArgs12
 from hip_attn.v1_2.attention_extend import (
     dual_stage_quadratic_hip_attention as hip_attention_12,

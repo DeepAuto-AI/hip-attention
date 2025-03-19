@@ -3,8 +3,7 @@ import time
 import torch
 import tqdm
 from flash_attn import flash_attn_func
-
-from hip_attn.v1_1.attention2_draft_sampling_extend import (
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_sampling_extend import (
     HiPAttentionArgs,
     ScanStage,
     dual_stage_quadratic_hip_attention,

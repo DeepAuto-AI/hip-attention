@@ -40,21 +40,24 @@ if not hasattr(tl, "sort"):
         "This will cause the compilation problem. Please upgrade `triton >= 2.2.0`"
     )
 
-from hip_attn.utils.benchmarking import get_bench
-from hip_attn.v1_0.attention1_block_gpu_kernel.calc_prob_return_context import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.calc_prob_return_context import (
     calc_prob_return_context,
 )
-from hip_attn.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.calc_score_return_prob import (
     calc_score_return_prob,
 )
-from hip_attn.v1_0.attention1_block_gpu_kernel.masking_iteration import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.masking_iteration import (
     masking_iteration,
 )
-from hip_attn.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
     PagedKeyCacheVllmCompat,
     PagedValueCacheVllmCompat,
 )
-from hip_attn.v1_0.attention1_block_gpu_kernel.safe_indices import safe_indices
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu_kernel.safe_indices import (
+    safe_indices,
+)
+
+from hip_attn.utils.benchmarking import get_bench
 
 logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)

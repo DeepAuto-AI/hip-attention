@@ -22,12 +22,12 @@ from hip_research.dataset.calib_loft_retrieval import (
     retrieval_prefix,
     retrieval_qa_pairs,
 )
-
-from hip_attn import HiPAttentionArgs11
-from hip_attn.v1_1.attention2_draft_sampling_extend import (
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_sampling_extend import (
     ScanStage,
     dual_stage_quadratic_hip_attention,
 )
+
+from hip_attn import HiPAttentionArgs11
 
 
 def load_loft_rag_chat_corpus() -> List[Tuple[str, str]]:

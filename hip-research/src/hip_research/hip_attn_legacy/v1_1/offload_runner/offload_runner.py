@@ -14,21 +14,22 @@ import torch.distributed
 import tqdm
 import triton
 import triton.language as tl
-from transformers import AutoTokenizer
-from transformers.cache_utils import Cache, PretrainedConfig
-from vllm.model_executor.layers.linear import QKVParallelLinear
-
-from hip_attn.v1_1.attention2_draft_prefetch import (
+from hip_research.hip_attn_legacy.v1_1.attention2_draft_prefetch import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
     hash_table_lookup_or_fail,
 )
-from hip_attn.v1_1.offload_runner.llama_model import (
+from hip_research.hip_attn_legacy.v1_1.offload_runner.llama_model import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
 )
-from hip_attn.v1_1.offload_runner.tensor_from_pointer import tensor_from_pointer
+from hip_research.hip_attn_legacy.v1_1.offload_runner.tensor_from_pointer import (
+    tensor_from_pointer,
+)
+from transformers import AutoTokenizer
+from transformers.cache_utils import Cache, PretrainedConfig
+from vllm.model_executor.layers.linear import QKVParallelLinear
 
 torch.set_num_threads(os.cpu_count())
 

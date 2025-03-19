@@ -32,13 +32,12 @@ from typing import Optional, Union
 import numba
 import numpy as np
 import torch
-from numpy import ndarray as NdArray
-from torch import Tensor
-
-from hip_attn.v1_0.attention1_block_gpu import (
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu import (
     calc_prob_return_context as block_sparse_flash_attention,
 )
-from hip_attn.v1_0.attention1_block_gpu import to_dense
+from hip_research.hip_attn_legacy.v1_0.attention1_block_gpu import to_dense
+from numpy import ndarray as NdArray
+from torch import Tensor
 
 
 @numba.njit
