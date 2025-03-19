@@ -4,13 +4,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
+from hip_research.utils.load_checkouts import load_checkouts
+from hip_research.utils.seed import seed
 from torch import Tensor
 
 import hip_attn.v1_0.attention1_gpu
 from hip_attn.utils.benchmarking import get_bench
 from hip_attn.v1_0.attention1_gpu import hip_attention
-from hip_research.utils.load_checkouts import load_checkouts
-from hip_research.utils.seed import seed
 
 
 class TestAttention1GPU(unittest.TestCase):

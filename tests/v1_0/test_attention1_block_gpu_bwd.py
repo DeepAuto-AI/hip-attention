@@ -2,10 +2,10 @@ import unittest
 import warnings
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 from torch import nn
 
 from hip_attn.v1_0.attention1_block_gpu import hip_attention_mask, sparse_attention
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention1BlockGPUBwd(unittest.TestCase):

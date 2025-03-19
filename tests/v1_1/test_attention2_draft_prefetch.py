@@ -2,9 +2,9 @@ import os
 import unittest
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs, hip_attention
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2DraftPrefetch(unittest.TestCase):

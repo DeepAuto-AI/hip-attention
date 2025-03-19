@@ -4,6 +4,7 @@ import unittest
 import cv2
 import numpy as np
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 import hip_attn.v1_1.attention2_draft_sampling_extend
 from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs, hip_attention
@@ -11,7 +12,6 @@ from hip_attn.v1_1.attention2_draft_sampling_extend import (
     ScanStage,
     dual_stage_quadratic_hip_attention,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2DraftSamplingExtend(unittest.TestCase):

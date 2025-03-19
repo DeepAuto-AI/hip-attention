@@ -75,8 +75,9 @@ Please follow the documentation to install [uv](https://docs.astral.sh/uv/gettin
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
-# This install all dev dependencies in .venv/
+# This install all research dev dependencies in .venv/
 uv sync
+uv run pre-commit install
 ```
 
 Then you can run any python program with `uv run`. `uv run` automatically picks up .venv/ virtual environment:
@@ -97,12 +98,8 @@ conda activate hip
 
 # Default install
 pip install -e "."
-# (Optional) For running unit tests
-pip install -e ".[test]"
-# (Optional) For research benchmarks
-pip install -e ".[research]"
-# (Optional) Install the full suite
-pip install -e ".[all]"
+# (Optional) For research benchmarks and unit tests
+pip install -e "hip-research"
 
 # Optional, depends on your CUDA environment
 export CUDACXX=/usr/local/cuda/bin/nvcc

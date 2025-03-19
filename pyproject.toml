@@ -34,35 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-research = [
-    # Trainer
-    "torchmetrics",
-    "deepspeed",
-    "lightning",
-    "pytorch_lightning",
-    "scikit-learn",
-
-    # Dataset
-    "torchtext",
-    "datasets",
-
-    # Eval
-    "pypareto",
-    "pyrouge",
-
-    # Other dependencies
-    "requests",
-    "tqdm",
-    "matplotlib",
-    "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
-    "scikit-image",
-    "wandb",
-]
-
-test = [  # Packages required for running the tests
-    "hip-attn[research]",
-]
-
 sglang = [
     "sgl-kernel",
     # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
@@ -74,15 +45,6 @@ sglang = [
     "sglang[all]",
 ]
 
-# You still need to install hip-attn[no_build_iso]
-all = ["hip_attn[test,research,sglang]"]
-
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.setuptools]
-packages = ["hip_attn", "hip_research"]
-
 [tool.uv.sources]
 hip-attn = { workspace = true }
 flashinfer-python = [
@@ -90,7 +52,10 @@ flashinfer-python = [
 ]
 flash-attn = [
     # pip format: "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.10'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.11'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.13'" },
 ]
 sglang = [
     # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python"
@@ -98,6 +63,7 @@ sglang = [
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },
 ]
+hip-research = { workspace = true }
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn"]
@@ -107,7 +73,12 @@ name = "flashinfer_cu124_torch25"
 url = "https://flashinfer.ai/whl/cu124/torch2.5/"
 explicit = true
 
+[tool.uv.workspace]
+members = ["hip-research"]
+
 [dependency-groups]
 dev = [
-    "hip-attn[all]",
+    "hip-attn[sglang]",
+    "hip-research",
+    "pre-commit>=4.2.0",
 ]

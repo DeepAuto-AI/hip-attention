@@ -1,12 +1,12 @@
 import unittest
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_1.attention2_draft_prefetch import (
     HiPAttentionArgs,
     block_sparse_attention,
 )
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2PrefetchBsa(unittest.TestCase):

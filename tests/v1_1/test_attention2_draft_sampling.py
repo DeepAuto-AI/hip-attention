@@ -2,11 +2,11 @@ import os
 import unittest
 
 import torch
+from hip_research.utils.load_checkouts import load_checkouts
 
 import hip_attn.v1_1.attention2_draft_sampling
 from hip_attn.v1_1.attention2_draft_prefetch import HiPAttentionArgs, hip_attention
 from hip_attn.v1_1.attention2_draft_sampling import dual_stage_quadratic_hip_attention
-from hip_research.utils.load_checkouts import load_checkouts
 
 
 class TestAttention2DraftSampling(unittest.TestCase):
