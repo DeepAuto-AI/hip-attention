@@ -77,6 +77,7 @@ cd hip-attention
 
 # This install all research dev dependencies in .venv/
 uv sync
+uv run pre-commit install
 ```
 
 Then you can run any python program with `uv run`. `uv run` automatically picks up .venv/ virtual environment:

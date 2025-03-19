@@ -80,4 +80,5 @@ members = ["hip-research"]
 dev = [
     "hip-attn[sglang]",
     "hip-research",
+    "pre-commit>=4.2.0",
 ]
