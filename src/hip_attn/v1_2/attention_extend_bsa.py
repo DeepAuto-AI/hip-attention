@@ -575,7 +575,7 @@ def get_block_sparse_attention_configs():
                 num_stages=2,
                 maxnreg=256,
             ),
-        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=256))
+        }.get(device_name, dict(num_warps=4, num_stages=2))
         return [triton.Config({}, **defaults)]
     if os.getenv("HIP_DISABLE_AUTOTUNE_WARNINGS", "0") == "0":
         warnings.warn(
