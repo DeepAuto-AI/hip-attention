@@ -43,7 +43,10 @@ from hip_attn.v1_0.attention1_block_gpu import to_dense
 try:
     from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache
 except ImportError:
-    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    try:
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    except ImportError:
+        flash_attn_func = flash_attn_with_kvcache = None
 
 
 def cdiv_python(a, b):
