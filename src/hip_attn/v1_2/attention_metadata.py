@@ -192,6 +192,7 @@ class HiPAttentionArgs:
     need_apply_rope: bool = False
     rope_cos: Optional[Tensor] = None
     rope_sin: Optional[Tensor] = None
+    rope_range: Optional[tuple[int, int]] = None
 
     offload_cache: "Optional[HiPOffloadCache]" = None
     k_cache: Optional[Tensor] = None
