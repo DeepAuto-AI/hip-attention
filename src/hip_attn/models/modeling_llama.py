@@ -892,6 +892,23 @@ class LlamaCustomAttention(LlamaAttention):
                 sliding_window_indices=self.sliding_window_indices,
             )
 
+        if os.environ.get("CHECKOUT_STATES", "0") == "1":
+            os.makedirs("./cache/llama/", exist_ok=True)
+            torch.save(
+                {
+                    "q": query_states,
+                    "k": key_states,
+                    "v": value_states,
+                    "q_derope": query_states_derope,
+                    "k_derope": key_states_derope,
+                    "out": attn_output,
+                    "cos": cos_all,
+                    "sin": sin_all,
+                },
+                "./cache/llama/qkvout.pth",
+            )
+            input("stored. press enter to continue >>> ")
+
         if os.environ.get("CHECKOUT_STATES_DEROPE", "0") == "1":
             os.makedirs("./cache/llama/", exist_ok=True)
             torch.save(
