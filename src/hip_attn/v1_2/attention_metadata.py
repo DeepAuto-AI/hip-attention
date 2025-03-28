@@ -266,6 +266,8 @@ class HiPAttentionArgs:
             self.need_apply_rope,
             *self.args_rope_cos(),
             *self.args_rope_sin(),
+            self.rope_range[0],
+            self.rope_range[1],
         )
 
     def args_rope_cos(self):

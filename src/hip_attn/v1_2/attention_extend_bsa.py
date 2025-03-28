@@ -666,6 +666,8 @@ def block_sparse_attention_cuda(
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    rope_range_begin: tl.constexpr,
+    rope_range_end: tl.constexpr,
     model_context_length,
     # paged attention args template
     USING_PAGES: tl.constexpr,
@@ -754,6 +756,10 @@ def block_sparse_attention_cuda(
 
     idx_hid = tl.arange(0, HID)
 
+    idx_rope_range = idx_hid - rope_range_begin
+    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+    ROPE_DIM = rope_range_end - rope_range_begin
+
     if BLOCK_SIZE_Q < 16:
         acc = tl.zeros((16, HID), dtype=tl.float32)
         m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
@@ -814,13 +820,16 @@ def block_sparse_attention_cuda(
         #     True,
         # ).to(queries.dtype)
 
+        rope_rot_idx = (
+            idx_hid - rope_range_begin + ROPE_DIM // 2
+        ) % ROPE_DIM + rope_range_begin
         queries_rot = tl.load(
             Q
             + idx_bsz * stride_q_bsz
             + idx_tdst[:, None] * stride_q_tdst
             + idx_head * stride_q_head
-            + ((idx_hid + HID // 2) % HID)[None, :] * stride_q_hid,
-            mask=mask_tdst[:, None],
+            + rope_rot_idx[None, :] * stride_q_hid,
+            mask=mask_tdst[:, None] & rope_mask[None, :],
             other=0.0,
             # cache_modifier='.cg',
             # eviction_policy='evict_last',
@@ -832,15 +841,15 @@ def block_sparse_attention_cuda(
         cos_new = tl.load(
             COS
             + rope_tdst[:, None].to(tl.int64) * stride_cos_t
-            + (idx_hid % (HID // 2))[None, :] * stride_cos_hid,
-            mask=mask_tdst[:, None],
+            + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_cos_hid,
+            mask=mask_tdst[:, None] & rope_mask[None, :],
             other=0.0,
         ).to(queries.dtype)
         sin_new = tl.load(
             SIN
             + rope_tdst[:, None].to(tl.int64) * stride_sin_t
-            + (idx_hid % (HID // 2))[None, :] * stride_sin_hid,
-            mask=mask_tdst[:, None],
+            + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_cos_hid,
+            mask=mask_tdst[:, None] & rope_mask[None, :],
             other=0.0,
         ).to(queries.dtype)
 
@@ -849,9 +858,9 @@ def block_sparse_attention_cuda(
         #     -queries_rot,
         #     queries_rot
         # )
-        queries_rot = queries_rot * (
-            ((idx_hid + HID // 2)[None, :] < HID) * (-2) + 1
-        ).to(queries_rot.dtype)
+        queries_rot *= ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1)[
+            None, :
+        ].to(queries_rot.dtype)
 
         queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
 
