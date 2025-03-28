@@ -46,8 +46,6 @@ hip_attention = hip_attention_12
 HiPAttentionArgs = HiPAttentionArgs12
 HiPAttentionOutputMetadata = HiPAttentionOutputMetadata12
 
-__version__ = "1.2.0"
-
 __all__ = [
     # version 1.0
     "hip_attention_10",
