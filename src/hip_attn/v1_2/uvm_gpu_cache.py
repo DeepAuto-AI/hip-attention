@@ -828,6 +828,7 @@ def load_tokens(
     HEAD_KV: int,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_HID: tl.constexpr,
+    HID_DIM,
     IS_BSA: tl.constexpr = False,
     UPDATE_CACHE: tl.constexpr = False,
     V_CACHE=None,

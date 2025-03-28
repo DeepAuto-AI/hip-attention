@@ -89,6 +89,7 @@ def adjust_rope(
     stride_sin_hid,
     T: tl.constexpr,
     HID: tl.constexpr,
+    HID_DIM,
     NEED_APPLY_ROPE: tl.constexpr,
     rope_range_begin: tl.constexpr = 0,
     rope_range_end: tl.constexpr = None,

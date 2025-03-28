@@ -730,6 +730,7 @@ def block_sparse_attention_cuda(
     IS_CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    HID_BLOCK: tl.constexpr,
     HID: tl.constexpr,
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
@@ -766,18 +767,18 @@ def block_sparse_attention_cuda(
             mask_tdst, tl.full((BLOCK_SIZE_Q,), value=MAX_TSRC, dtype=tl.int64), 0
         )
 
-    idx_hid = tl.arange(0, HID)
+    idx_hid = tl.arange(0, HID_BLOCK)
 
     idx_rope_range = idx_hid - rope_range_begin
     rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
     ROPE_DIM = rope_range_end - rope_range_begin
 
     if BLOCK_SIZE_Q < 16:
-        acc = tl.zeros((16, HID), dtype=tl.float32)
+        acc = tl.zeros((16, HID_BLOCK), dtype=tl.float32)
         m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
     else:
-        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_SIZE_Q, HID_BLOCK), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
 
@@ -803,7 +804,7 @@ def block_sparse_attention_cuda(
         + idx_tdst[:, None] * stride_q_tdst
         + idx_head * stride_q_head
         + idx_hid[None, :] * stride_q_hid,
-        mask=mask_tdst[:, None],
+        mask=mask_tdst[:, None] & (idx_hid[None, :] < HID),
         other=0.0,
         # cache_modifier='.cg',
         # eviction_policy='evict_last',
@@ -1796,6 +1797,7 @@ def block_sparse_attention(
         args.is_causal,
         args.block_size_q,
         args.block_size_k,
+        triton.next_power_of_2(HID),
         HID,
         # 2,
         BLOCK_BK=BLOCK_BK,

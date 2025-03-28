@@ -182,7 +182,8 @@ def load_keys_with_rope(
     EXTEND_BACKEND,
     NEED_APPLY_ROPE,
     BLOCK_CHUNK,
-    BLOCK_HID,
+    BLOCK_HID: tl.constexpr,
+    HID_DIM,
     IS_RIGHT,
     HEAD_KV,
     UPDATE_CACHE,
@@ -248,6 +249,7 @@ def load_keys_with_rope(
         HEAD_KV,
         BLOCK_CHUNK,
         BLOCK_HID,
+        HID_DIM,
         UPDATE_CACHE=UPDATE_CACHE,
     ).to(queries.dtype)
 
@@ -322,6 +324,7 @@ def load_keys_with_rope(
                     stride_sin_hid,
                     BLOCK_CHUNK,
                     BLOCK_HID,
+                    HID_DIM,
                     NEED_APPLY_ROPE,
                     rope_range_begin,
                     rope_range_end,
@@ -389,6 +392,7 @@ def load_keys_with_rope(
                     HEAD_KV,
                     BLOCK_CHUNK,
                     BLOCK_HID,
+                    HID_DIM,
                     # NOTE: in previous load, the fetch should be succesfully done.
                     UPDATE_CACHE=UPDATE_CACHE,
                 ).to(queries.dtype)
@@ -520,6 +524,7 @@ def chunk_controllable_sampling_mask_cuda(
     model_context_length: int,
     group_jobs: int,
     total_jobs: int,
+    HID_DIM: int,
     BLOCK_HID: tl.constexpr = 128,
     BLOCK_SIZE_Q: tl.constexpr = 32,
     STRIDE_Q: tl.constexpr = 1,
@@ -572,7 +577,7 @@ def chunk_controllable_sampling_mask_cuda(
                 ) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
                 mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
             idx_hid = tl.arange(0, BLOCK_HID)
-            mask_hid = idx_hid < BLOCK_HID  # (tl.arange(0, BLOCK_HID) % 4) == 0
+            mask_hid = idx_hid < HID_DIM  # (tl.arange(0, BLOCK_HID) % 4) == 0
 
             idx_rope_range = idx_hid - rope_range_begin
             rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
@@ -746,6 +751,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         stride_sin_hid,
                                         BLOCK_SIZE_Q // STRIDE_Q,
                                         BLOCK_HID,
+                                        HID_DIM,
                                         NEED_APPLY_ROPE,
                                         rope_range_begin,
                                         rope_range_end,
@@ -853,6 +859,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     NEED_APPLY_ROPE,
                                     BLOCK_CHUNK,
                                     BLOCK_HID,
+                                    HID_DIM,
                                     False,
                                     HEAD // HEAD_GROUP,
                                     UPDATE_CACHE,
@@ -864,13 +871,13 @@ def chunk_controllable_sampling_mask_cuda(
                                     (
                                         queries
                                         * (
-                                            tl.sqrt(BLOCK_HID * 1.0)
-                                            / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))
+                                            tl.sqrt(HID_DIM * 1.0)
+                                            / tl.sqrt(tl.sqrt(HID_DIM * 1.0))
                                         ).to(queries.dtype)
                                     ).to(queries.dtype),
                                     (
                                         keys_left.to(queries.dtype)
-                                        * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(
+                                        * (1 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(
                                             queries.dtype
                                         )
                                     ).to(queries.dtype),
@@ -950,6 +957,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 NEED_APPLY_ROPE,
                                 BLOCK_CHUNK,
                                 BLOCK_HID,
+                                HID_DIM,
                                 False,
                                 HEAD // HEAD_GROUP,
                                 UPDATE_CACHE,
@@ -961,13 +969,13 @@ def chunk_controllable_sampling_mask_cuda(
                                 (
                                     queries
                                     * (
-                                        tl.sqrt(BLOCK_HID * 1.0)
-                                        / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))
+                                        tl.sqrt(HID_DIM * 1.0)
+                                        / tl.sqrt(tl.sqrt(HID_DIM * 1.0))
                                     ).to(queries.dtype)
                                 ).to(queries.dtype),
                                 (
                                     keys_left.to(queries.dtype)
-                                    * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(
+                                    * (1 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(
                                         queries.dtype
                                     )
                                 ).to(queries.dtype),
@@ -1075,6 +1083,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     NEED_APPLY_ROPE,
                                     BLOCK_CHUNK,
                                     BLOCK_HID,
+                                    HID_DIM,
                                     True,
                                     HEAD // HEAD_GROUP,
                                     UPDATE_CACHE,
@@ -1086,13 +1095,13 @@ def chunk_controllable_sampling_mask_cuda(
                                     (
                                         queries
                                         * (
-                                            tl.sqrt(BLOCK_HID * 1.0)
-                                            / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))
+                                            tl.sqrt(HID_DIM * 1.0)
+                                            / tl.sqrt(tl.sqrt(HID_DIM * 1.0))
                                         ).to(queries.dtype)
                                     ).to(queries.dtype),
                                     (
                                         keys_right.to(queries.dtype)
-                                        * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(
+                                        * (1 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(
                                             queries.dtype
                                         )
                                     ).to(queries.dtype),
@@ -1172,6 +1181,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 NEED_APPLY_ROPE,
                                 BLOCK_CHUNK,
                                 BLOCK_HID,
+                                HID_DIM,
                                 True,
                                 HEAD // HEAD_GROUP,
                                 UPDATE_CACHE,
@@ -1183,13 +1193,13 @@ def chunk_controllable_sampling_mask_cuda(
                                 (
                                     queries
                                     * (
-                                        tl.sqrt(BLOCK_HID * 1.0)
-                                        / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))
+                                        tl.sqrt(HID_DIM * 1.0)
+                                        / tl.sqrt(tl.sqrt(HID_DIM * 1.0))
                                     ).to(queries.dtype)
                                 ).to(queries.dtype),
                                 (
                                     keys_right.to(queries.dtype)
-                                    * (1 / tl.sqrt(tl.sqrt(BLOCK_HID * 1.0))).to(
+                                    * (1 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(
                                         queries.dtype
                                     )
                                 ).to(queries.dtype),
@@ -1984,10 +1994,8 @@ def dual_stage_quadratic_hip_attention(
 
     k_mask_original = k_mask
 
-    BLOCK_HID = q.shape[-1]
-    assert BLOCK_HID == triton.next_power_of_2(
-        BLOCK_HID
-    ), "hidden size must be power of 2"
+    HID_DIM = q.shape[-1]
+    BLOCK_HID = triton.next_power_of_2(HID_DIM)
 
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -2596,6 +2604,7 @@ def dual_stage_quadratic_hip_attention(
                         args.model_context_length,
                         group_jobs,
                         njobs,
+                        HID_DIM=HID_DIM,
                         BLOCK_HID=BLOCK_HID,
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         STRIDE_Q=stage_block_stride_q,
