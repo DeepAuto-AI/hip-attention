@@ -62,6 +62,140 @@ def forward_paged_hip(
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
+    if is_prefill:
+        # Handle jagged inputs
+
+        # Output tensor
+        o = torch.empty_like(query)
+
+        start_len = 0
+        decoding_reqs = []
+        decoding_reqs_positions = []
+        for idx_batch, seq_len in enumerate(forward_batch.extend_seq_lens_cpu):
+            if seq_len == 0:  # Skip empty sequences
+                decoding_reqs.append(idx_batch)
+                decoding_reqs_positions.append(start_len)
+
+            else:
+                if not self.is_kv_cache_offload_enabled:
+                    k_chunk = v_chunk = None
+                    offloading_metadata = None
+
+                else:  # Offloading enabled
+                    k_chunk, v_chunk, offloading_metadata = (
+                        forward_batch.token_to_kv_pool.get_fetched_prefix_kv_buffer(
+                            layer_id=layer_id,
+                            batch_id=idx_batch,
+                            cache_k=k[start_len : start_len + seq_len].unsqueeze(0),
+                            cache_v=v[start_len : start_len + seq_len].unsqueeze(0),
+                        )
+                    )
+                    offload_cache = k_cache = v_cache = None
+
+                o_req, _ = _forward_paged_hip_validate(
+                    query=query[start_len : start_len + seq_len],
+                    sm_scale=sm_scale,
+                    batch_size=1,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    offload_cache=offload_cache,
+                    positions=positions[start_len : start_len + seq_len],
+                    seq_lens=seq_lens[idx_batch : idx_batch + 1],
+                    req_to_tokens=req_to_tokens,
+                    req_pool_indices=req_pool_indices[idx_batch : idx_batch + 1],
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    rope_range=rope_range,
+                    layer_id=layer_id,
+                    logit_cap=logit_cap,
+                    orig_context_len=orig_context_len,
+                    max_context_len=max_context_len,
+                    is_prefill=is_prefill,
+                    hip_config=hip_config,
+                    cached_metadata=cached_metadata,
+                    k=k,
+                    v=v,
+                    online_update_cache=online_update_cache,
+                    offloading_metadata=offloading_metadata,
+                    is_decode=is_decode,
+                    query_for_mask=query_for_mask,
+                    diag_sliding_window_indices=diag_sliding_window_indices,
+                )
+
+                o[start_len : start_len + seq_len] = o_req
+
+            start_len += seq_len
+
+        assert len(decoding_reqs) == 0
+
+        o = o.view(-1, layer.tp_q_head_num * layer.head_dim)
+
+        metadata_new = None
+
+    else:
+        o, metadata_new = _forward_paged_hip_validate(
+            query=query,
+            sm_scale=sm_scale,
+            batch_size=batch_size,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            offload_cache=offload_cache,
+            positions=positions,
+            seq_lens=seq_lens,
+            req_to_tokens=req_to_tokens,
+            req_pool_indices=req_pool_indices,
+            rope_cos=rope_cos,
+            rope_sin=rope_sin,
+            rope_range=rope_range,
+            layer_id=layer_id,
+            logit_cap=logit_cap,
+            orig_context_len=orig_context_len,
+            max_context_len=max_context_len,
+            is_prefill=is_prefill,
+            hip_config=hip_config,
+            cached_metadata=cached_metadata,
+            k=k,
+            v=v,
+            online_update_cache=online_update_cache,
+            offloading_metadata=offloading_metadata,
+            is_decode=is_decode,
+            query_for_mask=query_for_mask,
+            diag_sliding_window_indices=diag_sliding_window_indices,
+        )
+
+    return o, metadata_new
+
+
+def _forward_paged_hip_validate(
+    query: torch.Tensor,
+    sm_scale: float,
+    batch_size: int,
+    k_cache: Optional[torch.Tensor],
+    v_cache: Optional[torch.Tensor],
+    offload_cache: Optional[HiPOffloadCache],
+    positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    req_to_tokens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    rope_cos: Optional[torch.Tensor],
+    rope_sin: Optional[torch.Tensor],
+    layer_id: int,
+    logit_cap: float,
+    orig_context_len: int,
+    max_context_len: int,
+    is_prefill: bool,
+    hip_config: HiPAttentionConfig,
+    rope_range: Optional[tuple[int, int]] = None,
+    cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
+    k: Optional[torch.Tensor] = None,
+    v: Optional[torch.Tensor] = None,
+    online_update_cache: bool = False,
+    offloading_metadata: Any = None,
+    is_decode: bool = False,
+    query_for_mask: Optional[torch.Tensor] = None,
+    diag_sliding_window_indices: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
+
     if k is not None:
         # BUG: this padding is neccesary to match non offload scenario. why?
         pad_size = max_context_len
@@ -146,6 +280,7 @@ def forward_paged_hip(
                 req_pool_indices=req_pool_indices,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
+                rope_range=rope_range,
                 layer_id=layer_id,
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
@@ -177,6 +312,7 @@ def forward_paged_hip(
                 req_pool_indices=req_pool_indices,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
+                rope_range=rope_range,
                 layer_id=layer_id,
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
@@ -248,6 +384,7 @@ def forward_paged_hip(
                     req_pool_indices=req_pool_indices,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    rope_range=rope_range,
                     layer_id=layer_id,
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
@@ -278,6 +415,7 @@ def forward_paged_hip(
                     req_pool_indices=req_pool_indices,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    rope_range=rope_range,
                     layer_id=layer_id,
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
