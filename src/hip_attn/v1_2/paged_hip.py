@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import Any, Optional
 
 import torch
@@ -49,7 +50,141 @@ def forward_paged_hip(
     logit_cap: float,
     orig_context_len: int,
     max_context_len: int,
-    is_prefill: bool,
+    hip_config: HiPAttentionConfig,
+    rope_range: Optional[tuple[int, int]] = None,
+    extend_seq_lens: Optional[torch.Tensor] = None,
+    extend_seq_lens_cpu: Optional[torch.Tensor] = None,
+    cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
+    k: Optional[torch.Tensor] = None,
+    v: Optional[torch.Tensor] = None,
+    online_update_cache: bool = False,
+    offloading_metadata: Any = None,
+    is_prefill: Optional[bool] = None,
+    is_decode: bool = False,
+    query_for_mask: Optional[torch.Tensor] = None,
+    diag_sliding_window_indices: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
+
+    if is_prefill is not None:
+        warnings.warn("is_prefill is deprecated. Use is_decode instead.")
+
+    if not is_decode and extend_seq_lens_cpu is not None:
+        # Handle jagged inputs
+        is_kv_cache_offload_enabled = k is not None and v is not None
+        if is_kv_cache_offload_enabled:
+            assert isinstance(k, list) and isinstance(v, list)
+            assert isinstance(offloading_metadata, list)
+            offload_cache = k_cache = v_cache = None
+
+        # Output tensor
+        o = torch.empty_like(query)
+        metadata_new = cached_metadata
+
+        start_len = 0
+        decoding_reqs = []
+        decoding_reqs_positions = []
+        for idx_batch, seq_len in enumerate(extend_seq_lens_cpu):
+            if seq_len == 0:  # Skip empty sequences
+                decoding_reqs.append(idx_batch)
+                decoding_reqs_positions.append(start_len)
+
+            else:
+                if not is_kv_cache_offload_enabled:
+                    k_chunk = v_chunk = None
+                    offloading_metadata_curr = None
+
+                else:  # Offloading enabled
+                    k_chunk, v_chunk, offloading_metadata_curr = (
+                        k[idx_batch],
+                        v[idx_batch],
+                        offloading_metadata[idx_batch],
+                    )
+
+                o_req, _ = _forward_paged_hip_validate(
+                    query=query[start_len : start_len + seq_len],
+                    sm_scale=sm_scale,
+                    batch_size=1,
+                    k=k_chunk,
+                    v=v_chunk,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    offload_cache=offload_cache,
+                    positions=positions[start_len : start_len + seq_len],
+                    seq_lens=seq_lens[idx_batch : idx_batch + 1],
+                    req_to_tokens=req_to_tokens,
+                    req_pool_indices=req_pool_indices[idx_batch : idx_batch + 1],
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    rope_range=rope_range,
+                    layer_id=layer_id,
+                    logit_cap=logit_cap,
+                    orig_context_len=orig_context_len,
+                    max_context_len=max_context_len,
+                    hip_config=hip_config,
+                    cached_metadata=cached_metadata,
+                    online_update_cache=online_update_cache,
+                    offloading_metadata=offloading_metadata_curr,
+                    is_decode=is_decode,
+                    query_for_mask=query_for_mask,
+                    diag_sliding_window_indices=diag_sliding_window_indices,
+                )
+
+                o[start_len : start_len + seq_len] = o_req
+
+            start_len += seq_len
+
+        assert len(decoding_reqs) == 0
+
+    else:
+        o, metadata_new = _forward_paged_hip_validate(
+            query=query,
+            sm_scale=sm_scale,
+            batch_size=batch_size,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            offload_cache=offload_cache,
+            positions=positions,
+            seq_lens=seq_lens,
+            req_to_tokens=req_to_tokens,
+            req_pool_indices=req_pool_indices,
+            rope_cos=rope_cos,
+            rope_sin=rope_sin,
+            rope_range=rope_range,
+            layer_id=layer_id,
+            logit_cap=logit_cap,
+            orig_context_len=orig_context_len,
+            max_context_len=max_context_len,
+            hip_config=hip_config,
+            cached_metadata=cached_metadata,
+            k=k,
+            v=v,
+            online_update_cache=online_update_cache,
+            offloading_metadata=offloading_metadata,
+            is_decode=is_decode,
+            query_for_mask=query_for_mask,
+            diag_sliding_window_indices=diag_sliding_window_indices,
+        )
+
+    return o, metadata_new
+
+
+def _forward_paged_hip_validate(
+    query: torch.Tensor,
+    sm_scale: float,
+    batch_size: int,
+    k_cache: Optional[torch.Tensor],
+    v_cache: Optional[torch.Tensor],
+    offload_cache: Optional[HiPOffloadCache],
+    positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    req_to_tokens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    rope_cos: Optional[torch.Tensor],
+    rope_sin: Optional[torch.Tensor],
+    layer_id: int,
+    logit_cap: float,
+    orig_context_len: int,
+    max_context_len: int,
     hip_config: HiPAttentionConfig,
     rope_range: Optional[tuple[int, int]] = None,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
@@ -95,7 +230,7 @@ def forward_paged_hip(
 
     require_validation = offloading_metadata is not None
     if require_validation:
-        if is_prefill:
+        if not is_decode:
             k_pages, v_pages = offloading_metadata
         else:
             k_cache_valid, v_cache_valid = offloading_metadata
@@ -132,7 +267,7 @@ def forward_paged_hip(
     )
 
     if require_validation:
-        if is_prefill:
+        if not is_decode:
             o_req_valid, _ = _forward_paged_hip(
                 query=query,
                 sm_scale=sm_scale,
@@ -146,6 +281,7 @@ def forward_paged_hip(
                 req_pool_indices=req_pool_indices,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
+                rope_range=rope_range,
                 layer_id=layer_id,
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
@@ -177,6 +313,7 @@ def forward_paged_hip(
                 req_pool_indices=req_pool_indices,
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
+                rope_range=rope_range,
                 layer_id=layer_id,
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
@@ -248,6 +385,7 @@ def forward_paged_hip(
                     req_pool_indices=req_pool_indices,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    rope_range=rope_range,
                     layer_id=layer_id,
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
@@ -278,6 +416,7 @@ def forward_paged_hip(
                     req_pool_indices=req_pool_indices,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    rope_range=rope_range,
                     layer_id=layer_id,
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,

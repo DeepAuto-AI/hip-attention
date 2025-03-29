@@ -3,7 +3,7 @@ import math
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -160,10 +160,64 @@ class HiPModelOffloadCache:
     def get_fetched_prefix_kv_buffer(
         self,
         layer_id: int,
-        batch_id: int,
+        batch_id: Optional[int] = None,
         # you need to pass KV for extend
-        cache_k: Tensor,
-        cache_v: Tensor,
+        cache_k: Optional[Tensor] = None,
+        cache_v: Optional[Tensor] = None,
+        extend_seq_lens: Optional[Tensor] = None,
+        extend_seq_lens_cpu: Optional[List[int]] = None,
+    ) -> Tuple[
+        Union[Tensor, List[Tensor]], Union[Tensor, List[Tensor]], Union[Any, List[Any]]
+    ]:
+
+        if batch_id is not None:
+            return self._get_fetched_prefix_kv_buffer_single(
+                layer_id=layer_id,
+                batch_id=batch_id,
+                cache_k=cache_k,
+                cache_v=cache_v,
+            )
+
+        else:
+            k_chunks = []
+            v_chunks = []
+            offloading_metadata_list = []
+
+            start_len = 0
+            for idx_batch, seq_len in enumerate(extend_seq_lens_cpu):
+                if seq_len > 0:  # Skip empty sequences
+                    k_chunk, v_chunk, offloading_metadata = (
+                        self._get_fetched_prefix_kv_buffer_single(
+                            layer_id,
+                            idx_batch,
+                            cache_k=cache_k[start_len : start_len + seq_len].unsqueeze(
+                                0
+                            ),
+                            cache_v=cache_v[start_len : start_len + seq_len].unsqueeze(
+                                0
+                            ),
+                        )
+                    )
+                    k_chunks.append(k_chunk)
+                    v_chunks.append(v_chunk)
+                    offloading_metadata_list.append(offloading_metadata)
+
+                else:
+                    k_chunks.append(None)
+                    v_chunks.append(None)
+                    offloading_metadata_list.append(None)
+
+                start_len += seq_len
+
+            return k_chunks, v_chunks, offloading_metadata_list
+
+    def _get_fetched_prefix_kv_buffer_single(
+        self,
+        layer_id: int,
+        batch_id: Optional[int] = None,
+        # you need to pass KV for extend
+        cache_k: Optional[Tensor] = None,
+        cache_v: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Any]:
         # return cache_k, cache_v
 
