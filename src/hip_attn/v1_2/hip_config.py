@@ -38,9 +38,9 @@ class HiPAttentionPerLayerConfig:
     scan_extend_backend: Optional[str] = None
     stages: list[ScanStage] = field(default_factory=lambda: _DEFAULT_STAGES)
 
-    parsed_json: InitVar[dict | None] = None
+    parsed_json: InitVar[Optional[dict]] = None
 
-    def __post_init__(self, parsed_json: dict | None):
+    def __post_init__(self, parsed_json: Optional[dict]):
         super().__init__()
         if parsed_json is not None:
             if "second_stage_k" in parsed_json:
@@ -104,9 +104,9 @@ class HiPAttentionConfig:
     force_dense: bool = False
     prefill_dense_threshold: int = 8192
 
-    json_or_path: InitVar[str | None] = None
+    json_or_path: InitVar[Optional[str]] = None
 
-    def __post_init__(self, json_or_path: str | None):
+    def __post_init__(self, json_or_path: Optional[str]):
         super().__init__()
 
         if json_or_path is None:
