@@ -2,7 +2,7 @@
 name = "hip-research"
 version = "0.1.0"
 description = "HiP Attention Research Folder"
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.9, <3.13"
 dependencies = [
     # Trainer
     "torchmetrics",
