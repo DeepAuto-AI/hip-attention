@@ -525,7 +525,7 @@ def chunk_controllable_sampling_mask_cuda(
     group_jobs: int,
     total_jobs: int,
     HID_DIM: int,
-    BLOCK_HID: tl.constexpr = 128,
+    BLOCK_HID: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr = 32,
     STRIDE_Q: tl.constexpr = 1,
     BLOCK_CHUNK: tl.constexpr = 32,
@@ -689,7 +689,8 @@ def chunk_controllable_sampling_mask_cuda(
                                         + idx_head * stride_q_head
                                         + rope_rot_idx[None, :] * stride_q_hid,
                                         mask=mask_tdst_iter[:, None]
-                                        & rope_mask[None, :],
+                                        & rope_mask[None, :]
+                                        & mask_hid[None, :],
                                         other=0.0,
                                         # cache_modifier='.cg',
                                         # eviction_policy='evict_last',
@@ -704,7 +705,8 @@ def chunk_controllable_sampling_mask_cuda(
                                         + (idx_rope_range % (ROPE_DIM // 2))[None, :]
                                         * stride_cos_hid,
                                         mask=mask_tdst_iter[:, None]
-                                        & rope_mask[None, :],
+                                        & rope_mask[None, :]
+                                        & mask_hid[None, :],
                                         other=0.0,
                                     ).to(queries_iter.dtype)
                                     sin_new = tl.load(
@@ -713,7 +715,8 @@ def chunk_controllable_sampling_mask_cuda(
                                         + (idx_rope_range % (ROPE_DIM // 2))[None, :]
                                         * stride_sin_hid,
                                         mask=mask_tdst_iter[:, None]
-                                        & rope_mask[None, :],
+                                        & rope_mask[None, :]
+                                        & mask_hid[None, :],
                                         other=0.0,
                                     ).to(queries_iter.dtype)
 
@@ -729,7 +732,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     )[None, :].to(queries_rot.dtype)
 
                                     queries_iter = tl.where(
-                                        rope_mask[None, :],
+                                        rope_mask[None, :] & mask_hid[None, :],
                                         (
                                             queries_iter * cos_new
                                             + queries_rot * sin_new

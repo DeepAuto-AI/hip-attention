@@ -732,6 +732,8 @@ def block_sparse_attention_cuda(
     BLOCK_SIZE_K: tl.constexpr,
     HID_BLOCK: tl.constexpr,
     HID: tl.constexpr,
+    HID_BLOCK_V: tl.constexpr,
+    HID_V: tl.constexpr,
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
@@ -1691,11 +1693,14 @@ def block_sparse_attention(
         BSRC = cdiv_python(TSRC, args.block_size_k)
         MAX_TSRC = TSRC
         MAX_BSRC = BSRC
+        HID_V = v.shape[-1]
     else:
         if args.k_cache is not None:
             NUM_PAGE, PAGE_SIZE, KV_HEAD, _ = args.k_cache.shape
+            HID_V = args.v_cache.shape[-1]
         else:
             KV_HEAD = args.offload_cache.k_uvm.bank_cpu.shape[-2]
+            HID_V = args.offload_cache.v_uvm.bank_cpu.shape[-1]
         TSRC = None
         BSRC = None
         # MAX_TSRC = NUM_PAGE * PAGE_SIZE
@@ -1711,7 +1716,7 @@ def block_sparse_attention(
     assert B == N
     BK = indices.shape[-1]  # cdiv_python(args.mask_k, args.block_size_k)
 
-    context = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
     # BLOCK_BK = 64 // block_size_k
     # if block_size_k > 4:
@@ -1799,6 +1804,8 @@ def block_sparse_attention(
         args.block_size_k,
         triton.next_power_of_2(HID),
         HID,
+        triton.next_power_of_2(HID_V),
+        HID_V,
         # 2,
         BLOCK_BK=BLOCK_BK,
         EXTEND_BACKEND=EXTEND_BACKEND,
