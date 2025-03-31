@@ -407,14 +407,14 @@ def load_keys_with_rope(
                 cos_new = tl.load(
                     COS
                     + new_tsrc[None, :].to(tl.int64) * stride_cos_t
-                    + (idx_rope_range % (BLOCK_HID // 2))[:, None] * stride_cos_hid,
+                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_cos_hid,
                     mask=mask_tsrc_active[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys_left.dtype)
                 sin_new = tl.load(
                     SIN
                     + new_tsrc[None, :].to(tl.int64) * stride_sin_t
-                    + (idx_rope_range % (BLOCK_HID // 2))[:, None] * stride_sin_hid,
+                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_sin_hid,
                     mask=mask_tsrc_active[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys_left.dtype)

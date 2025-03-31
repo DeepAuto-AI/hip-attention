@@ -47,6 +47,8 @@ def block_sparse_attention_cuda_step(
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    rope_range_begin,
+    rope_range_end,
     model_context_length,
     idx_bk,
     pos_tdst,
@@ -58,6 +60,10 @@ def block_sparse_attention_cuda_step(
     BLOCK_SIZE_K: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
 ):
+    idx_rope_range = idx_hid - rope_range_begin
+    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+    ROPE_DIM = rope_range_end - rope_range_begin
+
     if USING_EXTEND:
         if EXTEND_BACKEND == "self_extend":
             raise Exception()
@@ -308,15 +314,15 @@ def block_sparse_attention_cuda_step(
                 cos_new = tl.load(
                     COS
                     + new_tsrc[None, :].to(tl.int64) * stride_cos_t
-                    + (tl.arange(0, HID) % (HID // 2))[:, None] * stride_cos_hid,
-                    mask=mask_tsrc[None, :],
+                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_cos_hid,
+                    mask=mask_tsrc[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys.dtype)
                 sin_new = tl.load(
                     SIN
                     + new_tsrc[None, :].to(tl.int64) * stride_sin_t
-                    + (tl.arange(0, HID) % (HID // 2))[:, None] * stride_sin_hid,
-                    mask=mask_tsrc[None, :],
+                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_sin_hid,
+                    mask=mask_tsrc[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys.dtype)
 
@@ -339,16 +345,18 @@ def block_sparse_attention_cuda_step(
                         cos_zero = tl.load(
                             COS
                             + streaming_tsrc[None, :].to(tl.int64) * stride_cos_t
-                            + (tl.arange(0, HID) % (HID // 2))[:, None]
-                            * stride_cos_hid,
+                            + (idx_rope_range % (ROPE_DIM // 2))[:, None]
+                            * stride_cos_hid
+                            & rope_mask[:, None],
                             # mask=mask_tsrc[None, :],
                             # other=0.0,
                         ).to(keys.dtype)
                         sin_zero = tl.load(
                             SIN
                             + streaming_tsrc[None, :].to(tl.int64) * stride_sin_t
-                            + (tl.arange(0, HID) % (HID // 2))[:, None]
-                            * stride_sin_hid,
+                            + (idx_rope_range % (ROPE_DIM // 2))[:, None]
+                            * stride_sin_hid
+                            & rope_mask[:, None],
                             # mask=mask_tsrc[None, :],
                             # other=0.0,
                         ).to(keys.dtype)
@@ -371,11 +379,15 @@ def block_sparse_attention_cuda_step(
                 #     -keys_rot,
                 #     keys_rot
                 # )
-                keys_rot = keys_rot * (
-                    ((idx_hid + HID // 2)[:, None] < HID) * (-2) + 1
-                ).to(keys_rot.dtype)
+                keys_rot *= ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1)[
+                    :, None
+                ].to(keys_rot.dtype)
 
-                keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype)
+                keys_adjusted = tl.where(
+                    rope_mask[:, None],
+                    (keys * cos_new + keys_rot * sin_new).to(keys.dtype),
+                    keys,
+                )
 
                 queries_adjusted = queries
 
@@ -820,9 +832,11 @@ def block_sparse_attention_cuda(
         #     True,
         # ).to(queries.dtype)
 
-        rope_rot_idx = (
-            idx_hid - rope_range_begin + ROPE_DIM // 2
-        ) % ROPE_DIM + rope_range_begin
+        rope_rot_idx = tl.where(
+            rope_mask,
+            (idx_hid - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+            idx_hid,
+        )
         queries_rot = tl.load(
             Q
             + idx_bsz * stride_q_bsz
@@ -858,9 +872,9 @@ def block_sparse_attention_cuda(
         #     -queries_rot,
         #     queries_rot
         # )
-        queries_rot *= ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1)[
-            None, :
-        ].to(queries_rot.dtype)
+        queries_rot *= (
+            ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1)[None, :]
+        ).to(queries_rot.dtype)
 
         queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
 
@@ -1020,7 +1034,7 @@ def block_sparse_attention_cuda(
                         idx_bsz,
                         idx_tsrc[None, :],
                         idx_head // KV_HEAD_REPEAT,
-                        ((idx_hid + HID // 2) % HID)[:, None],
+                        rope_rot_idx[:, None],
                         mask_tsrc[None, :],
                         HEAD // KV_HEAD_REPEAT,
                         BLOCK_BK * BLOCK_SIZE_K,
@@ -1125,6 +1139,8 @@ def block_sparse_attention_cuda(
                     SIN,
                     stride_sin_t,
                     stride_sin_hid,
+                    rope_range_begin,
+                    rope_range_end,
                     model_context_length,
                     idx_bk + sink_token_size // BLOCK_SIZE_K,
                     pos_tdst,
@@ -1259,7 +1275,7 @@ def block_sparse_attention_cuda(
                     idx_bsz,
                     idx_tsrc[None, :],
                     idx_head // KV_HEAD_REPEAT,
-                    ((idx_hid + HID // 2) % HID)[:, None],
+                    rope_rot_idx[:, None],
                     mask_tsrc[None, :],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
@@ -1364,6 +1380,8 @@ def block_sparse_attention_cuda(
                 SIN,
                 stride_sin_t,
                 stride_sin_hid,
+                rope_range_begin,
+                rope_range_end,
                 model_context_length,
                 tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
                 pos_tdst,
@@ -1501,7 +1519,7 @@ def block_sparse_attention_cuda(
                     idx_bsz,
                     idx_tsrc[None, :],
                     idx_head // KV_HEAD_REPEAT,
-                    ((idx_hid + HID // 2) % HID)[:, None],
+                    rope_rot_idx[:, None],
                     mask_tsrc[None, :],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
@@ -1606,6 +1624,8 @@ def block_sparse_attention_cuda(
                 SIN,
                 stride_sin_t,
                 stride_sin_hid,
+                rope_range_begin,
+                rope_range_end,
                 model_context_length,
                 # tl.arange(0, BLOCK_BK) +\
                 #     (range_end - range_start) +\
