@@ -770,17 +770,18 @@ def block_sparse_attention_cuda(
         )
 
     idx_hid = tl.arange(0, HID_BLOCK)
+    idx_hid_v = tl.arange(0, HID_BLOCK_V)
 
     idx_rope_range = idx_hid - rope_range_begin
     rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
     ROPE_DIM = rope_range_end - rope_range_begin
 
     if BLOCK_SIZE_Q < 16:
-        acc = tl.zeros((16, HID_BLOCK), dtype=tl.float32)
+        acc = tl.zeros((16, HID_BLOCK_V), dtype=tl.float32)
         m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
     else:
-        acc = tl.zeros((BLOCK_SIZE_Q, HID_BLOCK), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_SIZE_Q, HID_BLOCK_V), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
 
@@ -977,6 +978,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
+                    HID_BLOCK,
                     HID,
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
@@ -1041,6 +1043,7 @@ def block_sparse_attention_cuda(
                         mask_tsrc[None, :],
                         HEAD // KV_HEAD_REPEAT,
                         BLOCK_BK * BLOCK_SIZE_K,
+                        HID_BLOCK,
                         HID,
                         IS_BSA=True,
                         UPDATE_CACHE=UPDATE_CACHE,
@@ -1102,11 +1105,12 @@ def block_sparse_attention_cuda(
                     idx_bsz,
                     idx_tsrc[:, None],
                     idx_head // KV_HEAD_REPEAT,
-                    idx_hid[None, :],
+                    idx_hid_v[None, :],
                     mask_tsrc[:, None],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
-                    HID,
+                    HID_BLOCK_V,
+                    HID_V,
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
                     V_CACHE=K_CACHE,
@@ -1218,6 +1222,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 HEAD // KV_HEAD_REPEAT,
                 BLOCK_BK * BLOCK_SIZE_K,
+                HID_BLOCK,
                 HID,
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
@@ -1282,6 +1287,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
+                    HID_BLOCK,
                     HID,
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
@@ -1343,11 +1349,12 @@ def block_sparse_attention_cuda(
                 idx_bsz,
                 idx_tsrc[:, None],
                 idx_head // KV_HEAD_REPEAT,
-                idx_hid[None, :],
+                idx_hid_v[None, :],
                 mask_tsrc[:, None],
                 HEAD // KV_HEAD_REPEAT,
                 BLOCK_BK * BLOCK_SIZE_K,
-                HID,
+                HID_BLOCK_V,
+                HID_V,
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
                 V_CACHE=K_CACHE,
@@ -1462,6 +1469,7 @@ def block_sparse_attention_cuda(
                 mask_tsrc[None, :],
                 HEAD // KV_HEAD_REPEAT,
                 BLOCK_BK * BLOCK_SIZE_K,
+                HID_BLOCK,
                 HID,
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
@@ -1526,6 +1534,7 @@ def block_sparse_attention_cuda(
                     mask_tsrc[None, :],
                     HEAD // KV_HEAD_REPEAT,
                     BLOCK_BK * BLOCK_SIZE_K,
+                    HID_BLOCK,
                     HID,
                     IS_BSA=True,
                     UPDATE_CACHE=UPDATE_CACHE,
@@ -1587,11 +1596,12 @@ def block_sparse_attention_cuda(
                 idx_bsz,
                 idx_tsrc[:, None],
                 idx_head // KV_HEAD_REPEAT,
-                idx_hid[None, :],
+                idx_hid_v[None, :],
                 mask_tsrc[:, None],
                 HEAD // KV_HEAD_REPEAT,
                 BLOCK_BK * BLOCK_SIZE_K,
-                HID,
+                HID_BLOCK_V,
+                HID_V,
                 IS_BSA=True,
                 UPDATE_CACHE=UPDATE_CACHE,
                 V_CACHE=K_CACHE,
@@ -1661,8 +1671,8 @@ def block_sparse_attention_cuda(
         + idx_bsz * stride_context_bsz
         + idx_tdst[:, None] * stride_context_tdst
         + idx_head * stride_context_head
-        + idx_hid[None, :] * stride_context_hid,
-        mask=mask_tdst[:, None],
+        + idx_hid_v[None, :] * stride_context_hid,
+        mask=mask_tdst[:, None] & (idx_hid_v < HID_V),
         value=acc.to(CONTEXT.type.element_ty),
         # eviction_policy='evict_first',
         # cache_modifier='.cs', # TODO: uncomment this

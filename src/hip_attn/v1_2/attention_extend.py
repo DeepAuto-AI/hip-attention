@@ -1998,15 +1998,19 @@ def dual_stage_quadratic_hip_attention(
     k_mask_original = k_mask
 
     HID_DIM = q.shape[-1]
-    HID_DIM_V = v.shape[-1]
     BLOCK_HID = triton.next_power_of_2(HID_DIM)
+    if v is not None:
+        HID_DIM_V = v.shape[-1]
+    else:
+        HID_DIM_V = args.k_cache.shape[-1]
     BLOCK_HID_V = triton.next_power_of_2(HID_DIM_V)
 
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
         BSZ, TSRC, HEAD_KV, HID = k.shape
-        _, _, _, HID_V = v.shape
-        assert v.shape == k.shape
+        assert v.shape[0] == k.shape[0]
+        assert v.shape[1] == k.shape[1]
+        assert v.shape[2] == k.shape[2]
         MAX_TSRC = TSRC
     else:
         # MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
