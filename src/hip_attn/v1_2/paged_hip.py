@@ -516,12 +516,12 @@ def _forward_paged_hip(
         query_for_mask = query_for_mask.view(batch_size, -1, num_heads, hidden_dims)
 
     if k_cache is not None:
-        N_PAGE, num_heads_kv, hidden_dims_kv = k_cache.shape
-        assert v_cache.shape == k_cache.shape
-        assert hidden_dims_kv == hidden_dims
+        N_PAGE, num_heads_kv, hidden_dims_v = v_cache.shape
+        assert N_PAGE == k_cache.shape[0], f"{N_PAGE} != {k_cache.shape[0]}"
+        assert num_heads_kv == k_cache.shape[1], f"{num_heads_kv} != {k_cache.shape[1]}"
 
         k_cache = k_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims)
-        v_cache = v_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims)
+        v_cache = v_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims_v)
 
     # FIXME: this operation is linear during decoding
     block_table = req_to_tokens.index_select(dim=0, index=req_pool_indices)
@@ -823,4 +823,4 @@ def _forward_paged_hip(
                 _CHECKOUT_COUNTER += 1
             print(f"saved {filename}")
 
-    return context.view(N, num_heads, hidden_dims), metadata
+    return context.view(N, num_heads, hidden_dims_v), metadata
