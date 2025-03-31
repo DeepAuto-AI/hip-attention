@@ -56,7 +56,7 @@ There is a secret keyword hidden inside a lot of irrelevant text. Find the secre
 In previous text, you have seen the secret keyword. You had to remember that secret keyword. What was the pass key? Just answer the secret keyword without any verbal text.
 <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
-"""
+The secret keyword is $"""
 
 
 def interpolate_passkey(k):
