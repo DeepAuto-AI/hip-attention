@@ -1,6 +1,5 @@
 import math
 import os
-import time
 import warnings
 from typing import Optional
 
@@ -28,6 +27,11 @@ from hip_attn.v1_2.attention_metadata import (
     ScanStage,
     safe_stride,
 )
+
+# from hip_attn.v1_2.scan_stage import (
+#     chunk_controllable_sampling_mask_cuda,
+#     load_keys_with_rope,
+# )
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
 _NUM_STREAMING_MULTIPROCESSOR = None
@@ -741,7 +745,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     )
                                 else:
                                     queries_iter = adjust_rope(
-                                        queries,
+                                        queries_iter,
                                         old_tdst,
                                         new_tdst,
                                         mask_tdst_iter,
@@ -1998,12 +2002,7 @@ def dual_stage_quadratic_hip_attention(
     k_mask_original = k_mask
 
     HID_DIM = q.shape[-1]
-    BLOCK_HID = triton.next_power_of_2(HID_DIM)
-    if v is not None:
-        HID_DIM_V = v.shape[-1]
-    else:
-        HID_DIM_V = args.k_cache.shape[-1]
-    BLOCK_HID_V = triton.next_power_of_2(HID_DIM_V)
+    HID_BLOCK = triton.next_power_of_2(HID_DIM)  # // 2
 
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -2615,7 +2614,7 @@ def dual_stage_quadratic_hip_attention(
                         group_jobs,
                         njobs,
                         HID_DIM=HID_DIM,
-                        BLOCK_HID=BLOCK_HID,
+                        BLOCK_HID=HID_BLOCK,  # HID_BLOCK_0=HID_BLOCK,
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         STRIDE_Q=stage_block_stride_q,
                         BLOCK_CHUNK=BLOCK_CHUNK,

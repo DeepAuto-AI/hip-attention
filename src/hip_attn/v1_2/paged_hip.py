@@ -77,8 +77,20 @@ def forward_paged_hip(
             assert isinstance(offloading_metadata, list)
             offload_cache = k_cache = v_cache = None
 
+        BSZ_TDST, HEAD, _ = query.shape
+        if v is not None:
+            HID_V = v.shape[-1]
+        elif v_cache is not None:
+            HID_V = v_cache.shape[-1]
+        else:
+            HID_V = offload_cache.v_uvm.bank_cpu.shape[-1]
+
         # Output tensor
-        o = torch.empty_like(query)
+        o = torch.empty(
+            (BSZ_TDST, HEAD, HID_V),
+            dtype=query.dtype,
+            device=query.device,
+        )
         metadata_new = cached_metadata
 
         start_len = 0
@@ -518,9 +530,8 @@ def _forward_paged_hip(
     if k_cache is not None:
         N_PAGE, num_heads_kv, hidden_dims_v = v_cache.shape
         assert N_PAGE == k_cache.shape[0], f"{N_PAGE} != {k_cache.shape[0]}"
-        assert num_heads_kv == k_cache.shape[1], f"{num_heads_kv} != {k_cache.shape[1]}"
 
-        k_cache = k_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims)
+        k_cache = k_cache.view(N_PAGE, 1, num_heads_kv, k_cache.shape[-1])
         v_cache = v_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims_v)
 
     # FIXME: this operation is linear during decoding
