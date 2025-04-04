@@ -51,6 +51,7 @@ def forward_paged_hip(
     orig_context_len: int,
     max_context_len: int,
     hip_config: HiPAttentionConfig,
+    is_kv_cache_offload_enabled: Optional[bool] = False,
     rope_range: Optional[tuple[int, int]] = None,
     extend_seq_lens: Optional[torch.Tensor] = None,
     extend_seq_lens_cpu: Optional[torch.Tensor] = None,
@@ -66,28 +67,52 @@ def forward_paged_hip(
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_prefill is not None:
-        warnings.warn("is_prefill is deprecated. Use is_decode instead.")
+        warnings.warn(
+            "Deprecated behavior: `is_prefill` is deprecated. Use `is_decode` instead."
+        )
         is_decode = not is_prefill
+
+    if v is None:
+        warnings.warn(
+            "Deprecated behavior: `k` and `v` should be provided in order to precisely know the output size."
+        )
+
+        if v_cache is not None:
+            v_hidden_dim = v_cache.shape[-1]
+        else:
+            assert offload_cache is not None
+            v_hidden_dim = offload_cache.v_uvm.bank_cpu.shape[-1]
+
+    else:
+        if isinstance(v, list):
+            v_hidden_dim = v[0].shape[-1]
+
+        else:
+            v_hidden_dim = v.shape[-1]
+
+            if k.ndim == 3 and v.ndim == 3:  # Ignore if paged attn
+                assert (
+                    k_cache is not None and v_cache is not None
+                ) or offload_cache is not None
+                k = v = None
 
     if not is_decode and extend_seq_lens_cpu is not None:
         # Handle jagged inputs
-        is_kv_cache_offload_enabled = k is not None and v is not None
+        if is_kv_cache_offload_enabled is None:
+            warnings.warn(
+                "Deprecated behavior: `is_kv_cache_offload_enabled` must be specified in the future."
+            )
+            is_kv_cache_offload_enabled = k is not None and v is not None
         if is_kv_cache_offload_enabled:
             assert isinstance(k, list) and isinstance(v, list)
             assert isinstance(offloading_metadata, list)
             offload_cache = k_cache = v_cache = None
 
         BSZ_TDST, HEAD, _ = query.shape
-        if v is not None:
-            HID_V = v.shape[-1]
-        elif v_cache is not None:
-            HID_V = v_cache.shape[-1]
-        else:
-            HID_V = offload_cache.v_uvm.bank_cpu.shape[-1]
 
         # Output tensor
         o = torch.empty(
-            (BSZ_TDST, HEAD, HID_V),
+            (BSZ_TDST, HEAD, v_hidden_dim),
             dtype=query.dtype,
             device=query.device,
         )
@@ -133,7 +158,9 @@ def forward_paged_hip(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
+                    is_kv_cache_offload_enabled=is_kv_cache_offload_enabled,
                     cached_metadata=cached_metadata,
                     online_update_cache=online_update_cache,
                     offloading_metadata=offloading_metadata_curr,
@@ -167,7 +194,9 @@ def forward_paged_hip(
             logit_cap=logit_cap,
             orig_context_len=orig_context_len,
             max_context_len=max_context_len,
+            v_hidden_dim=v_hidden_dim,
             hip_config=hip_config,
+            is_kv_cache_offload_enabled=is_kv_cache_offload_enabled,
             cached_metadata=cached_metadata,
             k=k,
             v=v,
@@ -198,7 +227,9 @@ def _forward_paged_hip_validate(
     logit_cap: float,
     orig_context_len: int,
     max_context_len: int,
+    v_hidden_dim: int,
     hip_config: HiPAttentionConfig,
+    is_kv_cache_offload_enabled: Optional[bool] = False,
     rope_range: Optional[tuple[int, int]] = None,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
     k: Optional[torch.Tensor] = None,
@@ -210,36 +241,37 @@ def _forward_paged_hip_validate(
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
-    if k is not None:
-        # BUG: this padding is neccesary to match non offload scenario. why?
-        pad_size = max_context_len
-        if k.shape[1] != pad_size:
-            k_chunk_padded = torch.zeros(
-                (
-                    k.shape[0],
-                    pad_size,
-                    k.shape[2],
-                    k.shape[3],
-                ),
-                dtype=k.dtype,
-                device=k.device,
-            )
-            k_chunk_padded[:, : k.shape[1]] = k
-            del k
-            v_chunk_padded = torch.zeros(
-                (
-                    v.shape[0],
-                    pad_size,
-                    v.shape[2],
-                    v.shape[3],
-                ),
-                dtype=v.dtype,
-                device=v.device,
-            )
-            v_chunk_padded[:, : v.shape[1]] = v
-            del v
-            k = k_chunk_padded
-            v = v_chunk_padded
+    if is_kv_cache_offload_enabled:
+        if k is not None and v is not None:
+            # BUG: this padding is neccesary to match non offload scenario. why?
+            pad_size = max_context_len
+            if k.shape[1] != pad_size:
+                k_chunk_padded = torch.zeros(
+                    (
+                        k.shape[0],
+                        pad_size,
+                        k.shape[2],
+                        k.shape[3],
+                    ),
+                    dtype=k.dtype,
+                    device=k.device,
+                )
+                k_chunk_padded[:, : k.shape[1]] = k
+                del k
+                v_chunk_padded = torch.zeros(
+                    (
+                        v.shape[0],
+                        pad_size,
+                        v.shape[2],
+                        v.shape[3],
+                    ),
+                    dtype=v.dtype,
+                    device=v.device,
+                )
+                v_chunk_padded[:, : v.shape[1]] = v
+                del v
+                k = k_chunk_padded
+                v = v_chunk_padded
 
     require_validation = offloading_metadata is not None
     if require_validation:
@@ -269,6 +301,7 @@ def _forward_paged_hip_validate(
         logit_cap=logit_cap,
         orig_context_len=orig_context_len,
         max_context_len=max_context_len,
+        v_hidden_dim=v_hidden_dim,
         hip_config=hip_config,
         cached_metadata=cached_metadata,
         k=k,
@@ -299,6 +332,7 @@ def _forward_paged_hip_validate(
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
                 max_context_len=max_context_len,
+                v_hidden_dim=v_hidden_dim,
                 hip_config=hip_config,
                 cached_metadata=cached_metadata,
                 k=k,
@@ -331,6 +365,7 @@ def _forward_paged_hip_validate(
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
                 max_context_len=max_context_len,
+                v_hidden_dim=v_hidden_dim,
                 hip_config=hip_config,
                 cached_metadata=cached_metadata,
                 k=k,
@@ -403,6 +438,7 @@ def _forward_paged_hip_validate(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
                     cached_metadata=cached_metadata,
                     k=k,
@@ -434,6 +470,7 @@ def _forward_paged_hip_validate(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
                     cached_metadata=cached_metadata,
                     k=k,
@@ -495,6 +532,7 @@ def _forward_paged_hip(
     logit_cap: float,
     orig_context_len: int,
     max_context_len: int,
+    v_hidden_dim: int,
     hip_config: HiPAttentionConfig,
     rope_range: Optional[tuple[int, int]] = None,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
@@ -612,6 +650,7 @@ def _forward_paged_hip(
             else None
         ),
         layer_id=layer_id,
+        v_hidden_dim=v_hidden_dim,
     )
 
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
@@ -834,4 +873,4 @@ def _forward_paged_hip(
                 _CHECKOUT_COUNTER += 1
             print(f"saved {filename}")
 
-    return context.view(N, num_heads, hidden_dims_v), metadata
+    return context.view(N, num_heads, context.shape[-1]), metadata

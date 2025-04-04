@@ -2150,6 +2150,7 @@ def block_sparse_attention(
         # MAX_TSRC = NUM_PAGE * PAGE_SIZE
         MAX_TSRC = extend_context_length
         MAX_BSRC = cdiv_python(MAX_TSRC, args.block_size_k)
+    HID_V = args.v_hidden_dim if args.v_hidden_dim is not None else HID_V
     N = BSZ * HEAD
     # assert q.shape == k.shape
     BDST = cdiv_python(TDST, args.block_size_q)

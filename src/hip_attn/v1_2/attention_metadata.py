@@ -173,6 +173,7 @@ class HiPAttentionArgs:
     # kernel args,
     mask_only: bool = False
     block_sparse_block_size_q: Optional[int] = 64
+    v_hidden_dim: Optional[int] = None
 
     scan_early_terminate: int = 1
     stage_early_terminate: int = 1
