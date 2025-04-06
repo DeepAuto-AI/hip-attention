@@ -522,7 +522,7 @@ uv run -m sglang.launch_server \
 --cuda-graph-bs 1 2 4 8 \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 1 \
+--max-running-requests 8 \
 --enable-hip-attention \
 --hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
@@ -563,7 +563,7 @@ python \
 --cuda-graph-bs 1 2 4 8 \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 1 \
+--max-running-requests 8 \
 --enable-hip-attention \
 --hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
@@ -606,7 +606,7 @@ uv run -m sglang.launch_server \
 --cuda-graph-bs 1 2 4 8 16 \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 1 \
+--max-running-requests 16 \
 --enable-hip-attention \
 --hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
@@ -647,7 +647,7 @@ python \
 --cuda-graph-bs 1 2 4 8 16 \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 1 \
+--max-running-requests 16 \
 --enable-hip-attention \
 --hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
 --enable-hip-offload \
