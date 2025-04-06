@@ -408,7 +408,7 @@ python \
 export SRT_PORT=8921
 export HIP_DEBUG_UNION_HEAD=1;
 export HIP_HEAD_REDUCE=0;
-export CUDA_VISIBLE_DEVICES=4,5,6,7;
+export CUDA_VISIBLE_DEVICES=0,1,2,3;
 export SRT_WARMUP_PASSKEY_LENGTH=1000;
 export TOTAL_TOKENS=2097152;
 export CONTEXT_LENGTH=1048576;
@@ -451,7 +451,7 @@ export SRT_MODEL_PATH="Valdemardi/DeepSeek-R1-Distill-Qwen-32B-AWQ"
 export SRT_SERVED_MODEL_NAME="deepauto/deepseek-r1-distill-qwen-32b-1m-ctx"
 
 docker run --rm --runtime nvidia \
---gpus '"device=4,5,6,7"' \
+--gpus '"device=0,1,2,3"' \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
@@ -626,7 +626,7 @@ export SRT_MODEL_PATH="casperhansen/llama-3.3-70b-instruct-awq"
 export SRT_SERVED_MODEL_NAME="deepauto/llama-3.3-70b-instruct-awq-1m-ctx"
 
 docker run --rm --runtime nvidia \
---gpus '"device=4,5,6,7"' \
+--gpus '"device=0,1,2,3"' \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
