@@ -582,8 +582,7 @@ python \
 - Tested at: 2025-04-06
 - Tested version:
   - `hip-attention`: `600d3b614e6da8dd26c38f91d0245d046a90a046`
-  - `sglang`: `cf7158db50590ef4fe98c5b5d17d15946a6eef87
-
+  - `sglang`: `cf7158db50590ef4fe98c5b5d17d15946a6eef87`
 #### Local
 
 ```bash
