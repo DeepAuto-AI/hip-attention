@@ -34,7 +34,7 @@ classifiers = [
 dependencies = [
     # Required
     "torch",
-    "triton>=3.2.0",
+    "triton",
     "setuptools",  # Required by triton amd backend
     "numba",
     "performer_pytorch",
