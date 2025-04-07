@@ -29,10 +29,7 @@ from hip_attn.v1_2.attention_metadata import (
 )
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
-from hip_attn.v1_2.scan_stage import (
-    chunk_controllable_sampling_mask_cuda,
-    load_keys_with_rope,
-)
+from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
