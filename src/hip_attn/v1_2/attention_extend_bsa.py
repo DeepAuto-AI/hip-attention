@@ -2204,7 +2204,13 @@ def block_sparse_attention(
         raise Exception()
     assert seq_lens.ndim == 2
 
-    HID_BLOCK = triton.next_power_of_2(HID)  # // 2
+    if args.rope_range[0] == 0 and args.rope_range[1] == HID:
+        HID_BLOCK = triton.next_power_of_2(HID)
+    else:
+        assert triton.next_power_of_2(args.rope_range[0]) == args.rope_range[0]
+        assert args.rope_range[1] == HID
+        HID_BLOCK = args.rope_range[0]
+
     HID_BLOCK_V = triton.next_power_of_2(min(HID_V, 512))
     NUM_HID_V_BLOCKS = triton.cdiv(HID_V, HID_BLOCK_V)
 

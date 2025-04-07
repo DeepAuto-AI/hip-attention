@@ -146,9 +146,6 @@ def dual_stage_quadratic_hip_attention(
 
     k_mask_original = k_mask
 
-    HID_DIM = q.shape[-1]
-    HID_BLOCK = triton.next_power_of_2(HID_DIM)  # // 2
-
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
         BSZ, TSRC, HEAD_KV, HID = k.shape
@@ -184,6 +181,13 @@ def dual_stage_quadratic_hip_attention(
 
     if args.rope_range is None:
         args.rope_range = (0, HID)
+
+    if args.rope_range[0] == 0 and args.rope_range[1] == HID:
+        HID_BLOCK = triton.next_power_of_2(HID)
+    else:
+        assert triton.next_power_of_2(args.rope_range[0]) == args.rope_range[0]
+        assert args.rope_range[1] == HID
+        HID_BLOCK = args.rope_range[0]
 
     if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
         assert args.position_ids is not None
@@ -758,7 +762,7 @@ def dual_stage_quadratic_hip_attention(
                         args.model_context_length,
                         group_jobs,
                         njobs,
-                        HID_DIM=HID_DIM,
+                        HID_DIM=HID,
                         HID_BLOCK_0=HID_BLOCK,
                         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                         STRIDE_Q=stage_block_stride_q,
