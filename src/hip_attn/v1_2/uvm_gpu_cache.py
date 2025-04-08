@@ -124,7 +124,7 @@ class UVMCache:
         t = torch.empty(
             (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]),
             dtype=self.bank_cpu.dtype,
-            device='cpu',
+            device="cpu",
             pin_memory=pin_memory,
         )
 

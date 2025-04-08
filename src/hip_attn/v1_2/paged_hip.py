@@ -603,7 +603,7 @@ def _forward_paged_hip(
         layer_id=layer_id,
     )
 
-    last_dense = int(os.getenv('HIP_DEBUG_LAST_DENSE', '64'))
+    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
 
     if is_decode or (query.shape[1] < (last_dense * 2)):
         context, metadata = dual_stage_quadratic_hip_attention(
