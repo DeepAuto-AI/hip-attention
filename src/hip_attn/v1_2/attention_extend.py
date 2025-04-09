@@ -179,6 +179,12 @@ def dual_stage_quadratic_hip_attention(
     if args.rope_range is None:
         args.rope_range = (0, HID)
 
+    if args.rope_is_neox_style is None:
+        warnings.warn(
+            "Deprecated: Please specify `rope_is_neox_style`. Defaulting to True."
+        )
+        args.rope_is_neox_style = True
+
     if args.rope_range[0] == 0 and args.rope_range[1] == HID:
         HID_BLOCK = triton.next_power_of_2(HID)
     else:
@@ -745,6 +751,7 @@ def dual_stage_quadratic_hip_attention(
                         *safe_stride(args.rope_sin, 2),
                         args.rope_range[0],
                         args.rope_range[1],
+                        args.rope_is_neox_style,
                         mask_access_counter,
                         *safe_stride(mask_access_counter, 3),
                         mask_cache_miss_counter,

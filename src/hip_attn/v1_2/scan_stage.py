@@ -81,11 +81,8 @@ def load_keys_with_rope(
     UPDATE_CACHE,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    apply_rope: tl.constexpr,
 ):
-    idx_rope_range = idx_hid - rope_range_begin
-    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
-    ROPE_DIM = rope_range_end - rope_range_begin
-
     keys_left = load_tokens(
         K,
         stride_k_bsz,
@@ -145,7 +142,11 @@ def load_keys_with_rope(
         UPDATE_CACHE=UPDATE_CACHE,
     ).to(queries_dtype)
 
-    if USING_EXTEND:
+    if USING_EXTEND and apply_rope:
+        idx_rope_range = idx_hid - rope_range_begin
+        rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+        ROPE_DIM = rope_range_end - rope_range_begin
+
         real_pos_tdst_max = tl.sum(mask_tdst.to(tl.int32)) + real_pos_tdst_min
         tsrc_extend = tl.maximum(0, real_pos_tdst_max - model_context_length)
         if NEED_APPLY_ROPE or (tsrc_extend >= 0):
@@ -358,6 +359,7 @@ def pool_queries(
     BLOCK_SIZE_Q: tl.constexpr,
     HID_BLOCK: tl.constexpr,
     STRIDE_Q: tl.constexpr,
+    apply_rope: tl.constexpr,
 ):
     ROPE_DIM = rope_range_end - rope_range_begin
 
@@ -383,7 +385,7 @@ def pool_queries(
         if queries_iter.dtype == tl.float8e5:
             queries_iter = queries_iter.to(tl.float16)
 
-        if USING_EXTEND:
+        if USING_EXTEND and apply_rope:
             if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
                 old_tdst = pos_tdst
                 if EXTEND_BACKEND == "dynamic_extend":
@@ -559,6 +561,7 @@ def chunk_controllable_sampling_mask_cuda(
     stride_sin_hid,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     MASK_ACCESS_COUNTER,
     stride_mask_access_counter_bsz,
     stride_mask_access_counter_head_kv,
@@ -590,6 +593,7 @@ def chunk_controllable_sampling_mask_cuda(
     SCAN_STRIDE: tl.constexpr = 1,
     UPDATE_CACHE: tl.constexpr = True,
     ORACLE_MAXIMUM: tl.constexpr = False,
+    LOAD_Q_EACH_TIME: tl.constexpr = True,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)
@@ -629,42 +633,17 @@ def chunk_controllable_sampling_mask_cuda(
                 ) * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
                 mask_tdst = (idx_tdst < TDST) & (idx_tdst >= 0)
 
-            ROPE_DIM = rope_range_end - rope_range_begin
-
             HID_BLOCK_1: tl.constexpr = HID_DIM - HID_BLOCK_0
 
             idx_hid_q0 = tl.arange(0, HID_BLOCK_0)
             mask_hid_q0 = idx_hid_q0 < HID_DIM
-            idx_rope_range_0 = idx_hid_q0 - rope_range_begin
-            rope_mask_0 = (rope_range_begin <= idx_hid_q0) & (
-                idx_hid_q0 < rope_range_end
-            )
-            rope_rot_idx_0 = tl.where(
-                rope_mask_0,
-                (idx_hid_q0 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-                + rope_range_begin,
-                idx_hid_q0,
-            )
 
             if HID_BLOCK_1 > 0:
                 idx_hid_q1 = HID_BLOCK_0 + tl.arange(0, HID_BLOCK_1)
                 mask_hid_q1 = idx_hid_q1 < HID_DIM
-                idx_rope_range_1 = idx_hid_q1 - rope_range_begin
-                rope_mask_1 = (rope_range_begin <= idx_hid_q1) & (
-                    idx_hid_q1 < rope_range_end
-                )
-                rope_rot_idx_1 = tl.where(
-                    rope_mask_1,
-                    (idx_hid_q1 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-                    + rope_range_begin,
-                    idx_hid_q1,
-                )
             else:
                 idx_hid_q1 = None
                 mask_hid_q1 = None
-                idx_rope_range_1 = None
-                rope_mask_1 = None
-                rope_rot_idx_1 = None
 
             pos_tdst = tl.load(
                 POS + idx_bsz * stride_pos_bsz + idx_tdst * stride_pos_tdst,
@@ -678,7 +657,10 @@ def chunk_controllable_sampling_mask_cuda(
                 tl.sum(mask_tdst.to(tl.int32)) > 0, real_pos_tdst_min, -1
             )
 
-            q_dtype = Q.dtype.element_ty
+            if Q.dtype.element_ty != tl.float8e5:
+                q_dtype = Q.dtype.element_ty
+            else:
+                q_dtype = tl.float16
             cq = (tl.sqrt(HID_DIM * 1.0) / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
             ck = (1.0 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
 
@@ -718,50 +700,15 @@ def chunk_controllable_sampling_mask_cuda(
 
                     scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
 
-                    queries_0 = pool_queries(
-                        idx_bsz,
-                        idx_head,
-                        pos_tdst,
-                        idx_tdst,
-                        mask_tdst,
-                        idx_hid_q0,
-                        mask_hid_q0,
-                        Q,
-                        stride_q_bsz,
-                        stride_q_tdst,
-                        stride_q_head,
-                        stride_q_hid,
-                        COS,
-                        stride_cos_t,
-                        stride_cos_hid,
-                        SIN,
-                        stride_sin_t,
-                        stride_sin_hid,
-                        rope_range_begin,
-                        rope_range_end,
-                        HID_DIM,
-                        TDST,
-                        CHUNK_COUNT,
-                        real_pos_tdst_min,
-                        model_context_length,
-                        sliding_window_size,
-                        USING_EXTEND,
-                        NEED_APPLY_ROPE,
-                        EXTEND_BACKEND,
-                        BLOCK_SIZE_Q,
-                        HID_BLOCK_0,
-                        STRIDE_Q,
-                    )
-
-                    if HID_BLOCK_1 > 0:
-                        queries_1 = pool_queries(
+                    if not LOAD_Q_EACH_TIME:
+                        queries_0 = pool_queries(
                             idx_bsz,
                             idx_head,
                             pos_tdst,
                             idx_tdst,
                             mask_tdst,
-                            idx_hid_q1,
-                            mask_hid_q1,
+                            idx_hid_q0,
+                            mask_hid_q0,
                             Q,
                             stride_q_bsz,
                             stride_q_tdst,
@@ -785,11 +732,49 @@ def chunk_controllable_sampling_mask_cuda(
                             NEED_APPLY_ROPE,
                             EXTEND_BACKEND,
                             BLOCK_SIZE_Q,
-                            HID_BLOCK_1,
+                            HID_BLOCK_0,
                             STRIDE_Q,
+                            apply_rope=rope_range_begin < HID_BLOCK_0,
                         )
-                    else:
-                        queries_1 = None
+
+                        if HID_BLOCK_1 > 0:
+                            queries_1 = pool_queries(
+                                idx_bsz,
+                                idx_head,
+                                pos_tdst,
+                                idx_tdst,
+                                mask_tdst,
+                                idx_hid_q1,
+                                mask_hid_q1,
+                                Q,
+                                stride_q_bsz,
+                                stride_q_tdst,
+                                stride_q_head,
+                                stride_q_hid,
+                                COS,
+                                stride_cos_t,
+                                stride_cos_hid,
+                                SIN,
+                                stride_sin_t,
+                                stride_sin_hid,
+                                rope_range_begin,
+                                rope_range_end,
+                                HID_DIM,
+                                TDST,
+                                CHUNK_COUNT,
+                                real_pos_tdst_min,
+                                model_context_length,
+                                sliding_window_size,
+                                USING_EXTEND,
+                                NEED_APPLY_ROPE,
+                                EXTEND_BACKEND,
+                                BLOCK_SIZE_Q,
+                                HID_BLOCK_1,
+                                STRIDE_Q,
+                                apply_rope=True,
+                            )
+                        else:
+                            queries_1 = None
 
                     while max_chunk_size >= TERMINATE_SIZE:
                         max_chunk_size /= 2.0
@@ -809,6 +794,43 @@ def chunk_controllable_sampling_mask_cuda(
                             )
                             for tt in range(0, max_chunk_size.to(tl.int32)):
                                 idx_tsrc = idx_tsrc_left + tt
+
+                                queries_0 = pool_queries(
+                                    idx_bsz,
+                                    idx_head,
+                                    pos_tdst,
+                                    idx_tdst,
+                                    mask_tdst,
+                                    idx_hid_q0,
+                                    mask_hid_q0,
+                                    Q,
+                                    stride_q_bsz,
+                                    stride_q_tdst,
+                                    stride_q_head,
+                                    stride_q_hid,
+                                    COS,
+                                    stride_cos_t,
+                                    stride_cos_hid,
+                                    SIN,
+                                    stride_sin_t,
+                                    stride_sin_hid,
+                                    rope_range_begin,
+                                    rope_range_end,
+                                    HID_DIM,
+                                    TDST,
+                                    CHUNK_COUNT,
+                                    real_pos_tdst_min,
+                                    model_context_length,
+                                    sliding_window_size,
+                                    USING_EXTEND,
+                                    NEED_APPLY_ROPE,
+                                    EXTEND_BACKEND,
+                                    BLOCK_SIZE_Q,
+                                    HID_BLOCK_0,
+                                    STRIDE_Q,
+                                    apply_rope=rope_range_begin < HID_BLOCK_0,
+                                )
+
                                 keys_left_0 = load_keys_with_rope(
                                     K,
                                     stride_k_bsz,
@@ -884,6 +906,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                                 t_scores_left = tl.dot(
@@ -894,6 +917,42 @@ def chunk_controllable_sampling_mask_cuda(
                                 ).to(q_dtype)
 
                                 if HID_BLOCK_1 > 0:
+                                    queries_1 = pool_queries(
+                                        idx_bsz,
+                                        idx_head,
+                                        pos_tdst,
+                                        idx_tdst,
+                                        mask_tdst,
+                                        idx_hid_q1,
+                                        mask_hid_q1,
+                                        Q,
+                                        stride_q_bsz,
+                                        stride_q_tdst,
+                                        stride_q_head,
+                                        stride_q_hid,
+                                        COS,
+                                        stride_cos_t,
+                                        stride_cos_hid,
+                                        SIN,
+                                        stride_sin_t,
+                                        stride_sin_hid,
+                                        rope_range_begin,
+                                        rope_range_end,
+                                        HID_DIM,
+                                        TDST,
+                                        CHUNK_COUNT,
+                                        real_pos_tdst_min,
+                                        model_context_length,
+                                        sliding_window_size,
+                                        USING_EXTEND,
+                                        NEED_APPLY_ROPE,
+                                        EXTEND_BACKEND,
+                                        BLOCK_SIZE_Q,
+                                        HID_BLOCK_1,
+                                        STRIDE_Q,
+                                        apply_rope=True,
+                                    )
+
                                     keys_left_1 = load_keys_with_rope(
                                         K,
                                         stride_k_bsz,
@@ -969,6 +1028,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         UPDATE_CACHE,
                                         rope_range_begin,
                                         rope_range_end,
+                                        apply_rope=True,
                                     )
 
                                     t_scores_left += tl.dot(
@@ -981,6 +1041,44 @@ def chunk_controllable_sampling_mask_cuda(
                                 scores_left = tl.maximum(scores_left, t_scores_left)
                         else:
                             idx_tsrc = (idx_tsrc_left + idx_tsrc_center) // 2
+
+                            if LOAD_Q_EACH_TIME:
+                                queries_0 = pool_queries(
+                                    idx_bsz,
+                                    idx_head,
+                                    pos_tdst,
+                                    idx_tdst,
+                                    mask_tdst,
+                                    idx_hid_q0,
+                                    mask_hid_q0,
+                                    Q,
+                                    stride_q_bsz,
+                                    stride_q_tdst,
+                                    stride_q_head,
+                                    stride_q_hid,
+                                    COS,
+                                    stride_cos_t,
+                                    stride_cos_hid,
+                                    SIN,
+                                    stride_sin_t,
+                                    stride_sin_hid,
+                                    rope_range_begin,
+                                    rope_range_end,
+                                    HID_DIM,
+                                    TDST,
+                                    CHUNK_COUNT,
+                                    real_pos_tdst_min,
+                                    model_context_length,
+                                    sliding_window_size,
+                                    USING_EXTEND,
+                                    NEED_APPLY_ROPE,
+                                    EXTEND_BACKEND,
+                                    BLOCK_SIZE_Q,
+                                    HID_BLOCK_0,
+                                    STRIDE_Q,
+                                    apply_rope=rope_range_begin < HID_BLOCK_0,
+                                )
+
                             keys_left_0 = load_keys_with_rope(
                                 K,
                                 stride_k_bsz,
@@ -1056,6 +1154,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 UPDATE_CACHE,
                                 rope_range_begin,
                                 rope_range_end,
+                                apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
                             scores_left = tl.dot(
@@ -1066,6 +1165,43 @@ def chunk_controllable_sampling_mask_cuda(
                             ).to(q_dtype)
 
                             if HID_BLOCK_1 > 0:
+                                if LOAD_Q_EACH_TIME:
+                                    queries_1 = pool_queries(
+                                        idx_bsz,
+                                        idx_head,
+                                        pos_tdst,
+                                        idx_tdst,
+                                        mask_tdst,
+                                        idx_hid_q1,
+                                        mask_hid_q1,
+                                        Q,
+                                        stride_q_bsz,
+                                        stride_q_tdst,
+                                        stride_q_head,
+                                        stride_q_hid,
+                                        COS,
+                                        stride_cos_t,
+                                        stride_cos_hid,
+                                        SIN,
+                                        stride_sin_t,
+                                        stride_sin_hid,
+                                        rope_range_begin,
+                                        rope_range_end,
+                                        HID_DIM,
+                                        TDST,
+                                        CHUNK_COUNT,
+                                        real_pos_tdst_min,
+                                        model_context_length,
+                                        sliding_window_size,
+                                        USING_EXTEND,
+                                        NEED_APPLY_ROPE,
+                                        EXTEND_BACKEND,
+                                        BLOCK_SIZE_Q,
+                                        HID_BLOCK_1,
+                                        STRIDE_Q,
+                                        apply_rope=True,
+                                    )
+
                                 keys_left_1 = load_keys_with_rope(
                                     K,
                                     stride_k_bsz,
@@ -1141,6 +1277,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    apply_rope=True,
                                 )
 
                                 scores_left += tl.dot(
@@ -1181,6 +1318,44 @@ def chunk_controllable_sampling_mask_cuda(
                             )
                             for tt in range(0, max_chunk_size.to(tl.int32)):
                                 idx_tsrc = idx_tsrc_center + tt
+
+                                if LOAD_Q_EACH_TIME:
+                                    queries_0 = pool_queries(
+                                        idx_bsz,
+                                        idx_head,
+                                        pos_tdst,
+                                        idx_tdst,
+                                        mask_tdst,
+                                        idx_hid_q0,
+                                        mask_hid_q0,
+                                        Q,
+                                        stride_q_bsz,
+                                        stride_q_tdst,
+                                        stride_q_head,
+                                        stride_q_hid,
+                                        COS,
+                                        stride_cos_t,
+                                        stride_cos_hid,
+                                        SIN,
+                                        stride_sin_t,
+                                        stride_sin_hid,
+                                        rope_range_begin,
+                                        rope_range_end,
+                                        HID_DIM,
+                                        TDST,
+                                        CHUNK_COUNT,
+                                        real_pos_tdst_min,
+                                        model_context_length,
+                                        sliding_window_size,
+                                        USING_EXTEND,
+                                        NEED_APPLY_ROPE,
+                                        EXTEND_BACKEND,
+                                        BLOCK_SIZE_Q,
+                                        HID_BLOCK_0,
+                                        STRIDE_Q,
+                                        apply_rope=rope_range_begin < HID_BLOCK_0,
+                                    )
+
                                 keys_right_0 = load_keys_with_rope(
                                     K,
                                     stride_k_bsz,
@@ -1256,6 +1431,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                                 t_scores_right = tl.dot(
@@ -1266,6 +1442,43 @@ def chunk_controllable_sampling_mask_cuda(
                                 ).to(q_dtype)
 
                                 if HID_BLOCK_1 > 0:
+                                    if LOAD_Q_EACH_TIME:
+                                        queries_1 = pool_queries(
+                                            idx_bsz,
+                                            idx_head,
+                                            pos_tdst,
+                                            idx_tdst,
+                                            mask_tdst,
+                                            idx_hid_q1,
+                                            mask_hid_q1,
+                                            Q,
+                                            stride_q_bsz,
+                                            stride_q_tdst,
+                                            stride_q_head,
+                                            stride_q_hid,
+                                            COS,
+                                            stride_cos_t,
+                                            stride_cos_hid,
+                                            SIN,
+                                            stride_sin_t,
+                                            stride_sin_hid,
+                                            rope_range_begin,
+                                            rope_range_end,
+                                            HID_DIM,
+                                            TDST,
+                                            CHUNK_COUNT,
+                                            real_pos_tdst_min,
+                                            model_context_length,
+                                            sliding_window_size,
+                                            USING_EXTEND,
+                                            NEED_APPLY_ROPE,
+                                            EXTEND_BACKEND,
+                                            BLOCK_SIZE_Q,
+                                            HID_BLOCK_1,
+                                            STRIDE_Q,
+                                            apply_rope=True,
+                                        )
+
                                     keys_right_1 = load_keys_with_rope(
                                         K,
                                         stride_k_bsz,
@@ -1341,6 +1554,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         UPDATE_CACHE,
                                         rope_range_begin,
                                         rope_range_end,
+                                        apply_rope=True,
                                     )
 
                                     t_scores_right += tl.dot(
@@ -1353,6 +1567,44 @@ def chunk_controllable_sampling_mask_cuda(
                                 scores_right = tl.maximum(scores_right, t_scores_right)
                         else:
                             idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
+
+                            if LOAD_Q_EACH_TIME:
+                                queries_0 = pool_queries(
+                                    idx_bsz,
+                                    idx_head,
+                                    pos_tdst,
+                                    idx_tdst,
+                                    mask_tdst,
+                                    idx_hid_q0,
+                                    mask_hid_q0,
+                                    Q,
+                                    stride_q_bsz,
+                                    stride_q_tdst,
+                                    stride_q_head,
+                                    stride_q_hid,
+                                    COS,
+                                    stride_cos_t,
+                                    stride_cos_hid,
+                                    SIN,
+                                    stride_sin_t,
+                                    stride_sin_hid,
+                                    rope_range_begin,
+                                    rope_range_end,
+                                    HID_DIM,
+                                    TDST,
+                                    CHUNK_COUNT,
+                                    real_pos_tdst_min,
+                                    model_context_length,
+                                    sliding_window_size,
+                                    USING_EXTEND,
+                                    NEED_APPLY_ROPE,
+                                    EXTEND_BACKEND,
+                                    BLOCK_SIZE_Q,
+                                    HID_BLOCK_0,
+                                    STRIDE_Q,
+                                    apply_rope=rope_range_begin < HID_BLOCK_0,
+                                )
+
                             keys_right_0 = load_keys_with_rope(
                                 K,
                                 stride_k_bsz,
@@ -1428,6 +1680,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 UPDATE_CACHE,
                                 rope_range_begin,
                                 rope_range_end,
+                                apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
                             scores_right = tl.dot(
@@ -1438,6 +1691,43 @@ def chunk_controllable_sampling_mask_cuda(
                             ).to(q_dtype)
 
                             if HID_BLOCK_1 > 0:
+                                if LOAD_Q_EACH_TIME:
+                                    queries_1 = pool_queries(
+                                        idx_bsz,
+                                        idx_head,
+                                        pos_tdst,
+                                        idx_tdst,
+                                        mask_tdst,
+                                        idx_hid_q1,
+                                        mask_hid_q1,
+                                        Q,
+                                        stride_q_bsz,
+                                        stride_q_tdst,
+                                        stride_q_head,
+                                        stride_q_hid,
+                                        COS,
+                                        stride_cos_t,
+                                        stride_cos_hid,
+                                        SIN,
+                                        stride_sin_t,
+                                        stride_sin_hid,
+                                        rope_range_begin,
+                                        rope_range_end,
+                                        HID_DIM,
+                                        TDST,
+                                        CHUNK_COUNT,
+                                        real_pos_tdst_min,
+                                        model_context_length,
+                                        sliding_window_size,
+                                        USING_EXTEND,
+                                        NEED_APPLY_ROPE,
+                                        EXTEND_BACKEND,
+                                        BLOCK_SIZE_Q,
+                                        HID_BLOCK_1,
+                                        STRIDE_Q,
+                                        apply_rope=True,
+                                    )
+
                                 keys_right_1 = load_keys_with_rope(
                                     K,
                                     stride_k_bsz,
@@ -1513,6 +1803,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    apply_rope=True,
                                 )
 
                                 scores_right += tl.dot(

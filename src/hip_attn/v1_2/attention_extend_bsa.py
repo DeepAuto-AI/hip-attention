@@ -34,8 +34,9 @@ def apply_rope_to_keys(
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    rope_range_begin,
-    rope_range_end,
+    rope_range_begin: tl.constexpr,
+    rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     model_context_length,
     sink_token_size,
     mask_k,
@@ -50,10 +51,6 @@ def apply_rope_to_keys(
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
 ):
-    idx_rope_range = idx_hid - rope_range_begin
-    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
-    ROPE_DIM = rope_range_end - rope_range_begin
-
     if EXTEND_BACKEND == "self_extend":
         raise Exception()
     elif (
@@ -89,7 +86,10 @@ def apply_rope_to_keys(
                         stride_sin_hid,
                         BLOCK_TQ,
                         HID,
+                        idx_hid.shape[0],
                         NEED_APPLY_ROPE,
+                        rope_range_begin,
+                        rope_range_end,
                     )
 
                     keys_adjusted = keys
@@ -125,7 +125,10 @@ def apply_rope_to_keys(
                         stride_sin_hid,
                         BLOCK_TK,
                         HID,
+                        idx_hid.shape[0],
                         NEED_APPLY_ROPE,
+                        rope_range_begin,
+                        rope_range_end,
                     )
                     keys_adjusted = tl.trans(keys_adjusted, 1, 0)
 
@@ -147,7 +150,10 @@ def apply_rope_to_keys(
                         stride_sin_hid,
                         BLOCK_TQ,
                         HID,
+                        idx_hid.shape[0],
                         True,
+                        rope_range_begin,
+                        rope_range_end,
                     ).to(queries.dtype)
                     queries_adjusted = (queries * mask_tdst[:, None]).to(queries.dtype)
 
@@ -166,7 +172,10 @@ def apply_rope_to_keys(
                             stride_sin_hid,
                             BLOCK_TK,
                             HID,
+                            idx_hid.shape[0],
                             True,
+                            rope_range_begin,
+                            rope_range_end,
                         ),
                         1,
                         0,
@@ -176,6 +185,19 @@ def apply_rope_to_keys(
         else:
             tl.static_assert(NEED_APPLY_ROPE)
             tl.static_assert(USING_EXTEND)
+
+            ROPE_DIM = rope_range_end - rope_range_begin
+
+            idx_rope_range = idx_hid - rope_range_begin
+            rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+            if rope_is_neox_style:
+                cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+                rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
+                    queries.dtype
+                )
+            else:
+                cos_sin_idx = idx_rope_range >> 1
+                rope_mult = (idx_rope_range & 1).to(queries.dtype)
 
             if EXCLUDE_SLIDING_WINDOW:
                 pos_tdst_max = pos_tdst_min + tl.sum(mask_tdst.to(tl.int32))
@@ -233,14 +255,14 @@ def apply_rope_to_keys(
             cos_new = tl.load(
                 COS
                 + new_tsrc[None, :].to(tl.int64) * stride_cos_t
-                + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_cos_hid,
+                + cos_sin_idx[:, None] * stride_cos_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
             ).to(keys.dtype)
             sin_new = tl.load(
                 SIN
                 + new_tsrc[None, :].to(tl.int64) * stride_sin_t
-                + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_sin_hid,
+                + cos_sin_idx[:, None] * stride_sin_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
             ).to(keys.dtype)
@@ -264,26 +286,24 @@ def apply_rope_to_keys(
                     cos_zero = tl.load(
                         COS
                         + streaming_tsrc[None, :].to(tl.int64) * stride_cos_t
-                        + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_cos_hid
-                        & rope_mask[:, None],
+                        + cos_sin_idx[:, None] * stride_cos_hid,
+                        mask=rope_mask[:, None],
                         # mask=mask_tsrc[None, :],
-                        # other=0.0,
+                        other=0.0,
                     ).to(keys.dtype)
                     sin_zero = tl.load(
                         SIN
                         + streaming_tsrc[None, :].to(tl.int64) * stride_sin_t
-                        + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_sin_hid
-                        & rope_mask[:, None],
+                        + cos_sin_idx[:, None] * stride_sin_hid,
+                        mask=rope_mask[:, None],
                         # mask=mask_tsrc[None, :],
-                        # other=0.0,
+                        other=0.0,
                     ).to(keys.dtype)
 
                     cos_new = (cos_zero * 0.75 + cos_new * 0.25).to(cos_new.dtype)
                     sin_new = (sin_zero * 0.75 + sin_new * 0.25).to(sin_new.dtype)
 
-            keys_rot *= (
-                (idx_rope_range[:, None] + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1
-            ).to(keys_rot.dtype)
+            keys_rot *= rope_mult[:, None]
 
             keys_adjusted = tl.where(
                 rope_mask[:, None],
@@ -334,8 +354,9 @@ def block_sparse_attention_cuda_step(
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    rope_range_begin,
-    rope_range_end,
+    rope_range_begin: tl.constexpr,
+    rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     model_context_length,
     idx_bk,
     pos_tdst,
@@ -371,6 +392,7 @@ def block_sparse_attention_cuda_step(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 sink_token_size,
                 mask_k,
@@ -405,6 +427,7 @@ def block_sparse_attention_cuda_step(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 sink_token_size,
                 mask_k,
@@ -422,19 +445,20 @@ def block_sparse_attention_cuda_step(
 
     q_dtype = queries_0.dtype
 
+    cq = tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0))
+    ck = 1 / tl.sqrt(tl.sqrt(HID * 1.0))
+
     qk = tl.dot(
-        (queries_0 * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_dtype),
-        (keys_0.to(q_dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_dtype),
+        (queries_0 * cq).to(q_dtype),
+        (keys_0.to(q_dtype) * ck).to(q_dtype),
         out_dtype=tl.float32,
         allow_tf32=True,
     ).to(tl.float32)
 
     if HID_BLOCK_1 > 0:
         qk += tl.dot(
-            (queries_1 * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(
-                q_dtype
-            ),
-            (keys_1.to(q_dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_dtype),
+            (queries_1 * cq).to(q_dtype),
+            (keys_1.to(q_dtype) * ck).to(q_dtype),
             out_dtype=tl.float32,
             allow_tf32=True,
         ).to(tl.float32)
@@ -460,8 +484,8 @@ def block_sparse_attention_cuda_step(
         qk_mask = ~(mask_tdst[:, None] & mask_tsrc[None, :])
 
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    qk_ = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
-    m_ij = tl.maximum(m_i, tl.max(qk_, axis=1)[:, None])
+    qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
+    m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
 
     qk = qk - m_ij
     # [BLOCK_SIZE_Q: tdst, BLOCK_BK * BLOCK_SIZE_K: tsrc]
@@ -559,20 +583,36 @@ def apply_rope_to_queries(
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    rope_range_begin,
-    rope_range_end,
+    rope_range_begin: tl.constexpr,
+    rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
 ):
     rope_tdst = pos_tdst - 1
 
-    idx_rope_range = idx_hid - rope_range_begin
-    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
     ROPE_DIM = rope_range_end - rope_range_begin
 
-    rope_rot_idx = tl.where(
-        rope_mask,
-        (idx_hid - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
-        idx_hid,
-    )
+    idx_rope_range = idx_hid - rope_range_begin
+    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+    if rope_is_neox_style:
+        rope_rot_idx = tl.where(
+            rope_mask,
+            (idx_rope_range + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+            idx_hid,
+        )
+        cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+        rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
+            queries.dtype
+        )
+    else:
+        flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
+        rope_rot_idx = tl.where(
+            rope_mask,
+            idx_rope_range + flip,
+            idx_hid,
+        )
+        cos_sin_idx = idx_rope_range >> 1
+        rope_mult = (idx_rope_range & 1).to(queries.dtype)
+
     queries_rot = tl.load(
         Q
         + idx_bsz * stride_q_bsz
@@ -588,23 +628,25 @@ def apply_rope_to_queries(
     cos_new = tl.load(
         COS
         + rope_tdst[:, None].to(tl.int64) * stride_cos_t
-        + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_cos_hid,
+        + cos_sin_idx[None, :] * stride_cos_hid,
         mask=mask_tdst[:, None] & rope_mask[None, :],
         other=0.0,
     ).to(queries.dtype)
     sin_new = tl.load(
         SIN
         + rope_tdst[:, None].to(tl.int64) * stride_sin_t
-        + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_sin_hid,
+        + cos_sin_idx[None, :] * stride_sin_hid,
         mask=mask_tdst[:, None] & rope_mask[None, :],
         other=0.0,
     ).to(queries.dtype)
 
-    queries_rot *= (
-        ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1)[None, :]
-    ).to(queries_rot.dtype)
+    queries_rot *= rope_mult[None, :]
 
-    queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
+    queries = tl.where(
+        rope_mask[None, :],
+        (queries * cos_new + queries_rot * sin_new).to(queries.dtype),
+        queries,
+    )
 
     return queries
 
@@ -673,6 +715,7 @@ def block_sparse_attention_cuda(
     stride_sin_hid,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     model_context_length,
     # paged attention args template
     USING_PAGES: tl.constexpr,
@@ -769,28 +812,42 @@ def block_sparse_attention_cuda(
     HID_BLOCK_1: tl.constexpr = HID - HID_BLOCK_0
 
     idx_hid_q0 = tl.arange(0, HID_BLOCK_0)
-    idx_rope_range_0 = idx_hid_q0 - rope_range_begin
     rope_mask_0 = (rope_range_begin <= idx_hid_q0) & (idx_hid_q0 < rope_range_end)
-    rope_rot_idx_0 = tl.where(
-        rope_mask_0,
-        (idx_hid_q0 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
-        idx_hid_q0,
-    )
+    idx_rope_range_q0 = idx_hid_q0 - rope_range_begin
+    if rope_is_neox_style:
+        rope_rot_idx_0 = tl.where(
+            rope_mask_0,
+            (idx_rope_range_q0 + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+            idx_hid_q0,
+        )
+    else:
+        flip = tl.where(idx_rope_range_q0 % 2 == 0, 1, -1)
+        rope_rot_idx_0 = tl.where(
+            rope_mask_0,
+            idx_rope_range_q0 + flip,
+            idx_hid_q0,
+        )
 
     if HID_BLOCK_1 > 0:
         idx_hid_q1 = HID_BLOCK_0 + tl.arange(0, HID_BLOCK_1)
-        idx_rope_range_1 = idx_hid_q1 - rope_range_begin
         rope_mask_1 = (rope_range_begin <= idx_hid_q1) & (idx_hid_q1 < rope_range_end)
-        rope_rot_idx_1 = tl.where(
-            rope_mask_1,
-            (idx_hid_q1 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-            + rope_range_begin,
-            idx_hid_q1,
-        )
+        idx_rope_range_q1 = idx_hid_q1 - rope_range_begin
+        if rope_is_neox_style:
+            rope_rot_idx_1 = tl.where(
+                rope_mask_1,
+                (idx_hid_q1 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
+                + rope_range_begin,
+                idx_hid_q1,
+            )
+        else:
+            flip = tl.where(idx_rope_range_q1 % 2 == 0, 1, -1)
+            rope_rot_idx_1 = tl.where(
+                rope_mask_1,
+                idx_rope_range_q1 + flip,
+                idx_hid_q1,
+            )
     else:
         idx_hid_q1 = None
-        idx_rope_range_1 = None
-        rope_mask_1 = None
         rope_rot_idx_1 = None
 
     idx_hid_v = dim_v_offset + tl.arange(0, HID_BLOCK_V)
@@ -870,6 +927,7 @@ def block_sparse_attention_cuda(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
             )
 
         if HID_BLOCK_1 > 0:
@@ -894,9 +952,10 @@ def block_sparse_attention_cuda(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
             )
 
-    if (BK > 0) and True:
+    if (BK > 0) and False:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
@@ -1295,6 +1354,7 @@ def block_sparse_attention_cuda(
                     stride_sin_hid,
                     rope_range_begin,
                     rope_range_end,
+                    rope_is_neox_style,
                     model_context_length,
                     idx_bk + sink_token_size // BLOCK_SIZE_K,
                     pos_tdst,
@@ -1310,7 +1370,7 @@ def block_sparse_attention_cuda(
             else:
                 pass
 
-    if (sink_token_size > 0) and True:
+    if (sink_token_size > 0) and False:
         CURR_TSRC = tl.max(pos_tdst)
         for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
@@ -1682,6 +1742,7 @@ def block_sparse_attention_cuda(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
                 pos_tdst,
@@ -2072,6 +2133,7 @@ def block_sparse_attention_cuda(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 # tl.arange(0, BLOCK_BK) +\
                 #     (range_end - range_start) +\
@@ -2211,7 +2273,7 @@ def block_sparse_attention(
         assert args.rope_range[1] == HID
         HID_BLOCK = args.rope_range[0]
 
-    HID_BLOCK_V = triton.next_power_of_2(min(HID_V, 512))
+    HID_BLOCK_V = triton.next_power_of_2(min(HID_V, 256))
     NUM_HID_V_BLOCKS = triton.cdiv(HID_V, HID_BLOCK_V)
 
     grid = (HEAD * NUM_HID_V_BLOCKS, BDST, BSZ)
@@ -2222,6 +2284,32 @@ def block_sparse_attention(
     # if indices.shape[1] == 1:
     #     input()
 
+    if os.getenv("HIP_VERBOSE", "0") == "1":
+        print(
+            f"{HEAD=}",
+            f"{BK=}",
+            f"{KV_HEAD_REPEAT=}",
+            f"{args.sliding_window_size=}",
+            f"{args.sink_token_size=}",
+            f"{args.logit_softcap=}",
+            f"{args.using_extend=}",
+            f"{args.need_apply_rope=}",
+            f"{args.rope_range[0]=}",
+            f"{args.rope_range[1]=}",
+            f"{args.using_paged_cache=}",
+            f"{args.k_cache.shape[1]=}",
+            f"{args.is_causal=}",
+            f"{args.block_size_q=}",
+            f"{args.block_size_k=}",
+            f"{HID_BLOCK=}",
+            f"{HID=}",
+            f"{HID_BLOCK_V=}",
+            f"{HID_V=}",
+            f"{BLOCK_BK=}",
+            f"{EXTEND_BACKEND=}",
+            f"{offload_update_cache=}",
+            sep=", ",
+        )
     block_sparse_attention_cuda[grid](
         q,
         *safe_stride(q, 4),
