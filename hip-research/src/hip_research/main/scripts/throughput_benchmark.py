@@ -2,6 +2,7 @@ import argparse
 import itertools
 import json
 import math
+import os
 import time
 import traceback
 from dataclasses import dataclass
@@ -21,27 +22,45 @@ class RequestStatistics:
     num_returned: int
 
 
+def is_third_party(endpoint):
+    return any([keyword in endpoint for keyword in ["together", "friendli"]])
+
 def stream_chat_completion(
     endpoint: str, messages, num_prefill: int, num_decode: int, num_concurrent: int
 ):
-    url = f"{endpoint}/flush_cache"
-    requests.post(url)
+    if not is_third_party(endpoint):
+        url = f"{endpoint}/flush_cache"
+        requests.post(url)
 
-    url = f"{endpoint}/v1/chat/completions"
+    if 'friendli' in endpoint:
+        url = f"{endpoint}/v1/completions"
+    else:
+        url = f"{endpoint}/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer sk-dummy",
+        "Authorization": f"Bearer {os.getenv('HIP_SGLANG_APIKEY', 'sk-dummy')}",
         "Content-Type": "application/json",
     }
     # Note the 'stream': True parameter
-    data = {
-        "model": "anything",
-        "messages": messages,
-        "temperature": 0.0,
-        "max_tokens": num_decode,
-        "min_tokens": num_decode,
-        "stream": True,
-        "n": num_concurrent,
-    }
+    if 'friendli' in endpoint:
+        data = {
+            "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
+            "prompt": messages[-1]['content'],
+            "temperature": 0.0,
+            "max_tokens": num_decode,
+            "min_tokens": num_decode,
+            "stream": True,
+            "n": num_concurrent,
+        }
+    else:
+        data = {
+            "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
+            "messages": messages,
+            "temperature": 0.0,
+            "max_tokens": num_decode,
+            "min_tokens": num_decode,
+            "stream": True,
+            "n": num_concurrent,
+        }
 
     is_decode = False
     timestamp_start = time.time()
@@ -100,12 +119,16 @@ def stream_chat_completion(
         num_returned=num_returned,
     )
 
+def shuffle(lst):
+    import random
+    random.shuffle(lst)
+    return lst
 
 def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
     header = "There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
     passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
     footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
-    filler = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
+    filler = " ".join(shuffle("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ".split())) + " "
     len_filler = tokenizer(filler, return_tensors="pt").input_ids.shape[-1]
     num_filler = math.ceil(seq_len * 1024 / len_filler * 0.95)
 
@@ -157,10 +180,11 @@ def benchmark(
         leave=False,
     ):
         example = get_random_example(tokenizer, dataset, seq_len)
-        # run warmup
-        stream_chat_completion(
-            endpoint, example, seq_len * 1024, decode_len, num_concurrent
-        )
+        if not is_third_party(endpoint):
+            # run warmup
+            stream_chat_completion(
+                endpoint, example, seq_len * 1024, decode_len, num_concurrent
+            )
         # sample
         result = stream_chat_completion(
             endpoint, example, seq_len * 1024, decode_len, num_concurrent
@@ -185,7 +209,7 @@ def benchmark(
 
 # Example usage:
 if __name__ == "__main__":
-    seed()
+    seed(seed=int(time.time() * 100000) % 100000)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", type=str)
