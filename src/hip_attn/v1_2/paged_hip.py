@@ -3,8 +3,10 @@ import warnings
 from typing import Any, Optional
 
 import torch
+import triton
 
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
+from hip_attn.v1_2.attention_extend import get_block_sparse_backend
 from hip_attn.v1_2.attention_metadata import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
@@ -65,6 +67,7 @@ def forward_paged_hip(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_prefill is not None:
@@ -169,6 +172,7 @@ def forward_paged_hip(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
                 )
 
                 o[start_len : start_len + seq_len] = o_req
@@ -208,6 +212,7 @@ def forward_paged_hip(
             is_decode=is_decode,
             query_for_mask=query_for_mask,
             diag_sliding_window_indices=diag_sliding_window_indices,
+            sliding_window_size=sliding_window_size,
         )
 
     return o, metadata_new
@@ -243,6 +248,7 @@ def _forward_paged_hip_validate(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -315,6 +321,7 @@ def _forward_paged_hip_validate(
         is_decode=is_decode,
         query_for_mask=query_for_mask,
         diag_sliding_window_indices=diag_sliding_window_indices,
+        sliding_window_size=sliding_window_size,
     )
 
     if require_validation:
@@ -347,6 +354,7 @@ def _forward_paged_hip_validate(
                 is_decode=is_decode,
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
+                sliding_window_size=sliding_window_size,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -381,6 +389,7 @@ def _forward_paged_hip_validate(
                 is_decode=is_decode,
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
+                sliding_window_size=sliding_window_size,
             )
 
             err_thresh = 1e-7
@@ -455,6 +464,7 @@ def _forward_paged_hip_validate(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -488,6 +498,7 @@ def _forward_paged_hip_validate(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -552,6 +563,7 @@ def _forward_paged_hip(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -666,7 +678,48 @@ def _forward_paged_hip(
 
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
 
-    if is_decode or (query.shape[1] < (last_dense * 2)):
+    if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
+        bsa_fn = get_block_sparse_backend(args, query)
+        
+        args = args.clone()
+        args.block_size_q = args.block_sparse_block_size_q
+        args.block_size_k = args.stages[-1].stage_chunk_size
+        args.second_stage_k = 0
+        args.sink_token_size = 0
+        args.sliding_window_size = sliding_window_size if sliding_window_size is not None else 1024
+        args.sliding_window_indices = None
+
+        BSZ, TDST, HEAD, HID = query.shape
+        BDST = triton.cdiv(TDST, args.block_size_q)
+        BH = BSZ * HEAD
+
+        indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+        ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros(
+            (BH, BDST, 2), dtype=torch.int64, device=query.device
+        )
+
+        context = bsa_fn(
+            q=(query * sm_scale).to(query.dtype),
+            k=k,
+            v=v,
+            seq_lens=args.position_ids + 1,
+            indices=indices,
+            ks=ks,
+            ks_count=ks_count,
+            ks_start_end=ks_start_end,
+            access_counter=None,
+            cache_miss_counter=None,
+            EXTEND_BACKEND=args.sa_extend_backend,
+            model_context_length=args.model_context_length,
+            extend_context_length=args.extend_context_length,
+            offload_update_cache=False,
+            args=args,
+        )
+        context = context.to(query.dtype)
+        metadata = None
+    elif is_decode or (query.shape[1] < (last_dense * 2)):
         context, metadata = dual_stage_quadratic_hip_attention(
             (query * sm_scale).to(query.dtype),
             k,

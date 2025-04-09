@@ -43,6 +43,18 @@ def num_streaming_multiprocessor():
     return _NUM_STREAMING_MULTIPROCESSOR
 
 
+def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
+    block_sparse_attention_backend = block_sparse_attention
+
+    # Use flashdecode
+    if (
+        (q.shape[1] == 1)
+        and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
+        and (not args.disable_flashdecode)
+    ):
+        block_sparse_attention_backend = decode_block_sparse_attention
+    return block_sparse_attention_backend
+
 @numba.njit(parallel=True)
 def render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q):
     for i in numba.prange(out_indices_cpu.shape[1]):
@@ -1294,15 +1306,7 @@ def dual_stage_quadratic_hip_attention(
             - args.block_size_q
         )
 
-    block_sparse_attention_backend = block_sparse_attention
-
-    # Use flashdecode
-    if (
-        (TDST == 1)
-        and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
-        and (not args.disable_flashdecode)
-    ):
-        block_sparse_attention_backend = decode_block_sparse_attention
+    block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
 
     context = block_sparse_attention_backend(
         q=q_bsa,

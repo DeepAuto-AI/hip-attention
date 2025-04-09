@@ -388,118 +388,54 @@ def _fwd_kernel_stage1(
     if BK <= 0:
         range_start = 0
         range_end = 0
-
-    kv_blocks_per_split = tl.cdiv(BK, NUM_SPARSE_KV_SPLITS)
-    split_kv_block_start = kv_blocks_per_split * split_kv_id
-    split_kv_block_end = tl.minimum(split_kv_block_start + kv_blocks_per_split, BK)
-
+    
     e_max = tl.full([BLOCK_H, 1], -float("inf"), dtype=tl.float32)  # m_i
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
-    if (split_kv_block_end > split_kv_block_start) and True:
-        for i_bk in range(split_kv_block_start, split_kv_block_end, BLOCK_BK):
-            idx_bk = i_bk + tl.arange(0, BLOCK_BK)  # [BLOCK_BK]
-            mask_bk = (range_start <= idx_bk) & (
-                idx_bk < tl.minimum(range_start + BK, range_end)
-            )  # [BLOCK_BK]
+    if BK > 0:
+        kv_blocks_per_split = tl.cdiv(BK, NUM_SPARSE_KV_SPLITS)
+        split_kv_block_start = kv_blocks_per_split * split_kv_id
+        split_kv_block_end = tl.minimum(split_kv_block_start + kv_blocks_per_split, BK)
 
-            if (range_start <= i_bk + BLOCK_BK) & (i_bk < range_end):
-                idx_tsrc_start = tl.load(
-                    INDICES
-                    + cur_flattened_batch.to(tl.int64) * stride_indices_b
-                    + 0 * stride_indices_bdst
-                    + idx_bk * stride_indices_bk,
-                    mask=mask_bk & (cur_head_begin < q_head_num),
-                    other=0,
+        if (split_kv_block_end > split_kv_block_start) and True:
+            for i_bk in range(split_kv_block_start, split_kv_block_end, BLOCK_BK):
+                idx_bk = i_bk + tl.arange(0, BLOCK_BK)  # [BLOCK_BK]
+                mask_bk = (range_start <= idx_bk) & (
+                    idx_bk < tl.minimum(range_start + BK, range_end)
                 )  # [BLOCK_BK]
-                idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC + 1)
-                idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
-                idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
-                mask_tsrc_from_bk = mask_bk[:, None] & tl.full(
-                    (1, BLOCK_SIZE_K), 1, dtype=tl.int1
-                )
-                mask_tsrc_from_bk = tl.reshape(
-                    mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K)
-                )
-                mask_tsrc = (
-                    ((MAX_TSRC * 0) <= idx_tsrc)
-                    & (idx_tsrc < (MAX_TSRC * 1))
-                    & mask_tsrc_from_bk
-                )
-                idx_tsrc = idx_tsrc % MAX_TSRC  # [BLOCK_BK * BLOCK_SIZE_K]
-                mask_tsrc = (
-                    (sink_token_size <= idx_tsrc)
-                    & (idx_tsrc < cur_batch_seq_len)
-                    & mask_tsrc
-                )
 
-                keys_0 = load_tokens(
-                    K,
-                    stride_k_bsz,
-                    stride_k_tsrc,
-                    stride_k_head,
-                    stride_k_hid,
-                    USING_PAGES,
-                    PAGE_SIZE,
-                    K_CACHE,
-                    stride_k_cache_page,
-                    stride_k_cache_offset,
-                    stride_k_cache_kv_head,
-                    stride_k_cache_hid,
-                    BLOCK_TABLE,
-                    stride_block_table_bsz,
-                    stride_block_table_page,
-                    CACHE_SEQ_LENS,
-                    stride_cache_seq_lens_b,
-                    USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_KV_PACKED,
-                    GPU_BANK_COUNT,
-                    False,
-                    OFFLOAD_CACHE_UVM_METADATA,
-                    stride_offload_cache_uvm_metadata_token,
-                    stride_offload_cache_uvm_metadata_k,
-                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
-                    stride_offload_cache_gpu_global_metadata_k,
-                    stride_offload_cache_gpu_global_metadata_pad,
-                    OFFLOAD_CACHE_GPU_BANK,
-                    stride_offload_cache_gpu_bank_token,
-                    stride_offload_cache_gpu_bank_hid,
-                    OFFLOAD_CACHE_GPU_METADATA,
-                    stride_offload_cache_gpu_metadata_token,
-                    stride_offload_cache_gpu_metadata_k,
-                    OFFLOAD_CACHE_GPU_TABLE,
-                    stride_offload_cache_gpu_table_head_kv,
-                    stride_offload_cache_gpu_table_token,
-                    strdie_offload_cache_gpu_table_k,
-                    ACCESS_COUNTER,
-                    stride_access_counter_bsz,
-                    stride_access_counter_head_kv,
-                    stride_access_counter_tsrc,
-                    CACHE_MISS_COUNTER,
-                    stride_cache_miss_counter_bsz,
-                    stride_cache_miss_counter_head_kv,
-                    stride_cache_miss_counter_tsrc,
-                    cur_batch,
-                    idx_tsrc[None, :],
-                    cur_kv_head,
-                    offs_d_0[:, None],
-                    mask_tsrc[None, :],
-                    q_head_num // kv_group_num,
-                    BLOCK_SIZE_K,
-                    BLOCK_DMODEL_0,
-                    Lk,
-                    IS_BSA=True,
-                    UPDATE_CACHE=UPDATE_CACHE,
-                    V_CACHE=V_CACHE,
-                    stride_v_cache_page=stride_v_cache_page,
-                    stride_v_cache_offset=stride_v_cache_offset,
-                    stride_v_cache_kv_head=stride_v_cache_kv_head,
-                    stride_v_cache_hid=stride_v_cache_hid,
-                )
+                if (range_start <= i_bk + BLOCK_BK) & (i_bk < range_end):
+                    idx_tsrc_start = tl.load(
+                        INDICES
+                        + cur_flattened_batch.to(tl.int64) * stride_indices_b
+                        + 0 * stride_indices_bdst
+                        + idx_bk * stride_indices_bk,
+                        mask=mask_bk & (cur_head_begin < q_head_num),
+                        other=0,
+                    )  # [BLOCK_BK]
+                    idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC + 1)
+                    idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
+                    idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
+                    mask_tsrc_from_bk = mask_bk[:, None] & tl.full(
+                        (1, BLOCK_SIZE_K), 1, dtype=tl.int1
+                    )
+                    mask_tsrc_from_bk = tl.reshape(
+                        mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K)
+                    )
+                    mask_tsrc = (
+                        ((MAX_TSRC * 0) <= idx_tsrc)
+                        & (idx_tsrc < (MAX_TSRC * 1))
+                        & mask_tsrc_from_bk
+                    )
+                    idx_tsrc = idx_tsrc % MAX_TSRC  # [BLOCK_BK * BLOCK_SIZE_K]
+                    mask_tsrc = (
+                        (sink_token_size <= idx_tsrc)
+                        & (idx_tsrc < cur_batch_seq_len)
+                        & mask_tsrc
+                    )
 
-                if BLOCK_DMODEL_1 > 0:
-                    keys_1 = load_tokens(
+                    keys = load_tokens(
                         K,
                         stride_k_bsz,
                         stride_k_tsrc,
@@ -548,11 +484,10 @@ def _fwd_kernel_stage1(
                         cur_batch,
                         idx_tsrc[None, :],
                         cur_kv_head,
-                        offs_d_1[:, None],
+                        offs_d[:, None],
                         mask_tsrc[None, :],
                         q_head_num // kv_group_num,
                         BLOCK_SIZE_K,
-                        BLOCK_DMODEL_1,
                         Lk,
                         IS_BSA=True,
                         UPDATE_CACHE=UPDATE_CACHE,
@@ -562,12 +497,9 @@ def _fwd_kernel_stage1(
                         stride_v_cache_kv_head=stride_v_cache_kv_head,
                         stride_v_cache_hid=stride_v_cache_hid,
                     )
-                else:
-                    keys_1 = None
 
-                if USING_EXTEND and NEED_APPLY_ROPE:
-                    if rope_range_begin < BLOCK_DMODEL_0:
-                        keys_rot_0 = load_tokens(
+                    if USING_EXTEND and NEED_APPLY_ROPE:
+                        keys_rot = load_tokens(
                             K,
                             stride_k_bsz,
                             stride_k_tsrc,
@@ -616,11 +548,10 @@ def _fwd_kernel_stage1(
                             cur_batch,
                             idx_tsrc[None, :],
                             cur_kv_head,
-                            rope_rot_idx_0[:, None],
+                            ((offs_d[:, None] + Lk // 2) % Lk),
                             mask_tsrc[None, :],
                             q_head_num // kv_group_num,
                             BLOCK_SIZE_K,
-                            BLOCK_DMODEL_0,
                             Lk,
                             IS_BSA=True,
                             UPDATE_CACHE=UPDATE_CACHE,
@@ -631,189 +562,110 @@ def _fwd_kernel_stage1(
                             stride_v_cache_hid=stride_v_cache_hid,
                         )
                     else:
-                        keys_rot_0 = None
+                        keys_rot = None
 
-                    if BLOCK_DMODEL_1 > 0:
-                        keys_rot_1 = load_tokens(
-                            K,
-                            stride_k_bsz,
-                            stride_k_tsrc,
-                            stride_k_head,
-                            stride_k_hid,
-                            USING_PAGES,
-                            PAGE_SIZE,
-                            K_CACHE,
-                            stride_k_cache_page,
-                            stride_k_cache_offset,
-                            stride_k_cache_kv_head,
-                            stride_k_cache_hid,
-                            BLOCK_TABLE,
-                            stride_block_table_bsz,
-                            stride_block_table_page,
-                            CACHE_SEQ_LENS,
-                            stride_cache_seq_lens_b,
-                            USING_OFFLOAD_CACHE,
-                            OFFLOAD_CACHE_KV_PACKED,
-                            GPU_BANK_COUNT,
-                            False,
-                            OFFLOAD_CACHE_UVM_METADATA,
-                            stride_offload_cache_uvm_metadata_token,
-                            stride_offload_cache_uvm_metadata_k,
-                            OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
-                            stride_offload_cache_gpu_global_metadata_k,
-                            stride_offload_cache_gpu_global_metadata_pad,
-                            OFFLOAD_CACHE_GPU_BANK,
-                            stride_offload_cache_gpu_bank_token,
-                            stride_offload_cache_gpu_bank_hid,
-                            OFFLOAD_CACHE_GPU_METADATA,
-                            stride_offload_cache_gpu_metadata_token,
-                            stride_offload_cache_gpu_metadata_k,
-                            OFFLOAD_CACHE_GPU_TABLE,
-                            stride_offload_cache_gpu_table_head_kv,
-                            stride_offload_cache_gpu_table_token,
-                            strdie_offload_cache_gpu_table_k,
-                            ACCESS_COUNTER,
-                            stride_access_counter_bsz,
-                            stride_access_counter_head_kv,
-                            stride_access_counter_tsrc,
-                            CACHE_MISS_COUNTER,
-                            stride_cache_miss_counter_bsz,
-                            stride_cache_miss_counter_head_kv,
-                            stride_cache_miss_counter_tsrc,
-                            cur_batch,
-                            idx_tsrc[None, :],
-                            cur_kv_head,
-                            rope_rot_idx_1[:, None],
-                            mask_tsrc[None, :],
-                            q_head_num // kv_group_num,
-                            BLOCK_SIZE_K,
-                            BLOCK_DMODEL_1,
-                            Lk,
-                            IS_BSA=True,
-                            UPDATE_CACHE=UPDATE_CACHE,
-                            V_CACHE=V_CACHE,
-                            stride_v_cache_page=stride_v_cache_page,
-                            stride_v_cache_offset=stride_v_cache_offset,
-                            stride_v_cache_kv_head=stride_v_cache_kv_head,
-                            stride_v_cache_hid=stride_v_cache_hid,
-                        )
-                    else:
-                        keys_rot_1 = None
+                    values = load_tokens(
+                        V,
+                        stride_v_bsz,
+                        stride_v_tsrc,
+                        stride_v_head,
+                        stride_v_hid,
+                        USING_PAGES,
+                        PAGE_SIZE,
+                        V_CACHE,
+                        stride_v_cache_page,
+                        stride_v_cache_offset,
+                        stride_v_cache_kv_head,
+                        stride_v_cache_hid,
+                        BLOCK_TABLE,
+                        stride_block_table_bsz,
+                        stride_block_table_page,
+                        CACHE_SEQ_LENS,
+                        stride_cache_seq_lens_b,
+                        USING_OFFLOAD_CACHE,
+                        OFFLOAD_CACHE_KV_PACKED,
+                        GPU_BANK_COUNT,
+                        True,
+                        OFFLOAD_CACHE_UVM_METADATA,
+                        stride_offload_cache_uvm_metadata_token,
+                        stride_offload_cache_uvm_metadata_k,
+                        OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
+                        stride_offload_cache_gpu_global_metadata_k,
+                        stride_offload_cache_gpu_global_metadata_pad,
+                        OFFLOAD_CACHE_GPU_BANK,
+                        stride_offload_cache_gpu_bank_token,
+                        stride_offload_cache_gpu_bank_hid,
+                        OFFLOAD_CACHE_GPU_METADATA,
+                        stride_offload_cache_gpu_metadata_token,
+                        stride_offload_cache_gpu_metadata_k,
+                        OFFLOAD_CACHE_GPU_TABLE,
+                        stride_offload_cache_gpu_table_head_kv,
+                        stride_offload_cache_gpu_table_token,
+                        strdie_offload_cache_gpu_table_k,
+                        ACCESS_COUNTER,
+                        stride_access_counter_bsz,
+                        stride_access_counter_head_kv,
+                        stride_access_counter_tsrc,
+                        CACHE_MISS_COUNTER,
+                        stride_cache_miss_counter_bsz,
+                        stride_cache_miss_counter_head_kv,
+                        stride_cache_miss_counter_tsrc,
+                        cur_batch,
+                        idx_tsrc[:, None],
+                        cur_kv_head,
+                        offs_dv[None, :],
+                        mask_tsrc[:, None],
+                        q_head_num // kv_group_num,
+                        BLOCK_SIZE_K,
+                        Lv,
+                        IS_BSA=True,
+                        UPDATE_CACHE=UPDATE_CACHE,
+                        V_CACHE=K_CACHE,
+                        stride_v_cache_page=stride_k_cache_page,
+                        stride_v_cache_offset=stride_k_cache_offset,
+                        stride_v_cache_kv_head=stride_k_cache_kv_head,
+                        stride_v_cache_hid=stride_k_cache_hid,
+                    )
 
+                    acc, e_sum, e_max = block_sparse_attention_cuda_step(
+                        q,  # FIXME: q is [BLOCK_H, BLOCK_DMODEL]: the first axis is head, not time
+                        keys,
+                        keys_rot,
+                        values,
+                        idx_tsrc,
+                        mask_tsrc,
+                        tl.zeros([1], dtype=tl.int32),
+                        tl.full((1,), 1, dtype=tl.int1),
+                        acc,
+                        e_sum,
+                        e_max,
+                        sliding_window_size,
+                        sink_token_size,
+                        (range_end - range_start) * BLOCK_SIZE_K,  # mask_k
+                        True,
+                        False,
+                        LOGIT_SOFTCAP,
+                        USING_EXTEND,
+                        NEED_APPLY_ROPE,
+                        COS,
+                        stride_cos_t,
+                        stride_cos_hid,
+                        SIN,
+                        stride_sin_t,
+                        stride_sin_hid,
+                        model_context_length,
+                        idx_bk + sink_token_size // BLOCK_SIZE_K,
+                        cur_batch_seq_len,
+                        offs_d,
+                        IS_CAUSAL,
+                        Lk,
+                        BLOCK_SIZE_Q,
+                        BLOCK_BK * BLOCK_SIZE_K,
+                        BLOCK_SIZE_K,
+                        EXTEND_BACKEND=EXTEND_BACKEND,
+                    )
                 else:
-                    keys_rot_0 = None
-                    keys_rot_1 = None
-
-                values = load_tokens(
-                    V,
-                    stride_v_bsz,
-                    stride_v_tsrc,
-                    stride_v_head,
-                    stride_v_hid,
-                    USING_PAGES,
-                    PAGE_SIZE,
-                    V_CACHE,
-                    stride_v_cache_page,
-                    stride_v_cache_offset,
-                    stride_v_cache_kv_head,
-                    stride_v_cache_hid,
-                    BLOCK_TABLE,
-                    stride_block_table_bsz,
-                    stride_block_table_page,
-                    CACHE_SEQ_LENS,
-                    stride_cache_seq_lens_b,
-                    USING_OFFLOAD_CACHE,
-                    OFFLOAD_CACHE_KV_PACKED,
-                    GPU_BANK_COUNT,
-                    True,
-                    OFFLOAD_CACHE_UVM_METADATA,
-                    stride_offload_cache_uvm_metadata_token,
-                    stride_offload_cache_uvm_metadata_k,
-                    OFFLOAD_CACHE_GPU_GLOBAL_METADATA,
-                    stride_offload_cache_gpu_global_metadata_k,
-                    stride_offload_cache_gpu_global_metadata_pad,
-                    OFFLOAD_CACHE_GPU_BANK,
-                    stride_offload_cache_gpu_bank_token,
-                    stride_offload_cache_gpu_bank_hid,
-                    OFFLOAD_CACHE_GPU_METADATA,
-                    stride_offload_cache_gpu_metadata_token,
-                    stride_offload_cache_gpu_metadata_k,
-                    OFFLOAD_CACHE_GPU_TABLE,
-                    stride_offload_cache_gpu_table_head_kv,
-                    stride_offload_cache_gpu_table_token,
-                    strdie_offload_cache_gpu_table_k,
-                    ACCESS_COUNTER,
-                    stride_access_counter_bsz,
-                    stride_access_counter_head_kv,
-                    stride_access_counter_tsrc,
-                    CACHE_MISS_COUNTER,
-                    stride_cache_miss_counter_bsz,
-                    stride_cache_miss_counter_head_kv,
-                    stride_cache_miss_counter_tsrc,
-                    cur_batch,
-                    idx_tsrc[:, None],
-                    cur_kv_head,
-                    offs_dv[None, :],
-                    mask_tsrc[:, None],
-                    q_head_num // kv_group_num,
-                    BLOCK_SIZE_K,
-                    BLOCK_DV,
-                    Lv,
-                    IS_BSA=True,
-                    UPDATE_CACHE=UPDATE_CACHE,
-                    V_CACHE=K_CACHE,
-                    stride_v_cache_page=stride_k_cache_page,
-                    stride_v_cache_offset=stride_k_cache_offset,
-                    stride_v_cache_kv_head=stride_k_cache_kv_head,
-                    stride_v_cache_hid=stride_k_cache_hid,
-                )
-
-                acc, e_sum, e_max = block_sparse_attention_cuda_step(
-                    q_0,  # FIXME: q is [BLOCK_H, BLOCK_DMODEL]: the first axis is head, not time
-                    q_1,
-                    keys_0,
-                    keys_1,
-                    keys_rot_0,
-                    keys_rot_1,
-                    values,
-                    idx_tsrc,
-                    mask_tsrc,
-                    tl.zeros([1], dtype=tl.int32),
-                    tl.full((1,), 1, dtype=tl.int1),
-                    acc,
-                    e_sum,
-                    e_max,
-                    sliding_window_size,
-                    sink_token_size,
-                    (range_end - range_start) * BLOCK_SIZE_K,  # mask_k
-                    True,
-                    False,
-                    LOGIT_SOFTCAP,
-                    USING_EXTEND,
-                    NEED_APPLY_ROPE,
-                    COS,
-                    stride_cos_t,
-                    stride_cos_hid,
-                    SIN,
-                    stride_sin_t,
-                    stride_sin_hid,
-                    rope_range_begin,
-                    rope_range_end,
-                    rope_is_neox_style,
-                    model_context_length,
-                    idx_bk + sink_token_size // BLOCK_SIZE_K,
-                    cur_batch_seq_len,
-                    offs_d_0,
-                    offs_d_1,
-                    IS_CAUSAL,
-                    Lk,
-                    BLOCK_SIZE_Q,
-                    BLOCK_BK * BLOCK_SIZE_K,
-                    BLOCK_SIZE_K,
-                    EXTEND_BACKEND=EXTEND_BACKEND,
-                )
-            else:
-                pass
+                    pass
 
     # process sink tokens
     sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
