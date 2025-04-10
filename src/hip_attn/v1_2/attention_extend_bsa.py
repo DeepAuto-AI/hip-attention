@@ -955,7 +955,7 @@ def block_sparse_attention_cuda(
                 rope_is_neox_style,
             )
 
-    if (BK > 0) and False:
+    if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
@@ -1370,7 +1370,7 @@ def block_sparse_attention_cuda(
             else:
                 pass
 
-    if (sink_token_size > 0) and False:
+    if (sink_token_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
         for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)

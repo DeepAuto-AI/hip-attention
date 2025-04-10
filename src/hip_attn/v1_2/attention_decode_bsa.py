@@ -41,6 +41,7 @@ def load_queries(
     stride_sin_hid,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
     APPLY_ROPE: tl.constexpr,
@@ -59,16 +60,30 @@ def load_queries(
 
     if USING_EXTEND and NEED_APPLY_ROPE:
         if APPLY_ROPE:
-            idx_rope_range = offs_d - rope_range_begin
-            rope_mask = (rope_range_begin <= offs_d) & (offs_d < rope_range_end)
             ROPE_DIM = rope_range_end - rope_range_begin
 
-            rope_rot_idx = tl.where(
-                rope_mask,
-                (offs_d - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-                + rope_range_begin,
-                offs_d,
-            )
+            idx_rope_range = offs_d - rope_range_begin
+            rope_mask = (rope_range_begin <= offs_d) & (offs_d < rope_range_end)
+            if rope_is_neox_style:
+                rope_rot_idx = tl.where(
+                    rope_mask,
+                    (offs_d - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
+                    + rope_range_begin,
+                    offs_d,
+                )
+                cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+                rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
+                    q.dtype
+                )
+            else:
+                flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
+                rope_rot_idx = tl.where(
+                    rope_mask,
+                    idx_rope_range + flip + rope_range_begin,
+                    offs_d,
+                )
+                cos_sin_idx = idx_rope_range // 2
+                rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
 
             rope_tdst = cur_batch_seq_len - 1
 
@@ -87,7 +102,7 @@ def load_queries(
             cos_new = tl.load(
                 COS
                 + rope_tdst.to(tl.int64) * stride_cos_t
-                + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_cos_hid,
+                + cos_sin_idx[None, :] * stride_cos_hid,
                 mask=mask_d[None, :] & rope_mask[None, :],
                 other=0.0,
             ).to(
@@ -96,16 +111,20 @@ def load_queries(
             sin_new = tl.load(
                 SIN
                 + rope_tdst.to(tl.int64) * stride_sin_t
-                + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_sin_hid,
+                + cos_sin_idx[None, :] * stride_sin_hid,
                 mask=mask_d[None, :] & rope_mask[None, :],
                 other=0.0,
             ).to(
                 q.dtype
             )  # [1, BLOCK_DMODEL]
 
-            queries_rot *= (((offs_d[None, :] + Lk // 2) < Lk) * (-2) + 1).to(q.dtype)
+            queries_rot *= rope_mult[None, :]
 
-            q = (q * cos_new + queries_rot * sin_new).to(q.dtype)
+            q = tl.where(
+                rope_mask[None, :],
+                (q * cos_new + queries_rot * sin_new).to(q.dtype),
+                q,
+            )
 
     return q
 
@@ -161,6 +180,7 @@ def _fwd_kernel_stage1(
     stride_sin_hid,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     model_context_length,
     # paged attention args template
     USING_PAGES: tl.constexpr,
@@ -250,26 +270,42 @@ def _fwd_kernel_stage1(
     offs_d_0 = tl.arange(0, BLOCK_DMODEL_0)
     mask_d_0 = offs_d_0 < Lk
     rope_mask_0 = (rope_range_begin <= offs_d_0) & (offs_d_0 < rope_range_end)
-    rope_rot_idx_0 = tl.where(
-        rope_mask_0,
-        (offs_d_0 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
-        offs_d_0,
-    )
+    idx_rope_range_q0 = offs_d_0 - rope_range_begin
+    if rope_is_neox_style:
+        rope_rot_idx_0 = tl.where(
+            rope_mask_0,
+            (idx_rope_range_q0 + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+            offs_d_0,
+        )
+    else:
+        flip = tl.where(idx_rope_range_q0 % 2 == 0, 1, -1)
+        rope_rot_idx_0 = tl.where(
+            rope_mask_0,
+            idx_rope_range_q0 + flip + rope_range_begin,
+            offs_d_0,
+        )
 
     if BLOCK_DMODEL_1 > 0:
         offs_d_1 = BLOCK_DMODEL_0 + tl.arange(0, BLOCK_DMODEL_1)
         mask_d_1 = offs_d_1 < Lk
         rope_mask_1 = (rope_range_begin <= offs_d_1) & (offs_d_1 < rope_range_end)
-        rope_rot_idx_1 = tl.where(
-            rope_mask_1,
-            (offs_d_1 - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
-            offs_d_1,
-        )
+        idx_rope_range_q1 = offs_d_1 - rope_range_begin
+        if rope_is_neox_style:
+            rope_rot_idx_1 = tl.where(
+                rope_mask_1,
+                (idx_rope_range_q1 + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+                offs_d_1,
+            )
+        else:
+            flip = tl.where(idx_rope_range_q1 % 2 == 0, 1, -1)
+            rope_rot_idx_1 = tl.where(
+                rope_mask_1,
+                idx_rope_range_q1 + flip + rope_range_begin,
+                offs_d_1,
+            )
     else:
         offs_d_1 = None
         mask_d_1 = None
-        rope_mask_1 = None
-        rope_rot_idx_1 = None
 
     offs_dv = tl.arange(0, BLOCK_DV)
     mask_dv = offs_dv < Lv
@@ -300,6 +336,7 @@ def _fwd_kernel_stage1(
         stride_sin_hid,
         rope_range_begin,
         rope_range_end,
+        rope_is_neox_style,
         USING_EXTEND,
         NEED_APPLY_ROPE,
         APPLY_ROPE=rope_range_begin < BLOCK_DMODEL_0,
@@ -327,6 +364,7 @@ def _fwd_kernel_stage1(
             stride_sin_hid,
             rope_range_begin,
             rope_range_end,
+            rope_is_neox_style,
             USING_EXTEND,
             NEED_APPLY_ROPE,
             APPLY_ROPE=True,
@@ -765,6 +803,7 @@ def _fwd_kernel_stage1(
                     stride_sin_hid,
                     rope_range_begin,
                     rope_range_end,
+                    rope_is_neox_style,
                     model_context_length,
                     idx_bk + sink_token_size // BLOCK_SIZE_K,
                     cur_batch_seq_len,
@@ -1160,6 +1199,7 @@ def _fwd_kernel_stage1(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
                 cur_batch_seq_len,
@@ -1569,6 +1609,7 @@ def _fwd_kernel_stage1(
                 stride_sin_hid,
                 rope_range_begin,
                 rope_range_end,
+                rope_is_neox_style,
                 model_context_length,
                 idx_bk,
                 cur_batch_seq_len,

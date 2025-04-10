@@ -81,6 +81,7 @@ def load_keys_with_rope(
     UPDATE_CACHE,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     apply_rope: tl.constexpr,
 ):
     keys_left = load_tokens(
@@ -143,9 +144,29 @@ def load_keys_with_rope(
     ).to(queries_dtype)
 
     if USING_EXTEND and apply_rope:
+        ROPE_DIM = rope_range_end - rope_range_begin
+
         idx_rope_range = idx_hid - rope_range_begin
         rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
-        ROPE_DIM = rope_range_end - rope_range_begin
+        if rope_is_neox_style:
+            rope_rot_idx = tl.where(
+                rope_mask,
+                (idx_rope_range + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+                idx_hid,
+            )
+            cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+            rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
+                queries_dtype
+            )
+        else:
+            flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
+            rope_rot_idx = tl.where(
+                rope_mask,
+                idx_rope_range + flip + rope_range_begin,
+                idx_hid,
+            )
+            cos_sin_idx = idx_rope_range // 2
+            rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(queries_dtype)
 
         real_pos_tdst_max = tl.sum(mask_tdst.to(tl.int32)) + real_pos_tdst_min
         tsrc_extend = tl.maximum(0, real_pos_tdst_max - model_context_length)
@@ -225,12 +246,6 @@ def load_keys_with_rope(
                 keys_left = tl.trans(keys_left, 1, 0)
                 keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
             else:
-                rope_rot_idx = tl.where(
-                    rope_mask,
-                    (idx_hid - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-                    + rope_range_begin,
-                    idx_hid,
-                )
                 keys_left_rot = load_tokens(
                     K,
                     stride_k_bsz,
@@ -297,21 +312,19 @@ def load_keys_with_rope(
                 #     keys_left_rot
                 # )
 
-                keys_left_rot *= (
-                    (idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1
-                )[:, None].to(keys_left_rot.dtype)
+                keys_left_rot *= rope_mult[:, None]
 
                 cos_new = tl.load(
                     COS
                     + new_tsrc[None, :].to(tl.int64) * stride_cos_t
-                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_cos_hid,
+                    + cos_sin_idx[:, None] * stride_cos_hid,
                     mask=mask_tsrc_active[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys_left.dtype)
                 sin_new = tl.load(
                     SIN
                     + new_tsrc[None, :].to(tl.int64) * stride_sin_t
-                    + (idx_rope_range % (ROPE_DIM // 2))[:, None] * stride_sin_hid,
+                    + cos_sin_idx[:, None] * stride_sin_hid,
                     mask=mask_tsrc_active[None, :] & rope_mask[:, None],
                     other=0.0,
                 ).to(keys_left.dtype)
@@ -345,8 +358,9 @@ def pool_queries(
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    rope_range_begin,
-    rope_range_end,
+    rope_range_begin: tl.constexpr,
+    rope_range_end: tl.constexpr,
+    rope_is_neox_style: tl.constexpr,
     HID_DIM: int,
     TDST: int,
     CHUNK_COUNT: int,
@@ -365,6 +379,23 @@ def pool_queries(
 
     idx_rope_range = idx_hid - rope_range_begin
     rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+    if rope_is_neox_style:
+        rope_rot_idx = tl.where(
+            rope_mask,
+            (idx_rope_range + ROPE_DIM // 2) % ROPE_DIM + rope_range_begin,
+            idx_hid,
+        )
+        cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+        rope_mult = (idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1
+    else:
+        flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
+        rope_rot_idx = tl.where(
+            rope_mask,
+            idx_rope_range + flip + rope_range_begin,
+            idx_hid,
+        )
+        cos_sin_idx = idx_rope_range // 2
+        rope_mult = (idx_rope_range % 2 == 0) * (-2) + 1
 
     queries_sum = tl.zeros((BLOCK_SIZE_Q // STRIDE_Q, HID_BLOCK), dtype=tl.float32)
     queries_counter = tl.zeros((BLOCK_SIZE_Q // STRIDE_Q,), dtype=tl.int32)
@@ -403,9 +434,6 @@ def pool_queries(
                     raise Exception()
 
                 if NEED_APPLY_ROPE:
-                    rope_rot_idx = (
-                        idx_hid - rope_range_begin + ROPE_DIM // 2
-                    ) % ROPE_DIM + rope_range_begin
                     queries_rot = tl.load(
                         Q
                         + idx_bsz * stride_q_bsz
@@ -423,7 +451,7 @@ def pool_queries(
                     cos_new = tl.load(
                         COS
                         + new_tdst[:, None].to(tl.int64) * stride_cos_t
-                        + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_cos_hid,
+                        + cos_sin_idx[None, :] * stride_cos_hid,
                         mask=mask_tdst_iter[:, None]
                         & rope_mask[None, :]
                         & mask_hid[None, :],
@@ -432,16 +460,14 @@ def pool_queries(
                     sin_new = tl.load(
                         SIN
                         + new_tdst[:, None].to(tl.int64) * stride_sin_t
-                        + (idx_rope_range % (ROPE_DIM // 2))[None, :] * stride_sin_hid,
+                        + cos_sin_idx[None, :] * stride_sin_hid,
                         mask=mask_tdst_iter[:, None]
                         & rope_mask[None, :]
                         & mask_hid[None, :],
                         other=0.0,
                     ).to(queries_iter.dtype)
 
-                    queries_rot *= (
-                        (idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1
-                    )[None, :].to(queries_rot.dtype)
+                    queries_rot *= rope_mult[None, :].to(queries_rot.dtype)
 
                     queries_iter = tl.where(
                         rope_mask[None, :] & mask_hid[None, :],
@@ -722,6 +748,7 @@ def chunk_controllable_sampling_mask_cuda(
                             stride_sin_hid,
                             rope_range_begin,
                             rope_range_end,
+                            rope_is_neox_style,
                             HID_DIM,
                             TDST,
                             CHUNK_COUNT,
@@ -759,6 +786,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 stride_sin_hid,
                                 rope_range_begin,
                                 rope_range_end,
+                                rope_is_neox_style,
                                 HID_DIM,
                                 TDST,
                                 CHUNK_COUNT,
@@ -816,6 +844,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     stride_sin_hid,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     HID_DIM,
                                     TDST,
                                     CHUNK_COUNT,
@@ -906,6 +935,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
@@ -938,6 +968,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         stride_sin_hid,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         HID_DIM,
                                         TDST,
                                         CHUNK_COUNT,
@@ -1028,6 +1059,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         UPDATE_CACHE,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         apply_rope=True,
                                     )
 
@@ -1064,6 +1096,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     stride_sin_hid,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     HID_DIM,
                                     TDST,
                                     CHUNK_COUNT,
@@ -1154,6 +1187,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 UPDATE_CACHE,
                                 rope_range_begin,
                                 rope_range_end,
+                                rope_is_neox_style,
                                 apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
@@ -1187,6 +1221,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         stride_sin_hid,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         HID_DIM,
                                         TDST,
                                         CHUNK_COUNT,
@@ -1277,6 +1312,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     apply_rope=True,
                                 )
 
@@ -1341,6 +1377,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         stride_sin_hid,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         HID_DIM,
                                         TDST,
                                         CHUNK_COUNT,
@@ -1431,6 +1468,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
@@ -1464,6 +1502,7 @@ def chunk_controllable_sampling_mask_cuda(
                                             stride_sin_hid,
                                             rope_range_begin,
                                             rope_range_end,
+                                            rope_is_neox_style,
                                             HID_DIM,
                                             TDST,
                                             CHUNK_COUNT,
@@ -1554,6 +1593,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         UPDATE_CACHE,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         apply_rope=True,
                                     )
 
@@ -1590,6 +1630,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     stride_sin_hid,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     HID_DIM,
                                     TDST,
                                     CHUNK_COUNT,
@@ -1680,6 +1721,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 UPDATE_CACHE,
                                 rope_range_begin,
                                 rope_range_end,
+                                rope_is_neox_style,
                                 apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
@@ -1713,6 +1755,7 @@ def chunk_controllable_sampling_mask_cuda(
                                         stride_sin_hid,
                                         rope_range_begin,
                                         rope_range_end,
+                                        rope_is_neox_style,
                                         HID_DIM,
                                         TDST,
                                         CHUNK_COUNT,
@@ -1803,6 +1846,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     UPDATE_CACHE,
                                     rope_range_begin,
                                     rope_range_end,
+                                    rope_is_neox_style,
                                     apply_rope=True,
                                 )
 
