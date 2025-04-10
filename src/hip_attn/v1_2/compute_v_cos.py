@@ -15,7 +15,7 @@ def compute_v_cos(
     stride_indices_bsz,
     stride_indices_bdst,
     stride_indices_head,
-    strdie_indices_k,
+    stride_indices_k,
     POS,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -61,7 +61,7 @@ def compute_v_cos(
     OFFLOAD_CACHE_GPU_TABLE,
     stride_offload_cache_gpu_table_head_kv,
     stride_offload_cache_gpu_table_token,
-    strdie_offload_cache_gpu_table_k,
+    stride_offload_cache_gpu_table_k,
     ACCESS_COUNTER,
     stride_access_counter_bsz,
     stride_access_counter_head_kv,
@@ -115,7 +115,7 @@ def compute_v_cos(
         + idx_bsz * stride_indices_bsz
         + idx_bdst * stride_indices_bdst
         + idx_head * stride_indices_head
-        + idx_k * strdie_indices_k,
+        + idx_k * stride_indices_k,
         mask=mask_k,
         other=seq_len + 2 * BLOCK_SIZE_K,
     )
@@ -129,7 +129,7 @@ def compute_v_cos(
     #         idx_bsz * stride_v_bsz+\
     #         idx_tdst[:, None] * stride_v_tsrc+\
     #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
-    #         idx_hid[None, :] * strdie_v_hid,
+    #         idx_hid[None, :] * stride_v_hid,
     #     mask=mask_tdst[:, None],
     #     other=0,
     # )
@@ -172,7 +172,7 @@ def compute_v_cos(
         OFFLOAD_CACHE_GPU_TABLE,
         stride_offload_cache_gpu_table_head_kv,
         stride_offload_cache_gpu_table_token,
-        strdie_offload_cache_gpu_table_k,
+        stride_offload_cache_gpu_table_k,
         ACCESS_COUNTER,
         stride_access_counter_bsz,
         stride_access_counter_head_kv,
@@ -201,7 +201,7 @@ def compute_v_cos(
     #         idx_bsz * stride_v_bsz +\
     #         idx_tsrc[:, None] * stride_v_tsrc +\
     #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
-    #         idx_hid[None, :] * strdie_v_hid,
+    #         idx_hid[None, :] * stride_v_hid,
     #     mask=mask_tsrc[:, None],
     #     other=0,
     # )
@@ -243,7 +243,7 @@ def compute_v_cos(
         OFFLOAD_CACHE_GPU_TABLE,
         stride_offload_cache_gpu_table_head_kv,
         stride_offload_cache_gpu_table_token,
-        strdie_offload_cache_gpu_table_k,
+        stride_offload_cache_gpu_table_k,
         ACCESS_COUNTER,
         stride_access_counter_bsz,
         stride_access_counter_head_kv,
