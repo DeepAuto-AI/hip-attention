@@ -519,7 +519,7 @@ def pool_queries(
 
 
 def get_scan_stage_configs():
-    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1"
+    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         defaults = {
