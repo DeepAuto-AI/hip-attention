@@ -196,8 +196,8 @@ def apply_rope_to_keys(
                     queries.dtype
                 )
             else:
-                cos_sin_idx = idx_rope_range >> 1
-                rope_mult = (idx_rope_range & 1).to(queries.dtype)
+                cos_sin_idx = idx_rope_range // 2
+                rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(queries.dtype)
 
             if EXCLUDE_SLIDING_WINDOW:
                 pos_tdst_max = pos_tdst_min + tl.sum(mask_tdst.to(tl.int32))
@@ -607,11 +607,11 @@ def apply_rope_to_queries(
         flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
         rope_rot_idx = tl.where(
             rope_mask,
-            idx_rope_range + flip,
+            idx_rope_range + flip + rope_range_begin,
             idx_hid,
         )
-        cos_sin_idx = idx_rope_range >> 1
-        rope_mult = (idx_rope_range & 1).to(queries.dtype)
+        cos_sin_idx = idx_rope_range // 2
+        rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(queries.dtype)
 
     queries_rot = tl.load(
         Q
@@ -824,7 +824,7 @@ def block_sparse_attention_cuda(
         flip = tl.where(idx_rope_range_q0 % 2 == 0, 1, -1)
         rope_rot_idx_0 = tl.where(
             rope_mask_0,
-            idx_rope_range_q0 + flip,
+            idx_rope_range_q0 + flip + rope_range_begin,
             idx_hid_q0,
         )
 
@@ -843,7 +843,7 @@ def block_sparse_attention_cuda(
             flip = tl.where(idx_rope_range_q1 % 2 == 0, 1, -1)
             rope_rot_idx_1 = tl.where(
                 rope_mask_1,
-                idx_rope_range_q1 + flip,
+                idx_rope_range_q1 + flip + rope_range_begin,
                 idx_hid_q1,
             )
     else:
