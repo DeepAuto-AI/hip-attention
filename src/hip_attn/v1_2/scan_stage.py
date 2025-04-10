@@ -1,3 +1,7 @@
+import os
+import warnings
+
+import torch
 import triton
 import triton.language as tl
 
@@ -514,6 +518,45 @@ def pool_queries(
     return queries
 
 
+def get_scan_stage_configs():
+    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1"
+    if autotune_disabled:
+        device_name = torch.cuda.get_device_name()
+        defaults = {
+            "NVIDIA A100-SXM4-80GB": dict(
+                num_warps=4,
+                num_stages=2,
+                maxnreg=256,
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2))
+        return [triton.Config({}, **defaults)]
+    if os.getenv("HIP_DISABLE_AUTOTUNE_WARNINGS", "0") == "0":
+        warnings.warn(
+            "triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1"
+        )
+    configs = []
+    for LOAD_Q_EACH_TIME in [False, True]:
+        for max_nreg in [128, 256, 512]:
+            for num_warps in [4, 8]:
+                for num_stages in [1, 2, 4]:
+                    configs.append(
+                        triton.Config(
+                            {"LOAD_Q_EACH_TIME": LOAD_Q_EACH_TIME},
+                            num_warps=num_warps,
+                            num_stages=num_stages,
+                            maxnreg=max_nreg,
+                        )
+                    )
+    return configs
+
+
+@triton.autotune(
+    configs=get_scan_stage_configs(),
+    key=[
+        "BLOCK_SIZE_Q",
+        "HID_DIM",
+    ],
+)
 @triton.jit
 def chunk_controllable_sampling_mask_cuda(
     Q,
@@ -621,7 +664,7 @@ def chunk_controllable_sampling_mask_cuda(
     SCAN_STRIDE: tl.constexpr = 1,
     UPDATE_CACHE: tl.constexpr = True,
     ORACLE_MAXIMUM: tl.constexpr = False,
-    LOAD_Q_EACH_TIME: tl.constexpr = True,
+    LOAD_Q_EACH_TIME: tl.constexpr = False,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)

@@ -529,7 +529,7 @@ def block_sparse_attention_cuda_step(
 
 
 def get_block_sparse_attention_configs():
-    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
+    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1"
     if autotune_disabled:
         device_name = torch.cuda.get_device_name()
         defaults = {
