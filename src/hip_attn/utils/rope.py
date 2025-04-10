@@ -67,9 +67,11 @@ def adjust_rope(
     NEED_APPLY_ROPE: tl.constexpr,
     rope_range_begin: tl.constexpr = 0,
     rope_range_end: tl.constexpr = None,
+    rope_is_neox_style: tl.constexpr = True,
 ):
     if rope_range_end is None:
         rope_range_end = HID_DIM
+    tl.static_assert(rope_is_neox_style, "interleaved style not supported")
     tl.device_assert(
         tl.min(idx_hid) == rope_range_begin, "tl.min(idx_hid) != rope_range_begin"
     )

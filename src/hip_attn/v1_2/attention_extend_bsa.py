@@ -90,6 +90,7 @@ def apply_rope_to_keys(
                         NEED_APPLY_ROPE,
                         rope_range_begin,
                         rope_range_end,
+                        rope_is_neox_style,
                     )
 
                     keys_adjusted = keys
@@ -129,6 +130,7 @@ def apply_rope_to_keys(
                         NEED_APPLY_ROPE,
                         rope_range_begin,
                         rope_range_end,
+                        rope_is_neox_style,
                     )
                     keys_adjusted = tl.trans(keys_adjusted, 1, 0)
 
@@ -154,6 +156,7 @@ def apply_rope_to_keys(
                         True,
                         rope_range_begin,
                         rope_range_end,
+                        rope_is_neox_style,
                     ).to(queries.dtype)
                     queries_adjusted = (queries * mask_tdst[:, None]).to(queries.dtype)
 
@@ -176,6 +179,7 @@ def apply_rope_to_keys(
                             True,
                             rope_range_begin,
                             rope_range_end,
+                            rope_is_neox_style,
                         ),
                         1,
                         0,

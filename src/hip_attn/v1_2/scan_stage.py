@@ -242,6 +242,7 @@ def load_keys_with_rope(
                     NEED_APPLY_ROPE,
                     rope_range_begin,
                     rope_range_end,
+                    rope_is_neox_style,
                 ).to(keys_left.dtype)
                 keys_left = tl.trans(keys_left, 1, 0)
                 keys_left = (keys_left * mask_tsrc_active[None, :]).to(keys_left.dtype)
@@ -495,6 +496,7 @@ def pool_queries(
                         NEED_APPLY_ROPE,
                         rope_range_begin,
                         rope_range_end,
+                        rope_is_neox_style,
                     ).to(queries_iter.dtype)
                     queries_iter = (queries_iter * mask_tdst_iter[:, None]).to(
                         queries_iter.dtype
