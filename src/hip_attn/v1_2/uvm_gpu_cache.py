@@ -121,11 +121,12 @@ class UVMCache:
         assert table.device == self.bank_cpu.device
 
         # print('gather alloc', flush=True)
-        # t = torch.empty(
-        #     (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]),
-        #     dtype=self.bank_cpu.dtype,
-        #     device='cpu'
-        # )
+        t = torch.empty(
+            (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]),
+            dtype=self.bank_cpu.dtype,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
 
         view_dtype = torch.uint16
         view_dtype_np = np.uint16
@@ -141,10 +142,10 @@ class UVMCache:
         else:
             raise Exception()
 
-        t = np.empty(
-            (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]),
-            dtype=view_dtype_np,
-        )
+        # t = np.empty(
+        #     (table.shape[0], self.bank_cpu.shape[1], self.bank_cpu.shape[2]),
+        #     dtype=view_dtype_np,
+        # )
 
         # print('gather pin', flush=True)
         # if pin_memory:
@@ -153,13 +154,13 @@ class UVMCache:
         # print('gather index_copy', flush=True)
         index_copy(
             self.bank_cpu.view(dtype=view_dtype).numpy(),
-            t,
+            t.view(dtype=view_dtype).numpy(),
             table.numpy(),
             num_thread=os.cpu_count(),
         )
         # print('gather done', flush=True)
 
-        t = torch.from_numpy(t).view(self.bank_cpu.dtype)
+        # t = torch.from_numpy(t).view(self.bank_cpu.dtype)
         # print('convert done', flush=True)
 
         return t
@@ -622,8 +623,8 @@ class HiPOffloadCache:
             table = table.to("cpu", non_blocking=False)
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
-        k = k.to(device, non_blocking=False).unsqueeze(0)
-        v = v.to(device, non_blocking=False).unsqueeze(0)
+        k = k.to(device, non_blocking=True).unsqueeze(0)
+        v = v.to(device, non_blocking=True).unsqueeze(0)
         return k, v
 
     def set_kv_buffer(

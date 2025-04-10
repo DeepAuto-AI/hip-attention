@@ -67,6 +67,7 @@ def forward_paged_hip(
 
     if is_prefill is not None:
         warnings.warn("is_prefill is deprecated. Use is_decode instead.")
+        is_decode = not is_prefill
 
     if not is_decode and extend_seq_lens_cpu is not None:
         # Handle jagged inputs
@@ -602,7 +603,7 @@ def _forward_paged_hip(
         layer_id=layer_id,
     )
 
-    last_dense = 64
+    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
 
     if is_decode or (query.shape[1] < (last_dense * 2)):
         context, metadata = dual_stage_quadratic_hip_attention(
