@@ -44,7 +44,6 @@ def load_queries(
     rope_is_neox_style: tl.constexpr,
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
-    APPLY_ROPE: tl.constexpr,
 ):
     offs_q = (
         cur_batch.to(tl.int64) * stride_q_bsz
@@ -59,72 +58,71 @@ def load_queries(
         q = q.to(tl.float16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
-        if APPLY_ROPE:
-            ROPE_DIM = rope_range_end - rope_range_begin
+        ROPE_DIM = rope_range_end - rope_range_begin
 
-            idx_rope_range = offs_d - rope_range_begin
-            rope_mask = (rope_range_begin <= offs_d) & (offs_d < rope_range_end)
-            if rope_is_neox_style:
-                rope_rot_idx = tl.where(
-                    rope_mask,
-                    (offs_d - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
-                    + rope_range_begin,
-                    offs_d,
-                )
-                cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
-                rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
-                    q.dtype
-                )
-            else:
-                flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
-                rope_rot_idx = tl.where(
-                    rope_mask,
-                    idx_rope_range + flip + rope_range_begin,
-                    offs_d,
-                )
-                cos_sin_idx = idx_rope_range // 2
-                rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
-
-            rope_tdst = cur_batch_seq_len - 1
-
-            queries_rot = tl.load(
-                Q
-                + cur_batch.to(tl.int64) * stride_q_bsz
-                + 0 * stride_q_tdst
-                + cur_head[:, None] * stride_q_head
-                + rope_rot_idx[None, :] * stride_q_hid,
-                mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
-                other=0.0,
-            )  # [BLOCK_H, BLOCK_DMODEL]
-            if queries_rot.dtype == tl.float8e5:
-                queries_rot = queries_rot.to(tl.float16)
-
-            cos_new = tl.load(
-                COS
-                + rope_tdst.to(tl.int64) * stride_cos_t
-                + cos_sin_idx[None, :] * stride_cos_hid,
-                mask=mask_d[None, :] & rope_mask[None, :],
-                other=0.0,
-            ).to(
-                q.dtype
-            )  # [1, BLOCK_DMODEL]
-            sin_new = tl.load(
-                SIN
-                + rope_tdst.to(tl.int64) * stride_sin_t
-                + cos_sin_idx[None, :] * stride_sin_hid,
-                mask=mask_d[None, :] & rope_mask[None, :],
-                other=0.0,
-            ).to(
-                q.dtype
-            )  # [1, BLOCK_DMODEL]
-
-            queries_rot *= rope_mult[None, :]
-
-            q = tl.where(
-                rope_mask[None, :],
-                (q * cos_new + queries_rot * sin_new).to(q.dtype),
-                q,
+        idx_rope_range = offs_d - rope_range_begin
+        rope_mask = (rope_range_begin <= offs_d) & (offs_d < rope_range_end)
+        if rope_is_neox_style:
+            rope_rot_idx = tl.where(
+                rope_mask,
+                (offs_d - rope_range_begin + ROPE_DIM // 2) % ROPE_DIM
+                + rope_range_begin,
+                offs_d,
             )
+            cos_sin_idx = idx_rope_range % (ROPE_DIM // 2)
+            rope_mult = ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(
+                q.dtype
+            )
+        else:
+            flip = tl.where(idx_rope_range & 1 == 0, 1, -1)
+            rope_rot_idx = tl.where(
+                rope_mask,
+                idx_rope_range + flip + rope_range_begin,
+                offs_d,
+            )
+            cos_sin_idx = idx_rope_range // 2
+            rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
+
+        rope_tdst = cur_batch_seq_len - 1
+
+        queries_rot = tl.load(
+            Q
+            + cur_batch.to(tl.int64) * stride_q_bsz
+            + 0 * stride_q_tdst
+            + cur_head[:, None] * stride_q_head
+            + rope_rot_idx[None, :] * stride_q_hid,
+            mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
+            other=0.0,
+        )  # [BLOCK_H, BLOCK_DMODEL]
+        if queries_rot.dtype == tl.float8e5:
+            queries_rot = queries_rot.to(tl.float16)
+
+        cos_new = tl.load(
+            COS
+            + rope_tdst.to(tl.int64) * stride_cos_t
+            + cos_sin_idx[None, :] * stride_cos_hid,
+            mask=mask_d[None, :] & rope_mask[None, :],
+            other=0.0,
+        ).to(
+            q.dtype
+        )  # [1, BLOCK_DMODEL]
+        sin_new = tl.load(
+            SIN
+            + rope_tdst.to(tl.int64) * stride_sin_t
+            + cos_sin_idx[None, :] * stride_sin_hid,
+            mask=mask_d[None, :] & rope_mask[None, :],
+            other=0.0,
+        ).to(
+            q.dtype
+        )  # [1, BLOCK_DMODEL]
+
+        queries_rot *= rope_mult[None, :]
+
+        q = tl.where(
+            rope_mask[None, :],
+            (q * cos_new + queries_rot * sin_new).to(q.dtype),
+            q,
+        )
 
     return q
 
@@ -337,9 +335,8 @@ def _fwd_kernel_stage1(
         rope_range_begin,
         rope_range_end,
         rope_is_neox_style,
-        USING_EXTEND,
+        USING_EXTEND and (rope_range_begin < BLOCK_DMODEL_0),
         NEED_APPLY_ROPE,
-        APPLY_ROPE=rope_range_begin < BLOCK_DMODEL_0,
     )
 
     if BLOCK_DMODEL_1 > 0:
@@ -367,7 +364,6 @@ def _fwd_kernel_stage1(
             rope_is_neox_style,
             USING_EXTEND,
             NEED_APPLY_ROPE,
-            APPLY_ROPE=True,
         )
     else:
         q_1 = None

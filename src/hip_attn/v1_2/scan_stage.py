@@ -86,7 +86,6 @@ def load_keys_with_rope(
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
     rope_is_neox_style: tl.constexpr,
-    apply_rope: tl.constexpr,
 ):
     keys_left = load_tokens(
         K,
@@ -147,7 +146,7 @@ def load_keys_with_rope(
         UPDATE_CACHE=UPDATE_CACHE,
     ).to(queries_dtype)
 
-    if USING_EXTEND and apply_rope:
+    if USING_EXTEND:
         ROPE_DIM = rope_range_end - rope_range_begin
 
         idx_rope_range = idx_hid - rope_range_begin
@@ -378,7 +377,6 @@ def pool_queries(
     BLOCK_SIZE_Q: tl.constexpr,
     HID_BLOCK: tl.constexpr,
     STRIDE_Q: tl.constexpr,
-    apply_rope: tl.constexpr,
 ):
     ROPE_DIM = rope_range_end - rope_range_begin
 
@@ -421,7 +419,7 @@ def pool_queries(
         if queries_iter.dtype == tl.float8e5:
             queries_iter = queries_iter.to(tl.float16)
 
-        if USING_EXTEND and apply_rope:
+        if USING_EXTEND:
             if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
                 old_tdst = pos_tdst
                 if EXTEND_BACKEND == "dynamic_extend":
@@ -805,13 +803,12 @@ def chunk_controllable_sampling_mask_cuda(
                             real_pos_tdst_min,
                             model_context_length,
                             sliding_window_size,
-                            USING_EXTEND,
+                            USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                             NEED_APPLY_ROPE,
                             EXTEND_BACKEND,
                             BLOCK_SIZE_Q,
                             HID_BLOCK_0,
                             STRIDE_Q,
-                            apply_rope=rope_range_begin < HID_BLOCK_0,
                         )
 
                         if HID_BLOCK_1 > 0:
@@ -849,7 +846,6 @@ def chunk_controllable_sampling_mask_cuda(
                                 BLOCK_SIZE_Q,
                                 HID_BLOCK_1,
                                 STRIDE_Q,
-                                apply_rope=True,
                             )
                         else:
                             queries_1 = None
@@ -901,13 +897,12 @@ def chunk_controllable_sampling_mask_cuda(
                                     real_pos_tdst_min,
                                     model_context_length,
                                     sliding_window_size,
-                                    USING_EXTEND,
+                                    USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                     NEED_APPLY_ROPE,
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
                                     STRIDE_Q,
-                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                                 keys_left_0 = load_keys_with_rope(
@@ -974,7 +969,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     real_pos_tdst_min,
                                     model_context_length,
                                     num_sinks,
-                                    USING_EXTEND,
+                                    USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     NEED_APPLY_ROPE,
                                     BLOCK_CHUNK,
@@ -986,7 +981,6 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_range_begin,
                                     rope_range_end,
                                     rope_is_neox_style,
-                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                                 t_scores_left = tl.dot(
@@ -1031,7 +1025,6 @@ def chunk_controllable_sampling_mask_cuda(
                                         BLOCK_SIZE_Q,
                                         HID_BLOCK_1,
                                         STRIDE_Q,
-                                        apply_rope=True,
                                     )
 
                                     keys_left_1 = load_keys_with_rope(
@@ -1110,7 +1103,6 @@ def chunk_controllable_sampling_mask_cuda(
                                         rope_range_begin,
                                         rope_range_end,
                                         rope_is_neox_style,
-                                        apply_rope=True,
                                     )
 
                                     t_scores_left += tl.dot(
@@ -1153,13 +1145,12 @@ def chunk_controllable_sampling_mask_cuda(
                                     real_pos_tdst_min,
                                     model_context_length,
                                     sliding_window_size,
-                                    USING_EXTEND,
+                                    USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                     NEED_APPLY_ROPE,
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
                                     STRIDE_Q,
-                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                             keys_left_0 = load_keys_with_rope(
@@ -1226,7 +1217,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 real_pos_tdst_min,
                                 model_context_length,
                                 num_sinks,
-                                USING_EXTEND,
+                                USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
                                 NEED_APPLY_ROPE,
                                 BLOCK_CHUNK,
@@ -1238,7 +1229,6 @@ def chunk_controllable_sampling_mask_cuda(
                                 rope_range_begin,
                                 rope_range_end,
                                 rope_is_neox_style,
-                                apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
                             scores_left = tl.dot(
@@ -1284,7 +1274,6 @@ def chunk_controllable_sampling_mask_cuda(
                                         BLOCK_SIZE_Q,
                                         HID_BLOCK_1,
                                         STRIDE_Q,
-                                        apply_rope=True,
                                     )
 
                                 keys_left_1 = load_keys_with_rope(
@@ -1363,7 +1352,6 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_range_begin,
                                     rope_range_end,
                                     rope_is_neox_style,
-                                    apply_rope=True,
                                 )
 
                                 scores_left += tl.dot(
@@ -1434,13 +1422,13 @@ def chunk_controllable_sampling_mask_cuda(
                                         real_pos_tdst_min,
                                         model_context_length,
                                         sliding_window_size,
-                                        USING_EXTEND,
+                                        USING_EXTEND
+                                        and (rope_range_begin < HID_BLOCK_0),
                                         NEED_APPLY_ROPE,
                                         EXTEND_BACKEND,
                                         BLOCK_SIZE_Q,
                                         HID_BLOCK_0,
                                         STRIDE_Q,
-                                        apply_rope=rope_range_begin < HID_BLOCK_0,
                                     )
 
                                 keys_right_0 = load_keys_with_rope(
@@ -1507,7 +1495,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     real_pos_tdst_min,
                                     model_context_length,
                                     num_sinks,
-                                    USING_EXTEND,
+                                    USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     NEED_APPLY_ROPE,
                                     BLOCK_CHUNK,
@@ -1519,7 +1507,6 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_range_begin,
                                     rope_range_end,
                                     rope_is_neox_style,
-                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                                 t_scores_right = tl.dot(
@@ -1565,7 +1552,6 @@ def chunk_controllable_sampling_mask_cuda(
                                             BLOCK_SIZE_Q,
                                             HID_BLOCK_1,
                                             STRIDE_Q,
-                                            apply_rope=True,
                                         )
 
                                     keys_right_1 = load_keys_with_rope(
@@ -1644,7 +1630,6 @@ def chunk_controllable_sampling_mask_cuda(
                                         rope_range_begin,
                                         rope_range_end,
                                         rope_is_neox_style,
-                                        apply_rope=True,
                                     )
 
                                     t_scores_right += tl.dot(
@@ -1687,13 +1672,12 @@ def chunk_controllable_sampling_mask_cuda(
                                     real_pos_tdst_min,
                                     model_context_length,
                                     sliding_window_size,
-                                    USING_EXTEND,
+                                    USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                     NEED_APPLY_ROPE,
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
                                     STRIDE_Q,
-                                    apply_rope=rope_range_begin < HID_BLOCK_0,
                                 )
 
                             keys_right_0 = load_keys_with_rope(
@@ -1760,7 +1744,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 real_pos_tdst_min,
                                 model_context_length,
                                 num_sinks,
-                                USING_EXTEND,
+                                USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
                                 NEED_APPLY_ROPE,
                                 BLOCK_CHUNK,
@@ -1772,7 +1756,6 @@ def chunk_controllable_sampling_mask_cuda(
                                 rope_range_begin,
                                 rope_range_end,
                                 rope_is_neox_style,
-                                apply_rope=rope_range_begin < HID_BLOCK_0,
                             )
 
                             scores_right = tl.dot(
@@ -1818,7 +1801,6 @@ def chunk_controllable_sampling_mask_cuda(
                                         BLOCK_SIZE_Q,
                                         HID_BLOCK_1,
                                         STRIDE_Q,
-                                        apply_rope=True,
                                     )
 
                                 keys_right_1 = load_keys_with_rope(
@@ -1897,7 +1879,6 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_range_begin,
                                     rope_range_end,
                                     rope_is_neox_style,
-                                    apply_rope=True,
                                 )
 
                                 scores_right += tl.dot(
