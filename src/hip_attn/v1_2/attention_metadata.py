@@ -173,6 +173,7 @@ class HiPAttentionArgs:
     # kernel args,
     mask_only: bool = False
     block_sparse_block_size_q: Optional[int] = 64
+    v_hidden_dim: Optional[int] = None
 
     scan_early_terminate: int = 1
     stage_early_terminate: int = 1
@@ -193,6 +194,7 @@ class HiPAttentionArgs:
     rope_cos: Optional[Tensor] = None
     rope_sin: Optional[Tensor] = None
     rope_range: Optional[tuple[int, int]] = None
+    rope_is_neox_style: Optional[bool] = None
 
     offload_cache: "Optional[HiPOffloadCache]" = None
     k_cache: Optional[Tensor] = None
@@ -266,6 +268,9 @@ class HiPAttentionArgs:
             self.need_apply_rope,
             *self.args_rope_cos(),
             *self.args_rope_sin(),
+            self.rope_range[0],
+            self.rope_range[1],
+            self.rope_is_neox_style,
         )
 
     def args_rope_cos(self):

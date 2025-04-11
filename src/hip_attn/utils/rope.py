@@ -1,76 +1,50 @@
 import triton
 import triton.language as tl
 
-from hip_attn.utils.rotate import rotate_left, rotate_right
+
+@triton.jit
+def split_half(x: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    x = x.reshape(T, 2, HID // 2)
+    x = x.trans(0, 2, 1)
+    return x.split()
+
+
+@triton.jit
+def merge_half(left: tl.tensor, right: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    assert left.shape == right.shape
+    x = tl.join(left, right)
+    x = x.trans(0, 2, 1)
+    x = x.reshape(T, HID)
+    return x
 
 
 @triton.jit
 def de_rope(
-    vec: tl.tensor,
-    cos: tl.tensor,
-    sin: tl.tensor,
-    T: tl.constexpr,
-    HID: tl.constexpr,
-    rope_range_begin: tl.constexpr,
-    rope_range_end: tl.constexpr,
+    vec: tl.tensor, cos: tl.tensor, sin: tl.tensor, T: tl.constexpr, HID: tl.constexpr
 ):
-    ROPE_DIM = rope_range_end - rope_range_begin
-    idx_hid = tl.arange(0, HID)
-
-    c0, ch = cos, rotate_left(cos, ROPE_DIM // 2)
-    s0, sh = sin, rotate_left(sin, ROPE_DIM // 2)
-    vr0, vrh = vec, rotate_left(vec, ROPE_DIM // 2)
+    c0, ch = split_half(cos, T, HID)
+    s0, sh = split_half(sin, T, HID)
+    vr0, vrh = split_half(vec, T, HID)
 
     out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
     outh = (out0 * c0 - vr0) / (s0 + 1e-20)
-
-    outh = rotate_right(outh, ROPE_DIM // 2)
-    out = tl.where(
-        (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end),
-        tl.where(
-            idx_hid < rope_range_begin + ROPE_DIM // 2,
-            out0,
-            outh,
-        ),
-        vec,
-    )
+    out = merge_half(out0, outh, T, HID)
     return out
 
 
 @triton.jit
-def rotate_half(
-    vec: tl.tensor,
-    T: tl.constexpr,
-    HID: tl.constexpr,
-    rope_range_begin: tl.constexpr,
-    rope_range_end: tl.constexpr,
-):
-    idx_hid = tl.arange(0, HID)
-    idx_rope_range = idx_hid - rope_range_begin
-    ROPE_DIM = rope_range_end - rope_range_begin
-
-    vec *= ((idx_rope_range + ROPE_DIM // 2 < ROPE_DIM) * (-2) + 1).to(vec.dtype)
-
-    return vec
+def rotate_half(vec: tl.tensor, T: tl.constexpr, HID: tl.constexpr):
+    left, right = split_half(vec, T, HID)
+    out0 = -right
+    outh = left
+    return merge_half(out0, outh, T, HID)
 
 
 @triton.jit
 def apply_rope(
-    vec: tl.tensor,
-    cos: tl.tensor,
-    sin: tl.tensor,
-    T: tl.constexpr,
-    HID: tl.constexpr,
-    rope_range_begin: tl.constexpr,
-    rope_range_end: tl.constexpr,
+    vec: tl.tensor, cos: tl.tensor, sin: tl.tensor, T: tl.constexpr, HID: tl.constexpr
 ):
-    idx_hid = tl.arange(0, HID)
-    vec_rot = rotate_half(vec, T, HID, rope_range_begin, rope_range_end)
-    vec = tl.where(
-        (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end),
-        vec * cos + vec_rot * sin,
-        vec,
-    )
+    vec = vec * cos + rotate_half(vec, T, HID) * sin
     return vec
 
 
@@ -89,15 +63,21 @@ def adjust_rope(
     stride_sin_hid,
     T: tl.constexpr,
     HID: tl.constexpr,
+    HID_DIM,
     NEED_APPLY_ROPE: tl.constexpr,
     rope_range_begin: tl.constexpr = 0,
     rope_range_end: tl.constexpr = None,
+    rope_is_neox_style: tl.constexpr = True,
 ):
     if rope_range_end is None:
-        rope_range_end: tl.constexpr = HID
-
-    idx_rope_range = idx_hid - rope_range_begin
-    rope_mask = (rope_range_begin <= idx_hid) & (idx_hid < rope_range_end)
+        rope_range_end = HID_DIM
+    tl.static_assert(rope_is_neox_style, "interleaved style not supported")
+    tl.device_assert(
+        tl.min(idx_hid) == rope_range_begin, "tl.min(idx_hid) != rope_range_begin"
+    )
+    tl.device_assert(
+        tl.max(idx_hid) == rope_range_end - 1, "tl.max(idx_hid) != rope_range_end - 1"
+    )
 
     if not NEED_APPLY_ROPE:
         mask_t = mask_t & (old_t != 0)
@@ -105,30 +85,30 @@ def adjust_rope(
         cos_old = tl.load(
             COS
             + old_t[:, None].to(tl.int64) * stride_cos_t
-            + idx_rope_range[None, :] * stride_cos_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0,
         )
         sin_old = tl.load(
             SIN
             + old_t[:, None].to(tl.int64) * stride_sin_t
-            + idx_rope_range[None, :] * stride_sin_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0,
         )
 
         cos_new = tl.load(
             COS
             + new_t[:, None].to(tl.int64) * stride_cos_t
-            + idx_rope_range[None, :] * stride_cos_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0,
         )
         sin_new = tl.load(
             SIN
             + new_t[:, None].to(tl.int64) * stride_sin_t
-            + idx_rope_range[None, :] * stride_sin_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0,
         )
 
@@ -138,8 +118,6 @@ def adjust_rope(
             sin_old.to(tl.float32),
             T,
             HID,
-            rope_range_begin,
-            rope_range_end,
         )
         tokens_adjusted = apply_rope(
             tokens_adjusted.to(tl.float32),
@@ -147,8 +125,6 @@ def adjust_rope(
             sin_new.to(tl.float32),
             T,
             HID,
-            rope_range_begin,
-            rope_range_end,
         )
 
         tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
@@ -158,15 +134,15 @@ def adjust_rope(
         cos_new = tl.load(
             COS
             + new_t[:, None].to(tl.int64) * stride_cos_t
-            + idx_rope_range[None, :] * stride_cos_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0.0,
         )
         sin_new = tl.load(
             SIN
             + new_t[:, None].to(tl.int64) * stride_sin_t
-            + idx_rope_range[None, :] * stride_sin_hid,
-            mask=tl.ravel(mask_t)[:, None] & rope_mask[None, :],
+            + idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
             other=0.0,
         )
 

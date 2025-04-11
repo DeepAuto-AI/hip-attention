@@ -828,6 +828,7 @@ def load_tokens(
     HEAD_KV: int,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_HID: tl.constexpr,
+    HID_DIM,
     IS_BSA: tl.constexpr = False,
     UPDATE_CACHE: tl.constexpr = False,
     V_CACHE=None,
@@ -869,7 +870,7 @@ def load_tokens(
             + idx_tsrc.to(tl.int64) * stride_k_tsrc
             + idx_kv_head.to(tl.int64) * stride_k_head
             + idx_hid.to(tl.int64) * stride_k_hid,
-            mask=mask_keys,
+            mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
             # cache_modifier='.cs', # TODO: uncomment this
         )
@@ -1038,7 +1039,7 @@ def load_tokens(
             + offset_page.to(tl.int64) * stride_k_cache_offset
             + idx_kv_head.to(tl.int64) * stride_k_cache_kv_head
             + idx_hid.to(tl.int64) * stride_k_cache_hid,
-            mask=mask_keys,
+            mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
         )
         if keys.dtype == tl.uint8:
