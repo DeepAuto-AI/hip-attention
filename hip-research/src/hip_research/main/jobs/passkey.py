@@ -18,7 +18,9 @@ def get_numbers(s, cnt):
 def job_passkey(args, model, tokenizer, device):
     dataset = Passkey(tokenizer, batch_size=args.batch_size)
 
-    accuracy = {}
+    accuracy = dict()
+    seq_lens = set()
+    locations = set()
 
     for j, (input_ids, target_ids) in enumerate(
         tqdm(dataset, dynamic_ncols=True, leave=False)
@@ -93,6 +95,10 @@ def job_passkey(args, model, tokenizer, device):
         location = int(location / 0.2) / 5
 
         seq_len = input_ids.shape[1]
+        
+        seq_lens.add(seq_len)
+        locations.add(location)
+        
         accuracy_key = (seq_len, location)
         acc_sum, acc_count = accuracy.get(accuracy_key, (0, 0))
         for x, y in zip(truth, est):
@@ -114,3 +120,12 @@ def job_passkey(args, model, tokenizer, device):
         tqdm.write(
             f"current accuracy { {k: f'{v[0] / (v[1] + 1e-20)*100:.2f}' for k, v in accuracy.items()} } | {truth[0]}, {est[0]}"
         )
+    
+    seq_lens = list(sorted(seq_lens))
+    locations = list(sorted(locations))
+    
+    def to_acc(x): return x[0] / (x[1] + 1e-20) * 100
+    print(f'Loc.,{",".join(map(lambda x: str(x), seq_lens))}')
+    print(f'Avg.,{",".join([str(to_acc(accuracy[(seq_len,)])) for seq_len in seq_lens])}')
+    for location in locations:
+        print(f'{location},{",".join([str(to_acc(accuracy[(seq_len, location)])) for seq_len in seq_lens])}')
