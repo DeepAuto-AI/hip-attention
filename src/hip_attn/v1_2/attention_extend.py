@@ -123,6 +123,8 @@ def render_plot_ks(indices, ks, debug, DEBUG_HEAD, BLOCK_SIZE_Q):
 
 
 DEBUG = os.getenv("HIP_DEBUG", "0") == "1"
+DEBUG_LOGALL = os.getenv("HIP_DEBUG_LOGALL", '0') == '1'
+__logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
 
@@ -133,8 +135,9 @@ def dual_stage_quadratic_hip_attention(
     args: HiPAttentionArgs,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
-    DEBUG_HEAD = -1
+    global __logall_index
     global DEBUG
+    DEBUG_HEAD = -1
 
     # if (q.shape[1] == 1) and (not args.disable_flashdecode):
     #     pass
@@ -982,7 +985,12 @@ def dual_stage_quadratic_hip_attention(
                     causal_mask=True,
                     sliding_window_size=args.sliding_window_size,
                 )
-                cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
+                if DEBUG_LOGALL:
+                    __logall_index += 1
+                    os.makedirs('./cache/mask_log', exist_ok=True)
+                    cv2.imwrite(f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png", debug * 255)
+                else:
+                    cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
                 # print(f'saved dummy_sampled_stage_{i_stage}.png')
 
         if STAGE_STRIDE > 1:
@@ -1121,7 +1129,12 @@ def dual_stage_quadratic_hip_attention(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
-            cv2.imwrite("dummy_sampled_final.png", debug * 255)
+            if DEBUG_LOGALL:
+                os.makedirs('./cache/mask_log', exist_ok=True)
+                __logall_index += 1
+                cv2.imwrite(f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png", debug * 255)
+            else:
+                cv2.imwrite("dummy_sampled_final.png", debug * 255)
             # print('saved dummy_sampled_final.png')
 
         args = args.clone()
