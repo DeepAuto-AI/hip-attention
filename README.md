@@ -158,6 +158,7 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 ### Building and publishing
 
 ```bash
+rm -rf dist
 uv build --no-sources
 uv publish
 ```
