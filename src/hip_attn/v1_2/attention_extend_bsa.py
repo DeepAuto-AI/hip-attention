@@ -50,6 +50,7 @@ def apply_rope_to_keys(
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
+    CHUNKED_SW: tl.constexpr = False,
 ):
     if EXTEND_BACKEND == "self_extend":
         raise Exception()
@@ -471,6 +472,7 @@ def block_sparse_attention_cuda_step(
         qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
     qk = qk * 1.44269504
 
+    # if qk_mask == True, then dropped
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
             qk_mask = (
@@ -479,11 +481,28 @@ def block_sparse_attention_cuda_step(
                 | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
             )
         else:
-            qk_mask = (
-                ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
-                | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-            )
+            if not CHUNKED_SW:
+                qk_mask = (
+                    ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                    | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
+                    | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+                )
+            else:
+                # qk_mask = (
+                #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                #     | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
+                #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+                # )
+                qk_mask = (
+                    ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                    # | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
+                    | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+                    # | idx_tsrc[None, :] < ((pos_tdst - 1) - ((pos_tdst - 1) % sliding_window_size))[:, None]
+                    | (
+                        (idx_tsrc[None, :] < ((pos_tdst - 1) // sliding_window_size * sliding_window_size)[:, None])
+                        & ((pos_tdst - 1)[:, None] >= (idx_tsrc + 1)[None, :])
+                    )
+                )
     else:
         qk_mask = ~(mask_tdst[:, None] & mask_tsrc[None, :])
 
@@ -783,6 +802,7 @@ def block_sparse_attention_cuda(
     BLOCK_BK: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
+    CHUNKED_SW: tl.constexpr,
 ):
     G: tl.constexpr = 1
 
@@ -1765,7 +1785,7 @@ def block_sparse_attention_cuda(
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
 
-    if sliding_window_size > 0:
+    if (sliding_window_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
         # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
         i_tsrc_range_start = tl.maximum(
@@ -2165,6 +2185,7 @@ def block_sparse_attention_cuda(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                CHUNKED_SW=CHUNKED_SW,
             )
 
     # epilogue
@@ -2362,6 +2383,7 @@ def block_sparse_attention(
         BLOCK_BK=BLOCK_BK,
         EXTEND_BACKEND=EXTEND_BACKEND,
         UPDATE_CACHE=offload_update_cache,
+        CHUNKED_SW=args.using_chunked_sliding_window,
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
     )

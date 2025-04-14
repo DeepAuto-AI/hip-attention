@@ -15,6 +15,7 @@ from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
 
 try:
+    import torch.distributed as dist
     from sglang.srt.distributed import (
         get_tensor_model_parallel_rank,
         split_tensor_along_last_dim,
@@ -68,6 +69,7 @@ def forward_paged_hip(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_prefill is not None:
@@ -173,6 +175,7 @@ def forward_paged_hip(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
 
                 o[start_len : start_len + seq_len] = o_req
@@ -213,6 +216,7 @@ def forward_paged_hip(
             query_for_mask=query_for_mask,
             diag_sliding_window_indices=diag_sliding_window_indices,
             sliding_window_size=sliding_window_size,
+            using_chunked_sliding_window=using_chunked_sliding_window,
         )
 
     return o, metadata_new
@@ -249,6 +253,7 @@ def _forward_paged_hip_validate(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -322,6 +327,7 @@ def _forward_paged_hip_validate(
         query_for_mask=query_for_mask,
         diag_sliding_window_indices=diag_sliding_window_indices,
         sliding_window_size=sliding_window_size,
+        using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
     if require_validation:
@@ -355,6 +361,7 @@ def _forward_paged_hip_validate(
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
                 sliding_window_size=sliding_window_size,
+                using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -390,6 +397,7 @@ def _forward_paged_hip_validate(
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
                 sliding_window_size=sliding_window_size,
+                using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
             err_thresh = 1e-7
@@ -465,6 +473,7 @@ def _forward_paged_hip_validate(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -499,6 +508,7 @@ def _forward_paged_hip_validate(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -564,6 +574,7 @@ def _forward_paged_hip(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -674,6 +685,7 @@ def _forward_paged_hip(
         ),
         layer_id=layer_id,
         v_hidden_dim=v_hidden_dim,
+        using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))

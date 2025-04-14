@@ -53,6 +53,7 @@ def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
         and (not args.disable_flashdecode)
     ):
         block_sparse_attention_backend = decode_block_sparse_attention
+    
     return block_sparse_attention_backend
 
 @numba.njit(parallel=True)

@@ -214,6 +214,8 @@ class HiPAttentionArgs:
 
     sliding_window_indices: Optional[torch.Tensor] = None
 
+    using_chunked_sliding_window: bool = False
+
     # NOTE: use only for debugging purpose
     layer_id: int = 31
 

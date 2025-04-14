@@ -241,6 +241,7 @@ def _fwd_kernel_stage1(
     BLOCK_DV: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
+    CHUNKED_SW: tl.constexpr,
 ):
     cur_batch = tl.program_id(0).to(tl.int64)
     cur_head_id = tl.program_id(1).to(tl.int64)
@@ -1469,6 +1470,7 @@ def _fwd_kernel_stage1(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                CHUNKED_SW=CHUNKED_SW,
             )
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
@@ -1602,6 +1604,7 @@ def decode_block_sparse_attention_stage1(
         BLOCK_DV=BLOCK_DV,
         EXTEND_BACKEND=extend_backend,
         UPDATE_CACHE=offload_update_cache,
+        CHUNKED_SW=args.using_chunked_sliding_window,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS
