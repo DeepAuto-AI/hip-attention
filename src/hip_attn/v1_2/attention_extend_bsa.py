@@ -481,6 +481,7 @@ def block_sparse_attention_cuda_step(
                 | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
             )
         else:
+            # TODO(ainl): we should reduce scanning loop range if CHUNKED_SW is true.
             if not CHUNKED_SW:
                 qk_mask = (
                     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
