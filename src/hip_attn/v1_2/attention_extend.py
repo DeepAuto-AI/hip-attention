@@ -217,9 +217,9 @@ def dual_stage_quadratic_hip_attention(
         args.rope_range = (0, HID)
 
     if args.rope_is_neox_style is None:
-        warnings.warn(
-            "Deprecated: Please specify `rope_is_neox_style`. Defaulting to True."
-        )
+        # warnings.warn(
+        #     "Deprecated: Please specify `rope_is_neox_style`. Defaulting to True."
+        # )
         args.rope_is_neox_style = True
 
     if args.rope_range[0] == 0 and args.rope_range[1] == HID:

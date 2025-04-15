@@ -79,9 +79,9 @@ def forward_paged_hip(
         is_decode = not is_prefill
 
     if v is None:
-        warnings.warn(
-            "Deprecated behavior: `k` and `v` should be provided in order to precisely know the output size."
-        )
+        # warnings.warn(
+        #     "Deprecated behavior: `k` and `v` should be provided in order to precisely know the output size."
+        # )
 
         if v_cache is not None:
             v_hidden_dim = v_cache.shape[-1]
@@ -692,8 +692,16 @@ def _forward_paged_hip(
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)
-        
+
+        # dist.barrier()
+        # if get_tensor_model_parallel_rank() == 0: 
+        #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+        BSZ, TDST, HEAD, HID = query.shape
+
         args = args.clone()
+        if args.rope_range is None:
+            args.rope_range = (0, HID)
         args.block_size_q = args.block_sparse_block_size_q
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.second_stage_k = 0
@@ -701,7 +709,6 @@ def _forward_paged_hip(
         args.sliding_window_size = sliding_window_size if sliding_window_size is not None else 1024
         args.sliding_window_indices = None
 
-        BSZ, TDST, HEAD, HID = query.shape
         BDST = triton.cdiv(TDST, args.block_size_q)
         BH = BSZ * HEAD
 
@@ -732,6 +739,9 @@ def _forward_paged_hip(
         context = context.to(query.dtype)
         metadata = None
     elif is_decode or (query.shape[1] < (last_dense * 2)):
+        # dist.barrier()
+        # if get_tensor_model_parallel_rank() == 0: print('hip')
+
         context, metadata = dual_stage_quadratic_hip_attention(
             (query * sm_scale).to(query.dtype),
             k,

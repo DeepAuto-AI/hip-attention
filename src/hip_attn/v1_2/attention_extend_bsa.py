@@ -50,7 +50,6 @@ def apply_rope_to_keys(
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
-    CHUNKED_SW: tl.constexpr = False,
 ):
     if EXTEND_BACKEND == "self_extend":
         raise Exception()
@@ -373,6 +372,7 @@ def block_sparse_attention_cuda_step(
     BLOCK_TK,
     BLOCK_SIZE_K: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
+    CHUNKED_SW: tl.constexpr = False,
 ):
     HID_BLOCK_0: tl.constexpr = queries_0.shape[1]
     HID_BLOCK_1: tl.constexpr = queries_1.shape[1] if queries_1 is not None else 0
