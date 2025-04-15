@@ -491,7 +491,7 @@ def block_sparse_attention_cuda_step(
             else:
                 # qk_mask = (
                 #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                #     | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
+                #     | ((pos_tdst - 1)[:, None] >= (idx_tsrc + 1024)[None, :])
                 #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                 # )
                 qk_mask = (
