@@ -31,6 +31,15 @@ from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
 
+try:
+    from sglang.srt.distributed import (
+        get_tensor_model_parallel_world_size,
+        tensor_model_parallel_all_gather,
+    )
+    SGLANG_DIST_AVAILABLE = True
+except:
+    SGLANG_DIST_AVAILABLE = False
+
 _NUM_STREAMING_MULTIPROCESSOR = None
 
 
@@ -140,12 +149,24 @@ def dual_stage_quadratic_hip_attention(
     global DEBUG
     DEBUG_HEAD = -1
 
-    # if (q.shape[1] == 1) and (not args.disable_flashdecode):
-    #     pass
-    # else:
-    #     # FIXME: just for dev
-    #     k = args.gather_k_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
-    #     v = args.gather_v_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
+    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = os.getenv(
+        'HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE', '0'
+    ) == '1'
+
+    if (q.shape[1] == 1):
+        pass
+    elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+        # FIXME: just for dev
+        k = args.gather_k_from_paged_cache(
+            chunk_size=args.stages[0].stage_chunk_size,
+            disable_gqa=True,
+            gqa_q=q,
+        )
+        # v = args.gather_v_from_paged_cache(
+        #     chunk_size=args.stages[0].stage_chunk_size,
+        #     disable_gqa=True,
+        #     gqa_q=q,
+        # )
 
     if args.q_mask is None:
         q_bsa = q
@@ -471,6 +492,15 @@ def dual_stage_quadratic_hip_attention(
 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
+                    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE
+                    and (BDST > 1)
+                    and (args.position_ids.shape[0] == 1)
+                ):
+                    k_dense = k[:, :TDST, :, :]
+                    chunk_size = 1024
+                    for t_start in range(0, TDST, chunk_size):
+                        k_slice = [:, t_start:t_start+chunk_size]
+                elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
                     and (BDST > 1)
@@ -801,8 +831,17 @@ def dual_stage_quadratic_hip_attention(
                 if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
-                    out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
+                    # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
+
+                    if SGLANG_DIST_AVAILABLE and get_tensor_model_parallel_world_size() > 1:
+                        out_scores_tp = out_scores
+                        out_scores = tensor_model_parallel_all_gather(out_scores_tp.permute(0, 1, 3, 2).contiguous()).permute(0, 1, 3, 2).contiguous()
+                    
+                    out_scores = torch.amax(out_scores, keepdim=True, dim=2)
+
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
+                else:
+                    args.disable_flashdecode = True
 
                 if args.offload_cache is not None:
                     # print('after masking')
