@@ -69,9 +69,8 @@ class HiPModelOffloadCache:
                     cur_max_mask_cache_token_size *= 2
             else:
                 base_mask_cache_tokens = (
-                    layer_config.sink_token_size
-                    + layer_config.sliding_window_size
-                    + layer_config.second_stage_k
+                    (max_token_size / layer_config.stages[0].stage_chunk_size)
+                    * 2 * math.log2(layer_config.stages[0].stage_chunk_size)
                 )
                 cur_max_mask_cache_token_size = math.ceil(
                     max_mask_cache_factor * base_mask_cache_tokens
@@ -83,7 +82,9 @@ class HiPModelOffloadCache:
                     cur_max_sa_cache_token_size *= 2
             else:
                 base_sa_cache_tokens = (
-                    max_token_size / layer_config.stages[0].stage_chunk_size
+                    layer_config.sink_token_size
+                    + layer_config.sliding_window_size
+                    + layer_config.second_stage_k
                 )
                 cur_max_sa_cache_token_size = math.ceil(
                     max_sa_cache_factor * base_sa_cache_tokens
