@@ -499,7 +499,7 @@ def dual_stage_quadratic_hip_attention(
                     k_dense = k[:, :TDST, :, :]
                     chunk_size = 1024
                     for t_start in range(0, TDST, chunk_size):
-                        k_slice = [:, t_start:t_start+chunk_size]
+                        k_slice = k_dense[:, t_start:t_start+chunk_size]
                 elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
