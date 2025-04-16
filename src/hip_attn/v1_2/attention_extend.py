@@ -36,6 +36,7 @@ try:
         get_tensor_model_parallel_world_size,
         tensor_model_parallel_all_gather,
     )
+
     SGLANG_DIST_AVAILABLE = True
 except:
     SGLANG_DIST_AVAILABLE = False
@@ -62,8 +63,9 @@ def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
         and (not args.disable_flashdecode)
     ):
         block_sparse_attention_backend = decode_block_sparse_attention
-    
+
     return block_sparse_attention_backend
+
 
 @numba.njit(parallel=True)
 def render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q):
@@ -133,7 +135,7 @@ def render_plot_ks(indices, ks, debug, DEBUG_HEAD, BLOCK_SIZE_Q):
 
 
 DEBUG = os.getenv("HIP_DEBUG", "0") == "1"
-DEBUG_LOGALL = os.getenv("HIP_DEBUG_LOGALL", '0') == '1'
+DEBUG_LOGALL = os.getenv("HIP_DEBUG_LOGALL", "0") == "1"
 __logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
@@ -149,11 +151,11 @@ def dual_stage_quadratic_hip_attention(
     global DEBUG
     DEBUG_HEAD = -1
 
-    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = os.getenv(
-        'HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE', '0'
-    ) == '1'
+    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
+        os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
+    )
 
-    if (q.shape[1] == 1):
+    if q.shape[1] == 1:
         pass
     elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
         # FIXME: just for dev
@@ -499,7 +501,7 @@ def dual_stage_quadratic_hip_attention(
                     k_dense = k[:, :TDST, :, :]
                     chunk_size = 1024
                     for t_start in range(0, TDST, chunk_size):
-                        k_slice = k_dense[:, t_start:t_start+chunk_size]
+                        k_slice = k_dense[:, t_start : t_start + chunk_size]
                 elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
@@ -833,10 +835,19 @@ def dual_stage_quadratic_hip_attention(
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
                     # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
 
-                    if SGLANG_DIST_AVAILABLE and get_tensor_model_parallel_world_size() > 1:
+                    if (
+                        SGLANG_DIST_AVAILABLE
+                        and get_tensor_model_parallel_world_size() > 1
+                    ):
                         out_scores_tp = out_scores
-                        out_scores = tensor_model_parallel_all_gather(out_scores_tp.permute(0, 1, 3, 2).contiguous()).permute(0, 1, 3, 2).contiguous()
-                    
+                        out_scores = (
+                            tensor_model_parallel_all_gather(
+                                out_scores_tp.permute(0, 1, 3, 2).contiguous()
+                            )
+                            .permute(0, 1, 3, 2)
+                            .contiguous()
+                        )
+
                     out_scores = torch.amax(out_scores, keepdim=True, dim=2)
 
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
@@ -1027,8 +1038,11 @@ def dual_stage_quadratic_hip_attention(
                 )
                 if DEBUG_LOGALL:
                     __logall_index += 1
-                    os.makedirs('./cache/mask_log', exist_ok=True)
-                    cv2.imwrite(f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png", debug * 255)
+                    os.makedirs("./cache/mask_log", exist_ok=True)
+                    cv2.imwrite(
+                        f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png",
+                        debug * 255,
+                    )
                 else:
                     cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
                 # print(f'saved dummy_sampled_stage_{i_stage}.png')
@@ -1170,9 +1184,12 @@ def dual_stage_quadratic_hip_attention(
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
             if DEBUG_LOGALL:
-                os.makedirs('./cache/mask_log', exist_ok=True)
+                os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
-                cv2.imwrite(f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png", debug * 255)
+                cv2.imwrite(
+                    f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
+                    debug * 255,
+                )
             else:
                 cv2.imwrite("dummy_sampled_final.png", debug * 255)
             # print('saved dummy_sampled_final.png')

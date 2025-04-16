@@ -1,4 +1,5 @@
 import os
+
 import requests
 from transformers import AutoTokenizer
 
@@ -70,10 +71,10 @@ class SglangModel:
             response = requests.post(
                 f"{self.endpoint}/v1/chat/completions",
                 headers={
-                    'Authorization': f'Bearer {os.getenv("HIP_SGLANG_APIKEY", "sk-dummy")}'
+                    "Authorization": f'Bearer {os.getenv("HIP_SGLANG_APIKEY", "sk-dummy")}'
                 },
                 json={
-                    "model": os.getenv('HIP_SGLANG_MODEL', 'anything'),
+                    "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
                     "messages": input_text,
                     "max_tokens": max_tokens,
                     "top_p": 0.000000000001,

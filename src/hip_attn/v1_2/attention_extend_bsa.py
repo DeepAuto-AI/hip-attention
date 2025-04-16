@@ -485,7 +485,10 @@ def block_sparse_attention_cuda_step(
             if not CHUNKED_SW:
                 qk_mask = (
                     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                    | ((pos_tdst - 1)[:, None] >= (idx_tsrc + sliding_window_size)[None, :])
+                    | (
+                        (pos_tdst - 1)[:, None]
+                        >= (idx_tsrc + sliding_window_size)[None, :]
+                    )
                     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                 )
             else:
@@ -500,7 +503,14 @@ def block_sparse_attention_cuda_step(
                     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                     # | idx_tsrc[None, :] < ((pos_tdst - 1) - ((pos_tdst - 1) % sliding_window_size))[:, None]
                     | (
-                        (idx_tsrc[None, :] < ((pos_tdst - 1) // sliding_window_size * sliding_window_size)[:, None])
+                        (
+                            idx_tsrc[None, :]
+                            < (
+                                (pos_tdst - 1)
+                                // sliding_window_size
+                                * sliding_window_size
+                            )[:, None]
+                        )
                         & ((pos_tdst - 1)[:, None] >= (idx_tsrc + 1)[None, :])
                     )
                 )

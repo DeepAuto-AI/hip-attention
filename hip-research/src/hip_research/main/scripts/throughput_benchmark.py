@@ -25,6 +25,7 @@ class RequestStatistics:
 def is_third_party(endpoint):
     return any([keyword in endpoint for keyword in ["together", "friendli"]])
 
+
 def stream_chat_completion(
     endpoint: str, messages, num_prefill: int, num_decode: int, num_concurrent: int
 ):
@@ -32,7 +33,7 @@ def stream_chat_completion(
         url = f"{endpoint}/flush_cache"
         requests.post(url)
 
-    if 'friendli' in endpoint:
+    if "friendli" in endpoint:
         url = f"{endpoint}/v1/completions"
     else:
         url = f"{endpoint}/v1/chat/completions"
@@ -41,10 +42,10 @@ def stream_chat_completion(
         "Content-Type": "application/json",
     }
     # Note the 'stream': True parameter
-    if 'friendli' in endpoint:
+    if "friendli" in endpoint:
         data = {
             "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
-            "prompt": messages[-1]['content'],
+            "prompt": messages[-1]["content"],
             "temperature": 0.0,
             "max_tokens": num_decode,
             "min_tokens": num_decode,
@@ -119,16 +120,26 @@ def stream_chat_completion(
         num_returned=num_returned,
     )
 
+
 def shuffle(lst):
     import random
+
     random.shuffle(lst)
     return lst
+
 
 def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
     header = "There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
     passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
     footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
-    filler = " ".join(shuffle("The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ".split())) + " "
+    filler = (
+        " ".join(
+            shuffle(
+                "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ".split()
+            )
+        )
+        + " "
+    )
     len_filler = tokenizer(filler, return_tensors="pt").input_ids.shape[-1]
     num_filler = math.ceil(seq_len * 1024 / len_filler * 0.95)
 

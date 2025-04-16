@@ -398,7 +398,7 @@ def _fwd_kernel_stage1(
         kv_blocks_per_split = 0
         split_kv_block_start = 0
         split_kv_block_end = 0
-    
+
     e_max = tl.full([BLOCK_H, 1], -float("inf"), dtype=tl.float32)  # m_i
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
@@ -822,7 +822,7 @@ def _fwd_kernel_stage1(
                 pass
 
     # process sink tokens
-    if (sink_token_size > 0):
+    if sink_token_size > 0:
         sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
         split_sink_start = sink_tokens_per_split * sink_split_kv_id
         split_sink_end = tl.minimum(

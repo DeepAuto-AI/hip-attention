@@ -5,8 +5,10 @@ from typing import Any, Optional
 import torch
 import triton
 
-from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
-from hip_attn.v1_2.attention_extend import get_block_sparse_backend
+from hip_attn.v1_2.attention_extend import (
+    dual_stage_quadratic_hip_attention,
+    get_block_sparse_backend,
+)
 from hip_attn.v1_2.attention_metadata import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
@@ -694,7 +696,7 @@ def _forward_paged_hip(
         bsa_fn = get_block_sparse_backend(args, query)
 
         # dist.barrier()
-        # if get_tensor_model_parallel_rank() == 0: 
+        # if get_tensor_model_parallel_rank() == 0:
         #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
 
         BSZ, TDST, HEAD, HID = query.shape
@@ -706,7 +708,9 @@ def _forward_paged_hip(
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.second_stage_k = 0
         args.sink_token_size = 0
-        args.sliding_window_size = sliding_window_size if sliding_window_size is not None else 1024
+        args.sliding_window_size = (
+            sliding_window_size if sliding_window_size is not None else 1024
+        )
         args.sliding_window_indices = None
 
         BDST = triton.cdiv(TDST, args.block_size_q)
