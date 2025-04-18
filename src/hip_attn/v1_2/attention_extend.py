@@ -31,6 +31,16 @@ from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
 
+try:
+    from sglang.srt.distributed import (
+        get_tensor_model_parallel_world_size,
+        tensor_model_parallel_all_gather,
+    )
+
+    SGLANG_DIST_AVAILABLE = True
+except:
+    SGLANG_DIST_AVAILABLE = False
+
 _NUM_STREAMING_MULTIPROCESSOR = None
 
 
@@ -41,6 +51,20 @@ def num_streaming_multiprocessor():
             numba.cuda.get_current_device().MULTIPROCESSOR_COUNT
         )
     return _NUM_STREAMING_MULTIPROCESSOR
+
+
+def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
+    block_sparse_attention_backend = block_sparse_attention
+
+    # Use flashdecode
+    if (
+        (q.shape[1] == 1)
+        and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
+        and (not args.disable_flashdecode)
+    ):
+        block_sparse_attention_backend = decode_block_sparse_attention
+
+    return block_sparse_attention_backend
 
 
 @numba.njit(parallel=True)
@@ -111,6 +135,8 @@ def render_plot_ks(indices, ks, debug, DEBUG_HEAD, BLOCK_SIZE_Q):
 
 
 DEBUG = os.getenv("HIP_DEBUG", "0") == "1"
+DEBUG_LOGALL = os.getenv("HIP_DEBUG_LOGALL", "0") == "1"
+__logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
 
@@ -121,15 +147,28 @@ def dual_stage_quadratic_hip_attention(
     args: HiPAttentionArgs,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
 ):
-    DEBUG_HEAD = -1
+    global __logall_index
     global DEBUG
+    DEBUG_HEAD = -1
 
-    # if (q.shape[1] == 1) and (not args.disable_flashdecode):
-    #     pass
-    # else:
-    #     # FIXME: just for dev
-    #     k = args.gather_k_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
-    #     v = args.gather_v_from_paged_cache(chunk_size=args.stages[0].stage_chunk_size)
+    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
+        os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
+    )
+
+    if q.shape[1] == 1:
+        pass
+    elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+        # FIXME: just for dev
+        k = args.gather_k_from_paged_cache(
+            chunk_size=args.stages[0].stage_chunk_size,
+            disable_gqa=True,
+            gqa_q=q,
+        )
+        # v = args.gather_v_from_paged_cache(
+        #     chunk_size=args.stages[0].stage_chunk_size,
+        #     disable_gqa=True,
+        #     gqa_q=q,
+        # )
 
     if args.q_mask is None:
         q_bsa = q
@@ -180,9 +219,9 @@ def dual_stage_quadratic_hip_attention(
         args.rope_range = (0, HID)
 
     if args.rope_is_neox_style is None:
-        warnings.warn(
-            "Deprecated: Please specify `rope_is_neox_style`. Defaulting to True."
-        )
+        # warnings.warn(
+        #     "Deprecated: Please specify `rope_is_neox_style`. Defaulting to True."
+        # )
         args.rope_is_neox_style = True
 
     if args.rope_range[0] == 0 and args.rope_range[1] == HID:
@@ -455,6 +494,15 @@ def dual_stage_quadratic_hip_attention(
 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
+                    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE
+                    and (BDST > 1)
+                    and (args.position_ids.shape[0] == 1)
+                ):
+                    k_dense = k[:, :TDST, :, :]
+                    chunk_size = 1024
+                    for t_start in range(0, TDST, chunk_size):
+                        k_slice = k_dense[:, t_start : t_start + chunk_size]
+                elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
                     and (BDST > 1)
@@ -785,8 +833,26 @@ def dual_stage_quadratic_hip_attention(
                 if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
-                    out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
+                    # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
+
+                    if (
+                        SGLANG_DIST_AVAILABLE
+                        and get_tensor_model_parallel_world_size() > 1
+                    ):
+                        out_scores_tp = out_scores
+                        out_scores = (
+                            tensor_model_parallel_all_gather(
+                                out_scores_tp.permute(0, 1, 3, 2).contiguous()
+                            )
+                            .permute(0, 1, 3, 2)
+                            .contiguous()
+                        )
+
+                    out_scores = torch.amax(out_scores, keepdim=True, dim=2)
+
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
+                else:
+                    args.disable_flashdecode = True
 
                 if args.offload_cache is not None:
                     # print('after masking')
@@ -970,7 +1036,15 @@ def dual_stage_quadratic_hip_attention(
                     causal_mask=True,
                     sliding_window_size=args.sliding_window_size,
                 )
-                cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
+                if DEBUG_LOGALL:
+                    __logall_index += 1
+                    os.makedirs("./cache/mask_log", exist_ok=True)
+                    cv2.imwrite(
+                        f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png",
+                        debug * 255,
+                    )
+                else:
+                    cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
                 # print(f'saved dummy_sampled_stage_{i_stage}.png')
 
         if STAGE_STRIDE > 1:
@@ -1109,7 +1183,15 @@ def dual_stage_quadratic_hip_attention(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
-            cv2.imwrite("dummy_sampled_final.png", debug * 255)
+            if DEBUG_LOGALL:
+                os.makedirs("./cache/mask_log", exist_ok=True)
+                __logall_index += 1
+                cv2.imwrite(
+                    f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
+                    debug * 255,
+                )
+            else:
+                cv2.imwrite("dummy_sampled_final.png", debug * 255)
             # print('saved dummy_sampled_final.png')
 
         args = args.clone()
@@ -1294,15 +1376,7 @@ def dual_stage_quadratic_hip_attention(
             - args.block_size_q
         )
 
-    block_sparse_attention_backend = block_sparse_attention
-
-    # Use flashdecode
-    if (
-        (TDST == 1)
-        and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
-        and (not args.disable_flashdecode)
-    ):
-        block_sparse_attention_backend = decode_block_sparse_attention
+    block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
 
     context = block_sparse_attention_backend(
         q=q_bsa,

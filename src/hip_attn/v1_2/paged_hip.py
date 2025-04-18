@@ -3,8 +3,12 @@ import warnings
 from typing import Any, Optional
 
 import torch
+import triton
 
-from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
+from hip_attn.v1_2.attention_extend import (
+    dual_stage_quadratic_hip_attention,
+    get_block_sparse_backend,
+)
 from hip_attn.v1_2.attention_metadata import (
     HiPAttentionArgs,
     HiPAttentionOutputMetadata,
@@ -13,6 +17,7 @@ from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
 
 try:
+    import torch.distributed as dist
     from sglang.srt.distributed import (
         get_tensor_model_parallel_rank,
         split_tensor_along_last_dim,
@@ -65,6 +70,8 @@ def forward_paged_hip(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_prefill is not None:
@@ -74,9 +81,9 @@ def forward_paged_hip(
         is_decode = not is_prefill
 
     if v is None:
-        warnings.warn(
-            "Deprecated behavior: `k` and `v` should be provided in order to precisely know the output size."
-        )
+        # warnings.warn(
+        #     "Deprecated behavior: `k` and `v` should be provided in order to precisely know the output size."
+        # )
 
         if v_cache is not None:
             v_hidden_dim = v_cache.shape[-1]
@@ -169,6 +176,8 @@ def forward_paged_hip(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
 
                 o[start_len : start_len + seq_len] = o_req
@@ -208,6 +217,8 @@ def forward_paged_hip(
             is_decode=is_decode,
             query_for_mask=query_for_mask,
             diag_sliding_window_indices=diag_sliding_window_indices,
+            sliding_window_size=sliding_window_size,
+            using_chunked_sliding_window=using_chunked_sliding_window,
         )
 
     return o, metadata_new
@@ -243,6 +254,8 @@ def _forward_paged_hip_validate(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -315,6 +328,8 @@ def _forward_paged_hip_validate(
         is_decode=is_decode,
         query_for_mask=query_for_mask,
         diag_sliding_window_indices=diag_sliding_window_indices,
+        sliding_window_size=sliding_window_size,
+        using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
     if require_validation:
@@ -347,6 +362,8 @@ def _forward_paged_hip_validate(
                 is_decode=is_decode,
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
+                sliding_window_size=sliding_window_size,
+                using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -381,6 +398,8 @@ def _forward_paged_hip_validate(
                 is_decode=is_decode,
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
+                sliding_window_size=sliding_window_size,
+                using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
             err_thresh = 1e-7
@@ -455,6 +474,8 @@ def _forward_paged_hip_validate(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -488,6 +509,8 @@ def _forward_paged_hip_validate(
                     is_decode=is_decode,
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
+                    sliding_window_size=sliding_window_size,
+                    using_chunked_sliding_window=using_chunked_sliding_window,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -552,6 +575,8 @@ def _forward_paged_hip(
     is_decode: bool = False,
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
+    sliding_window_size: Optional[int] = -1,
+    using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -662,11 +687,65 @@ def _forward_paged_hip(
         ),
         layer_id=layer_id,
         v_hidden_dim=v_hidden_dim,
+        using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
 
-    if is_decode or (query.shape[1] < (last_dense * 2)):
+    if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
+        bsa_fn = get_block_sparse_backend(args, query)
+
+        # dist.barrier()
+        # if get_tensor_model_parallel_rank() == 0:
+        #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+        BSZ, TDST, HEAD, HID = query.shape
+
+        args = args.clone()
+        if args.rope_range is None:
+            args.rope_range = (0, HID)
+        args.block_size_q = args.block_sparse_block_size_q
+        args.block_size_k = args.stages[-1].stage_chunk_size
+        args.second_stage_k = 0
+        args.sink_token_size = 0
+        args.sliding_window_size = (
+            sliding_window_size if sliding_window_size is not None else 1024
+        )
+        args.sliding_window_indices = None
+
+        BDST = triton.cdiv(TDST, args.block_size_q)
+        BH = BSZ * HEAD
+
+        indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+        ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros(
+            (BH, BDST, 2), dtype=torch.int64, device=query.device
+        )
+
+        context = bsa_fn(
+            q=(query * sm_scale).to(query.dtype),
+            k=k,
+            v=v,
+            seq_lens=args.position_ids + 1,
+            indices=indices,
+            ks=ks,
+            ks_count=ks_count,
+            ks_start_end=ks_start_end,
+            access_counter=None,
+            cache_miss_counter=None,
+            EXTEND_BACKEND=args.sa_extend_backend,
+            model_context_length=args.model_context_length,
+            extend_context_length=args.extend_context_length,
+            offload_update_cache=False,
+            args=args,
+        )
+        context = context.to(query.dtype)
+        metadata = None
+    elif is_decode or (query.shape[1] < (last_dense * 2)):
+        # dist.barrier()
+        # if get_tensor_model_parallel_rank() == 0: print('hip')
+
         context, metadata = dual_stage_quadratic_hip_attention(
             (query * sm_scale).to(query.dtype),
             k,

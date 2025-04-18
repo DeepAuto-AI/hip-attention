@@ -241,6 +241,7 @@ def _fwd_kernel_stage1(
     BLOCK_DV: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
+    CHUNKED_SW: tl.constexpr,
 ):
     cur_batch = tl.program_id(0).to(tl.int64)
     cur_head_id = tl.program_id(1).to(tl.int64)
@@ -389,15 +390,20 @@ def _fwd_kernel_stage1(
         range_start = 0
         range_end = 0
 
-    kv_blocks_per_split = tl.cdiv(BK, NUM_SPARSE_KV_SPLITS)
-    split_kv_block_start = kv_blocks_per_split * split_kv_id
-    split_kv_block_end = tl.minimum(split_kv_block_start + kv_blocks_per_split, BK)
+    if BK > 0:
+        kv_blocks_per_split = tl.cdiv(BK, NUM_SPARSE_KV_SPLITS)
+        split_kv_block_start = kv_blocks_per_split * split_kv_id
+        split_kv_block_end = tl.minimum(split_kv_block_start + kv_blocks_per_split, BK)
+    else:
+        kv_blocks_per_split = 0
+        split_kv_block_start = 0
+        split_kv_block_end = 0
 
     e_max = tl.full([BLOCK_H, 1], -float("inf"), dtype=tl.float32)  # m_i
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
-    if (split_kv_block_end > split_kv_block_start) and True:
+    if ((BK > 0) & (split_kv_block_end > split_kv_block_start)) and True:
         for i_bk in range(split_kv_block_start, split_kv_block_end, BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)  # [BLOCK_BK]
             mask_bk = (range_start <= idx_bk) & (
@@ -816,11 +822,16 @@ def _fwd_kernel_stage1(
                 pass
 
     # process sink tokens
-    sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
-    split_sink_start = sink_tokens_per_split * sink_split_kv_id
-    split_sink_end = tl.minimum(
-        split_sink_start + sink_tokens_per_split, sink_token_size
-    )
+    if sink_token_size > 0:
+        sink_tokens_per_split = tl.cdiv(sink_token_size, NUM_SINK_KV_SPLITS)
+        split_sink_start = sink_tokens_per_split * sink_split_kv_id
+        split_sink_end = tl.minimum(
+            split_sink_start + sink_tokens_per_split, sink_token_size
+        )
+    else:
+        sink_tokens_per_split = 0
+        split_sink_start = 0
+        split_sink_end = 0
     if (
         (sink_token_size > 0)
         & (0 <= sink_split_kv_id)
@@ -1617,6 +1628,7 @@ def _fwd_kernel_stage1(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                CHUNKED_SW=CHUNKED_SW,
             )
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
@@ -1750,6 +1762,7 @@ def decode_block_sparse_attention_stage1(
         BLOCK_DV=BLOCK_DV,
         EXTEND_BACKEND=extend_backend,
         UPDATE_CACHE=offload_update_cache,
+        CHUNKED_SW=args.using_chunked_sliding_window,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS
