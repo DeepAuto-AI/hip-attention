@@ -27,15 +27,26 @@ class HiPModelOffloadCache:
         layer_num: int,
         device: torch.device,
         hip_config: HiPAttentionConfig,
-        max_mask_cache_token_size: Optional[int] = None,
-        max_sa_cache_token_size: Optional[int] = None,
-        max_mask_cache_factor: Optional[float] = None,
-        max_sa_cache_factor: Optional[float] = None,
+        max_mask_cache_token_size: Union[List[Optional[int]], Optional[int]] = None,
+        max_sa_cache_token_size: Union[List[Optional[int]], Optional[int]] = None,
+        max_mask_cache_factor: Union[List[Optional[float]], Optional[float]] = None,
+        max_sa_cache_factor: Union[List[Optional[float]], Optional[float]] = None,
     ):
         from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache, format_size_bytes
 
         assert isinstance(device, torch.device)
         assert device.index is not None
+        
+        def repeat_if_not_list(obj):
+            if isinstance(obj, (list, tuple)):
+                assert len(obj) == layer_num
+            else:
+                obj = [obj, ] * layer_num
+            return obj
+        max_mask_cache_token_size = repeat_if_not_list(max_mask_cache_token_size)
+        max_sa_cache_token_size = repeat_if_not_list(max_sa_cache_token_size)
+        max_mask_cache_factor = repeat_if_not_list(max_mask_cache_factor)
+        max_sa_cache_factor = repeat_if_not_list(max_sa_cache_factor)
 
         self.size = max_token_size
         self.dtype = dtype
@@ -63,33 +74,37 @@ class HiPModelOffloadCache:
             else:
                 layer_config = hip_config.layers[layer_id]
 
-            if max_mask_cache_factor is None:
-                cur_max_mask_cache_token_size = max_mask_cache_token_size * head_num
+            if max_mask_cache_token_size[layer_id] is not None:
+                cur_max_mask_cache_token_size = max_mask_cache_token_size[layer_id] * head_num
                 if layer_id in hip_config.dense_layers:
                     cur_max_mask_cache_token_size *= 2
             else:
+                assert max_mask_cache_factor[layer_id] is not None
                 base_mask_cache_tokens = (
                     (max_token_size / layer_config.stages[0].stage_chunk_size)
                     * 2
                     * math.log2(layer_config.stages[0].stage_chunk_size)
                 )
                 cur_max_mask_cache_token_size = math.ceil(
-                    max_mask_cache_factor * base_mask_cache_tokens
+                    max_mask_cache_factor[layer_id] * base_mask_cache_tokens
                 )
+            assert isinstance(cur_max_mask_cache_token_size, int)
 
-            if max_sa_cache_factor is None:
-                cur_max_sa_cache_token_size = max_sa_cache_token_size * head_num
+            if max_sa_cache_token_size[layer_id] is not None:
+                cur_max_sa_cache_token_size = max_sa_cache_token_size[layer_id] * head_num
                 if layer_id in hip_config.dense_layers:
                     cur_max_sa_cache_token_size *= 2
             else:
+                assert max_sa_cache_factor[layer_id] is not None
                 base_sa_cache_tokens = (
                     layer_config.sink_token_size
                     + layer_config.sliding_window_size
                     + layer_config.second_stage_k
                 )
                 cur_max_sa_cache_token_size = math.ceil(
-                    max_sa_cache_factor * base_sa_cache_tokens
+                    max_sa_cache_factor[layer_id] * base_sa_cache_tokens
                 )
+            assert isinstance(cur_max_sa_cache_token_size, int)
 
             self.layer_buffer.append(
                 HiPOffloadCache(
@@ -114,7 +129,8 @@ class HiPModelOffloadCache:
                 f"[{layer_id + 1}/{layer_num}] "
                 f"CPU (UVM): {format_size_bytes(uvm_allocated_bytes)} and "
                 f"GPU: {format_size_bytes(gpu_allocated_bytes)} are allocated. "
-                f"({self.dtype} on {self.device})"
+                f"({self.dtype} on {self.device}, "
+                f"{tuple(self.layer_buffer[-1].k_uvm.bank_cpu.shape)}, {tuple(self.layer_buffer[-1].mask_k_cache.bank.shape)})"
             )
 
         # (layer_id, batch_id) -> (K, V, seq_len)
