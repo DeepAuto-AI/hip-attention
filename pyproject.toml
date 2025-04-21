@@ -35,7 +35,7 @@ dependencies = [
     # Required
     "torch",
     "triton",
-    "setuptools",  # Required by triton amd backend
+    "setuptools", # Required by triton amd backend
     "numba",
     "performer_pytorch",
     "peft",
@@ -45,6 +45,8 @@ dependencies = [
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",
+    # Debugging
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [project.urls]
