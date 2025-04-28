@@ -475,6 +475,7 @@ def block_sparse_attention_cuda_step(
     # if qk_mask == True, then dropped
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
+            assert not CHUNKED_SW
             qk_mask = (
                 ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
                 | ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :])
