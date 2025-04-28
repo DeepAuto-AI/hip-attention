@@ -690,6 +690,7 @@ def _forward_paged_hip(
         using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
+    force_dense_decode = os.getenv('HIP_DEBUG_FORCE_DENSE_DECODE', '0') == '1'
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
@@ -742,6 +743,15 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
+    elif force_dense_decode and is_decode:
+        args.sliding_window_size = 777
+        context, metadata = dual_stage_quadratic_hip_attention(
+            (query * sm_scale).to(query.dtype),
+            k,
+            v,
+            args=args,
+            cached_metadata=cached_metadata,
+        )
     elif is_decode or (query.shape[1] < (last_dense * 2)):
         # dist.barrier()
         # if get_tensor_model_parallel_rank() == 0: print('hip')
