@@ -742,7 +742,7 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif is_decode or (query.shape[1] < (last_dense * 2)):
+    elif is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
         # dist.barrier()
         # if get_tensor_model_parallel_rank() == 0: print('hip')
 
