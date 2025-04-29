@@ -36,13 +36,16 @@ class HiPModelOffloadCache:
 
         assert isinstance(device, torch.device)
         assert device.index is not None
-        
+
         def repeat_if_not_list(obj):
             if isinstance(obj, (list, tuple)):
                 assert len(obj) == layer_num
             else:
-                obj = [obj, ] * layer_num
+                obj = [
+                    obj,
+                ] * layer_num
             return obj
+
         max_mask_cache_token_size = repeat_if_not_list(max_mask_cache_token_size)
         max_sa_cache_token_size = repeat_if_not_list(max_sa_cache_token_size)
         max_mask_cache_factor = repeat_if_not_list(max_mask_cache_factor)
@@ -75,7 +78,9 @@ class HiPModelOffloadCache:
                 layer_config = hip_config.layers[layer_id]
 
             if max_mask_cache_token_size[layer_id] is not None:
-                cur_max_mask_cache_token_size = max_mask_cache_token_size[layer_id] * head_num
+                cur_max_mask_cache_token_size = (
+                    max_mask_cache_token_size[layer_id] * head_num
+                )
                 if layer_id in hip_config.dense_layers:
                     cur_max_mask_cache_token_size *= 2
             else:
@@ -91,7 +96,9 @@ class HiPModelOffloadCache:
             assert isinstance(cur_max_mask_cache_token_size, int)
 
             if max_sa_cache_token_size[layer_id] is not None:
-                cur_max_sa_cache_token_size = max_sa_cache_token_size[layer_id] * head_num
+                cur_max_sa_cache_token_size = (
+                    max_sa_cache_token_size[layer_id] * head_num
+                )
                 if layer_id in hip_config.dense_layers:
                     cur_max_sa_cache_token_size *= 2
             else:
