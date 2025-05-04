@@ -695,13 +695,13 @@ def _forward_paged_hip(
     
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
-    
-    delta_attention_args_window = int(delta_attention_args.split("-")[1].split("_")[1])
-    delta_attention_args_diff = int(delta_attention_args.split("-")[2].split("_")[1])
-    delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
-    delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
-    
     using_delta_attention = delta_attention_args is not None
+    
+    if using_delta_attention:
+        delta_attention_args_window = int(delta_attention_args.split("-")[1].split("_")[1])
+        delta_attention_args_diff = int(delta_attention_args.split("-")[2].split("_")[1])
+        delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
+        delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)
