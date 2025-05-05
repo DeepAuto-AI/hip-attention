@@ -690,6 +690,14 @@ def _forward_paged_hip(
         using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
+    using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
+    if is_decode:
+        using_dense_prefill = False
+    else:
+        using_dense_prefill = using_dense_prefill and (
+            layer_id in [0, 1, 2, 3]
+        )
+    
     force_dense_decode = os.getenv("HIP_DEBUG_FORCE_DENSE_DECODE", "0") == "1"
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
     
@@ -872,7 +880,7 @@ def _forward_paged_hip(
                     
                     context = context_sparse + context_diff
                     context = torch.cat([context, last_context_dense], dim=1)
-    elif force_dense_decode and is_decode:
+    elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_dense)):
         args.sliding_window_size = 777
         context, metadata = dual_stage_quadratic_hip_attention(
             (query * sm_scale).to(query.dtype),
