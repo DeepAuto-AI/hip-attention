@@ -691,7 +691,7 @@ def _forward_paged_hip(
     )
 
     force_dense_decode = os.getenv("HIP_DEBUG_FORCE_DENSE_DECODE", "0") == "1"
-    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
+    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "-1"))
     
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
