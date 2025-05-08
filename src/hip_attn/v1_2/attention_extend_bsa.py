@@ -57,6 +57,7 @@ def apply_rope_to_keys(
         (EXTEND_BACKEND == "streaming")
         | (EXTEND_BACKEND == "dynamic_extend")
         | (EXTEND_BACKEND == "infllm")
+        | (EXTEND_BACKEND == "clamp")
     ):
         pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
         if not NEED_APPLY_ROPE:
@@ -247,6 +248,12 @@ def apply_rope_to_keys(
                     )
                     new_tsrc = tl.maximum(
                         0, new_tsrc * 0 + pos_tdst_min - sliding_window_size
+                    )
+                elif EXTEND_BACKEND == "clamp":
+                    new_tsrc = idx_tsrc
+                    new_tsrc = tl.maximum(
+                        new_tsrc,
+                        new_tsrc * 0 + pos_tdst_min - (model_context_length - mask_tdst.shape[0])
                     )
                 else:
                     raise Exception()

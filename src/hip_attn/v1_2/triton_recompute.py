@@ -278,7 +278,8 @@ class _attention(torch.autograd.Function):
             (q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
         )
 
-        assert q.shape[1] in (1, 2, 4, 8, 16, 32, 48, 64, 96,)
+        # assert q.shape[1] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 48, 64, 80, 96,)
+        assert q.shape[1] <= 128
         grid = lambda args: (
             triton.cdiv(q.shape[2], args["BLOCK_M"]),
             q.shape[0] * q.shape[1],
