@@ -787,7 +787,7 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif using_delta_attention:
+    elif using_delta_attention and (query.shape[1] > 256):
         if is_decode or (using_dense_prefill and (not is_decode)):
             k_unpack = args.gather_k_from_paged_cache()
             v_unpack = args.gather_v_from_paged_cache()
