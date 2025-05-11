@@ -714,6 +714,9 @@ def _forward_paged_hip(
     force_dense_decode = os.getenv("HIP_DEBUG_FORCE_DENSE_DECODE", "0") == "1"
     last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "-1"))
     
+    if last_dense > 0:
+        last_dense += dst_seq_len % args.block_sparse_block_size_q
+    
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
     # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_64-decode_dense
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
@@ -805,10 +808,13 @@ def _forward_paged_hip(
                 
                 cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
                 sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
 
                 k_unpack = (
-                    (k_unpack * cos[:, :k_unpack.shape[1], :, :]) 
-                    + (rotate_half(k_unpack) * sin[:, :k_unpack.shape[1], :, :])
+                    (k_unpack * cos[:, idx_tsrc, :, :]) 
+                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
                 ).to(k_unpack.dtype)
 
                 query = (
@@ -952,10 +958,13 @@ def _forward_paged_hip(
                     
                     cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
                     sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                    
+                    idx_tsrc = torch.arange(0, repeated_k.shape[1], device=cos.device)
+                    idx_tsrc.clamp_min_(seq_len - args.model_context_length)
 
                     repeated_k = (
-                        (repeated_k * cos[:, :repeated_k.shape[1], :, :]) 
-                        + (rotate_half(repeated_k) * sin[:, :repeated_k.shape[1], :, :])
+                        (repeated_k * cos[:, idx_tsrc, :, :]) 
+                        + (rotate_half(repeated_k) * sin[:, idx_tsrc, :, :])
                     ).to(repeated_k.dtype)
 
                     query_for_recomp = (
@@ -992,13 +1001,13 @@ def _forward_paged_hip(
                         delta_attention_args_w, dim=1
                     )
             
-                    # (exp) linear interpolate diff
-                    context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
-                    context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
+                    # # (exp) linear interpolate diff
+                    # context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
+                    # context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
 
-                    idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
-                    idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
-                    context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
+                    # idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                    # idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
+                    # context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
                 
                     # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
                     # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
@@ -1034,6 +1043,11 @@ def _forward_paged_hip(
         k_unpack = k_unpack[:, :seq_len]
         v_unpack = v_unpack[:, :seq_len]
         
+        if k_unpack.dtype in [torch.uint8]:
+            k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
+            v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
+        assert k_unpack.dtype == query.dtype
+        
         # if layer_id == 0:
         #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
         
@@ -1045,10 +1059,13 @@ def _forward_paged_hip(
             
             cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
             sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+            
+            idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+            idx_tsrc.clamp_min_(seq_len - args.model_context_length)
 
             k_unpack = (
-                (k_unpack * cos[:, :k_unpack.shape[1], :, :]) 
-                + (rotate_half(k_unpack) * sin[:, :k_unpack.shape[1], :, :])
+                (k_unpack * cos[:, idx_tsrc, :, :]) 
+                + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
             ).to(k_unpack.dtype)
 
             query = (
@@ -1060,7 +1077,11 @@ def _forward_paged_hip(
         v_unpack = v_unpack[:, :seq_len]
         
         context = flash_attn_func(
-            query, k_unpack, v_unpack, causal=True, softmax_scale=sm_scale,
+            query, 
+            k_unpack, 
+            v_unpack, 
+            causal=True, 
+            softmax_scale=sm_scale,
         )
         
         metadata = None
@@ -1093,14 +1114,70 @@ def _forward_paged_hip(
 
             args.sliding_window_size = 777
             args.position_ids = position_ids[:, -last_dense:]
-            context, metadata = dual_stage_quadratic_hip_attention(
+            context_dense, metadata = dual_stage_quadratic_hip_attention(
                 (query[:, -last_dense:, :, :] * sm_scale).to(query.dtype),
                 k,
                 v,
                 args=args,
                 cached_metadata=cached_metadata,
             )
-            context_dense = context.to(query.dtype)
+            context_dense = context_dense.to(query.dtype)
+            
+            # assert not torch.cuda.is_current_stream_capturing()
+            # k_unpack = args.gather_k_from_paged_cache()
+            # v_unpack = args.gather_v_from_paged_cache()
+            
+            # position_ids = args.position_ids[:, -last_dense:]
+            # seq_len = position_ids.amax().item() + 1
+
+            # k_unpack = k_unpack[:, :seq_len]
+            # v_unpack = v_unpack[:, :seq_len]
+            
+            # if k_unpack.dtype in [torch.uint8]:
+            #     k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
+            #     v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
+            # assert k_unpack.dtype == query.dtype
+            
+            # # if layer_id == 0:
+            # #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
+            
+            # query_for_dense = query[:, -last_dense:, :, :]
+            
+            # if args.need_apply_rope and args.using_extend:
+            #     cos = args.rope_cos
+            #     sin = args.rope_sin
+            #     assert cos.ndim == 2, cos.shape
+            #     assert sin.shape == cos.shape, sin.shape
+                
+            #     cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+            #     sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+            #     idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+            #     idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+            #     k_unpack = (
+            #         (k_unpack * cos[:, idx_tsrc, :, :]) 
+            #         + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+            #     ).to(k_unpack.dtype)
+
+            #     query_for_dense = (
+            #         (query_for_dense * cos[:, position_ids.view(-1), :, :]) 
+            #         + (rotate_half(query_for_dense) * sin[:, position_ids.view(-1), :, :])
+            #     ).to(query_for_dense.dtype)
+            
+            
+            # context_dense = flash_attn_func(
+            #     query_for_dense, 
+            #     k_unpack, 
+            #     v_unpack, 
+            #     causal=True, 
+            #     softmax_scale=sm_scale,
+            # )
+            # context_dense = context_dense.to(query_for_dense.dtype)
+            
+            # # if get_local_rank() == 0:
+            # #     print(context_dense)
+            # #     print(layer_id, query_for_dense.shape, k_unpack.shape, seq_len, args.model_context_length, args.need_apply_rope and args.using_extend)
 
             context = torch.cat([context_sparse, context_dense], dim=1)
         else:
