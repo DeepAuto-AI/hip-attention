@@ -1003,6 +1003,7 @@ def block_sparse_attention_cuda(
                 rope_is_neox_style,
             )
 
+    # 60ms
     if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
@@ -1417,7 +1418,8 @@ def block_sparse_attention_cuda(
                 )
             else:
                 pass
-
+    
+    # 6ms
     if (sink_token_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
         for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
@@ -1804,6 +1806,7 @@ def block_sparse_attention_cuda(
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
 
+    # 29ms
     if (sliding_window_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
         # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST

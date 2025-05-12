@@ -23,19 +23,21 @@ def main_debug():
     if query_seq_dups < 0:
         query_seq_dups = seq_dups
     block_size = int(os.getenv("BLOCK_SIZE", "64"))
-    num_samples = int(os.getenv("NUM_SAMPLES", "100"))
+    num_samples = int(os.getenv("NUM_SAMPLES", "20"))
     batch_size = int(os.getenv("BATCH_SIZE", "1"))
     mask_only = int(os.getenv("MASK_ONLY", "0")) == "1"
     k_group_size = int(os.getenv("K_GROUP_SIZE", "1"))
 
     assert seq_dups > 0
+    
+    using_extend = True
 
     q, k, v, out, cos, sin = load_checkouts(
         idx=0,
         window=40,
         seq_len=seq_len,
         return_cos_sin=True,
-        derope=True,
+        derope=using_extend,
         dtype=torch.bfloat16,
     )
     HEAD = q.shape[0]
@@ -55,63 +57,6 @@ def main_debug():
 
     q_mask = q
     k_mask = k
-    idx_pca_hid_q = None
-    idx_pca_hid_k = None
-
-    # q_pca = q[...,:32].contiguous()
-    # k_pca = k[...,:32].contiguous()
-
-    def pca(q, k, hid=32):
-        import einx
-
-        KV_HEAD_GROUP = q.shape[2] // k.shape[2]
-        q_ori = q
-        q = (
-            q.view(
-                q.shape[0],
-                q.shape[1],
-                q.shape[2] // KV_HEAD_GROUP,
-                KV_HEAD_GROUP,
-                q.shape[3],
-            )
-            .permute(0, 3, 1, 2, 4)
-            .flatten(0, 1)
-        )
-
-        t = einx.rearrange("n t h d -> h (n t) d", q).float()
-        _, _, proj = torch.linalg.svd(t, full_matrices=False)
-        proj = proj.to(q.dtype)  # type: torch.Tensor
-
-        q = einx.dot("n t h d1, h d1 d2 -> n t h d2", q, proj)
-        k = einx.dot("n t h d1, h d1 d2 -> n t h d2", k, proj)
-
-        x_colsum = q.flatten(0, 1).abs().mean(dim=0, keepdim=False)
-        y_colsum = k.flatten(0, 1).abs().mean(dim=0, keepdim=False)
-        colsum = x_colsum + y_colsum
-
-        _, topk_indices = colsum.topk(dim=-1, k=hid)
-        idx_hid_keys = topk_indices.sort(dim=-1).values
-        idx_hid_queries = idx_hid_keys.repeat_interleave(KV_HEAD_GROUP, 0)
-
-        debug = np.zeros((idx_hid_queries.shape[0], q.shape[-1]), dtype=np.uint8)
-        for i in range(idx_hid_queries.shape[0]):
-            for j in range(idx_hid_queries.shape[1]):
-                debug[i, idx_hid_queries[i, j]] = 255
-        cv2.imwrite("dummy_idx_pca.png", debug)
-
-        assert idx_hid_keys.ndim == 2
-        assert idx_hid_keys.shape == (k.shape[2], hid), idx_hid_keys.shape
-        q = q_ori.gather(
-            index=idx_hid_queries[None, None, :, :].expand(*q_ori.shape[:-1], -1),
-            dim=-1,
-        )
-        k = k.gather(
-            index=idx_hid_keys[None, None, :, :].expand(*k.shape[:-1], -1), dim=-1
-        )
-
-        return q, k, idx_hid_queries, idx_hid_keys
-
-    # q_pca, k_pca, idx_pca_hid_q, idx_pca_hid_k = pca(q, k)
 
     k_mask = k
     _N, _T, _H, _D = k.shape
@@ -141,29 +86,6 @@ def main_debug():
 
     preset = os.getenv("HIP_PRESET", "mid")
     config_stage = {
-        "high": [
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=1,
-                stage_chunk_size=64,
-                stage_k=None,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=1,
-                stage_chunk_size=16,
-                stage_k=65536,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=1,
-                stage_chunk_size=1,
-                stage_k=16384,
-                stage_stride=1,
-            ),
-        ],
         "mid": [
             ScanStage(
                 stage_block_size_q=64,
@@ -184,22 +106,6 @@ def main_debug():
                 stage_block_stride_q=1,
                 stage_chunk_size=16,
                 stage_k=8192,
-                stage_stride=1,
-            ),
-        ],
-        "low": [
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=4,
-                stage_chunk_size=256,
-                stage_k=None,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=4,
-                stage_chunk_size=32,
-                stage_k=32768,
                 stage_stride=1,
             ),
         ],
@@ -249,8 +155,8 @@ def main_debug():
             sliding_window_size=128 if preset == "debug" else 1024,
             sink_token_size=64 if preset == "debug" else 256,
             # position_ids=position_ids,
-            using_extend=True,
-            need_apply_rope=True,
+            using_extend=using_extend,
+            need_apply_rope=using_extend,
             rope_cos=cos,
             rope_sin=sin,
             second_stage_k=config_second_k,
@@ -259,45 +165,21 @@ def main_debug():
             model_context_length=65536,
             # scan_early_terminate=1,
             # stage_early_terminate=1,
-            scan_extend_backend="streaming",
+            scan_extend_backend="relative",
             sa_extend_backend=config_sa_extend_backend,
             stage_early_terminate=k_group_size,
             mask_only=mask_only,
         ),
     )
+    
+    ls_hip_extend = []
+    ls_hip = []
+    ls_fa = []
 
-    # hip_1k_kwargs = dict(
-    #     q=q,
-    #     k=k,
-    #     v=v,
-    #     args=HiPAttentionArgs(
-    #         mask_k=1024,
-    #         block_size_q=64,
-    #         block_stride_q=2,
-    #         block_size_k=2,
-    #         block_stride_k=1,
-    #     ),
-    #     mask_only=mask_only,
-    # )
-
-    # hip_512_kwargs = dict(
-    #     q=q,
-    #     k=k,
-    #     v=v,
-    #     args=HiPAttentionArgs(
-    #         mask_k=512,
-    #         block_size_q=64,
-    #         block_stride_q=2,
-    #         block_size_k=2,
-    #         block_stride_k=1,
-    #     ),
-    #     mask_only=mask_only,
-    # )
-
-    refresh_interval = 8 if is_decode else 2
+    refresh_interval = 8 if is_decode else 1
 
     metadata = None
-    for i in range(min(num_samples, 24)):
+    for i in range(min(num_samples, 5)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
 
@@ -317,7 +199,9 @@ def main_debug():
         end.record()
 
         end.synchronize()
-        print(start.elapsed_time(end))
+        latency = start.elapsed_time(end)
+        if i > 3: ls_hip_extend.append(latency)
+        print(latency)
 
     print("-" * 20)
 
@@ -330,7 +214,7 @@ def main_debug():
     dual_stage_kwargs["args"].need_apply_rope = False
 
     metadata = None
-    for i in range(min(num_samples, 24)):
+    for i in range(min(num_samples, 5)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
 
@@ -350,55 +234,14 @@ def main_debug():
         end.record()
 
         end.synchronize()
-        print(start.elapsed_time(end))
+        latency = start.elapsed_time(end)
+        if i > 3: ls_hip.append(latency)
+        print(latency)
 
     print("-" * 20)
 
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
-
-    # metadata = None
-    # for i in range(min(num_samples, 24)):
-    #     start = torch.cuda.Event(True)
-    #     end = torch.cuda.Event(True)
-
-    #     start.record()
-    #     context, metadata = hip_attention_11(
-    #         **hip_1k_kwargs,
-    #         previous_metadata=metadata,
-    #     )
-    #     end.record()
-
-    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
-    #         metadata = None
-
-    #     end.synchronize()
-    #     print(start.elapsed_time(end))
-
-    # print('-' * 20)
-
-    # torch.cuda.synchronize()
-    # torch.cuda.empty_cache()
-
-    # metadata = None
-    # for i in range(min(num_samples, 24)):
-    #     start = torch.cuda.Event(True)
-    #     end = torch.cuda.Event(True)
-
-    #     start.record()
-    #     context, metadata = hip_attention_11(
-    #         **hip_512_kwargs,
-    #         previous_metadata=metadata,
-    #     )
-    #     end.record()
-
-    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
-    #         metadata = None
-
-    #     end.synchronize()
-    #     print(start.elapsed_time(end))
-
-    # print('-' * 20)
 
     for i in range(min(num_samples, 5)):
         start = torch.cuda.Event(True)
@@ -417,4 +260,15 @@ def main_debug():
         end.record()
 
         end.synchronize()
-        print(start.elapsed_time(end))
+        latency = start.elapsed_time(end)
+        if i > 3: ls_fa.append(latency)
+        print(latency)
+    
+    print("-" * 20)
+    
+    print(f'hip_extend,{sum(ls_hip_extend) / len(ls_hip_extend)}')
+    print(f'hip,{sum(ls_hip) / len(ls_hip)}')
+    print(f'fa,{sum(ls_fa) / len(ls_fa)}')
+
+if __name__ == '__main__':
+    main_debug()

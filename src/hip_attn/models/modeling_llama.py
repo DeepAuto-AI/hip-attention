@@ -632,8 +632,8 @@ class LlamaCustomAttention(LlamaAttention):
         bsz, q_len, _ = hidden_states.size()
 
         if self.attention_method in ["hip", "skewed"]:
-            force_extend = True
-            need_apply_rope = True
+            force_extend = os.getenv('HIP_EXTEND', '1') == '1'
+            need_apply_rope = force_extend
             model_context_length = 131072
         else:
             force_extend = False
@@ -833,6 +833,7 @@ class LlamaCustomAttention(LlamaAttention):
                 layer_idx=self.layer_idx,
                 extend_stages=self.tree_extend_stages,
                 sliding_window_indices=self.sliding_window_indices,
+                using_extend=force_extend,
             )
         else:
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -890,6 +891,7 @@ class LlamaCustomAttention(LlamaAttention):
                 layer_idx=self.layer_idx,
                 extend_stages=self.tree_extend_stages,
                 sliding_window_indices=self.sliding_window_indices,
+                using_extend=force_extend,
             )
 
         if os.environ.get("CHECKOUT_STATES", "0") == "1":
