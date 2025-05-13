@@ -31,6 +31,9 @@ class HiPModelOffloadCache:
         max_sa_cache_token_size: Union[List[Optional[int]], Optional[int]] = None,
         max_mask_cache_factor: Union[List[Optional[float]], Optional[float]] = None,
         max_sa_cache_factor: Union[List[Optional[float]], Optional[float]] = None,
+        chunked_attention_size: int = 0,
+        irope_offset: int = 0,
+        irope_interval: int = 0,
     ):
         from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache, format_size_bytes
 
@@ -60,9 +63,9 @@ class HiPModelOffloadCache:
             self.store_dtype = dtype
         self.device = device
 
-        self.head_num = head_num
-        self.head_dim = head_dim
-        self.layer_num = layer_num
+        self.chunked_attention_size = chunked_attention_size
+        self.irope_offset = irope_offset
+        self.irope_interval = irope_interval
 
         # TODO: derive token sizes from size
         self.head_num = head_num
@@ -145,6 +148,8 @@ class HiPModelOffloadCache:
         self.prefetched_kv: Dict[Tuple[int, int], Tuple[Tensor, Tensor, int]] = {}
 
         self.async_set_threads: Set[threading.Thread] = set()
+
+        self.copy_stream = torch.cuda.Stream(self.device)
 
         self.enable_async = os.getenv("HIP_DISABLE_AYSNC", "0") == "0"
 
@@ -265,7 +270,7 @@ class HiPModelOffloadCache:
             #         raise RuntimeError('deadlock')
 
         assert handle_id in self.prefetched_kv, "did prefetch successed?"
-        k, v, prefix_seq_len, table = self.prefetched_kv.pop(handle_id)
+        k, v, prefix_seq_len, table, copy_event = self.prefetched_kv.pop(handle_id)
 
         assert isinstance(k, Tensor)
         assert isinstance(v, Tensor)
@@ -289,6 +294,9 @@ class HiPModelOffloadCache:
             torch.bfloat16,
             torch.float32,
         ]
+
+        if copy_event is not None:
+            torch.cuda.current_stream().wait_event(copy_event)
 
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
@@ -340,6 +348,7 @@ class HiPModelOffloadCache:
 
         if not self.enable_async:
             async_copy = False
+        # async_copy = False
 
         # pass async_copy=True when only prefill (eager mode)
         assert (not async_copy) or (
@@ -351,26 +360,28 @@ class HiPModelOffloadCache:
             cache_v = cache_v.to(self.dtype)
 
         if async_copy:
+            stream = self.copy_stream
+
+            table_gpu = table.to(torch.int64)
+
             start_event = torch.cuda.Event()
-            start_event.record()
+            start_event.record(torch.cuda.current_stream(self.device))
 
             def thread_main():
                 try:
-                    start_event.synchronize()
-                    stream = torch.cuda.Stream(device=self.device)
+                    stream.wait_event(start_event)
 
                     with torch.cuda.stream(stream):
-                        table_gpu = table.to(torch.int64)
                         table_cpu = table.to("cpu", non_blocking=False)
                         cache_k_cpu = cache_k.to("cpu", non_blocking=False)
                         cache_v_cpu = cache_v.to("cpu", non_blocking=False)
+
                         self.layer_buffer[layer_id].set_kv_buffer(
                             table=table_cpu,
                             table_gpu=table_gpu,
                             cache_k=cache_k_cpu,
                             cache_v=cache_v_cpu,
                         )
-                    stream.synchronize()
                 finally:
                     self.async_set_threads.remove(t)
 
@@ -466,22 +477,37 @@ class HiPModelOffloadCache:
         extend_prefix_lens_cpu: np.array,
         extend_seq_lens_cpu: np.array,
     ):
+        if self.chunked_attention_size > 0:
+            if ((layer_id + self.irope_offset) % self.irope_interval) == 0:
+                window = 0
+            else:
+                # for chunked attention
+                window = self.chunked_attention_size + np.amax(extend_seq_lens_cpu).item() + 1024
+        else:
+            window = 0
+
         for ibatch in range(batch_size):
             curr_req_pool_indices = req_pool_indices[ibatch : ibatch + 1]
             block_table = req_to_token.index_select(dim=0, index=curr_req_pool_indices)[
                 0,
                 : extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch],
             ]
+            if window > 0:
+                pad = max(0, extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch] - window)
+                block_table = block_table[pad:].contiguous()
+            else:
+                pad = 0
             # print(block_table, block_table.shape)
             self._prefetch_prefix_kv_buffer(
                 layer_id=layer_id,
                 batch_id=ibatch,
                 table=block_table,
                 prefix_seq_len=extend_prefix_lens_cpu[ibatch],
+                pad=pad,
             )
 
     def _prefetch_prefix_kv_buffer(
-        self, layer_id: int, batch_id: int, table: Tensor, prefix_seq_len: int
+        self, layer_id: int, batch_id: int, table: Tensor, prefix_seq_len: int, pad: int,
     ) -> threading.Thread:
         # you must call before get fetched prefix
         assert table.ndim == 1
@@ -493,27 +519,32 @@ class HiPModelOffloadCache:
         assert handle_id not in self.prefetched_kv, handle_id
 
         if self.enable_async:
-            start_event = torch.cuda.Event()
+            stream = self.copy_stream
+            current_stream = torch.cuda.current_stream(self.device)
+
             table = table.to(torch.int64).to("cpu")
-            start_event.record()
+
+            start_event = torch.cuda.Event()
+            start_event.record(current_stream)
 
             # torch.cuda.synchronize()
             def thread_main():
                 try:
-                    # BUG(heejun): i think this line is quite suspicious hmm
-                    start_event.synchronize()
-                    stream = torch.cuda.Stream(device=self.device, priority=0)
+                    stream.wait_event(start_event)
 
                     with torch.cuda.stream(stream):
                         k, v = hip_offload_cache.prefetch_prefix_kv_buffer(
                             table=table,
                             device=self.device,
+                            pad=pad,
                         )
                         assert k.device == self.device
                         assert v.device == self.device
+                    
+                    copy_event = torch.cuda.Event()
+                    copy_event.record(stream)
 
-                    stream.synchronize()
-                    self.prefetched_kv[handle_id] = (k, v, prefix_seq_len, table)
+                    self.prefetched_kv[handle_id] = (k, v, prefix_seq_len, table, copy_event)
                 except Exception as ex:
                     print(f"{handle_id} thread dead")
                     raise Exception("thread dead") from ex
@@ -527,11 +558,12 @@ class HiPModelOffloadCache:
             k, v = hip_offload_cache.prefetch_prefix_kv_buffer(
                 table=table.to(torch.int64),
                 device=self.device,
+                pad=pad,
             )
             assert k.device == self.device
             assert v.device == self.device
-            torch.cuda.synchronize()
-            self.prefetched_kv[handle_id] = (k, v, prefix_seq_len, table)
+
+            self.prefetched_kv[handle_id] = (k, v, prefix_seq_len, table, None)
         return
 
     def _synchronize(self):

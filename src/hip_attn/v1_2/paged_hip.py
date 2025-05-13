@@ -1048,8 +1048,7 @@ def _forward_paged_hip(
             args_sw.block_size_q = args_sw.block_sparse_block_size_q
             args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
             args_sw.second_stage_k = 0
-            # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
-            args_sw.sliding_window_size = delta_attention_args_window
+            args_sw.sliding_window_size = args_sw.model_context_length
             args_sw.sliding_window_indices = None
 
             BDST = triton.cdiv(TDST, args_sw.block_size_q)

@@ -1,8 +1,11 @@
 import json
+import os
 from dataclasses import InitVar, dataclass, field
 from typing import List, Optional, Union
 
 from hip_attn.v1_2.attention_metadata import ScanStage
+
+HIP_CONFIG_PRESET = os.getenv('HIP_CONFIG_PRESET', 'default')
 
 _DEFAULT_STAGES = [
     ScanStage(
@@ -65,20 +68,74 @@ class HiPAttentionPerLayerConfig:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
 
 
-_DEFAULT_LAEYRS = [
-    HiPAttentionPerLayerConfig(
-        # sliding_window_size = 777, # NOTE: debugging sw
-        second_stage_k=4096,
-        sa_extend_backend="streaming",
-        scan_extend_backend="streaming",
-    ),
-    HiPAttentionPerLayerConfig(
-        # sliding_window_size = 777, # NOTE: debugging sw
-        second_stage_k=2048,
-        sa_extend_backend="streaming",
-        scan_extend_backend="relative",
-    ),
-]
+if HIP_CONFIG_PRESET == 'default':
+    _DEFAULT_LAEYRS = [
+        HiPAttentionPerLayerConfig(
+            # sliding_window_size = 777, # NOTE: debugging sw
+            second_stage_k=4096,
+            sa_extend_backend="streaming",
+            scan_extend_backend="streaming",
+        ),
+        HiPAttentionPerLayerConfig(
+            # sliding_window_size = 777, # NOTE: debugging sw
+            second_stage_k=2048,
+            sa_extend_backend="streaming",
+            scan_extend_backend="relative",
+        ),
+    ]
+    _DEFAULT_LAEYRS_DECODE = _DEFAULT_LAEYRS
+elif HIP_CONFIG_PRESET == 'llama4':
+    _DEFAULT_LAEYRS = [
+        HiPAttentionPerLayerConfig(
+            second_stage_k=4096,
+            sa_extend_backend="streaming",
+            scan_extend_backend="streaming",
+        ),
+        HiPAttentionPerLayerConfig(
+            second_stage_k=2048,
+            sa_extend_backend="streaming",
+            scan_extend_backend="relative",
+        ),
+    ]
+    _DEFAULT_STAGES_DECODE = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=32,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=16,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=4,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
+    _DEFAULT_LAEYRS_DECODE = [
+        HiPAttentionPerLayerConfig(
+            second_stage_k=4096,
+            sa_extend_backend="streaming",
+            scan_extend_backend="streaming",
+            stages=_DEFAULT_STAGES_DECODE,
+        ),
+        HiPAttentionPerLayerConfig(
+            second_stage_k=2048,
+            sa_extend_backend="streaming",
+            scan_extend_backend="relative",
+            stages=_DEFAULT_STAGES_DECODE,
+        ),
+    ]
+else:
+    raise Exception(f'unknown preset `{HIP_CONFIG_PRESET}`')
 
 
 @dataclass
@@ -87,11 +144,11 @@ class HiPAttentionConfig:
     block_sparse_block_size_q: int = 64
     metadata_cache_max_batch_size: int = 32
     mask_refresh_interval: Union[int, List[int]] = field(
-        default_factory=lambda: [32, 16, 8]
+        default_factory=lambda: [64, 16, 8]
     )
     using_extend: bool = True
     layers: list[HiPAttentionPerLayerConfig] = field(
-        default_factory=lambda: _DEFAULT_LAEYRS
+        default_factory=lambda: _DEFAULT_LAEYRS_DECODE
     )
     prefill_layers: list[HiPAttentionPerLayerConfig] = field(
         default_factory=lambda: _DEFAULT_LAEYRS

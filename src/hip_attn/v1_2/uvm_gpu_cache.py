@@ -409,7 +409,7 @@ class GPUCache:
         if self.k_uvm.layer_id != 3 and (not force):
             return
 
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device=self.table.device)
         table = self.table.cpu()
         metadata = self.metadata.cpu()
         bank = self.bank.cpu()
@@ -617,14 +617,21 @@ class HiPOffloadCache:
         return self.k_uvm.bank_cpu.shape[0]
 
     def prefetch_prefix_kv_buffer(
-        self, table: Tensor, device: torch.device
+        self, table: Tensor, device: torch.device, pad: int,
     ) -> Tuple[Tensor, Tensor]:
         if table.device != torch.device("cpu"):
             table = table.to("cpu", non_blocking=False)
+        
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
+
         k = k.to(device, non_blocking=True).unsqueeze(0)
         v = v.to(device, non_blocking=True).unsqueeze(0)
+
+        if pad > 0:
+            k = torch.nn.functional.pad(k, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(k.dtype)
+            v = torch.nn.functional.pad(v, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(v.dtype)
+
         return k, v
 
     def set_kv_buffer(
@@ -648,7 +655,7 @@ class HiPOffloadCache:
             elif cache_k.dtype in [torch.uint8, torch.float8_e5m2]:
                 view_dtype = torch.uint8
             else:
-                raise Exception()
+                raise Exception(f'not supported dtype {cache_k.dtype}')
 
             set_kv_buffer_(
                 self.k_uvm.bank_cpu.view(view_dtype).numpy(),
