@@ -727,12 +727,14 @@ def _forward_paged_hip(
         delta_attention_args_diff = int(delta_attention_args.split("-")[2].split("_")[1])
         delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
         delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
+        delta_attention_args_smooth = 'smooth' in delta_attention_args
 
         if (layer_id == 0) and (get_local_rank() == 0):
             warnings.warn(
                 f'Delta Attention is activated {delta_attention_args_window=} '
                 f'{delta_attention_args_diff=} {delta_attention_args_w=} '
                 f'{delta_attention_args_just_return=}'
+                f'{delta_attention_args_smooth=}'
             )
         
         # args.sa_extend_backend = "clamp"
@@ -1000,14 +1002,15 @@ def _forward_paged_hip(
                     context_diff = context_diff.repeat_interleave(
                         delta_attention_args_w, dim=1
                     )
-            
-                    # # (exp) linear interpolate diff
-                    # context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
-                    # context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
+                    
+                    if delta_attention_args_smooth:
+                        # (exp) linear interpolate diff
+                        context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
+                        context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
 
-                    # idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
-                    # idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
-                    # context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
+                        idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                        idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
+                        context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
                 
                     # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
                     # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
@@ -1062,6 +1065,8 @@ def _forward_paged_hip(
             
             idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
             idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+            
+            assert cos.shape[1] >= k_unpack.shape[1], f'{cos.shape=} {k_unpack.shape}'
 
             k_unpack = (
                 (k_unpack * cos[:, idx_tsrc, :, :]) 

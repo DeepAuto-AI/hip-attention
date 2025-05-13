@@ -8,7 +8,7 @@ _DEFAULT_STAGES = [
     ScanStage(
         stage_block_size_q=64,
         stage_block_stride_q=4,
-        stage_chunk_size=256,
+        stage_chunk_size=128,
         stage_k=None,
         stage_stride=1,
     ),
