@@ -1028,68 +1028,114 @@ def _forward_paged_hip(
                             context_sparse.abs().mean().item()
                         )
     elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
-        # args.sliding_window_size = 777
-        # context, metadata = dual_stage_quadratic_hip_attention(
-        #     (query * sm_scale).to(query.dtype),
-        #     k,
-        #     v,
-        #     args=args,
-        #     cached_metadata=cached_metadata,
-        # )
-        
-        
-        k_unpack = args.gather_k_from_paged_cache()
-        v_unpack = args.gather_v_from_paged_cache()
-        
-        seq_len = args.position_ids.amax().item() + 1
+        if is_decode:
+            # args.sliding_window_size = 777
+            # context, metadata = dual_stage_quadratic_hip_attention(
+            #     (query * sm_scale).to(query.dtype),
+            #     k,
+            #     v,
+            #     args=args,
+            #     cached_metadata=cached_metadata,
+            # )
 
-        k_unpack = k_unpack[:, :seq_len]
-        v_unpack = v_unpack[:, :seq_len]
-        
-        if k_unpack.dtype in [torch.uint8]:
-            k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
-            v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
-        assert k_unpack.dtype == query.dtype
-        
-        # if layer_id == 0:
-        #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
-        
-        if args.need_apply_rope and args.using_extend:
-            cos = args.rope_cos
-            sin = args.rope_sin
-            assert cos.ndim == 2, cos.shape
-            assert sin.shape == cos.shape, sin.shape
-            
-            cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-            sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-            
-            idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
-            idx_tsrc.clamp_min_(seq_len - args.model_context_length)
-            
-            assert cos.shape[1] >= k_unpack.shape[1], f'{cos.shape=} {k_unpack.shape}'
+            assert delta_attention_args_window > 0
+            bsa_fn = get_block_sparse_backend(args, query)
 
-            k_unpack = (
-                (k_unpack * cos[:, idx_tsrc, :, :]) 
-                + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
-            ).to(k_unpack.dtype)
+            BSZ, TDST, HEAD, HID = query.shape
 
-            query = (
-                (query * cos[:, args.position_ids.view(-1), :, :]) 
-                + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
-            ).to(query.dtype)
-        
-        k_unpack = k_unpack[:, :seq_len]
-        v_unpack = v_unpack[:, :seq_len]
-        
-        context = flash_attn_func(
-            query, 
-            k_unpack, 
-            v_unpack, 
-            causal=True, 
-            softmax_scale=sm_scale,
-        )
-        
-        metadata = None
+            args_sw = args.clone()
+            if args_sw.rope_range is None:
+                args_sw.rope_range = (0, HID)
+            args_sw.block_size_q = args_sw.block_sparse_block_size_q
+            args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
+            args_sw.second_stage_k = 0
+            # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
+            args_sw.sliding_window_size = delta_attention_args_window
+            args_sw.sliding_window_indices = None
+
+            BDST = triton.cdiv(TDST, args_sw.block_size_q)
+            BH = BSZ * HEAD
+
+            indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+            ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+            ks_count = ks.unsqueeze(-1)
+            ks_start_end = torch.zeros(
+                (BH, BDST, 2), dtype=torch.int64, device=query.device
+            )
+
+            context_sparse = bsa_fn(
+                q=(query * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                seq_lens=args_sw.position_ids + 1,
+                indices=indices,
+                ks=ks,
+                ks_count=ks_count,
+                ks_start_end=ks_start_end,
+                access_counter=None,
+                cache_miss_counter=None,
+                EXTEND_BACKEND=args_sw.sa_extend_backend,
+                model_context_length=args_sw.model_context_length,
+                extend_context_length=args_sw.extend_context_length,
+                offload_update_cache=False,
+                args=args_sw,
+            )
+            context_sparse = context_sparse.to(query.dtype)
+            context = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+            metadata = None
+        else:
+            k_unpack = args.gather_k_from_paged_cache()
+            v_unpack = args.gather_v_from_paged_cache()
+            
+            seq_len = args.position_ids.amax().item() + 1
+
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            if k_unpack.dtype in [torch.uint8]:
+                k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
+                v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
+            assert k_unpack.dtype == query.dtype
+            
+            # if layer_id == 0:
+            #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
+            
+            if args.need_apply_rope and args.using_extend:
+                cos = args.rope_cos
+                sin = args.rope_sin
+                assert cos.ndim == 2, cos.shape
+                assert sin.shape == cos.shape, sin.shape
+                
+                cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+                sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+                
+                assert cos.shape[1] >= k_unpack.shape[1], f'{cos.shape=} {k_unpack.shape}'
+
+                k_unpack = (
+                    (k_unpack * cos[:, idx_tsrc, :, :]) 
+                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+                ).to(k_unpack.dtype)
+
+                query = (
+                    (query * cos[:, args.position_ids.view(-1), :, :]) 
+                    + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
+                ).to(query.dtype)
+            
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            context = flash_attn_func(
+                query, 
+                k_unpack, 
+                v_unpack, 
+                causal=True, 
+                softmax_scale=sm_scale,
+            )
+            
+            metadata = None
     elif is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
         # dist.barrier()
         # if get_tensor_model_parallel_rank() == 0: print('hip')
