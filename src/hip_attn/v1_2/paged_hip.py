@@ -1037,8 +1037,7 @@ def _forward_paged_hip(
             #     args=args,
             #     cached_metadata=cached_metadata,
             # )
-
-            assert delta_attention_args_window > 0
+            
             bsa_fn = get_block_sparse_backend(args, query)
 
             BSZ, TDST, HEAD, HID = query.shape
