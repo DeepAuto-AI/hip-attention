@@ -25,7 +25,7 @@ def apply_rope_to_keys(
     mask_tsrc,
     mask_tdst,
     pos_tdst,
-    idx_bk,
+    idx_rope,
     idx_hid,
     # configs
     COS,
@@ -51,6 +51,8 @@ def apply_rope_to_keys(
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
 ):
+    tl.static_assert(USING_EXTEND)
+
     if EXTEND_BACKEND == "self_extend":
         raise Exception()
     elif (
@@ -209,19 +211,17 @@ def apply_rope_to_keys(
 
                 if EXTEND_BACKEND == "streaming":
                     # streaming
-                    new_tsrc = tl.ravel(
-                        (idx_bk * BLOCK_SIZE_K)[:, None]
-                        + tl.arange(0, BLOCK_SIZE_K)[None, :]
-                    )
-                    new_tsrc = tl.maximum(
-                        0,
-                        new_tsrc
-                        + pos_tdst_min
-                        - sliding_window_size
-                        - sink_token_size
-                        - mask_k
-                        + 1,
-                    )
+                    new_tsrc = idx_rope
+                    # new_tsrc = tl.maximum(
+                    #     0,
+                    #     new_tsrc
+                    #     + pos_tdst_min
+                    #     - sliding_window_size
+                    #     - sink_token_size
+                    #     - mask_k
+                    #     + 1,
+                    # )
+                    new_tsrc = tl.maximum(0, new_tsrc)
                 elif EXTEND_BACKEND == "dynamic_extend":
                     # dynamic extend
                     window = model_context_length // 4
@@ -258,7 +258,11 @@ def apply_rope_to_keys(
                 else:
                     raise Exception()
             else:
-                new_tsrc = idx_tsrc
+                if EXTEND_BACKEND == 'streaming':
+                    new_tsrc = idx_rope
+                    new_tsrc = tl.maximum(0, new_tsrc)
+                else:
+                    new_tsrc = idx_tsrc
 
             keys = keys.to(queries.dtype)
             keys_rot = keys_rot.to(queries.dtype)
@@ -614,6 +618,7 @@ def get_block_sparse_attention_configs():
 def apply_rope_to_queries(
     queries,
     pos_tdst,
+    rope_tdst,
     idx_hid,
     idx_bsz,
     idx_tdst,
@@ -634,8 +639,6 @@ def apply_rope_to_queries(
     rope_range_end: tl.constexpr,
     rope_is_neox_style: tl.constexpr,
 ):
-    rope_tdst = pos_tdst - 1
-
     ROPE_DIM = rope_range_end - rope_range_begin
 
     idx_rope_range = idx_hid - rope_range_begin
@@ -953,10 +956,20 @@ def block_sparse_attention_cuda(
         queries_1 = None
 
     if USING_EXTEND and NEED_APPLY_ROPE:
+        if EXTEND_BACKEND == 'streaming':
+            rope_tdst = pos_tdst - 1
+            activate_len = sink_token_size + sliding_window_size + BK * BLOCK_SIZE_K
+            max_seq_len  = tl.max(pos_tdst * mask_tdst)
+            rope_tdst = rope_tdst - max_seq_len + activate_len
+            rope_tdst = tl.maximum(0, rope_tdst)
+        else:
+            rope_tdst = pos_tdst - 1
+        
         if rope_range_begin < HID_BLOCK_0:
             queries_0 = apply_rope_to_queries(
                 queries_0,
                 pos_tdst,
+                rope_tdst,
                 idx_hid_q0,
                 idx_bsz,
                 idx_tdst,
@@ -982,6 +995,7 @@ def block_sparse_attention_cuda(
             queries_1 = apply_rope_to_queries(
                 queries_1,
                 pos_tdst,
+                rope_tdst,
                 idx_hid_q1,
                 idx_bsz,
                 idx_tdst,
@@ -1405,7 +1419,13 @@ def block_sparse_attention_cuda(
                     rope_range_end,
                     rope_is_neox_style,
                     model_context_length,
-                    idx_bk + sink_token_size // BLOCK_SIZE_K,
+
+                    tl.reshape(
+                        idx_bk[:, None] * BLOCK_SIZE_K 
+                        + tl.arange(0, BLOCK_SIZE_K)[None, :],
+                        BLOCK_SIZE_K * BLOCK_BK
+                    ) + sink_token_size,
+                    
                     pos_tdst,
                     idx_hid_q0,
                     idx_hid_q1,
@@ -1794,7 +1814,11 @@ def block_sparse_attention_cuda(
                 rope_range_end,
                 rope_is_neox_style,
                 model_context_length,
-                tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
+                
+                # idx_rope,
+                # tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
+                idx_tsrc,
+
                 pos_tdst,
                 idx_hid_q0,
                 idx_hid_q1,
@@ -1813,6 +1837,7 @@ def block_sparse_attention_cuda(
         i_tsrc_range_start = tl.maximum(
             0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q
         )
+        i_tsrc_range_start = i_tsrc_range_start // BLOCK_SIZE_K * BLOCK_SIZE_K
         TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
         for i_tsrc in range(i_tsrc_range_start, CURR_TSRC, TSRC_RANGE_STEP):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
@@ -2190,14 +2215,17 @@ def block_sparse_attention_cuda(
                 #     (range_end - range_start) +\
                 #     (sink_token_size // BLOCK_SIZE_K) +\
                 #     (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
-                tl.arange(0, BLOCK_BK)
-                + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
-                + (
-                    tl.max(pos_tdst * mask_tdst)
-                    - tl.sum(mask_tdst.to(tl.int32))
-                    - sliding_window_size
-                )
-                // BLOCK_SIZE_K,
+                # tl.arange(0, BLOCK_BK)
+                # + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
+                # + (
+                #     tl.max(pos_tdst * mask_tdst)
+                #     - tl.sum(mask_tdst.to(tl.int32))
+                #     - sliding_window_size
+                # )
+                # // BLOCK_SIZE_K,
+                idx_tsrc 
+                - (tl.max(mask_tdst * pos_tdst) - sliding_window_size)
+                + sink_token_size + BK * BLOCK_SIZE_K,
                 pos_tdst,
                 idx_hid_q0,
                 idx_hid_q1,

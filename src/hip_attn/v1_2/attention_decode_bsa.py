@@ -39,11 +39,15 @@ def load_queries(
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    sink_token_size,
+    sliding_window_size,
+    sparse_token_size,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
     rope_is_neox_style: tl.constexpr,
     USING_EXTEND: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
+    EXTEND_BACKEND: tl.constexpr,
 ):
     offs_q = (
         cur_batch.to(tl.int64) * stride_q_bsz
@@ -83,7 +87,14 @@ def load_queries(
             cos_sin_idx = idx_rope_range // 2
             rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
 
-        rope_tdst = cur_batch_seq_len - 1
+        # rope_tdst = cur_batch_seq_len - 1
+        if EXTEND_BACKEND == 'streaming':
+            rope_tdst = cur_batch_seq_len - 1
+            activate_len = sink_token_size + sliding_window_size + sparse_token_size
+            rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
+            rope_tdst = tl.maximum(0, rope_tdst)
+        else:
+            rope_tdst = cur_batch_seq_len - 1
 
         queries_rot = tl.load(
             Q
@@ -249,6 +260,7 @@ def _fwd_kernel_stage1(
     split_kv_id = tl.program_id(2).to(tl.int64)
     sink_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS
     sliding_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS - NUM_SINK_KV_SPLITS
+    sparse_token_size = BK * BLOCK_SIZE_K
 
     if BLOCK_H < kv_group_num:
         VALID_BLOCK_H: tl.constexpr = BLOCK_H
@@ -333,11 +345,15 @@ def _fwd_kernel_stage1(
         SIN,
         stride_sin_t,
         stride_sin_hid,
+        sink_token_size,
+        sliding_window_size,
+        sparse_token_size,
         rope_range_begin,
         rope_range_end,
         rope_is_neox_style,
         USING_EXTEND and (rope_range_begin < BLOCK_DMODEL_0),
         NEED_APPLY_ROPE,
+        EXTEND_BACKEND,
     )
 
     if BLOCK_DMODEL_1 > 0:
@@ -360,11 +376,15 @@ def _fwd_kernel_stage1(
             SIN,
             stride_sin_t,
             stride_sin_hid,
+            sink_token_size,
+            sliding_window_size,
+            sparse_token_size,
             rope_range_begin,
             rope_range_end,
             rope_is_neox_style,
             USING_EXTEND,
             NEED_APPLY_ROPE,
+            EXTEND_BACKEND,
         )
     else:
         q_1 = None
@@ -807,7 +827,13 @@ def _fwd_kernel_stage1(
                     rope_range_end,
                     rope_is_neox_style,
                     model_context_length,
-                    idx_bk + sink_token_size // BLOCK_SIZE_K,
+
+                    tl.reshape(
+                        idx_bk[:, None] * BLOCK_SIZE_K 
+                        + tl.arange(0, BLOCK_SIZE_K)[None, :],
+                        BLOCK_SIZE_K * BLOCK_BK
+                    ) + sink_token_size,
+
                     cur_batch_seq_len,
                     offs_d_0,
                     offs_d_1,
@@ -1208,7 +1234,9 @@ def _fwd_kernel_stage1(
                 rope_range_end,
                 rope_is_neox_style,
                 model_context_length,
-                tl.arange(0, BLOCK_BK) + i_tsrc // BLOCK_SIZE_K,
+
+                idx_tsrc,
+                
                 cur_batch_seq_len,
                 offs_d_0,
                 offs_d_1,
@@ -1580,10 +1608,17 @@ def _fwd_kernel_stage1(
                 stride_v_cache_hid=stride_k_cache_hid,
             )
 
-            idx_bk = (
-                tl.arange(0, BLOCK_BK)
-                + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
-                + (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
+            # idx_bk = (
+            #     tl.arange(0, BLOCK_BK)
+            #     + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
+            #     + (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
+            # )
+            idx_rope = (
+                idx_tsrc 
+                - cur_batch_seq_len 
+                + sliding_window_size
+                + sink_token_size 
+                + sparse_token_size
             )
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
                 q_0,  # [BLOCK_H, BLOCK_DMODEL]
@@ -1618,7 +1653,7 @@ def _fwd_kernel_stage1(
                 rope_range_end,
                 rope_is_neox_style,
                 model_context_length,
-                idx_bk,
+                idx_rope,
                 cur_batch_seq_len,
                 offs_d_0,
                 offs_d_1,
