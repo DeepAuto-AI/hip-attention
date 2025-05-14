@@ -134,13 +134,88 @@ elif HIP_CONFIG_PRESET == 'llama4':
             stages=_DEFAULT_STAGES_DECODE,
         ),
     ]
+elif HIP_CONFIG_PRESET == 'qwen3':
+    _DEFAULT_LAEYRS = [
+        HiPAttentionPerLayerConfig(
+            second_stage_k=4096,
+            sa_extend_backend="streaming",
+            scan_extend_backend="streaming",
+        ),
+        HiPAttentionPerLayerConfig(
+            second_stage_k=2048,
+            sa_extend_backend="streaming",
+            scan_extend_backend="relative",
+        ),
+    ]
+    _DEFAULT_STAGES_DECODE_ST = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=128,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=16,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=4,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
+    _DEFAULT_STAGES_DECODE_RT = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=32,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=16,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=4,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
+    _DEFAULT_LAEYRS_DECODE = [
+        HiPAttentionPerLayerConfig(
+            sliding_window_size=24576,
+            second_stage_k=4096,
+            sa_extend_backend="streaming",
+            scan_extend_backend="streaming",
+            stages=_DEFAULT_STAGES_DECODE_ST,
+        ),
+        HiPAttentionPerLayerConfig(
+            sliding_window_size=24576,
+            second_stage_k=2048,
+            sa_extend_backend="streaming",
+            scan_extend_backend="relative",
+            stages=_DEFAULT_STAGES_DECODE_RT,
+        ),
+    ]
 else:
     raise Exception(f'unknown preset `{HIP_CONFIG_PRESET}`')
 
 
 @dataclass
 class HiPAttentionConfig:
-    dense_layers: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 31])
+    dense_layers: list[int] = field(default_factory=lambda: [0, 1, 2, 3,])
     block_sparse_block_size_q: int = 64
     metadata_cache_max_batch_size: int = 32
     mask_refresh_interval: Union[int, List[int]] = field(
