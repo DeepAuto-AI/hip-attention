@@ -789,8 +789,8 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif using_delta_attention and (query.shape[1] > 256):
-        if is_decode or (using_dense_prefill and (not is_decode)):
+    elif using_delta_attention:
+        if is_decode or (using_dense_prefill and (not is_decode)) or (query.shape[1] < 256):
             k_unpack = args.gather_k_from_paged_cache()
             v_unpack = args.gather_v_from_paged_cache()
             
@@ -1030,12 +1030,13 @@ def _forward_paged_hip(
     elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
         if is_decode:
             if args.using_extend:
-                args.sliding_window_size = 777
+                args_dense = args.clone()
+                args_dense.sliding_window_size = 777
                 context, metadata = dual_stage_quadratic_hip_attention(
                     (query * sm_scale).to(query.dtype),
                     k,
                     v,
-                    args=args,
+                    args=args_dense,
                     cached_metadata=cached_metadata,
                 )
             else:
@@ -1162,13 +1163,14 @@ def _forward_paged_hip(
             )
             context_sparse = context.to(query.dtype)
 
-            args.sliding_window_size = 777
-            args.position_ids = position_ids[:, -last_dense:]
+            args_dense = args.clone()
+            args_dense.sliding_window_size = 777
+            args_dense.position_ids = position_ids[:, -last_dense:]
             context_dense, metadata = dual_stage_quadratic_hip_attention(
                 (query[:, -last_dense:, :, :] * sm_scale).to(query.dtype),
                 k,
                 v,
-                args=args,
+                args=args_dense,
                 cached_metadata=cached_metadata,
             )
             context_dense = context_dense.to(query.dtype)
