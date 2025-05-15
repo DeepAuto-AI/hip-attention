@@ -35,6 +35,29 @@ if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
             stage_stride=1,
         ),
     ]
+    _DEFAULT_STAGES_DECODE = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=4,
+            stage_chunk_size=128,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=4,
+            stage_chunk_size=32,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=8,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
 else:
     _DEFAULT_STAGES = [
         ScanStage(
@@ -112,7 +135,25 @@ if HIP_CONFIG_PRESET == 'default':
             scan_extend_backend="relative",
         ),
     ]
-    _DEFAULT_LAEYRS_DECODE = _DEFAULT_LAEYRS
+    if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+        _DEFAULT_LAEYRS_DECODE = [
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                second_stage_k=4096,
+                sa_extend_backend="streaming",
+                scan_extend_backend="streaming",
+                stages=_DEFAULT_STAGES_DECODE,
+            ),
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                second_stage_k=2048,
+                sa_extend_backend="streaming",
+                scan_extend_backend="relative",
+                stages=_DEFAULT_STAGES_DECODE,
+            ),
+        ]
+    else:
+        _DEFAULT_LAEYRS_DECODE = _DEFAULT_LAEYRS
 elif HIP_CONFIG_PRESET == 'llama4':
     _DEFAULT_LAEYRS = [
         HiPAttentionPerLayerConfig(

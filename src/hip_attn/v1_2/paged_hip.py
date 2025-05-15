@@ -718,7 +718,7 @@ def _forward_paged_hip(
         last_dense += dst_seq_len % args.block_sparse_block_size_q
     
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
-    # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_64-decode_dense
+    # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_64-dense_decode
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
     using_delta_attention = delta_attention_args is not None
     
@@ -791,7 +791,7 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif using_delta_attention and ((not is_dense) or (is_decode and delta_attention_args_dense_decode)):
+    elif using_delta_attention and ((not is_decode) or (is_decode and delta_attention_args_dense_decode)):
         if (is_decode and delta_attention_args_dense_decode) or (using_dense_prefill and (not is_decode)) or ((query.shape[1] < 256) and (not is_decode)):
             k_unpack = args.gather_k_from_paged_cache()
             v_unpack = args.gather_v_from_paged_cache()
