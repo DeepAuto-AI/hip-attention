@@ -728,13 +728,15 @@ def _forward_paged_hip(
         delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
         delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
         delta_attention_args_smooth = 'smooth' in delta_attention_args
+        delta_attention_args_dense_decode = not ('sparse_decode' in delta_attention_args)
 
         if (layer_id == 0) and (get_local_rank() == 0):
             warnings.warn(
                 f'Delta Attention is activated {delta_attention_args_window=} '
                 f'{delta_attention_args_diff=} {delta_attention_args_w=} '
-                f'{delta_attention_args_just_return=}'
-                f'{delta_attention_args_smooth=}'
+                f'{delta_attention_args_just_return=} '
+                f'{delta_attention_args_smooth=} '
+                f'{delta_attention_args_dense_decode=} '
             )
         
         # args.sa_extend_backend = "clamp"
@@ -789,8 +791,8 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif using_delta_attention:
-        if is_decode or (using_dense_prefill and (not is_decode)) or (query.shape[1] < 256):
+    elif using_delta_attention and ((not is_dense) or (is_decode and delta_attention_args_dense_decode)):
+        if (is_decode and delta_attention_args_dense_decode) or (using_dense_prefill and (not is_decode)) or ((query.shape[1] < 256) and (not is_decode)):
             k_unpack = args.gather_k_from_paged_cache()
             v_unpack = args.gather_v_from_paged_cache()
             
