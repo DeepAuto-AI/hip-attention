@@ -90,7 +90,7 @@ def main_debug():
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=4,
-                stage_chunk_size=256,
+                stage_chunk_size=128,
                 stage_k=None,
                 stage_stride=1,
             ),
@@ -104,7 +104,30 @@ def main_debug():
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
+                stage_chunk_size=8,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ],
+        "high": [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=64,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
                 stage_chunk_size=16,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=4,
                 stage_k=8192,
                 stage_stride=1,
             ),
@@ -134,7 +157,7 @@ def main_debug():
         ],
     }[preset]
     config_second_k = {
-        "high": 4096,
+        "high": 2048,
         "mid": 2048,
         "low": 2048,
         "debug": 128,

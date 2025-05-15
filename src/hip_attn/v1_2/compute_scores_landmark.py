@@ -135,6 +135,7 @@ def _compute_scores_landmark_cuda(
             ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
         )
         scores = tl.where(mask, scores, float('-inf'))
+        # scores = tl.where(mask, scores, 0)
         
         scores = tl.reshape(scores, BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_CHUNK, BLOCK_K)
         scores = tl.max(scores, axis=0)
