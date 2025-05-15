@@ -7,29 +7,58 @@ from hip_attn.v1_2.attention_metadata import ScanStage
 
 HIP_CONFIG_PRESET = os.getenv('HIP_CONFIG_PRESET', 'default')
 
-_DEFAULT_STAGES = [
-    ScanStage(
-        stage_block_size_q=64,
-        stage_block_stride_q=4,
-        stage_chunk_size=128,
-        stage_k=None,
-        stage_stride=1,
-    ),
-    ScanStage(
-        stage_block_size_q=64,
-        stage_block_stride_q=4,
-        stage_chunk_size=32,
-        stage_k=32768,
-        stage_stride=1,
-    ),
-    ScanStage(
-        stage_block_size_q=64,
-        stage_block_stride_q=1,
-        stage_chunk_size=8,
-        stage_k=8192,
-        stage_stride=1,
-    ),
-]
+HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
+    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
+)
+
+if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+    _DEFAULT_STAGES = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=2,
+            stage_chunk_size=64,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=2,
+            stage_chunk_size=16,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=4,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
+else:
+    _DEFAULT_STAGES = [
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=4,
+            stage_chunk_size=128,
+            stage_k=None,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=4,
+            stage_chunk_size=32,
+            stage_k=32768,
+            stage_stride=1,
+        ),
+        ScanStage(
+            stage_block_size_q=64,
+            stage_block_stride_q=1,
+            stage_chunk_size=8,
+            stage_k=8192,
+            stage_stride=1,
+        ),
+    ]
 
 
 @dataclass
