@@ -124,7 +124,7 @@ See the following pages for more details:
 ```bash
 git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
-docker build -t hip-sglang:latest -t hip-sglang:$(git rev-parse --short HEAD) -f Dockerfile.sglang .
+docker build -t hip-attention:latest -t hip-attention:latest-sglang -t hip-attention:$(git rev-parse --short HEAD)-sglang -t hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang -f Dockerfile.sglang .
 ```
 
 ## Experiment Reproduce
@@ -157,8 +157,21 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ### Building and publishing
 
+- PyPI
+
 ```bash
 rm -rf dist
 uv build --no-sources
 uv publish
+```
+
+- Docker
+
+```bash
+docker login
+docker build -t deepauto/hip-attention:latest -t deepauto/hip-attention:latest-sglang -t deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang -t deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang -f Dockerfile.sglang .
+docker push deepauto/hip-attention:latest
+docker push deepauto/hip-attention:latest-sglang
+docker push deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang
+docker push deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
 ```
