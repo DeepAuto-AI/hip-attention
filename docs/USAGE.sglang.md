@@ -1,6 +1,7 @@
 # Running HiP Attention with SGLang OpenAI server
 
 - [Running HiP Attention with SGLang OpenAI server](#running-hip-attention-with-sglang-openai-server)
+  - [Prerequisites](#prerequisites)
   - [Testing](#testing)
   - [`meta-llama/Llama-3.1-8B-Instruct`](#meta-llamallama-31-8b-instruct)
     - [Single GPU (with cache offloading)](#single-gpu-with-cache-offloading)
@@ -29,13 +30,36 @@
     - [Multi GPU (with cache offloading)](#multi-gpu-with-cache-offloading-4)
       - [Local](#local-7)
       - [Docker](#docker-5)
+  - [`meta-llama/Llama-4-Scout-17B-16E-Instruct`](#meta-llamallama-4-scout-17b-16e-instruct)
+    - [1M Context (without cache offloading)](#1m-context-without-cache-offloading)
+      - [Local](#local-8)
+      - [Docker](#docker-6)
+  - [`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`](#meta-llamallama-4-maverick-17b-128e-instruct-fp8)
+    - [1M -\> 2M Context (with cache offloading)](#1m---2m-context-with-cache-offloading)
+      - [Local](#local-9)
+      - [Docker](#docker-7)
+  - [`Qwen/Qwen3-30B-A3B`](#qwenqwen3-30b-a3b)
+    - [32K -\> 2M Context (without cache offloading)](#32k---2m-context-without-cache-offloading)
+      - [Local](#local-10)
+      - [Docker](#docker-8)
+    - [32K -\> 5M Context (with cache offloading)](#32k---5m-context-with-cache-offloading)
+      - [Local](#local-11)
+      - [Docker](#docker-9)
+
+## Prerequisites
+
+- Export the `HF_TOKEN` environment variable.
+
+```bash
+export HF_TOKEN=<secret>
+```
 
 ## Testing
 
 ```bash
-SRT_PORT=8921 uv run scripts/test_openai.py
+SRT_PORT=30000 uv run scripts/test_openai.py
 # 1M tokens
-SRT_PORT=8921 uv run scripts/test_openai_long.py
+SRT_PORT=30000 uv run scripts/test_openai_long.py
 ```
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
@@ -359,7 +383,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=<secret>" \
+--env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
@@ -456,7 +480,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=<secret>" \
+--env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
@@ -547,7 +571,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=<secret>" \
+--env "HF_TOKEN=${HF_TOKEN}" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
 hip-sglang:latest \
 python \
@@ -631,7 +655,7 @@ docker run --rm --runtime nvidia \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
 -v ~/.cache/huggingface:/root/.cache/huggingface \
---env "HF_TOKEN=<secret>" \
+--env "HF_TOKEN=${HF_TOKEN}" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
 hip-sglang:latest \
 python \
@@ -653,4 +677,293 @@ python \
 --enable-hip-offload \
 --hip-max-sa-cache-token-size 3000 \
 --hip-max-mask-cache-token-size 32000
+```
+
+## `meta-llama/Llama-4-Scout-17B-16E-Instruct`
+
+### 1M Context (without cache offloading)
+
+- 1M context length
+- Cache offloading disabled
+- Tested model: `meta-llama/Llama-4-Scout-17B-16E-Instruct`
+- Testwd GPU: 8x H100 80GB
+- Tested at: 2025-05-19
+- Tested version:
+  - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `8125e3e029a9f90c7800199d1a9939ffda5fa871`
+
+#### Local
+
+```bash
+HIP_CONFIG_PRESET=llama4 \
+HIP_DISABLE_FLASHDECODE=0 \
+HIP_HEAD_REDUCE=0 \
+HIP_DEBUG_FORCE_DENSE_DECODE=1 \
+uv run \
+--env-file ".env" \
+-m sglang.launch_server \
+--model-path meta-llama/Llama-4-Scout-17B-16E-Instruct \
+--served-model-name deepauto/llama-4-scout-1m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 1000000 \
+--context-length 1000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--hip-attention-config '{"using_extend": false, "dense_layers": [0, 1, 2, 3]}' \
+--attention-backend flashinfer \
+--chat-template llama-4
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-llama-4-scout-1m-ctx \
+-p 30000:30000 \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_CONFIG_PRESET=llama4" \
+--env "HIP_DISABLE_FLASHDECODE=0" \
+--env "HIP_HEAD_REDUCE=0" \
+--env "HIP_DEBUG_FORCE_DENSE_DECODE=1" \
+deepauto/hip-attention:v1.2.5-sglang \
+python \
+-m sglang.launch_server \
+--model-path meta-llama/Llama-4-Scout-17B-16E-Instruct \
+--served-model-name deepauto/llama-4-scout-1m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 1000000 \
+--context-length 1000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--hip-attention-config '{"using_extend": false, "dense_layers": [0, 1, 2, 3]}' \
+--attention-backend flashinfer \
+--chat-template llama-4
+```
+
+## `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
+
+### 1M -\> 2M Context (with cache offloading)
+
+- 2M context length
+- Cache offloading enabled
+- Tested model: `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
+- Testwd GPU: 8x H100 80GB
+- Tested at: 2025-05-19
+- Tested version:
+  - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `8125e3e029a9f90c7800199d1a9939ffda5fa871`
+
+#### Local
+```bash
+HIP_CONFIG_PRESET=llama4 \
+HIP_DISABLE_FLASHDECODE=1 \
+HIP_HEAD_REDUCE=0 \
+HIP_DEBUG_FORCE_DENSE_DECODE=0 \
+uv run \
+--env-file ".env" \
+-m sglang.launch_server \
+--model-path meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 \
+--served-model-name deepauto/llama-4-maverick-2m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 2000000 \
+--context-length 2000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--hip-attention-config '{"using_extend": false, "dense_layers": [0, 1, 2, 3]}' \
+--attention-backend flashinfer \
+--chat-template llama-4 \
+--enable-hip-kv-cache-offload \
+--hip-max-mask-cache-size 131072 \
+--hip-max-sa-cache-size 8192
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-llama-4-maverick-2m-ctx \
+-p 30000:30000 \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_CONFIG_PRESET=llama4" \
+--env "HIP_DISABLE_FLASHDECODE=0" \
+--env "HIP_HEAD_REDUCE=0" \
+--env "HIP_DEBUG_FORCE_DENSE_DECODE=0" \
+deepauto/hip-attention:v1.2.5-sglang \
+python \
+-m sglang.launch_server \
+--model-path meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 \
+--served-model-name deepauto/llama-4-maverick-2m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 2000000 \
+--context-length 2000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--hip-attention-config '{"using_extend": false, "dense_layers": [0, 1, 2, 3]}' \
+--attention-backend flashinfer \
+--chat-template llama-4 \
+--enable-hip-kv-cache-offload \
+--hip-max-mask-cache-size 131072 \
+--hip-max-sa-cache-size 8192
+```
+
+## `Qwen/Qwen3-30B-A3B`
+
+### 32K -\> 2M Context (without cache offloading)
+
+- 2M context length
+- Cache offloading disabled
+- Tested model: `Qwen/Qwen3-30B-A3B`
+- Testwd GPU: 8x H100 80GB
+- Tested at: 2025-05-19
+- Tested version:
+  - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `8125e3e029a9f90c7800199d1a9939ffda5fa871`
+
+#### Local
+
+```bash
+HIP_CONFIG_PRESET=qwen3 \
+HIP_DISABLE_FLASHDECODE=0 \
+HIP_HEAD_REDUCE=1 \
+HIP_DEBUG_FORCE_DENSE_DECODE=1 \
+uv run \
+--env-file ".env" \
+-m sglang.launch_server \
+--model-path Qwen/Qwen3-30B-A3B \
+--served-model-name deepauto/qwen3-30b-a3b-2m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 2000000 \
+--context-length 2000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--attention-backend flashinfer
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-qwen3-30b-a3b-2m-ctx \
+-p 30000:30000 \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_CONFIG_PRESET=qwen3" \
+--env "HIP_DISABLE_FLASHDECODE=0" \
+--env "HIP_HEAD_REDUCE=1" \
+--env "HIP_DEBUG_FORCE_DENSE_DECODE=1" \
+deepauto/hip-attention:v1.2.5-sglang \
+python \
+-m sglang.launch_server \
+--model-path Qwen/Qwen3-30B-A3B \
+--served-model-name deepauto/qwen3-30b-a3b-2m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 2000000 \
+--context-length 2000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--attention-backend flashinfer
+```
+
+### 32K -\> 5M Context (with cache offloading)
+
+- 5M context length
+- Cache offloading enabled
+- Tested model: `Qwen/Qwen3-30B-A3B`
+- Testwd GPU: 8x H100 80GB
+- Tested at: 2025-05-19
+- Tested version:
+  - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `8125e3e029a9f90c7800199d1a9939ffda5fa871`
+
+#### Local
+
+```bash
+HIP_CONFIG_PRESET=qwen3 \
+HIP_DISABLE_FLASHDECODE=0 \
+HIP_HEAD_REDUCE=1 \
+HIP_DEBUG_FORCE_DENSE_DECODE=1 \
+uv run \
+--env-file ".env" \
+-m sglang.launch_server \
+--model-path Qwen/Qwen3-30B-A3B \
+--served-model-name deepauto/qwen3-30b-a3b-5m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 5000000 \
+--context-length 5000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--attention-backend flashinfer \
+--enable-hip-kv-cache-offload \
+--hip-max-mask-cache-size 266144 \
+--hip-max-sa-cache-size 16384
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-qwen3-30b-a3b-5m-ctx \
+-p 30000:30000 \
+--ipc=host \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_CONFIG_PRESET=qwen3" \
+--env "HIP_DISABLE_FLASHDECODE=0" \
+--env "HIP_HEAD_REDUCE=1" \
+--env "HIP_DEBUG_FORCE_DENSE_DECODE=1" \
+deepauto/hip-attention:v1.2.5-sglang \
+python \
+-m sglang.launch_server \
+--model-path Qwen/Qwen3-30B-A3B \
+--served-model-name deepauto/qwen3-30b-a3b-5m-ctx \
+--host 0.0.0.0 \
+--port 30000 \
+--tp 8 \
+--max-total-tokens 5000000 \
+--context-length 5000000 \
+--cuda-graph-bs 1 2 4 8 16 24 32 \
+--max-running-req 32 \
+--chunked-prefill-size 65536 \
+--enable-hip-attention \
+--attention-backend flashinfer \
+--enable-hip-kv-cache-offload \
+--hip-max-mask-cache-size 266144 \
+--hip-max-sa-cache-size 16384
 ```
