@@ -421,7 +421,9 @@ class HiPAttentionArgs:
             k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
         return k
 
-    def gather_v_from_paged_cache(self, chunk_size: int = 1):
+    def gather_v_from_paged_cache(
+        self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
+    ):
         if self.v_cache is not None:
             assert self.v_cache is not None
             v_cache = self.v_cache
@@ -434,4 +436,6 @@ class HiPAttentionArgs:
                 : self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size),
             ]
         ]
+        if disable_gqa:
+            v = v.repeat_interleave(gqa_q.shape[2] // v.shape[2], dim=2)
         return v

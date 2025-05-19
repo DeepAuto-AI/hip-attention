@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import torch
 import triton
+from flash_attn import flash_attn_func
 
 from hip_attn.v1_2.attention_extend import (
     dual_stage_quadratic_hip_attention,
@@ -24,11 +25,24 @@ try:
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
     )
+    SGLANG_DIST_ACTIVATED = True
 except ImportError as ex:
-    pass
+    SGLANG_DIST_ACTIVATED = False
+
+def get_local_rank() -> 0:
+    if SGLANG_DIST_ACTIVATED:
+        return get_tensor_model_parallel_rank()
+    else:
+        return 0
 
 _CHECKOUT_COUNTER = 0
 
+
+def rotate_half(x: torch.Tensor):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 def cuda_graph_capture_configs(hip_config: HiPAttentionConfig):
     num_stages = len(hip_config.layers[0].stages)
@@ -690,7 +704,42 @@ def _forward_paged_hip(
         using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
-    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "64"))
+    using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
+    if is_decode:
+        using_dense_prefill = False
+    else:
+        using_dense_prefill = using_dense_prefill and is_dense
+        # using_dense_prefill = True
+    
+    force_dense_decode = os.getenv("HIP_DEBUG_FORCE_DENSE_DECODE", "0") == "1"
+    last_dense = int(os.getenv("HIP_DEBUG_LAST_DENSE", "-1"))
+    
+    if last_dense > 0:
+        last_dense += dst_seq_len % args.block_sparse_block_size_q
+    
+    # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
+    # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_64-dense_decode
+    delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
+    using_delta_attention = delta_attention_args is not None
+    
+    if using_delta_attention:
+        delta_attention_args_window = int(delta_attention_args.split("-")[1].split("_")[1])
+        delta_attention_args_diff = int(delta_attention_args.split("-")[2].split("_")[1])
+        delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
+        delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
+        delta_attention_args_smooth = 'smooth' in delta_attention_args
+        delta_attention_args_dense_decode = not ('sparse_decode' in delta_attention_args)
+
+        if (layer_id == 0) and (get_local_rank() == 0):
+            warnings.warn(
+                f'Delta Attention is activated {delta_attention_args_window=} '
+                f'{delta_attention_args_diff=} {delta_attention_args_w=} '
+                f'{delta_attention_args_just_return=} '
+                f'{delta_attention_args_smooth=} '
+                f'{delta_attention_args_dense_decode=} '
+            )
+        
+        # args.sa_extend_backend = "clamp"
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)
@@ -742,7 +791,354 @@ def _forward_paged_hip(
         )
         context = context.to(query.dtype)
         metadata = None
-    elif is_decode or (query.shape[1] < (last_dense * 2)):
+    elif using_delta_attention and ((not is_decode) or (is_decode and delta_attention_args_dense_decode)):
+        if (is_decode and delta_attention_args_dense_decode) or (using_dense_prefill and (not is_decode)) or ((query.shape[1] < 256) and (not is_decode)):
+            k_unpack = args.gather_k_from_paged_cache()
+            v_unpack = args.gather_v_from_paged_cache()
+            
+            seq_len = args.position_ids.amax().item() + 1
+
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            # if (layer_id == 0) and (get_local_rank() == 0):
+            #     print('delta-dense', seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
+            
+            if args.need_apply_rope and args.using_extend:
+                cos = args.rope_cos
+                sin = args.rope_sin
+                assert cos.ndim == 2, cos.shape
+                assert sin.shape == cos.shape, sin.shape
+                
+                cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+                sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+                k_unpack = (
+                    (k_unpack * cos[:, idx_tsrc, :, :]) 
+                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+                ).to(k_unpack.dtype)
+
+                query = (
+                    (query * cos[:, args.position_ids.view(-1), :, :]) 
+                    + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
+                ).to(query.dtype)
+            
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            context = flash_attn_func(
+                query, 
+                k_unpack, 
+                v_unpack, 
+                causal=True, 
+                softmax_scale=sm_scale,
+            )
+            
+            metadata = None
+        else:
+            # On prefill
+            assert not is_decode
+            assert not torch.cuda.is_current_stream_capturing()
+            
+            assert isinstance(delta_attention_args_window, int)
+            if delta_attention_args_window == 0:
+                assert delta_attention_args_window == 0
+                context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                    (query * sm_scale).to(query.dtype),
+                    k,
+                    v,
+                    args=args,
+                    cached_metadata=cached_metadata,
+                )
+                context_sparse = context_sparse.to(query.dtype)
+                context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+            else:
+                assert delta_attention_args_window > 0
+                bsa_fn = get_block_sparse_backend(args, query)
+
+                # dist.barrier()
+                # if get_tensor_model_parallel_rank() == 0:
+                #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+                BSZ, TDST, HEAD, HID = query.shape
+
+                args_sw = args.clone()
+                if args_sw.rope_range is None:
+                    args_sw.rope_range = (0, HID)
+                args_sw.block_size_q = args_sw.block_sparse_block_size_q
+                args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
+                args_sw.second_stage_k = 0
+                # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
+                args_sw.sliding_window_size = delta_attention_args_window
+                args_sw.sliding_window_indices = None
+
+                BDST = triton.cdiv(TDST, args_sw.block_size_q)
+                BH = BSZ * HEAD
+
+                indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+                ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+                ks_count = ks.unsqueeze(-1)
+                ks_start_end = torch.zeros(
+                    (BH, BDST, 2), dtype=torch.int64, device=query.device
+                )
+
+                context_sparse = bsa_fn(
+                    q=(query * sm_scale).to(query.dtype),
+                    k=k,
+                    v=v,
+                    seq_lens=args_sw.position_ids + 1,
+                    indices=indices,
+                    ks=ks,
+                    ks_count=ks_count,
+                    ks_start_end=ks_start_end,
+                    access_counter=None,
+                    cache_miss_counter=None,
+                    EXTEND_BACKEND=args_sw.sa_extend_backend,
+                    model_context_length=args_sw.model_context_length,
+                    extend_context_length=args_sw.extend_context_length,
+                    offload_update_cache=False,
+                    args=args_sw,
+                )
+                context_sparse = context_sparse.to(query.dtype)
+                context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+                metadata = None
+            
+            if delta_attention_args_just_return:
+                context = context_sparse
+            else:
+                from hip_attn.v1_2.triton_recompute import attention as recomp_attn
+                
+                num_queries = query.shape[1]
+                num_last_dense = num_queries % delta_attention_args_w + max(128, delta_attention_args_w)
+                num_sparse = num_queries - num_last_dense
+                
+                context_sparse = context_sparse[:, :num_sparse]
+                
+                if num_last_dense > 0:
+                    idx = torch.arange(
+                        0,
+                        # delta_attention_args_w - 1, 
+                        num_sparse, 
+                        step=delta_attention_args_w, 
+                        device=query.device
+                    )
+                    # take mean
+                    # context_sparse_for_diff = context_sparse[:, :num_sparse]
+                    # context_sparse_for_diff = context_sparse_for_diff.view(
+                    #     context_sparse_for_diff.shape[0],
+                    #     num_sparse // delta_attention_args_w,
+                    #     delta_attention_args_w,
+                    #     context_sparse_for_diff.shape[2],
+                    #     context_sparse_for_diff.shape[3],
+                    # )
+                    # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
+
+                    # take first
+                    context_sparse_for_diff = context_sparse[:, idx]
+
+                    idx = torch.cat((idx, torch.arange(num_sparse, num_queries, device=query.device)))
+                    query_for_dense = query[:, idx]
+                
+                # TODO: using paged attention
+                repeated_k = args.gather_k_from_paged_cache(disable_gqa=True, gqa_q=query)
+                repeated_v = args.gather_v_from_paged_cache(disable_gqa=True, gqa_q=query)  # B, T, H, D
+                # assert repeated_k.shape[2] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64), repeated_k.shape
+                assert repeated_k.shape[2] < 128
+
+                seq_len = args.position_ids.amax().item() + 1
+                repeated_k = repeated_k[:, :seq_len]
+                repeated_v = repeated_v[:, :seq_len]
+
+                query_for_recomp = query_for_dense
+                
+                if args.need_apply_rope and args.using_extend:
+                    cos = args.rope_cos
+                    sin = args.rope_sin
+                    assert cos.ndim == 2, cos.shape
+                    assert sin.shape == cos.shape, sin.shape
+                    
+                    cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+                    sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                    
+                    idx_tsrc = torch.arange(0, repeated_k.shape[1], device=cos.device)
+                    idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+                    repeated_k = (
+                        (repeated_k * cos[:, idx_tsrc, :, :]) 
+                        + (rotate_half(repeated_k) * sin[:, idx_tsrc, :, :])
+                    ).to(repeated_k.dtype)
+
+                    query_for_recomp = (
+                        (query_for_recomp * cos[:, args.position_ids.view(-1)[idx], :, :]) 
+                        + (rotate_half(query_for_recomp) * sin[:, args.position_ids.view(-1)[idx], :, :])
+                    ).to(query_for_recomp.dtype)
+
+                context_dense = recomp_attn(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    repeated_k.permute(0, 2, 1, 3).contiguous(), 
+                    repeated_v.permute(0, 2, 1, 3).contiguous(), 
+                    idx.unsqueeze(0), 
+                    sm_scale,
+                ).permute(0, 2, 1, 3).contiguous()
+                
+                if delta_attention_args_diff == 0:
+                    context = torch.zeros_like(query)
+                    context[:, :num_sparse] = context_sparse
+                    context[:, idx] = context_dense
+                else:
+                    context_dense, last_context_dense = (
+                        context_dense[:, :-num_last_dense],
+                        context_dense[:, -num_last_dense:],
+                    )
+                    
+                    # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
+                    # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
+                    # scale = context_dense_norm / context_sparse_for_diff_norm
+
+                    # take difference
+                    context_diff = context_dense - context_sparse_for_diff# * scale
+                    
+                    context_diff = context_diff.repeat_interleave(
+                        delta_attention_args_w, dim=1
+                    )
+                    
+                    if delta_attention_args_smooth:
+                        # (exp) linear interpolate diff
+                        context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
+                        context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
+
+                        idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                        idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
+                        context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
+                
+                    # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
+                    # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
+
+                    # context = context_sparse * scale + context_diff
+                    context = context_sparse + context_diff
+                    context = torch.cat([context, last_context_dense], dim=1).to(query.dtype)
+
+                    if get_local_rank() == 0:
+                        print(
+                            'hit', layer_id, 
+                            context_diff.shape, 
+                            context_sparse.shape, 
+                            context_diff.abs().mean().item(), 
+                            context_sparse.abs().mean().item()
+                        )
+    elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
+        if is_decode:
+            if args.using_extend:
+                args_dense = args.clone()
+                args_dense.sliding_window_size = 777
+                context, metadata = dual_stage_quadratic_hip_attention(
+                    (query * sm_scale).to(query.dtype),
+                    k,
+                    v,
+                    args=args_dense,
+                    cached_metadata=cached_metadata,
+                )
+            else:
+                bsa_fn = get_block_sparse_backend(args, query)
+
+                BSZ, TDST, HEAD, HID = query.shape
+
+                args_sw = args.clone()
+                if args_sw.rope_range is None:
+                    args_sw.rope_range = (0, HID)
+                args_sw.block_size_q = args_sw.block_sparse_block_size_q
+                args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
+                args_sw.second_stage_k = 0
+                args_sw.sliding_window_size = args_sw.model_context_length
+                args_sw.sliding_window_indices = None
+
+                BDST = triton.cdiv(TDST, args_sw.block_size_q)
+                BH = BSZ * HEAD
+
+                indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+                ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+                ks_count = ks.unsqueeze(-1)
+                ks_start_end = torch.zeros(
+                    (BH, BDST, 2), dtype=torch.int64, device=query.device
+                )
+
+                context_sparse = bsa_fn(
+                    q=(query * sm_scale).to(query.dtype),
+                    k=k,
+                    v=v,
+                    seq_lens=args_sw.position_ids + 1,
+                    indices=indices,
+                    ks=ks,
+                    ks_count=ks_count,
+                    ks_start_end=ks_start_end,
+                    access_counter=None,
+                    cache_miss_counter=None,
+                    EXTEND_BACKEND=args_sw.sa_extend_backend,
+                    model_context_length=args_sw.model_context_length,
+                    extend_context_length=args_sw.extend_context_length,
+                    offload_update_cache=False,
+                    args=args_sw,
+                )
+                context_sparse = context_sparse.to(query.dtype)
+                context = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+                metadata = None
+        else:
+            k_unpack = args.gather_k_from_paged_cache()
+            v_unpack = args.gather_v_from_paged_cache()
+            
+            seq_len = args.position_ids.amax().item() + 1
+
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            if k_unpack.dtype in [torch.uint8]:
+                k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
+                v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
+            assert k_unpack.dtype == query.dtype
+            
+            # if layer_id == 0:
+            #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
+            
+            if args.need_apply_rope and args.using_extend:
+                cos = args.rope_cos
+                sin = args.rope_sin
+                assert cos.ndim == 2, cos.shape
+                assert sin.shape == cos.shape, sin.shape
+                
+                cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+                sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+                
+                assert cos.shape[1] >= k_unpack.shape[1], f'{cos.shape=} {k_unpack.shape}'
+
+                k_unpack = (
+                    (k_unpack * cos[:, idx_tsrc, :, :]) 
+                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+                ).to(k_unpack.dtype)
+
+                query = (
+                    (query * cos[:, args.position_ids.view(-1), :, :]) 
+                    + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
+                ).to(query.dtype)
+            
+            k_unpack = k_unpack[:, :seq_len]
+            v_unpack = v_unpack[:, :seq_len]
+            
+            context = flash_attn_func(
+                query, 
+                k_unpack, 
+                v_unpack, 
+                causal=True, 
+                softmax_scale=sm_scale,
+            )
+            
+            metadata = None
+    elif is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
         # dist.barrier()
         # if get_tensor_model_parallel_rank() == 0: print('hip')
 
@@ -769,16 +1165,73 @@ def _forward_paged_hip(
             )
             context_sparse = context.to(query.dtype)
 
-            args.sliding_window_size = 777
-            args.position_ids = position_ids[:, -last_dense:]
-            context, metadata = dual_stage_quadratic_hip_attention(
+            args_dense = args.clone()
+            args_dense.sliding_window_size = 777
+            args_dense.position_ids = position_ids[:, -last_dense:]
+            context_dense, metadata = dual_stage_quadratic_hip_attention(
                 (query[:, -last_dense:, :, :] * sm_scale).to(query.dtype),
                 k,
                 v,
-                args=args,
+                args=args_dense,
                 cached_metadata=cached_metadata,
             )
-            context_dense = context.to(query.dtype)
+            context_dense = context_dense.to(query.dtype)
+            
+            # assert not torch.cuda.is_current_stream_capturing()
+            # k_unpack = args.gather_k_from_paged_cache()
+            # v_unpack = args.gather_v_from_paged_cache()
+            
+            # position_ids = args.position_ids[:, -last_dense:]
+            # seq_len = position_ids.amax().item() + 1
+
+            # k_unpack = k_unpack[:, :seq_len]
+            # v_unpack = v_unpack[:, :seq_len]
+            
+            # if k_unpack.dtype in [torch.uint8]:
+            #     k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
+            #     v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
+            # assert k_unpack.dtype == query.dtype
+            
+            # # if layer_id == 0:
+            # #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
+            
+            # query_for_dense = query[:, -last_dense:, :, :]
+            
+            # if args.need_apply_rope and args.using_extend:
+            #     cos = args.rope_cos
+            #     sin = args.rope_sin
+            #     assert cos.ndim == 2, cos.shape
+            #     assert sin.shape == cos.shape, sin.shape
+                
+            #     cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+            #     sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                
+            #     idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+            #     idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+            #     k_unpack = (
+            #         (k_unpack * cos[:, idx_tsrc, :, :]) 
+            #         + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+            #     ).to(k_unpack.dtype)
+
+            #     query_for_dense = (
+            #         (query_for_dense * cos[:, position_ids.view(-1), :, :]) 
+            #         + (rotate_half(query_for_dense) * sin[:, position_ids.view(-1), :, :])
+            #     ).to(query_for_dense.dtype)
+            
+            
+            # context_dense = flash_attn_func(
+            #     query_for_dense, 
+            #     k_unpack, 
+            #     v_unpack, 
+            #     causal=True, 
+            #     softmax_scale=sm_scale,
+            # )
+            # context_dense = context_dense.to(query_for_dense.dtype)
+            
+            # # if get_local_rank() == 0:
+            # #     print(context_dense)
+            # #     print(layer_id, query_for_dense.shape, k_unpack.shape, seq_len, args.model_context_length, args.need_apply_rope and args.using_extend)
 
             context = torch.cat([context_sparse, context_dense], dim=1)
         else:

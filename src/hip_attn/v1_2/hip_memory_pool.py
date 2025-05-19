@@ -16,6 +16,8 @@ from hip_attn.v1_2.attention_metadata import (
 
 logger = logging.getLogger(__name__)
 
+IGNORE_MISS_MATCH = os.getenv("HIP_DEBUG_IGNORE_MISS_MATCH", "0") == "1"
+
 
 @dataclass
 class CachedBuffer:
@@ -43,8 +45,17 @@ class CachedBuffer:
                 f'Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{"metadata_cache_max_batch_size"}}.'
             )
         if self.batch_format == "BH":
+            if IGNORE_MISS_MATCH:
+                if self.buffer[: value.shape[0]].shape != value.shape:
+                    return
             self.buffer[: value.shape[0]].copy_(value.to(self.buffer.dtype))
         elif self.batch_format == "B,1,H":
+            if IGNORE_MISS_MATCH:
+                if (
+                    self.buffer[: value.shape[0], :, : value.shape[2]].shape
+                    != value.shape
+                ):
+                    return
             self.buffer[: value.shape[0], :, : value.shape[2]].copy_(
                 value.to(self.buffer.dtype)
             )

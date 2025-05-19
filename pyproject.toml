@@ -35,7 +35,7 @@ dependencies = [
     # Required
     "torch",
     "triton",
-    "setuptools",  # Required by triton amd backend
+    "setuptools", # Required by triton amd backend
     "numba",
     "performer_pytorch",
     "peft",
@@ -45,6 +45,8 @@ dependencies = [
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",
+    # Debugging
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [project.urls]
@@ -67,19 +69,19 @@ sglang = [
 [tool.uv.sources]
 hip-attn = { workspace = true }
 flashinfer-python = [
-  { index = "flashinfer_cu124_torch25" },
+  { index = "flashinfer_cu124_torch26" },
 ]
 flash-attn = [
-    # pip format: "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp39-cp39-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.9'" },
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.10'" },
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.11'" },
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12'" },
-    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.13'" },
+    # pip format: "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.9'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.10'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.11'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12'" },
+    { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.13'" },
 ]
 sglang = [
-    # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python"
-    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" },
+    # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/dev#subdirectory=python"
+    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/dev" },
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },
 ]
@@ -89,8 +91,13 @@ hip-research = { workspace = true }
 no-build-isolation-package = ["flash-attn"]
 
 [[tool.uv.index]]
-name = "flashinfer_cu124_torch25"
-url = "https://flashinfer.ai/whl/cu124/torch2.5/"
+name = "flashinfer_cu124_torch26"
+url = "https://flashinfer.ai/whl/cu124/torch2.6/"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer_cu126_torch26"
+url = "https://flashinfer.ai/whl/cu126/torch2.6/"
 explicit = true
 
 [tool.uv.workspace]

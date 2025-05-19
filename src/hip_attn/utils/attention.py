@@ -59,6 +59,7 @@ def custom_attention(
     layer_idx=10,
     extend_stages=None,
     sliding_window_indices=None,
+    using_extend=False,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -471,7 +472,7 @@ def custom_attention(
                         block_size_k=64,  # BLOCK_CHUNK
                         # block_stride_k=k_group_size,
                         sliding_window_size=(
-                            1024
+                            (1024 if layer_idx > 2 else 4096)
                             if extend_stages is None
                             else extend_stages["sliding_window_size"]
                         ),
@@ -481,10 +482,10 @@ def custom_attention(
                             else extend_stages["sink_token_size"]
                         ),
                         # position_ids=position_ids,
-                        using_extend=True,
+                        using_extend=using_extend,
                         rope_cos=cos,
                         rope_sin=sin,
-                        need_apply_rope=True,
+                        need_apply_rope=using_extend,
                         second_stage_k=(
                             2 * 1024
                             if extend_stages is None
@@ -537,6 +538,7 @@ def custom_attention(
                         require_stage_caches=False,
                         require_cache_statistics=False,
                         sliding_window_indices=sliding_window_indices,
+                        layer_id=layer_idx,
                     ),
                 )
 

@@ -35,9 +35,10 @@ try:
     from sglang.srt.distributed import (
         get_tensor_model_parallel_world_size,
         tensor_model_parallel_all_gather,
+        model_parallel_is_initialized,
     )
 
-    SGLANG_DIST_AVAILABLE = True
+    SGLANG_DIST_AVAILABLE = model_parallel_is_initialized()
 except:
     SGLANG_DIST_AVAILABLE = False
 
@@ -155,20 +156,26 @@ def dual_stage_quadratic_hip_attention(
         os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
     )
 
+    flatten_paged_cache = False
     if q.shape[1] == 1:
         pass
     elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
         # FIXME: just for dev
-        k = args.gather_k_from_paged_cache(
-            chunk_size=args.stages[0].stage_chunk_size,
-            disable_gqa=True,
-            gqa_q=q,
-        )
-        # v = args.gather_v_from_paged_cache(
-        #     chunk_size=args.stages[0].stage_chunk_size,
-        #     disable_gqa=True,
-        #     gqa_q=q,
-        # )
+        if k is None:
+            flatten_paged_cache = True
+            seq_len = args.position_ids.amax().item() + 1
+            k = args.gather_k_from_paged_cache(
+                chunk_size=args.stages[0].stage_chunk_size,
+                disable_gqa=True,
+                gqa_q=q,
+            )
+            k = k[:, :seq_len]
+            # v = args.gather_v_from_paged_cache(
+            #     chunk_size=args.stages[0].stage_chunk_size,
+            #     disable_gqa=True,
+            #     gqa_q=q,
+            # )
+            # v = v[:, :seq_len]
 
     if args.q_mask is None:
         q_bsa = q
@@ -185,9 +192,10 @@ def dual_stage_quadratic_hip_attention(
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
         BSZ, TSRC, HEAD_KV, HID = k.shape
-        assert v.shape[0] == k.shape[0]
-        assert v.shape[1] == k.shape[1]
-        assert v.shape[2] == k.shape[2]
+        if v is not None:
+            assert v.shape[0] == k.shape[0]
+            assert v.shape[1] == k.shape[1]
+            assert v.shape[2] == k.shape[2]
         MAX_TSRC = TSRC
     else:
         # MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
@@ -213,7 +221,7 @@ def dual_stage_quadratic_hip_attention(
     args = args.clone()
     args.mask_k = args.stages[0].stage_chunk_size
     original_sliding_window_size = args.sliding_window_size
-    args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
+    # args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
 
     if args.rope_range is None:
         args.rope_range = (0, HID)
@@ -238,6 +246,8 @@ def dual_stage_quadratic_hip_attention(
         position_ids = (torch.arange(0, TDST, device=q.device) + (TSRC - TDST))[
             None, :
         ].expand(BSZ, TDST)
+        args = args.clone()
+        args.position_ids = position_ids
     assert position_ids.shape == (BSZ, TDST), position_ids.shape
 
     if args.using_paged_cache:
@@ -308,6 +318,8 @@ def dual_stage_quadratic_hip_attention(
             indices_left = last_stage_cache.indices_left.clone()
             indices_right = last_stage_cache.indices_right.clone()
             out_scores = last_stage_cache.out_scores.clone()
+        
+        landmark_scores = None
 
         for i_stage, stage_info in enumerate(args.stages):
             # if stage_chunk_size > chunk_size: continue
@@ -497,11 +509,70 @@ def dual_stage_quadratic_hip_attention(
                     HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
+                    # and (args.layer_id > 300)
                 ):
-                    k_dense = k[:, :TDST, :, :]
-                    chunk_size = 1024
-                    for t_start in range(0, TDST, chunk_size):
-                        k_slice = k_dense[:, t_start : t_start + chunk_size]
+                    assert TDST == TSRC
+                    if landmark_scores is None:
+                        # chunked sampling
+                        landmark_chunk = 512
+
+                        def pad_seq(t: torch.Tensor):
+                            if (t.shape[1] % landmark_chunk) == 0:
+                                return t
+                            pad = landmark_chunk - t.shape[1] % landmark_chunk
+                            return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
+
+                        q_tp = pad_seq(q)
+                        TDST_PADDED = q_tp.shape[1]
+                        q_tp = q_tp\
+                            .permute(0, 2, 1, 3)\
+                            .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
+                        k_tp = pad_seq(k)
+                        TSRC_PADDED = k_tp.shape[1]
+                        k_tp = k_tp\
+                            .permute(0, 2, 3, 1)\
+                            .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
+                            .permute(0, 1, 3, 2, 4)\
+                            .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
+                        # print(q_tp.shape, k_tp.shape)
+                        landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
+                        # TODO Need to handle chunked prefill scenario
+                        # idx_tdst = args.position_ids[0]
+                        idx_t = torch.arange(0, landmark_chunk, device=q.device)
+                        mask = idx_t[:, None] >= idx_t[None, :]
+                        landmark_scores = landmark_scores * mask[None, None, None, :, :]
+                        assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
+                        landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
+                        landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
+                        landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
+
+                    landmarks = landmark_scores\
+                        .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
+                    num_landmarks = [1, 1, 1][i_stage]
+                    _, landmarks = torch.topk(landmarks, k=num_landmarks)
+                    landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
+                    assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks)
+                    
+                    assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
+                    
+                    from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
+                    scores = compute_scores_landmark(
+                        q=q, 
+                        k=k, 
+                        position_ids=args.position_ids, 
+                        indices_left=indices_left,
+                        landmarks=landmarks,
+                        BLOCK_SIZE_Q=stage_info.stage_block_size_q,
+                        BLOCK_STRIDE_Q=stage_info.stage_block_stride_q,
+                        CHUNK_SIZE=stage_info.stage_chunk_size,
+                        SLIDING_WINDOW_SIZE=args.sliding_window_size,
+                    )
+                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0
+                    # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
+                    out_scores.fill_(float('-inf'))
+                    out_scores[:, :, :, :scores.shape[-1]] = scores
+                    # indices_left = (indices_left + indices_right) // 2
+                    # indices_right = indices_left.clone()
                 elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
@@ -820,9 +891,9 @@ def dual_stage_quadratic_hip_attention(
                         STRIDE_Q=stage_block_stride_q,
                         BLOCK_CHUNK=BLOCK_CHUNK,
                         HEAD_GROUP=HEAD // HEAD_KV,
-                        USING_EXTEND=args.using_extend,
+                        USING_EXTEND=args.using_extend and (extend_backend != 'none'),
                         EXTEND_BACKEND=extend_backend,
-                        NEED_APPLY_ROPE=args.need_apply_rope,
+                        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != 'none'),
                         TERMINATE_SIZE=args.stage_early_terminate,
                         SCAN_STRIDE=STAGE_STRIDE,
                         UPDATE_CACHE=args.online_update_cache,
@@ -1036,13 +1107,13 @@ def dual_stage_quadratic_hip_attention(
                     causal_mask=True,
                     sliding_window_size=args.sliding_window_size,
                 )
-                if DEBUG_LOGALL:
+                if DEBUG_LOGALL and (BDST > 1):
                     __logall_index += 1
                     os.makedirs("./cache/mask_log", exist_ok=True)
-                    cv2.imwrite(
-                        f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png",
-                        debug * 255,
-                    )
+                    # cv2.imwrite(
+                    #     f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_stage_{i_stage}.png",
+                    #     debug * 255,
+                    # )
                 else:
                     cv2.imwrite(f"dummy_sampled_stage_{i_stage}.png", debug * 255)
                 # print(f'saved dummy_sampled_stage_{i_stage}.png')
@@ -1183,7 +1254,7 @@ def dual_stage_quadratic_hip_attention(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
-            if DEBUG_LOGALL:
+            if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
                 cv2.imwrite(
@@ -1328,10 +1399,9 @@ def dual_stage_quadratic_hip_attention(
             and (BDST > 10)
         ):
             try:
-                input(">>>")
+                input(f"[{args.layer_id}] >")
             except EOFError:
-                # time.sleep(1)
-                pass
+                print()
 
         # NOTE: break-down to fit BSA block size
         if (block_sparse_block_size_q is not None) and (
@@ -1375,6 +1445,12 @@ def dual_stage_quadratic_hip_attention(
             - args.second_stage_k
             - args.block_size_q
         )
+    elif args.sliding_window_size > 0:
+        args.sliding_window_size += args.block_size_q
+    
+    if flatten_paged_cache:
+        k = None
+        v = None
 
     block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
 
