@@ -1,14 +1,33 @@
 import torch
 from torch import Tensor
+from typing import Optional
 import triton
 import triton.language as tl
 from hip_attn.v1_2.attention_metadata import safe_stride
 
 @triton.jit
 def _compute_scores_landmark_cuda(
-    Q, stride_q_bsz, stride_q_tdst, stride_q_head, stride_q_hid,
-    K, stride_k_bsz, stride_k_tsrc, stride_k_head_kv, stride_k_hid,
-    POS, stride_pos_bsz, stride_pos_tdst,
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst, 
+    stride_q_head, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc, 
+    stride_k_head_kv, 
+    stride_k_hid,
+    K_CACHE, 
+    stride_k_cache_t, 
+    stride_k_cache_page, 
+    stride_k_cache_head_kv, 
+    stride_k_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_tsrc,
+    POS, 
+    stride_pos_bsz, 
+    stride_pos_tdst,
     INDICES_LEFT,
     stride_indices_left_bsz,
     stride_indices_left_bdst,
@@ -37,6 +56,7 @@ def _compute_scores_landmark_cuda(
     BLOCK_K: tl.constexpr,
     BLOCK_CHUNK: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    USING_PAGED_CACHE: tl.constexpr,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     
@@ -53,11 +73,22 @@ def _compute_scores_landmark_cuda(
         idx_bsz * stride_q_bsz + 
         idx_head * stride_q_head
     )
-    K = (
-        K + 
-        idx_bsz * stride_k_bsz + 
-        idx_head_kv * stride_k_head_kv
-    )
+    if K is not None:
+        K = (
+            K + 
+            idx_bsz * stride_k_bsz + 
+            idx_head_kv * stride_k_head_kv
+        )
+    if K_CACHE is not None:
+        K_CACHE = (
+            K_CACHE +
+            0 * stride_k_cache_page +
+            idx_head_kv * stride_k_cache_head_kv
+        )
+        BLOCK_TABLE = (
+            BLOCK_TABLE +
+            idx_bsz * stride_block_table_bsz
+        )
     INDICES_LEFT = (
         INDICES_LEFT +
         idx_bsz * stride_indices_left_bsz +
@@ -117,13 +148,28 @@ def _compute_scores_landmark_cuda(
         idx_tsrc = tl.reshape(idx_tsrc, BLOCK_CHUNK * BLOCK_K)
         mask_tsrc = tl.reshape(mask_tsrc, BLOCK_CHUNK * BLOCK_K)
         
-        keys = tl.load(
-            K +
-            idx_tsrc[None, :] * stride_k_tsrc +
-            idx_hid[:, None] * stride_k_hid,
-            mask=mask_tsrc[None, :],
-            other=0,
-        )#.to(tl.float8e5)
+        if not USING_PAGED_CACHE:
+            keys = tl.load(
+                K +
+                idx_tsrc[None, :] * stride_k_tsrc +
+                idx_hid[:, None] * stride_k_hid,
+                mask=mask_tsrc[None, :],
+                other=0,
+            )#.to(tl.float8e5)
+        else:
+            block_index = tl.load(
+                BLOCK_TABLE +
+                idx_tsrc * stride_block_table_tsrc,
+                mask=mask_tsrc,
+                other=0,
+            )
+            keys = tl.load(
+                K_CACHE +
+                block_index[None, :] * stride_k_cache_t +
+                idx_hid[:, None] * stride_k_hid,
+                mask=mask_tsrc[None, :],
+                other=0
+            )
 
         scores = tl.dot(
             queries, 
@@ -152,6 +198,10 @@ def compute_scores_landmark(
     q: Tensor,
     # [BSZ, TSRC, HEAD_KV, HID]
     k: Tensor,
+    # [T, 1, HEAD_KV, HID]
+    k_cache: Optional[Tensor],
+    # [BSZ, MAX_TSRC]
+    block_table: Optional[Tensor],
     # [BSZ, TDST]
     position_ids: Tensor,
     # [BSZ, BDST, HEAD, CHUNK_COUNT]
@@ -167,17 +217,25 @@ def compute_scores_landmark(
     # output: [BSZ, BDST, HEAD, CHUNK_COUNT]
     BSZ, TDST, HEAD, HID = q.shape
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
-    _, TSRC, HEAD_KV, _ = k.shape
-    assert k.shape == (BSZ, TSRC, HEAD_KV, HID)
+    if k is not None:
+        _, TSRC, HEAD_KV, _ = k.shape
+        assert k.shape == (BSZ, TSRC, HEAD_KV, HID)
+    else:
+        assert k_cache is not None
+        HEAD_KV = k_cache.shape[-2]
     assert position_ids.shape == (BSZ, TDST)
     K = landmarks.shape[-1]
-    assert landmarks.shape == (BSZ, TSRC // CHUNK_SIZE, HEAD, K)
+    assert landmarks.shape == (BSZ, landmarks.shape[1], HEAD, K)
     CHUNK_COUNT = indices_left.shape[-1]
     assert indices_left.shape == (BSZ, BDST, HEAD, CHUNK_COUNT)
-    
+    assert k_cache.shape[2:] == (HEAD_KV, HID)
+    assert k_cache.shape[1] == 1
+
     BLOCK_K = K
     BLOCK_CHUNK = 128 // BLOCK_K
     assert BLOCK_CHUNK > 0
+
+    USING_PAGED_CACHE = k_cache is not None
     
     scores = torch.full(
         (BSZ, BDST, HEAD, CHUNK_COUNT),
@@ -190,6 +248,8 @@ def compute_scores_landmark(
     _compute_scores_landmark_cuda[grid](
         q, *safe_stride(q, 4),
         k, *safe_stride(k, 4),
+        k_cache, *safe_stride(k_cache, 4),
+        block_table, *safe_stride(block_table, 2),
         position_ids, *safe_stride(position_ids, 2),
         indices_left, *safe_stride(indices_left, 4),
         landmarks, *safe_stride(landmarks, 4),
@@ -207,6 +267,7 @@ def compute_scores_landmark(
         BLOCK_K,
         BLOCK_CHUNK,
         CHUNK_SIZE,
+        USING_PAGED_CACHE,
     )
     
     return scores

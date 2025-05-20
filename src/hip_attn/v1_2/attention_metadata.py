@@ -116,6 +116,31 @@ class HiPAttentionStageInputCache:
 
 
 @dataclass
+class HiPAttentionState:
+    # [MAX_NUM_TOKENS, HEAD]
+    landmark_scores: torch.Tensor
+    # [NUM_STAGES, MAX_NUM_TOKENS // CHUNK_SIZE, K]
+    landmark_indices: List[torch.Tensor]
+    
+    @classmethod
+    def from_args(cls, q: torch.Tensor, args: "HiPAttentionArgs"):
+        assert args.using_paged_cache
+        
+        k_cache = args.get_k_cache()
+        num_tokens = k_cache.shape[0]
+        num_heads = q.shape[2]
+        landmark_scores = torch.zeros(
+            (num_tokens, num_heads), 
+            dtype=torch.float32, 
+            device=q.device
+        )
+
+        return HiPAttentionState(
+            landmark_scores=landmark_scores,
+            landmark_indices=None,
+        )
+
+@dataclass
 class HiPAttentionOutputMetadata:
     indices: Optional[Tensor]
     ks: Optional[Tensor]
@@ -129,6 +154,7 @@ class HiPAttentionOutputMetadata:
     # stage caches
     stage_caches: Optional[List[HiPAttentionStageInputCache]]
 
+    state: Optional[HiPAttentionState] = None
 
 @dataclass
 class HiPAttentionArgs:
@@ -169,6 +195,13 @@ class HiPAttentionArgs:
     )
     model_context_length: int = 131072
     extend_context_length: int = 512 * 1024
+    
+    using_landmark: bool = field(
+        default_factory=lambda: os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
+    )
+    landmark_stage_k: List[int] = field(
+        default_factory=lambda: [1, 1, 1]
+    )
 
     # kernel args,
     mask_only: bool = False
@@ -401,15 +434,42 @@ class HiPAttentionArgs:
                 0,
                 0,
             )
-
-    def gather_k_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
-    ):
+        
+    def get_k_cache(self):
+        if not self.using_paged_cache:
+            return None
+        
         if self.k_cache is not None:
-            assert self.k_cache is not None
             k_cache = self.k_cache
         else:
             k_cache = self.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
+        
+        # k_cache: [MAX_TOKENS, 1, HEAD, HID]
+        return k_cache
+
+    def gather_extend_k_from_paged_cache(
+        self, disable_gqa = False, gqa_q: torch.Tensor = None
+    ):
+        k_cache = self.get_k_cache()
+        # self.block_table[BLOCK_TABLE_BSZ, MODEL_SEQ_LEN]
+        assert self.block_table is not None
+        assert self.position_ids is not None
+        assert self.position_ids.shape[0] == self.block_table.shape[0], f'{self.position_ids.shape} == {self.block_table.shape}'
+        # k_cache: [T, HEAD, HID]
+        k = k_cache[:, 0, :, :][
+            self.block_table.gather(dim=1, index=self.position_ids)
+        ]
+        if gqa_q is not None:
+            B, T, H, D = gqa_q.shape
+            assert k.shape == (B, T, k.shape[2], D), k.shape
+        if disable_gqa:
+            k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
+        return k
+
+    def gather_k_from_paged_cache(
+        self, chunk_size: int = 1, disable_gqa = False, gqa_q: torch.Tensor = None
+    ):
+        k_cache = self.get_k_cache()
         assert self.block_table is not None
         k = k_cache[:, 0, :, :][
             self.block_table[

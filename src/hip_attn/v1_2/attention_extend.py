@@ -23,6 +23,7 @@ from hip_attn.v1_2.attention_metadata import (
     HiPAttentionCacheAccessStatistics,
     HiPAttentionOutputMetadata,
     HiPAttentionStageInputCache,
+    HiPAttentionState,
     NopStage,
     ScanStage,
     safe_stride,
@@ -152,30 +153,40 @@ def dual_stage_quadratic_hip_attention(
     global DEBUG
     DEBUG_HEAD = -1
 
-    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
-        os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
-    )
+    # HIP_LANDMARK_BASED_SCAN_STAGE = (
+    #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
+    # )
+
+    if (cached_metadata is not None) and (cached_metadata.state is not None):
+        # if q.shape[1] > 1: print('using cached state')
+        state = cached_metadata.state
+    elif args.using_paged_cache:
+        # print('using new state')
+        state = HiPAttentionState.from_args(q, args)
+    else:
+        # print('state is empty')
+        state = None
 
     flatten_paged_cache = False
     if q.shape[1] == 1:
         pass
-    elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
-        # FIXME: just for dev
-        if k is None:
-            flatten_paged_cache = True
-            seq_len = args.position_ids.amax().item() + 1
-            k = args.gather_k_from_paged_cache(
-                chunk_size=args.stages[0].stage_chunk_size,
-                disable_gqa=True,
-                gqa_q=q,
-            )
-            k = k[:, :seq_len]
-            # v = args.gather_v_from_paged_cache(
-            #     chunk_size=args.stages[0].stage_chunk_size,
-            #     disable_gqa=True,
-            #     gqa_q=q,
-            # )
-            # v = v[:, :seq_len]
+    # elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+    #     # FIXME: just for dev
+    #     if k is None:
+    #         flatten_paged_cache = True
+    #         seq_len = args.position_ids.amax().item() + 1
+    #         k = args.gather_k_from_paged_cache(
+    #             chunk_size=args.stages[0].stage_chunk_size,
+    #             disable_gqa=True,
+    #             gqa_q=q,
+    #         )
+    #         k = k[:, :seq_len]
+    #         # v = args.gather_v_from_paged_cache(
+    #         #     chunk_size=args.stages[0].stage_chunk_size,
+    #         #     disable_gqa=True,
+    #         #     gqa_q=q,
+    #         # )
+    #         # v = v[:, :seq_len]
 
     if args.q_mask is None:
         q_bsa = q
@@ -506,49 +517,95 @@ def dual_stage_quadratic_hip_attention(
 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
-                    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE
+                    args.using_landmark
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
                     # and (args.layer_id > 300)
                 ):
-                    assert TDST == TSRC
+                    # chunked sampling
+                    landmark_chunk = 512
+                    def pad_seq(t: torch.Tensor):
+                        if (t.shape[1] % landmark_chunk) == 0:
+                            return t
+                        pad = landmark_chunk - t.shape[1] % landmark_chunk
+                        return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
+                    
                     if landmark_scores is None:
-                        # chunked sampling
-                        landmark_chunk = 512
+                        if state is not None:
+                            k_chunk = args.gather_extend_k_from_paged_cache(
+                                disable_gqa = False,
+                                gqa_q = q,
+                            )
 
-                        def pad_seq(t: torch.Tensor):
-                            if (t.shape[1] % landmark_chunk) == 0:
-                                return t
-                            pad = landmark_chunk - t.shape[1] % landmark_chunk
-                            return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
+                            q_tp = pad_seq(q)
+                            TDST_PADDED = q_tp.shape[1]
+                            k_tp = pad_seq(k_chunk)
+                            TSRC_PADDED = k_tp.shape[1]
 
-                        q_tp = pad_seq(q)
-                        TDST_PADDED = q_tp.shape[1]
-                        q_tp = q_tp\
-                            .permute(0, 2, 1, 3)\
-                            .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                        k_tp = pad_seq(k)
-                        TSRC_PADDED = k_tp.shape[1]
-                        k_tp = k_tp\
-                            .permute(0, 2, 3, 1)\
-                            .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                            .permute(0, 1, 3, 2, 4)\
-                            .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
-                        # print(q_tp.shape, k_tp.shape)
-                        landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                        # TODO Need to handle chunked prefill scenario
-                        # idx_tdst = args.position_ids[0]
-                        idx_t = torch.arange(0, landmark_chunk, device=q.device)
-                        mask = idx_t[:, None] >= idx_t[None, :]
-                        landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                        assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                        landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
-                        landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                        landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
+                            assert TDST_PADDED == TSRC_PADDED
+                            q_tp = q_tp\
+                                .permute(0, 2, 1, 3)\
+                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
+                            k_tp = k_tp\
+                                .permute(0, 2, 3, 1)\
+                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
+                                .permute(0, 1, 3, 2, 4)\
+                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
+                            
+                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
+                            
+                            # TODO Need to handle chunked prefill scenario
+                            idx_t = torch.arange(0, landmark_chunk, device=q.device)
+                            mask = idx_t[:, None] >= idx_t[None, :]
+                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
+                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
+                            landmark_scores = landmark_scores.sum(dim=3, dtype=torch.float32) / mask.int().sum(dim=0)[None, None, None, :]
+                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
+                            landmark_scores[:, :, q.shape[1]:].fill_(float('-inf'))
+                            
+                            q_block_index = args.block_table.gather(dim=1, index=args.position_ids)
+                            state.landmark_scores[q_block_index] = landmark_scores[:, :, :q.shape[1]].contiguous().permute(0, 2, 1)
+                            landmark_scores = state.landmark_scores[
+                                args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]
+                            ]
+                            landmark_scores = landmark_scores.permute(0, 2, 1)
+
+                            if DEBUG:
+                                t = landmark_scores[0, 0, :].cpu().numpy()
+                                plt.clf()
+                                plt.plot(t)
+                                plt.savefig(f'./cache/mask_log/{__logall_index}_landmark_scores.png')
+
+                            # print('landmark score extended', args.layer_id)
+                        else:
+                            assert TDST == TSRC
+                            q_tp = pad_seq(q)
+                            TDST_PADDED = q_tp.shape[1]
+                            q_tp = q_tp\
+                                .permute(0, 2, 1, 3)\
+                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
+                            k_tp = pad_seq(k)
+                            TSRC_PADDED = k_tp.shape[1]
+                            k_tp = k_tp\
+                                .permute(0, 2, 3, 1)\
+                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
+                                .permute(0, 1, 3, 2, 4)\
+                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
+                            # print(q_tp.shape, k_tp.shape)
+                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
+                            # TODO Need to handle chunked prefill scenario
+                            # idx_tdst = args.position_ids[0]
+                            idx_t = torch.arange(0, landmark_chunk, device=q.device)
+                            mask = idx_t[:, None] >= idx_t[None, :]
+                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
+                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
+                            landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
+                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
+                            landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
 
                     landmarks = landmark_scores\
                         .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
-                    num_landmarks = [1, 1, 1][i_stage]
+                    num_landmarks = args.landmark_stage_k[i_stage]
                     _, landmarks = torch.topk(landmarks, k=num_landmarks)
                     landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
                     assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks)
@@ -559,6 +616,8 @@ def dual_stage_quadratic_hip_attention(
                     scores = compute_scores_landmark(
                         q=q, 
                         k=k, 
+                        k_cache=args.get_k_cache(),
+                        block_table=args.block_table,
                         position_ids=args.position_ids, 
                         indices_left=indices_left,
                         landmarks=landmarks,
@@ -573,6 +632,8 @@ def dual_stage_quadratic_hip_attention(
                     out_scores[:, :, :, :scores.shape[-1]] = scores
                     # indices_left = (indices_left + indices_right) // 2
                     # indices_right = indices_left.clone()
+
+                    # print('landmark based sampling', args.layer_id)
                 elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
@@ -1480,8 +1541,8 @@ def dual_stage_quadratic_hip_attention(
     #     print('context', context[0, :, DEBUG_HEAD, :], context.shape)
     #     print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
     #     print('ks', ks[0 + DEBUG_HEAD, -1], ks.shape)
-
-    return context, HiPAttentionOutputMetadata(
+    
+    metadata = HiPAttentionOutputMetadata(
         indices=indices,
         ks=ks,
         ks_count=ks_count,
@@ -1499,4 +1560,10 @@ def dual_stage_quadratic_hip_attention(
             cache_miss_counter=sa_cache_miss_counter,
         ),
         stage_caches=stage_caches,
+        state=state,
     )
+
+    # if BDST > 1:
+    #     print(id(metadata), type(state))
+
+    return context, metadata

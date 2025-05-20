@@ -12,6 +12,7 @@ from hip_attn.v1_2.attention_extend import (
 )
 from hip_attn.v1_2.attention_metadata import (
     HiPAttentionArgs,
+    HiPAttentionState,
     HiPAttentionOutputMetadata,
 )
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
@@ -138,7 +139,7 @@ def forward_paged_hip(
             dtype=query.dtype,
             device=query.device,
         )
-        metadata_new = cached_metadata
+        metadata_new = []
 
         start_len = 0
         decoding_reqs = []
@@ -160,7 +161,7 @@ def forward_paged_hip(
                         offloading_metadata[idx_batch],
                     )
 
-                o_req, _ = _forward_paged_hip_validate(
+                o_req, metadata_req = _forward_paged_hip_validate(
                     query=query[start_len : start_len + seq_len],
                     sm_scale=sm_scale,
                     batch_size=1,
@@ -193,6 +194,7 @@ def forward_paged_hip(
                     sliding_window_size=sliding_window_size,
                     using_chunked_sliding_window=using_chunked_sliding_window,
                 )
+                metadata_new.append(metadata_req)
 
                 o[start_len : start_len + seq_len] = o_req
 
@@ -1417,3 +1419,58 @@ def _forward_paged_hip(
             print(f"saved {filename}")
 
     return context.view(N, num_heads, context.shape[-1]), metadata
+
+class PagedHiPStateful:
+    def __init__(self):
+        # print('stateful init')
+        self.states = dict()
+
+    def __call__(
+        self, 
+        **kwargs,
+    ):
+        layer_id = kwargs.get('layer_id', None)
+        state = self.states.get(layer_id, None)
+
+        cached_metadata = kwargs.pop('cached_metadata', None)
+        if cached_metadata is None:
+            cached_metadata = HiPAttentionOutputMetadata(
+                indices=None,
+                ks=None,
+                ks_count=None,
+                ks_start_end=None,
+                mask_cache_statistics=None,
+                sa_cache_statistics=None,
+                stage_caches=None,
+                state=None
+            )
+        
+        assert isinstance(cached_metadata, HiPAttentionOutputMetadata)
+        cached_metadata.state = state
+
+        # print('stateful', type(cached_metadata), type(state))
+
+        o, metadata = forward_paged_hip(
+            **kwargs,
+            cached_metadata=cached_metadata,
+        )
+
+        if isinstance(metadata, list):
+            assert len(metadata) == 1
+            metadata = metadata[0]
+
+        # print('called', type(metadata.state))
+
+        if metadata is not None:
+            if metadata.state is not None:
+                # if self.states.get(layer_id, None) is None:
+                #     print(f'init cache for {layer_id}')
+                self.states[layer_id] = metadata.state
+            else:
+                # print(id(metadata), 'state is cleared why?')
+                pass
+        else:
+            # print('metadata is none, nothing to cache')
+            pass
+
+        return o, metadata
