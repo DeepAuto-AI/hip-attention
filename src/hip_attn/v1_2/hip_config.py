@@ -20,13 +20,13 @@ if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
             stage_k=None,
             stage_stride=1,
         ),
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=2,
-            stage_chunk_size=16,
-            stage_k=32768,
-            stage_stride=1,
-        ),
+        # ScanStage(
+        #     stage_block_size_q=64,
+        #     stage_block_stride_q=2,
+        #     stage_chunk_size=16,
+        #     stage_k=32768,
+        #     stage_stride=1,
+        # ),
         ScanStage(
             stage_block_size_q=64,
             stage_block_stride_q=1,
@@ -127,12 +127,15 @@ if HIP_CONFIG_PRESET == 'default':
             second_stage_k=4096,
             sa_extend_backend="streaming",
             scan_extend_backend="streaming",
+            stages=_DEFAULT_STAGES,
         ),
         HiPAttentionPerLayerConfig(
             # sliding_window_size = 777, # NOTE: debugging sw
+            sliding_window_size=1024,
             second_stage_k=2048,
             sa_extend_backend="streaming",
             scan_extend_backend="relative",
+            stages=_DEFAULT_STAGES,
         ),
     ]
     if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:

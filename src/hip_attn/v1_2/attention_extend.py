@@ -45,6 +45,8 @@ except:
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
+DEFAULT_VALUE_HIP_HEAD_REDUCE = '1'
+
 
 def num_streaming_multiprocessor():
     global _NUM_STREAMING_MULTIPROCESSOR
@@ -142,6 +144,52 @@ __logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
 
+class capture(object):
+
+    def __init__(self, callback):
+        self.callback = callback
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, ex_typ, ex_val, traceback):
+        return True
+
+    def __call__(self, *args, **kwargs):
+        run_benchmark = (
+            (not torch.cuda.is_current_stream_capturing()) and
+            (kwargs['q'].shape[1] > 1) and
+            os.getenv('HIP_DEBUG_BENCH', '0') == '1'
+        )
+
+        if run_benchmark:
+            start = torch.cuda.Event(True)
+            end = torch.cuda.Event(True)
+
+            # hip_args = kwargs['args']
+            # hip_args.rope_cos = hip_args.rope_cos.to(torch.bfloat16)
+            # hip_args.rope_sin = hip_args.rope_sin.to(torch.bfloat16)
+            # hip_args.disable_flashdecode = True
+            # hip_args.online_update_cache = False
+            # hip_args.v_hidden_dim = 128
+            # hip_args.rope_is_neox_style = True
+
+            start.record()
+        
+        ret = self.callback(*args, **kwargs)
+
+        if run_benchmark:
+            end.record()
+            end.synchronize()
+            elapsed = start.elapsed_time(end)
+            # print(args[0].dtype)
+            # print(kwargs['args'].pretty())
+            print(f'{self.callback} took {elapsed:.2f} ms')
+        
+        return ret
+
+
+@capture
 def dual_stage_quadratic_hip_attention(
     q: Tensor,
     k: Optional[Tensor],
@@ -962,7 +1010,10 @@ def dual_stage_quadratic_hip_attention(
                     )
 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
-                if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
+                if (
+                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "1") or 
+                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "2" and BDST > 1)
+                ):
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
                     # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
@@ -1202,7 +1253,7 @@ def dual_stage_quadratic_hip_attention(
 
         # NOTE: union head masks
         if os.getenv("HIP_DEBUG_UNION_HEAD", "0") == "1":
-            assert os.getenv("HIP_HEAD_REDUCE", "1") == "0"
+            assert os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "0"
             # args.disable_flashdecode = True
             # B BDST H CHUNK
             indices = indices.flatten(-2, -1).unsqueeze(-2).repeat(1, 1, HEAD, 1)

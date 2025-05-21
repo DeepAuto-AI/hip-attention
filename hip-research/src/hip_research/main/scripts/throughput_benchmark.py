@@ -1,3 +1,16 @@
+"""
+Usages:
+
+python hip-research/src/hip_research/main/scripts/throughput_benchmark.py \
+    --endpoint http://localhost:30000/ \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --dataset passkey \
+    --prompt 128 \
+    --decode 512 \
+    --batch 1
+
+"""
+
 import argparse
 import itertools
 import json
@@ -27,7 +40,7 @@ def is_third_party(endpoint):
 
 
 def stream_chat_completion(
-    endpoint: str, messages, num_prefill: int, num_decode: int, num_concurrent: int
+    endpoint: str, messages, num_prefill: int, num_decode: int, num_concurrent: int, verbose: bool
 ):
     if not is_third_party(endpoint):
         url = f"{endpoint}/flush_cache"
@@ -84,7 +97,15 @@ def stream_chat_completion(
                         data_str = chunk[len("data: ") :].strip()
                         # The termination line is: data: [DONE]
                         if data_str == "[DONE]":
+                            if verbose: 
+                                print('[DONE]', flush=True)
                             break
+                        if verbose:
+                            data = json.loads(data_str)
+                            delta_content = data['choices'][0]['delta']['content']
+                            if delta_content:
+                                delta_content = delta_content.replace('\n', '\\n')
+                                print(delta_content, end='', flush=True)
 
                         # Otherwise, parse the JSON for the token(s)
                         try:
@@ -175,6 +196,7 @@ def benchmark(
     seq_lens: List[int],
     decode_lens: List[int],
     num_concurrents: List[int],
+    verbose: bool,
 ):
     data = []
 
@@ -194,11 +216,11 @@ def benchmark(
         if not is_third_party(endpoint):
             # run warmup
             stream_chat_completion(
-                endpoint, example, seq_len * 1024, decode_len, num_concurrent
+                endpoint, example, seq_len * 1024, decode_len, num_concurrent, False,
             )
         # sample
         result = stream_chat_completion(
-            endpoint, example, seq_len * 1024, decode_len, num_concurrent
+            endpoint, example, seq_len * 1024, decode_len, num_concurrent, verbose
         )
         data.append(
             {
@@ -229,9 +251,10 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", nargs="+", type=int)
     parser.add_argument("--decode", nargs="+", type=int)
     parser.add_argument("--batch", nargs="+", type=int)
+    parser.add_argument("--verbose", action='store_true')
 
     args = parser.parse_args()
 
     benchmark(
-        args.endpoint, args.model, args.dataset, args.prompt, args.decode, args.batch
+        args.endpoint, args.model, args.dataset, args.prompt, args.decode, args.batch, args.verbose
     )

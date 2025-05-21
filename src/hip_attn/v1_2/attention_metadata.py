@@ -1,6 +1,6 @@
 import copy
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 import torch
@@ -520,3 +520,10 @@ class HiPAttentionArgs:
         if disable_gqa:
             v = v.repeat_interleave(gqa_q.shape[2] // v.shape[2], dim=2)
         return v
+
+    def pretty(self) -> str:
+        json = asdict(self)
+        for k, v in json.items():
+            if isinstance(v, torch.Tensor):
+                json[k] = f'{v.dtype}{list(v.shape)}@{str(v.device)}'
+        return str(json)

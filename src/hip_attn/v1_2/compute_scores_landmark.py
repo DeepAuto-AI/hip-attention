@@ -176,11 +176,13 @@ def _compute_scores_landmark_cuda(
             keys, 
             # out_dtype=tl.float16
         )
-        mask = (
-            (mask_tdst[:, None] & mask_tsrc[None, :]) &
-            ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
-        )
-        scores = tl.where(mask, scores, float('-inf'))
+
+        # mask = (
+        #     (mask_tdst[:, None] & mask_tsrc[None, :]) &
+        #     ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
+        # )
+        # scores = tl.where(mask, scores, float('-inf'))
+        
         # scores = tl.where(mask, scores, 0)
         
         scores = tl.reshape(scores, BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_CHUNK, BLOCK_K)
@@ -228,8 +230,9 @@ def compute_scores_landmark(
     assert landmarks.shape == (BSZ, landmarks.shape[1], HEAD, K)
     CHUNK_COUNT = indices_left.shape[-1]
     assert indices_left.shape == (BSZ, BDST, HEAD, CHUNK_COUNT)
-    assert k_cache.shape[2:] == (HEAD_KV, HID)
-    assert k_cache.shape[1] == 1
+    if k_cache is not None:
+        assert k_cache.shape[2:] == (HEAD_KV, HID)
+        assert k_cache.shape[1] == 1
 
     BLOCK_K = K
     BLOCK_CHUNK = 128 // BLOCK_K
