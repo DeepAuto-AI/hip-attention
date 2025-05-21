@@ -608,7 +608,7 @@ def dual_stage_quadratic_hip_attention(
                     num_landmarks = args.landmark_stage_k[i_stage]
                     _, landmarks = torch.topk(landmarks, k=num_landmarks)
                     landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
-                    assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks)
+                    assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks), f'{landmarks.shape} == ({BSZ}, {TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks})'
                     
                     assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
                     

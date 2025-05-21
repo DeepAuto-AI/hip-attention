@@ -8,7 +8,7 @@ from hip_attn.v1_2.attention_metadata import ScanStage
 HIP_CONFIG_PRESET = os.getenv('HIP_CONFIG_PRESET', 'default')
 
 HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
-    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
+    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
 )
 
 if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:

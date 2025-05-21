@@ -978,11 +978,13 @@ def _forward_paged_hip(
                         + (rotate_half(query_for_recomp) * sin[:, args.position_ids.view(-1)[idx], :, :])
                     ).to(query_for_recomp.dtype)
 
+                assert args.position_ids.shape[0] == 1
                 context_dense = recomp_attn(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     repeated_k.permute(0, 2, 1, 3).contiguous(), 
                     repeated_v.permute(0, 2, 1, 3).contiguous(), 
-                    idx.unsqueeze(0), 
+                    # idx.unsqueeze(0), 
+                    args.position_ids[:, idx],
                     sm_scale,
                 ).permute(0, 2, 1, 3).contiguous()
                 
