@@ -1011,8 +1011,10 @@ def dual_stage_quadratic_hip_attention(
 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if (
+                    # always reduce the head.
                     (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "1") or 
-                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "2" and BDST > 1)
+                    # reduce only when decode. this is for handling flash-decode kernel.
+                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "2" and BDST == 1)
                 ):
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea

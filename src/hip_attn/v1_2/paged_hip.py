@@ -902,8 +902,8 @@ def _forward_paged_hip(
                 delta_exp = True
 
                 if delta_exp:
-                    delta_exp_w = 4
-                    detla_exp_window = 1024
+                    delta_exp_w = 8
+                    detla_exp_window = 512
 
                     bsa_fn = get_block_sparse_backend(args, query)
 

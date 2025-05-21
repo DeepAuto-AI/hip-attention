@@ -139,6 +139,24 @@ if HIP_CONFIG_PRESET == 'default':
         ),
     ]
     if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+        _DEFAULT_LAEYRS = [
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                second_stage_k=4096,
+                sa_extend_backend="streaming",
+                scan_extend_backend="streaming",
+                stages=_DEFAULT_STAGES,
+            ),
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                sliding_window_size=1024,
+                second_stage_k=2048,
+                sa_extend_backend="streaming",
+                scan_extend_backend="relative",
+                stages=_DEFAULT_STAGES,
+            ),
+        ]
+            
         _DEFAULT_LAEYRS_DECODE = [
             HiPAttentionPerLayerConfig(
                 # sliding_window_size = 777, # NOTE: debugging sw
