@@ -19,6 +19,9 @@ import torch
 import triton
 import triton.language as tl
 import triton.tools.experimental_descriptor
+from hip_attn.v1_2.attention_metadata import (
+    safe_stride,
+)
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = "cuda:0"
@@ -51,18 +54,50 @@ def _attn_fwd_inner(
     N_CTX: tl.constexpr,
     N_KV: tl.constexpr,
     fp8_v: tl.constexpr,
+
+    USING_PAGED_CACHE: tl.constexpr,
+    K_CACHE,
+    stride_k_cache_t,
+    stride_k_cache_page,
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_t,
+    stride_v_cache_page,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_tsrc,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     lo, hi = 0, tl.max(mask_idx) + 1
 
-    K_block_ptr = tl.advance(K_block_ptr, (0, lo))
-    V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+    if not USING_PAGED_CACHE:
+        K_block_ptr = tl.advance(K_block_ptr, (0, lo))
+        V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+    else:
+        idx_hid = tl.arange(0, HEAD_DIM)
+        idx_tsrc = tl.arange(0, BLOCK_N) + lo
+        mask_tsrc = idx_tsrc < hi
+    
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+        if not USING_PAGED_CACHE:
+            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+        else:
+            idx_t = tl.load(
+                BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                mask=mask_tsrc,
+            ).to(tl.int64)
+            k = tl.load(
+                K_CACHE + 
+                idx_t[None, :] * stride_k_cache_t +
+                0 * stride_k_cache_page +
+                idx_hid[:, None] * stride_k_cache_hid,
+                mask=mask_tsrc[None, :],
+                other=0,
+            )
         qk = tl.dot(q, k)
 
         mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
@@ -79,11 +114,21 @@ def _attn_fwd_inner(
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        v = tl.load(
-            V_block_ptr,
-            boundary_check=(0,),
-            padding_option="zero",
-        )
+        if not USING_PAGED_CACHE:
+            v = tl.load(
+                V_block_ptr,
+                boundary_check=(0,),
+                padding_option="zero",
+            )
+        else:
+            v = tl.load(
+                V_CACHE +
+                idx_t[:, None] * stride_v_cache_t +
+                0 * stride_v_cache_page +
+                idx_hid[None, :] * stride_v_cache_hid,
+                mask=mask_tsrc[:, None],
+                other=0,
+            )
         if fp8_v:
             p = p.to(tl.float8e5)
         else:
@@ -92,8 +137,12 @@ def _attn_fwd_inner(
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
-        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+        if not USING_PAGED_CACHE:
+            V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+            K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+        else:
+            idx_tsrc = idx_tsrc + BLOCK_N
+            mask_tsrc = idx_tsrc < hi
     return acc, l_i, m_i
 
 
@@ -145,6 +194,23 @@ def _attn_fwd(
     stride_on,  #
     stride_mz,
     stride_mm,
+    
+    USING_PAGED_CACHE: tl.constexpr,
+    HEAD_REPEAT: tl.constexpr,
+    K_CACHE,
+    stride_k_cache_t,
+    stride_k_cache_page,
+    stride_k_cache_head_kv,
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_t,
+    stride_v_cache_page,
+    stride_v_cache_head_kv,
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_tsrc,
+
     Z,
     H,
     N_CTX,  #
@@ -155,7 +221,7 @@ def _attn_fwd(
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
-    off_hz = tl.program_id(1)
+    off_hz = tl.program_id(1).to(tl.int64)
     off_z = off_hz // H
     off_h = off_hz % H
     q_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
@@ -170,23 +236,37 @@ def _attn_fwd(
         block_shape=(BLOCK_M, HEAD_DIM),
         order=(1, 0),
     )
-    v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
-    V_block_ptr = tl.make_block_ptr(
-        base=V + kv_offset,
-        shape=(N_KV, HEAD_DIM),
-        strides=(stride_vk, stride_vn),
-        offsets=(0, 0),
-        block_shape=(BLOCK_N, HEAD_DIM),
-        order=v_order,
-    )
-    K_block_ptr = tl.make_block_ptr(
-        base=K + kv_offset,
-        shape=(HEAD_DIM, N_KV),
-        strides=(stride_kk, stride_kn),
-        offsets=(0, 0),
-        block_shape=(HEAD_DIM, BLOCK_N),
-        order=(0, 1),
-    )
+    if not USING_PAGED_CACHE:
+        v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
+        V_block_ptr = tl.make_block_ptr(
+            base=V + kv_offset,
+            shape=(N_KV, HEAD_DIM),
+            strides=(stride_vk, stride_vn),
+            offsets=(0, 0),
+            block_shape=(BLOCK_N, HEAD_DIM),
+            order=v_order,
+        )
+        K_block_ptr = tl.make_block_ptr(
+            base=K + kv_offset,
+            shape=(HEAD_DIM, N_KV),
+            strides=(stride_kk, stride_kn),
+            offsets=(0, 0),
+            block_shape=(HEAD_DIM, BLOCK_N),
+            order=(0, 1),
+        )
+    else:
+        K_CACHE = (
+            K_CACHE +
+            (off_h.to(tl.int64) // HEAD_REPEAT) * stride_k_cache_head_kv
+        )
+        V_CACHE = (
+            V_CACHE +
+            (off_h.to(tl.int64) // HEAD_REPEAT) * stride_v_cache_head_kv
+        )
+        BLOCK_TABLE = (
+            BLOCK_TABLE +
+            off_z.to(tl.int64) * stride_block_table_bsz
+        )
     O_block_ptr = tl.make_block_ptr(
         base=Out + q_offset,
         shape=(N_CTX, HEAD_DIM),
@@ -219,31 +299,65 @@ def _attn_fwd(
         padding_option="zero",
     )
 
-    acc, l_i, m_i = _attn_fwd_inner(
-        acc,
-        l_i,
-        m_i,
-        q,
-        K_block_ptr,
-        V_block_ptr,  #
-        mask_idx,
-        start_m,
-        qk_scale,  #
-        BLOCK_M,
-        HEAD_DIM,
-        BLOCK_N,  #
-        offs_m,
-        offs_n,
-        N_CTX,
-        N_KV,
-        V.dtype.element_ty == tl.float8e5,  #
-    )
+    if not USING_PAGED_CACHE:
+        acc, l_i, m_i = _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            K_block_ptr,
+            V_block_ptr,  #
+            mask_idx,
+            start_m,
+            qk_scale,  #
+            BLOCK_M,
+            HEAD_DIM,
+            BLOCK_N,  #
+            offs_m,
+            offs_n,
+            N_CTX,
+            N_KV,
+            V.dtype.element_ty == tl.float8e5,  #
+        )
+    else:
+        acc, l_i, m_i = _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            None,
+            None,
+            mask_idx,
+            start_m,
+            qk_scale,
+            BLOCK_M,
+            HEAD_DIM,
+            BLOCK_N,
+            offs_m,
+            offs_n,
+            N_CTX,
+            N_KV,
+            V_CACHE.dtype.element_ty == tl.float8e5,
+            
+            USING_PAGED_CACHE=USING_PAGED_CACHE,
+            K_CACHE=K_CACHE,
+            stride_k_cache_t=stride_k_cache_t,
+            stride_k_cache_page=stride_k_cache_page,
+            stride_k_cache_hid=stride_k_cache_hid,
+            V_CACHE=V_CACHE,
+            stride_v_cache_t=stride_v_cache_t,
+            stride_v_cache_page=stride_v_cache_page,
+            stride_v_cache_hid=stride_v_cache_hid,
+            BLOCK_TABLE=BLOCK_TABLE,
+            stride_block_table_tsrc=stride_block_table_tsrc,
+        )
 
     # epilogue
-    m_i += tl.math.log2(l_i)
+    if M is not None:
+        m_i += tl.math.log2(l_i)
+        m_ptrs = M + off_hz * N_CTX + offs_m
+        tl.store(m_ptrs, m_i, mask=mask_m)
     acc = acc / l_i[:, None]
-    m_ptrs = M + off_hz * N_CTX + offs_m
-    tl.store(m_ptrs, m_i, mask=mask_m)
     tl.store(
         O_block_ptr,
         acc.to(Out.type.element_ty),
@@ -259,11 +373,27 @@ def _attn_fwd(
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, mask, sm_scale):
-
-        HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
+    def forward(
+        ctx, 
+        q, 
+        k, 
+        v, 
+        mask, 
+        sm_scale,
+        k_cache,
+        v_cache,
+        block_table,
+    ):
+        USING_PAGED_CACHE = k_cache is not None
+        if not USING_PAGED_CACHE:   
+            HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
+        else:
+            HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k_cache.shape[-1]
         # when v is in float8_e5m2 it is transposed.
-        HEAD_DIM_V = v.shape[-1]
+        if not USING_PAGED_CACHE:
+            HEAD_DIM_V = v.shape[-1]
+        else:
+            HEAD_DIM_V = v_cache.shape[-1]
         assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
         assert HEAD_DIM_K in {16, 32, 64, 128, 256}
         o = torch.empty_like(q)
@@ -274,9 +404,13 @@ class _attention(torch.autograd.Function):
             waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
             extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
 
-        M = torch.empty(
-            (q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
-        )
+        # NOTE: this is for backward
+        # M = torch.empty(
+        #     (q.shape[0], q.shape[1], q.shape[2]), 
+        #     device=q.device, 
+        #     dtype=torch.float32,
+        # )
+        M = None
 
         # assert q.shape[1] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 48, 64, 80, 96,)
         assert q.shape[1] <= 128
@@ -295,28 +429,22 @@ class _attention(torch.autograd.Function):
             M,
             o,  #
             mask,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),  #
-            k.stride(0),
-            k.stride(1),
-            k.stride(2),
-            k.stride(3),  #
-            v.stride(0),
-            v.stride(1),
-            v.stride(2),
-            v.stride(3),  #
-            o.stride(0),
-            o.stride(1),
-            o.stride(2),
-            o.stride(3),  #
-            mask.stride(0),
-            mask.stride(1),
+            *safe_stride(q, 4),
+            *safe_stride(k, 4),
+            *safe_stride(v, 4),
+            *safe_stride(o, 4),
+            *safe_stride(mask, 2),
+
+            k_cache is not None,
+            q.shape[1] // k_cache.shape[2] if k_cache is not None else q.shape[1] // k.shape[1],
+            k_cache, *safe_stride(k_cache, 4),
+            v_cache, *safe_stride(v_cache, 4),
+            block_table, *safe_stride(block_table, 2),
+
             q.shape[0],
             q.shape[1],  #
             N_CTX=q.shape[2],  #
-            N_KV=k.shape[2],
+            N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
             HEAD_DIM=HEAD_DIM_K,  #
             **extra_kern_args,
         )

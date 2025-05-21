@@ -5,6 +5,7 @@ from typing import Any, Optional
 import torch
 import triton
 from flash_attn import flash_attn_func
+from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from hip_attn.v1_2.attention_extend import (
     dual_stage_quadratic_hip_attention,
@@ -795,18 +796,15 @@ def _forward_paged_hip(
         metadata = None
     elif using_delta_attention and ((not is_decode) or (is_decode and delta_attention_args_dense_decode)):
         if (is_decode and delta_attention_args_dense_decode) or (using_dense_prefill and (not is_decode)) or ((query.shape[1] < 256) and (not is_decode)):
-            k_unpack = args.gather_k_from_paged_cache()
-            v_unpack = args.gather_v_from_paged_cache()
-            
-            seq_len = args.position_ids.amax().item() + 1
-
-            k_unpack = k_unpack[:, :seq_len]
-            v_unpack = v_unpack[:, :seq_len]
-            
-            # if (layer_id == 0) and (get_local_rank() == 0):
-            #     print('delta-dense', seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
-            
             if args.need_apply_rope and args.using_extend:
+                k_unpack = args.gather_k_from_paged_cache()
+                v_unpack = args.gather_v_from_paged_cache()
+                
+                seq_len = args.position_ids.amax().item() + 1
+
+                k_unpack = k_unpack[:, :seq_len]
+                v_unpack = v_unpack[:, :seq_len]
+
                 cos = args.rope_cos
                 sin = args.rope_sin
                 assert cos.ndim == 2, cos.shape
@@ -827,18 +825,51 @@ def _forward_paged_hip(
                     (query * cos[:, args.position_ids.view(-1), :, :]) 
                     + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
                 ).to(query.dtype)
-            
-            k_unpack = k_unpack[:, :seq_len]
-            v_unpack = v_unpack[:, :seq_len]
-            
-            context = flash_attn_func(
-                query, 
-                k_unpack, 
-                v_unpack, 
-                causal=True, 
-                softmax_scale=sm_scale,
-            )
-            
+
+                k_unpack = k_unpack[:, :seq_len]
+                v_unpack = v_unpack[:, :seq_len]
+                
+                context = flash_attn_func(
+                    query, 
+                    k_unpack, 
+                    v_unpack, 
+                    causal=True, 
+                    softmax_scale=sm_scale,
+                )
+            else:
+                assert args.using_paged_cache
+
+                k_cache = args.get_k_cache()
+                v_cache = args.get_v_cache()
+
+                q_reshaped = query.contiguous().view(-1, query.shape[2], query.shape[3])
+
+                print(k_cache.shape, v_cache.shape)
+
+                cu_seqlens_q = torch.arange(0, query.shape[0] + 1, device=query.device, dtype=torch.int32) * query.shape[1]
+                cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
+                cu_seqlens_k_new = torch.zeros(
+                    (args.position_ids.shape[0] + 1,), 
+                    dtype=torch.int32, 
+                    device=q_reshaped.device,
+                )
+                cu_seqlens_k_new[1:] = cache_seqlens
+
+                block_table = args.block_table
+
+                context = flash_attn_with_kvcache(
+                    q=q_reshaped,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    page_table=block_table,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k_new=cu_seqlens_k_new,
+                    max_seqlen_q=cu_seqlens_q.amax().item(),
+                    causal=True,
+                    softmax_scale=sm_scale,
+                )
+
             metadata = None
         else:
             # On prefill
@@ -944,19 +975,19 @@ def _forward_paged_hip(
                     idx = torch.cat((idx, torch.arange(num_sparse, num_queries, device=query.device)))
                     query_for_dense = query[:, idx]
                 
-                # TODO: using paged attention
-                repeated_k = args.gather_k_from_paged_cache(disable_gqa=True, gqa_q=query)
-                repeated_v = args.gather_v_from_paged_cache(disable_gqa=True, gqa_q=query)  # B, T, H, D
-                # assert repeated_k.shape[2] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64), repeated_k.shape
-                assert repeated_k.shape[2] < 128
-
-                seq_len = args.position_ids.amax().item() + 1
-                repeated_k = repeated_k[:, :seq_len]
-                repeated_v = repeated_v[:, :seq_len]
-
-                query_for_recomp = query_for_dense
-                
                 if args.need_apply_rope and args.using_extend:
+                    # TODO: using paged attention
+                    repeated_k = args.gather_k_from_paged_cache(disable_gqa=True, gqa_q=query)
+                    repeated_v = args.gather_v_from_paged_cache(disable_gqa=True, gqa_q=query)  # B, T, H, D
+                    # assert repeated_k.shape[2] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64), repeated_k.shape
+                    assert repeated_k.shape[2] < 128
+
+                    seq_len = args.position_ids.amax().item() + 1
+                    repeated_k = repeated_k[:, :seq_len]
+                    repeated_v = repeated_v[:, :seq_len]
+
+                    query_for_recomp = query_for_dense
+                    
                     cos = args.rope_cos
                     sin = args.rope_sin
                     assert cos.ndim == 2, cos.shape
@@ -978,15 +1009,37 @@ def _forward_paged_hip(
                         + (rotate_half(query_for_recomp) * sin[:, args.position_ids.view(-1)[idx], :, :])
                     ).to(query_for_recomp.dtype)
 
-                assert args.position_ids.shape[0] == 1
-                context_dense = recomp_attn(
-                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                    repeated_k.permute(0, 2, 1, 3).contiguous(), 
-                    repeated_v.permute(0, 2, 1, 3).contiguous(), 
-                    # idx.unsqueeze(0), 
-                    args.position_ids[:, idx],
-                    sm_scale,
-                ).permute(0, 2, 1, 3).contiguous()
+                    assert args.position_ids.shape[0] == 1
+                    context_dense = recomp_attn(
+                        query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                        repeated_k.permute(0, 2, 1, 3).contiguous(), 
+                        repeated_v.permute(0, 2, 1, 3).contiguous(), 
+                        # idx.unsqueeze(0), 
+                        args.position_ids[:, idx],
+                        sm_scale,
+                        None, 
+                        None, 
+                        None
+                    ).permute(0, 2, 1, 3).contiguous()
+                else:
+                    assert args.using_paged_cache
+
+                    query_for_recomp = query_for_dense
+                    k_cache = args.get_k_cache()
+                    v_cache = args.get_v_cache()
+
+                    assert args.position_ids.shape[0] == 1
+                    context_dense = recomp_attn(
+                        query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                        None, 
+                        None, 
+                        args.position_ids[:, idx],
+                        sm_scale,
+                        k_cache,
+                        v_cache,
+                        args.block_table,
+                    ).permute(0, 2, 1, 3).contiguous()
+
                 
                 if delta_attention_args_diff == 0:
                     context = torch.zeros_like(query)
@@ -1025,14 +1078,14 @@ def _forward_paged_hip(
                     context = context_sparse + context_diff
                     context = torch.cat([context, last_context_dense], dim=1).to(query.dtype)
 
-                    if get_local_rank() == 0:
-                        print(
-                            'hit', layer_id, 
-                            context_diff.shape, 
-                            context_sparse.shape, 
-                            context_diff.abs().mean().item(), 
-                            context_sparse.abs().mean().item()
-                        )
+                    # if get_local_rank() == 0:
+                    #     print(
+                    #         'hit', layer_id, 
+                    #         context_diff.shape, 
+                    #         context_sparse.shape, 
+                    #         context_diff.abs().mean().item(), 
+                    #         context_sparse.abs().mean().item()
+                    #     )
     elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
         if is_decode:
             if args.using_extend:

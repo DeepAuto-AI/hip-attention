@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
 
 
+HIP_DEBUG_ALLOW_GATHER_KV_CACHE = os.getenv('HIP_DEBUG_ALLOW_GATHER_KV_CACHE', '0') == '1'
+
+
 def safe_stride(x: Optional[Tensor], ndim: int):
     if x is None:
         return tuple(
@@ -446,6 +449,18 @@ class HiPAttentionArgs:
         
         # k_cache: [MAX_TOKENS, 1, HEAD, HID]
         return k_cache
+    
+    def get_v_cache(self):
+        if not self.using_paged_cache:
+            return None
+        
+        if self.v_cache is not None:
+            v_cache = self.v_cache
+        else:
+            v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+        
+        # v_cache: [MAX_TOKENS, 1, HEAD, HID]
+        return v_cache
 
     def gather_extend_k_from_paged_cache(
         self, disable_gqa = False, gqa_q: torch.Tensor = None
@@ -469,6 +484,9 @@ class HiPAttentionArgs:
     def gather_k_from_paged_cache(
         self, chunk_size: int = 1, disable_gqa = False, gqa_q: torch.Tensor = None
     ):
+        if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
+            raise Exception('Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior')
+        
         k_cache = self.get_k_cache()
         assert self.block_table is not None
         k = k_cache[:, 0, :, :][
@@ -484,6 +502,9 @@ class HiPAttentionArgs:
     def gather_v_from_paged_cache(
         self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
     ):
+        if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
+            raise Exception('Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior')
+
         if self.v_cache is not None:
             assert self.v_cache is not None
             v_cache = self.v_cache
