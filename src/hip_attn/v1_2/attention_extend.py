@@ -144,49 +144,7 @@ __logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
 
-class capture(object):
-
-    def __init__(self, callback):
-        self.callback = callback
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, ex_typ, ex_val, traceback):
-        return True
-
-    def __call__(self, *args, **kwargs):
-        run_benchmark = (
-            (not torch.cuda.is_current_stream_capturing()) and
-            (kwargs['q'].shape[1] > 1) and
-            os.getenv('HIP_DEBUG_BENCH', '0') == '1'
-        )
-
-        if run_benchmark:
-            start = torch.cuda.Event(True)
-            end = torch.cuda.Event(True)
-
-            # hip_args = kwargs['args']
-            # hip_args.rope_cos = hip_args.rope_cos.to(torch.bfloat16)
-            # hip_args.rope_sin = hip_args.rope_sin.to(torch.bfloat16)
-            # hip_args.disable_flashdecode = True
-            # hip_args.online_update_cache = False
-            # hip_args.v_hidden_dim = 128
-            # hip_args.rope_is_neox_style = True
-
-            start.record()
-        
-        ret = self.callback(*args, **kwargs)
-
-        if run_benchmark:
-            end.record()
-            end.synchronize()
-            elapsed = start.elapsed_time(end)
-            # print(args[0].dtype)
-            # print(kwargs['args'].pretty())
-            print(f'{self.callback} took {elapsed:.2f} ms')
-        
-        return ret
+from .utils import capture
 
 
 @capture
@@ -580,17 +538,24 @@ def dual_stage_quadratic_hip_attention(
                     
                     if landmark_scores is None:
                         if state is not None:
+                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
+                            position_ids_for_landmark = (
+                                args.position_ids_for_landmark 
+                                if args.position_ids_for_landmark is not None else 
+                                args.position_ids
+                            )
                             k_chunk = args.gather_extend_k_from_paged_cache(
                                 disable_gqa = False,
-                                gqa_q = q,
+                                gqa_q = q_for_landmark,
+                                position_ids = position_ids_for_landmark
                             )
 
-                            q_tp = pad_seq(q)
+                            q_tp = pad_seq(q_for_landmark)
                             TDST_PADDED = q_tp.shape[1]
                             k_tp = pad_seq(k_chunk)
                             TSRC_PADDED = k_tp.shape[1]
 
-                            assert TDST_PADDED == TSRC_PADDED
+                            assert TDST_PADDED == TSRC_PADDED, f'{TDST_PADDED} == {TSRC_PADDED}'
                             q_tp = q_tp\
                                 .permute(0, 2, 1, 3)\
                                 .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
@@ -603,22 +568,23 @@ def dual_stage_quadratic_hip_attention(
                             landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
                             
                             # TODO Need to handle chunked prefill scenario
-                            idx_t = torch.arange(0, landmark_chunk, device=q.device)
+                            idx_t = torch.arange(0, landmark_chunk, device=q_for_landmark.device)
                             mask = idx_t[:, None] >= idx_t[None, :]
                             landmark_scores = landmark_scores * mask[None, None, None, :, :]
                             assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
                             landmark_scores = landmark_scores.sum(dim=3, dtype=torch.float32) / mask.int().sum(dim=0)[None, None, None, :]
                             landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                            landmark_scores[:, :, q.shape[1]:].fill_(float('-inf'))
+                            landmark_scores[:, :, q_for_landmark.shape[1]:].fill_(float('-inf'))
                             
-                            q_block_index = args.block_table.gather(dim=1, index=args.position_ids)
-                            state.landmark_scores[q_block_index] = landmark_scores[:, :, :q.shape[1]].contiguous().permute(0, 2, 1)
+                            q_block_index = args.block_table.gather(dim=1, index=position_ids_for_landmark)
+                            state.landmark_scores[q_block_index] = landmark_scores[:, :, :q_for_landmark.shape[1]].contiguous().permute(0, 2, 1)
                             landmark_scores = state.landmark_scores[
                                 args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]
                             ]
                             landmark_scores = landmark_scores.permute(0, 2, 1)
 
-                            if DEBUG:
+                            if DEBUG and (BDST > 1):
+                                os.makedirs("./cache/mask_log", exist_ok=True)
                                 t = landmark_scores[0, 0, :].cpu().numpy()
                                 plt.clf()
                                 plt.plot(t)
@@ -626,14 +592,22 @@ def dual_stage_quadratic_hip_attention(
 
                             # print('landmark score extended', args.layer_id)
                         else:
-                            assert TDST == TSRC
-                            q_tp = pad_seq(q)
+                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
+                            position_ids_for_landmark = (
+                                args.position_ids_for_landmark 
+                                if args.position_ids_for_landmark is not None else 
+                                args.position_ids
+                            )
+
+                            q_tp = pad_seq(q_for_landmark)
                             TDST_PADDED = q_tp.shape[1]
                             q_tp = q_tp\
                                 .permute(0, 2, 1, 3)\
                                 .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
                             k_tp = pad_seq(k)
                             TSRC_PADDED = k_tp.shape[1]
+                            assert TDST_PADDED == TSRC_PADDED
+
                             k_tp = k_tp\
                                 .permute(0, 2, 3, 1)\
                                 .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
@@ -661,8 +635,15 @@ def dual_stage_quadratic_hip_attention(
                     assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
                     
                     from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
+                    # k_temp = args.gather_k_from_paged_cache(
+                    #     chunk_size=1,
+                    #     disable_gqa=False,
+                    #     gqa_q=q,
+                    # )
                     scores = compute_scores_landmark(
                         q=q, 
+                        # k=k_temp, 
+                        # k_cache=None,
                         k=k, 
                         k_cache=args.get_k_cache(),
                         block_table=args.block_table,

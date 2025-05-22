@@ -255,6 +255,9 @@ class HiPAttentionArgs:
     # NOTE: use only for debugging purpose
     layer_id: int = 31
 
+    query_for_landmark: Optional[Tensor] = None
+    position_ids_for_landmark: Optional[Tensor] = None
+
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
             self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
@@ -463,20 +466,22 @@ class HiPAttentionArgs:
         return v_cache
 
     def gather_extend_k_from_paged_cache(
-        self, disable_gqa = False, gqa_q: torch.Tensor = None
+        self, disable_gqa = False, gqa_q: torch.Tensor = None, position_ids: torch.Tensor = None
     ):
         k_cache = self.get_k_cache()
         # self.block_table[BLOCK_TABLE_BSZ, MODEL_SEQ_LEN]
         assert self.block_table is not None
-        assert self.position_ids is not None
-        assert self.position_ids.shape[0] == self.block_table.shape[0], f'{self.position_ids.shape} == {self.block_table.shape}'
+        if position_ids is None:
+            position_ids = self.position_ids
+        assert position_ids is not None
+        assert position_ids.shape[0] == self.block_table.shape[0], f'{position_ids.shape} == {self.block_table.shape}'
         # k_cache: [T, HEAD, HID]
         k = k_cache[:, 0, :, :][
-            self.block_table.gather(dim=1, index=self.position_ids)
+            self.block_table.gather(dim=1, index=position_ids)
         ]
         if gqa_q is not None:
             B, T, H, D = gqa_q.shape
-            assert k.shape == (B, T, k.shape[2], D), k.shape
+            assert k.shape == (B, T, k.shape[2], D), f'{gqa_q.shape} {k.shape}'
         if disable_gqa:
             k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
         return k

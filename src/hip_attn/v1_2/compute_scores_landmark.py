@@ -1,4 +1,5 @@
 import torch
+import os
 from torch import Tensor
 from typing import Optional
 import triton
@@ -60,7 +61,7 @@ def _compute_scores_landmark_cuda(
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     idx_head = pid % HEAD
     idx_head_kv = idx_head // (HEAD // HEAD_KV)
     pid = pid // HEAD
@@ -82,7 +83,7 @@ def _compute_scores_landmark_cuda(
     if K_CACHE is not None:
         K_CACHE = (
             K_CACHE +
-            0 * stride_k_cache_page +
+            # 0 * stride_k_cache_page +
             idx_head_kv * stride_k_cache_head_kv
         )
         BLOCK_TABLE = (
@@ -166,7 +167,7 @@ def _compute_scores_landmark_cuda(
             keys = tl.load(
                 K_CACHE +
                 block_index[None, :] * stride_k_cache_t +
-                idx_hid[:, None] * stride_k_hid,
+                idx_hid[:, None] * stride_k_cache_hid,
                 mask=mask_tsrc[None, :],
                 other=0
             )
@@ -177,11 +178,11 @@ def _compute_scores_landmark_cuda(
             # out_dtype=tl.float16
         )
 
-        # mask = (
-        #     (mask_tdst[:, None] & mask_tsrc[None, :]) &
-        #     ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
-        # )
-        # scores = tl.where(mask, scores, float('-inf'))
+        mask = (
+            (mask_tdst[:, None] & mask_tsrc[None, :]) &
+            ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
+        )
+        scores = tl.where(mask, scores, float('-inf'))
         
         # scores = tl.where(mask, scores, 0)
         
@@ -235,7 +236,7 @@ def compute_scores_landmark(
         assert k_cache.shape[1] == 1
 
     BLOCK_K = K
-    BLOCK_CHUNK = 128 // BLOCK_K
+    BLOCK_CHUNK = int(os.getenv('SA_BLOCK_SIZE_LANDMARK', '128')) // BLOCK_K
     assert BLOCK_CHUNK > 0
 
     USING_PAGED_CACHE = k_cache is not None

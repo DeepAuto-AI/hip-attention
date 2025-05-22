@@ -523,7 +523,7 @@ def block_sparse_attention_cuda_step(
                                 * sliding_window_size
                             )[:, None]
                         )
-                        & ((pos_tdst - 1)[:, None] >= (idx_tsrc + 1)[None, :])
+                        # & ((pos_tdst - 1)[:, None] >= (idx_tsrc + 64)[None, :])
                     )
                 )
     else:
@@ -2255,7 +2255,9 @@ def block_sparse_attention_cuda(
         # value = l_i
     )
 
+from .utils import capture
 
+@capture
 def block_sparse_attention(
     q: Tensor,
     k: Optional[Tensor],

@@ -951,13 +951,35 @@ def _forward_paged_hip(
                     args_sparse = args.clone()
                     query_sparse = query[:, ::delta_exp_w].contiguous()
                     args_sparse.position_ids = args.position_ids[:, ::delta_exp_w].contiguous()
+                    args_sparse.query_for_landmark = query
+                    args_sparse.position_ids_for_landmark = args.position_ids
+
+                    # args_new = args_sparse.clone()
+                    # k_flat = args_sparse.gather_k_from_paged_cache()
+                    # v_flat = args_sparse.gather_v_from_paged_cache()
+                    # seq_len = args_sparse.position_ids.amax().item() + 1
+                    # k_flat = k_flat[:, :seq_len].contiguous()
+                    # v_flat = v_flat[:, :seq_len].contiguous()
+                    # args_new.k_cache = None
+                    # args_new.v_cache = None
+                    # args_new.block_table = None
+                    # args_new.using_paged_cache = False
+                    # cached_metadata.state = None
+
+                    # context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                    #     q=(query_sparse * sm_scale).to(query.dtype),
+                    #     k=k_flat,
+                    #     v=v_flat,
+                    #     args=args_new,
+                    #     cached_metadata=cached_metadata,
+                    # )
 
                     context_sparse, metadata = dual_stage_quadratic_hip_attention(
                         q=(query_sparse * sm_scale).to(query.dtype),
                         k=k,
                         v=v,
                         args=args_sparse,
-                        cached_metadata=None,
+                        cached_metadata=cached_metadata,
                     )
                     context_sparse = context_sparse.to(query.dtype)
 
@@ -979,6 +1001,26 @@ def _forward_paged_hip(
 
                     context_sparse = context_sw + delta_sparse[:, :context_sw.shape[1]]
                 else:
+                    # args_new = args.clone()
+                    # k_flat = args.gather_k_from_paged_cache()
+                    # v_flat = args.gather_v_from_paged_cache()
+                    # seq_len = args.position_ids.amax().item() + 1
+                    # k_flat = k_flat[:, :seq_len].contiguous()
+                    # v_flat = v_flat[:, :seq_len].contiguous()
+                    # args_new.k_cache = None
+                    # args_new.v_cache = None
+                    # args_new.block_table = None
+                    # args_new.using_paged_cache = False
+                    # cached_metadata.state = None
+
+                    # context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                    #     q=(query * sm_scale).to(query.dtype),
+                    #     k=k_flat,
+                    #     v=v_flat,
+                    #     args=args_new,
+                    #     cached_metadata=cached_metadata,
+                    # )
+
                     context_sparse, metadata = dual_stage_quadratic_hip_attention(
                         q=(query * sm_scale).to(query.dtype),
                         k=k,
@@ -986,6 +1028,7 @@ def _forward_paged_hip(
                         args=args,
                         cached_metadata=cached_metadata,
                     )
+
                     context_sparse = context_sparse.to(query.dtype)
                     context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
             else:
