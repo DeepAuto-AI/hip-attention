@@ -84,7 +84,11 @@ def _attn_fwd_inner(
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         if not USING_PAGED_CACHE:
-            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+            k = tl.load(
+                K_block_ptr, 
+                boundary_check=(1,), 
+                padding_option="zero"
+            )
         else:
             idx_t = tl.load(
                 BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -282,8 +286,11 @@ def _attn_fwd(
     offs_n = tl.arange(0, BLOCK_N)
 
     mask_idx = tl.load(
-        MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
+        MaskIdx 
+        + off_z.to(tl.int64) * stride_mz 
+        + offs_m.to(tl.int64) * stride_mm,
         mask=mask_m,
+        other=0,
     )
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")

@@ -536,6 +536,24 @@ def dual_stage_quadratic_hip_attention(
                         pad = landmark_chunk - t.shape[1] % landmark_chunk
                         return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
                     
+                    landmark_derope = False
+                    def split_half(x: Tensor):
+                        HID = x.shape[-1]
+                        return x[..., :HID//2], x[..., HID//2:]
+                    def merge_half(x: Tensor, y: Tensor):
+                        return torch.cat([x, y], dim=-1)
+                    def de_rope(
+                        vec: Tensor, cos: Tensor, sin: Tensor
+                    ):
+                        c0, ch = split_half(cos)
+                        s0, sh = split_half(sin)
+                        vr0, vrh = split_half(vec)
+
+                        out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
+                        outh = (out0 * c0 - vr0) / (s0 + 1e-20)
+                        out = merge_half(out0, outh)
+                        return out
+                    
                     if landmark_scores is None:
                         if state is not None:
                             q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
@@ -554,8 +572,23 @@ def dual_stage_quadratic_hip_attention(
                             TDST_PADDED = q_tp.shape[1]
                             k_tp = pad_seq(k_chunk)
                             TSRC_PADDED = k_tp.shape[1]
-
                             assert TDST_PADDED == TSRC_PADDED, f'{TDST_PADDED} == {TSRC_PADDED}'
+
+                            if landmark_derope:
+                                padded_position_ids_for_landmark = pad_seq(
+                                    position_ids_for_landmark[:, :, None, None]
+                                )[:, :, 0, 0]
+                                q_tp = de_rope(
+                                    q_tp,
+                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
+                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
+                                )
+                                k_tp = de_rope(
+                                    k_tp,
+                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
+                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
+                                )
+
                             q_tp = q_tp\
                                 .permute(0, 2, 1, 3)\
                                 .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
@@ -601,13 +634,28 @@ def dual_stage_quadratic_hip_attention(
 
                             q_tp = pad_seq(q_for_landmark)
                             TDST_PADDED = q_tp.shape[1]
-                            q_tp = q_tp\
-                                .permute(0, 2, 1, 3)\
-                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
                             k_tp = pad_seq(k)
                             TSRC_PADDED = k_tp.shape[1]
                             assert TDST_PADDED == TSRC_PADDED
 
+                            if landmark_derope:
+                                padded_position_ids_for_landmark = pad_seq(
+                                    position_ids_for_landmark[:, :, None, None]
+                                )[:, :, 0, 0]
+                                q_tp = de_rope(
+                                    q_tp,
+                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
+                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
+                                )
+                                k_tp = de_rope(
+                                    k_tp,
+                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
+                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
+                                )
+
+                            q_tp = q_tp\
+                                .permute(0, 2, 1, 3)\
+                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
                             k_tp = k_tp\
                                 .permute(0, 2, 3, 1)\
                                 .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
@@ -628,7 +676,7 @@ def dual_stage_quadratic_hip_attention(
                     landmarks = landmark_scores\
                         .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
                     num_landmarks = args.landmark_stage_k[i_stage]
-                    _, landmarks = torch.topk(landmarks, k=num_landmarks)
+                    _, landmarks = torch.topk(landmarks, k=num_landmarks, sorted=False)
                     landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
                     assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks), f'{landmarks.shape} == ({BSZ}, {TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks})'
                     
@@ -657,8 +705,9 @@ def dual_stage_quadratic_hip_attention(
                     )
                     assert (args.sink_token_size % stage_info.stage_chunk_size) == 0
                     # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
-                    out_scores.fill_(float('-inf'))
+                    
                     out_scores[:, :, :, :scores.shape[-1]] = scores
+                    out_scores[:, :, :, scores.shape[-1]:].fill_(float('-inf'))
                     # indices_left = (indices_left + indices_right) // 2
                     # indices_right = indices_left.clone()
 

@@ -62,11 +62,16 @@ def _compute_scores_landmark_cuda(
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     
     pid = tl.program_id(0).to(tl.int64)
+
     idx_head = pid % HEAD
     idx_head_kv = idx_head // (HEAD // HEAD_KV)
     pid = pid // HEAD
+    
     idx_bdst = pid % BDST
-    idx_bsz = pid // BDST
+    pid = pid // BDST
+
+    idx_bsz = pid
+    
     idx_hid = tl.arange(0, HID)
     
     Q = (
@@ -118,7 +123,7 @@ def _compute_scores_landmark_cuda(
         other=0,
     )
     pos_tdst_max = tl.max(pos_tdst * mask_tdst)
-    seq_len_max = pos_tdst_max + 1
+    seq_len_max = pos_tdst_max + 1 - SLIDING_WINDOW_SIZE
     
     queries = tl.load(
         Q +
@@ -148,53 +153,58 @@ def _compute_scores_landmark_cuda(
         mask_tsrc = mask_chunk[:, None] & (idx_tsrc < seq_len_max)
         idx_tsrc = tl.reshape(idx_tsrc, BLOCK_CHUNK * BLOCK_K)
         mask_tsrc = tl.reshape(mask_tsrc, BLOCK_CHUNK * BLOCK_K)
-        
-        if not USING_PAGED_CACHE:
-            keys = tl.load(
-                K +
-                idx_tsrc[None, :] * stride_k_tsrc +
-                idx_hid[:, None] * stride_k_hid,
-                mask=mask_tsrc[None, :],
-                other=0,
-            )#.to(tl.float8e5)
-        else:
-            block_index = tl.load(
-                BLOCK_TABLE +
-                idx_tsrc * stride_block_table_tsrc,
-                mask=mask_tsrc,
-                other=0,
-            )
-            keys = tl.load(
-                K_CACHE +
-                block_index[None, :] * stride_k_cache_t +
-                idx_hid[:, None] * stride_k_cache_hid,
-                mask=mask_tsrc[None, :],
-                other=0
-            )
 
-        scores = tl.dot(
-            queries, 
-            keys, 
-            # out_dtype=tl.float16
-        )
+        if seq_len_max >= tl.min(tl.where(mask_tsrc, idx_tsrc, 98765431)):
+            if not USING_PAGED_CACHE:
+                keys = tl.load(
+                    K +
+                    idx_tsrc[None, :] * stride_k_tsrc +
+                    idx_hid[:, None] * stride_k_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0,
+                )#.to(tl.float8e5)
+            else:
+                block_index = tl.load(
+                    BLOCK_TABLE +
+                    idx_tsrc * stride_block_table_tsrc,
+                    mask=mask_tsrc,
+                    other=0,
+                )
+                keys = tl.load(
+                    K_CACHE +
+                    block_index[None, :] * stride_k_cache_t +
+                    idx_hid[:, None] * stride_k_cache_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0
+                )
 
-        mask = (
-            (mask_tdst[:, None] & mask_tsrc[None, :]) &
-            ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
-        )
-        scores = tl.where(mask, scores, float('-inf'))
-        
-        # scores = tl.where(mask, scores, 0)
-        
-        scores = tl.reshape(scores, BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_CHUNK, BLOCK_K)
-        scores = tl.max(scores, axis=0)
-        scores = tl.max(scores, axis=-1)
-        
-        tl.store(
-            SCORES + idx_chunk * stride_scores_tchunk,
-            value=scores,
-            mask=mask_chunk,
-        )
+            scores = tl.dot(
+                queries, 
+                keys,
+            )
+            
+            scores = tl.where(scores == 0.0, float('-inf'), scores).to(scores.dtype)
+
+            # mask = (
+            #     (mask_tdst[:, None] & mask_tsrc[None, :]) &
+            #     ((pos_tdst - SLIDING_WINDOW_SIZE)[:, None] >= idx_tsrc[None, :])
+            # )
+            # scores = tl.where(mask, scores, float('-inf')).to(scores.dtype)
+            # scores = tl.where(mask, scores, 0)
+            
+            if BLOCK_K > 1:
+                scores = tl.reshape(scores, BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_CHUNK, BLOCK_K)
+                scores = tl.max(scores, axis=0)
+                scores = tl.max(scores, axis=-1)
+            else:
+                scores = tl.reshape(scores, BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_CHUNK)
+                scores = tl.max(scores, axis=0)
+            
+            tl.store(
+                SCORES + idx_chunk * stride_scores_tchunk,
+                value=scores,
+                mask=mask_chunk,
+            )
 
 def compute_scores_landmark(
     # [BSZ, TDST, HEAD, HID]
@@ -272,6 +282,9 @@ def compute_scores_landmark(
         BLOCK_CHUNK,
         CHUNK_SIZE,
         USING_PAGED_CACHE,
+
+        num_warps=4,
+        num_stages=3,
     )
     
     return scores

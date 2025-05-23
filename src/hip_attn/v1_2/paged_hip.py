@@ -731,6 +731,7 @@ def _forward_paged_hip(
         delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
         delta_attention_args_smooth = 'smooth' in delta_attention_args
         delta_attention_args_dense_decode = not ('sparse_decode' in delta_attention_args)
+        delta_attention_args_exp = 'exp' in delta_attention_args
 
         if (layer_id == 0) and (get_local_rank() == 0):
             warnings.warn(
@@ -899,10 +900,10 @@ def _forward_paged_hip(
                 #     cached_metadata=cached_metadata,
                 # )
 
-                delta_exp = True
+                delta_exp = delta_attention_args_exp
 
                 if delta_exp:
-                    delta_exp_w = 8
+                    delta_exp_w = 4
                     detla_exp_window = 512
 
                     bsa_fn = get_block_sparse_backend(args, query)
@@ -915,7 +916,7 @@ def _forward_paged_hip(
                     args_sw.block_size_q = args_sw.block_sparse_block_size_q
                     args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
                     args_sw.second_stage_k = 0
-                    args_sw.sink_token_size = 128
+                    args_sw.sink_token_size = 4
                     args_sw.sliding_window_size = detla_exp_window
                     args_sw.sliding_window_indices = None
 
@@ -1101,6 +1102,11 @@ def _forward_paged_hip(
                         step=delta_attention_args_w, 
                         device=query.device
                     )
+                    rolling_idx = False
+                    if rolling_idx:
+                        idx = (
+                            idx + (args.layer_id % delta_attention_args_w)
+                        ).clamp_max(num_sparse - 1)
                     # take mean
                     # context_sparse_for_diff = context_sparse[:, :num_sparse]
                     # context_sparse_for_diff = context_sparse_for_diff.view(
@@ -1210,9 +1216,9 @@ def _forward_paged_hip(
                         context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
                         context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
 
-                        idx = torch.arange(0, context_diff.shape[1], device=context_diff.device)
-                        idx = (idx % delta_attention_args_w).float() / delta_attention_args_w
-                        context_diff = context_diff + (context_diff_shift - context_diff) * idx[None, :, None, None]
+                        offset = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                        offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
+                        context_diff = context_diff + (context_diff_shift - context_diff) * offset[None, :, None, None]
                 
                     # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
                     # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
