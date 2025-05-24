@@ -27,6 +27,18 @@
 
 ## Usage
 
+[`hip-attn` package is available on PyPI](https://pypi.org/project/hip-attn/):
+
+```bash
+pip install hip-attn
+```
+
+or using uv:
+
+```bash
+uv add hip-attn
+```
+
 After installation, you can access the `hip` package from any project. `hip` is the code name of HiP attention.
 
 ```py
@@ -112,20 +124,16 @@ pip install -e ".[sglang]" \
 --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
 ```
 
+### Docker
+
+Docker images `deepauto/hip-attention` are available on [Docker Hub](https://hub.docker.com/r/deepauto/hip-attention).
+Docker examples are available in [Running section](#running).
+
 ### Running
 
 See the following pages for more details:
 
 - [Running OpenAI API server examples (SGlang)](docs/USAGE.sglang.md)
-
-
-### Building Docker
-
-```bash
-git clone git@github.com:DeepAuto-AI/hip-attention.git
-cd hip-attention
-docker build -t hip-sglang:latest -t hip-sglang:$(git rev-parse --short HEAD) -f Dockerfile.sglang .
-```
 
 ## Experiment Reproduce
 
@@ -157,8 +165,25 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ### Building and publishing
 
+- PyPI
+
 ```bash
 rm -rf dist
 uv build --no-sources
 uv publish
+```
+
+- Docker
+
+```bash
+git clone git@github.com:DeepAuto-AI/hip-attention.git
+cd hip-attention
+docker login
+
+docker build -t deepauto/hip-attention:latest -t deepauto/hip-attention:latest-sglang -t deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang -t deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang -f Dockerfile.sglang .
+
+docker push deepauto/hip-attention:latest
+docker push deepauto/hip-attention:latest-sglang
+docker push deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang
+docker push deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
 ```
