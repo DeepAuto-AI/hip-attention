@@ -70,7 +70,7 @@ SRT_PORT=30000 uv run scripts/test_openai_long.py
 - Cache offloading enabled
 - For cache offloading, KV cache type is `fp8_e5m2`
 - Tested model: `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`
-- Testwd GPU: 1x L40S 48GB
+- Tested GPU: 1x L40S 48GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
@@ -113,7 +113,7 @@ uv run -m sglang.launch_server \
 - 2M context length
 - Cache offloading disabled
 - Tested model: `meta-llama/Llama-3.1-8B-Instruct`
-- Testwd GPU: 1x L40S 48GB
+- Tested GPU: 1x L40S 48GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
@@ -156,7 +156,7 @@ uv run -m sglang.launch_server \
 - With cache offloading
 - For cache offloading, KV cache type is `fp8_e5m2`
 - Tested model: `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`
-- Testwd GPU: 2x A100 40GB
+- Tested GPU: 2x A100 40GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
@@ -236,7 +236,7 @@ python \
 - 2M context length
 - Cache offloading enabled
 - Tested model: `neody/r1-14b-awq`
-- Testwd GPU: 1x L40S 48GB
+- Tested GPU: 1x L40S 48GB
 - Tested at: 2025-01-29
 - Tested version:
   - `hip-attention`: `a1f2578e0b8d948efdb7df10bad89be0b09c47c6`
@@ -323,7 +323,7 @@ python \
 - 1M context length
 - Cache offloading enabled
 - Tested model: `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`
-- Testwd GPU: 4x A100 40GB
+- Tested GPU: 4x A100 40GB
 - Tested at: 2025-02-10
 - Tested version:
   - `hip-attention`: `1f346394bf98c4f53b3484d83c746435038b5b98`
@@ -420,7 +420,7 @@ python \
 - 1M context length
 - Cache offloading enabled
 - Tested model: `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`
-- Testwd GPU: 4x A100 40GB
+- Tested GPU: 4x A100 40GB
 - Tested at: 2025-02-07
 - Tested version:
   - `hip-attention`: `1f346394bf98c4f53b3484d83c746435038b5b98`
@@ -517,7 +517,7 @@ python \
 - 1M context length
 - Cache offloading enabled
 - Tested model: `Qwen/QwQ-32B`
-- Testwd GPU: 4x A100 40GB
+- Tested GPU: 4x A100 40GB
 - Tested at: 2025-04-06
 - Tested version:
   - `hip-attention`: `600d3b614e6da8dd26c38f91d0245d046a90a046`
@@ -602,7 +602,7 @@ python \
 - 1M context length
 - Cache offloading enabled
 - Tested model: `casperhansen/llama-3.3-70b-instruct-awq`
-- Testwd GPU: 4x A100 40GB
+- Tested GPU: 4x A100 40GB
 - Tested at: 2025-04-06
 - Tested version:
   - `hip-attention`: `600d3b614e6da8dd26c38f91d0245d046a90a046`
@@ -686,7 +686,7 @@ python \
 - 1M context length
 - Cache offloading disabled
 - Tested model: `meta-llama/Llama-4-Scout-17B-16E-Instruct`
-- Testwd GPU: 8x H100 80GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-05-19
 - Tested version:
   - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
@@ -758,7 +758,7 @@ python \
 - 2M context length
 - Cache offloading enabled
 - Tested model: `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-- Testwd GPU: 8x H100 80GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-05-19
 - Tested version:
   - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
@@ -835,7 +835,7 @@ python \
 - 2M context length
 - Cache offloading disabled
 - Tested model: `Qwen/Qwen3-30B-A3B`
-- Testwd GPU: 8x H100 80GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-05-19
 - Tested version:
   - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
@@ -901,7 +901,7 @@ python \
 - 5M context length
 - Cache offloading enabled
 - Tested model: `Qwen/Qwen3-30B-A3B`
-- Testwd GPU: 8x H100 80GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-05-19
 - Tested version:
   - `hip-attention`: `3974c558f79149584847576ad27a7adf32d30be5`
