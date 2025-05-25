@@ -16,21 +16,21 @@ if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
     if HIP_DEBUG_DELTA_EXP:
         _DEFAULT_STAGES = [
             ScanStage(
-                stage_block_size_q=32,
-                stage_block_stride_q=1,
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
                 stage_chunk_size=64,
                 stage_k=None,
                 stage_stride=1,
             ),
             ScanStage(
-                stage_block_size_q=32,
-                stage_block_stride_q=1,
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
                 stage_chunk_size=16,
                 stage_k=32768,
                 stage_stride=1,
             ),
             ScanStage(
-                stage_block_size_q=32,
+                stage_block_size_q=64,
                 stage_block_stride_q=1,
                 stage_chunk_size=4,
                 stage_k=8192,

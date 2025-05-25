@@ -719,6 +719,8 @@ def _forward_paged_hip(
     if last_dense > 0:
         last_dense += dst_seq_len % args.block_sparse_block_size_q
     
+    # TODO: if delta norm is too high, then just recompute that whole block.
+    # TODO: use partial densely decode. delta attention for decode
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
     # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_32-sparse_decode-smooth
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
@@ -903,8 +905,14 @@ def _forward_paged_hip(
                 delta_exp = delta_attention_args_exp
 
                 if delta_exp:
-                    delta_exp_w = 4
-                    detla_exp_window = 512
+                    delta_exp_w = 2
+                    delta_exp_bk = 16
+                    delta_exp_k = 0
+                    delta_exp_window = 1024
+                    delta_exp_sink = 128
+                    delta_merge_strategy = 'delta' # replace / delta
+                    if delta_exp_k == 0:
+                        delta_exp_bk = 64
 
                     bsa_fn = get_block_sparse_backend(args, query)
 
@@ -914,21 +922,46 @@ def _forward_paged_hip(
                     if args_sw.rope_range is None:
                         args_sw.rope_range = (0, HID)
                     args_sw.block_size_q = args_sw.block_sparse_block_size_q
-                    args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
-                    args_sw.second_stage_k = 0
-                    args_sw.sink_token_size = 4
-                    args_sw.sliding_window_size = detla_exp_window
+                    args_sw.block_size_k = delta_exp_bk
+                    args_sw.second_stage_k = delta_exp_k
+                    args_sw.sink_token_size = delta_exp_sink
+                    args_sw.sliding_window_size = delta_exp_window
                     args_sw.sliding_window_indices = None
 
                     BDST = triton.cdiv(TDST, args_sw.block_size_q)
                     BH = BSZ * HEAD
 
-                    indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
-                    ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
-                    ks_count = ks.unsqueeze(-1)
-                    ks_start_end = torch.zeros(
-                        (BH, BDST, 2), dtype=torch.int64, device=query.device
-                    )
+                    if delta_exp_k == 0:
+                        indices = torch.zeros((BH, BDST, delta_exp_k // delta_exp_bk), dtype=torch.int64, device=query.device)
+                        ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+                        ks_count = ks.unsqueeze(-1)
+                        ks_start_end = torch.zeros(
+                            (BH, BDST, 2), dtype=torch.int64, device=query.device
+                        )
+                        ks_start_end[:, :, 1:] = ks[:, :, None]
+                    else:
+                        indices = torch.rand((BH, BDST, delta_exp_k // delta_exp_bk), device=query.device)
+                        indices = indices * args_sw.position_ids[:, ::args_sw.block_size_q].repeat_interleave(HEAD, dim=0)[:, :, None]
+                        indices = indices.to(torch.int64) // delta_exp_bk * delta_exp_bk
+                        
+                        indices, _ = indices.sort(dim=-1)
+                        indices = indices // args_sw.block_size_k * args_sw.block_size_k
+
+                        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+                        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+                        indices, _ = indices.sort(dim=-1)
+                        active_mask = indices < (
+                            args_sw.position_ids[:, :: args_sw.block_size_q, None].repeat_interleave(HEAD, 0)
+                            + args_sw.block_size_q
+                        )
+                        ks = active_mask.int().sum(-1)
+                        ks_count = ks.unsqueeze(-1)
+                        ks_start_end = torch.zeros(
+                            (ks.shape[0], ks.shape[1], 2), 
+                            dtype=torch.int32, 
+                            device=query.device
+                        )
+                        ks_start_end[:, :, -1] = ks
 
                     context_sw = bsa_fn(
                         q=(query * sm_scale).to(query.dtype),
@@ -984,23 +1017,29 @@ def _forward_paged_hip(
                     )
                     context_sparse = context_sparse.to(query.dtype)
 
-                    context_sw_for_sparse = context_sw[:, ::delta_exp_w]
-                    delta_sparse = context_sparse - context_sw_for_sparse
+                    if delta_merge_strategy == 'delta':
+                        context_sw_for_sparse = context_sw[:, ::delta_exp_w]
+                        delta_sparse = context_sparse - context_sw_for_sparse
 
-                    delta_sparse = delta_sparse.repeat_interleave(
-                        delta_exp_w, dim=1
-                    )
-                    
-                    if delta_attention_args_smooth:
-                        # (exp) linear interpolate diff
-                        delta_sparse_shift = torch.roll(delta_sparse, -delta_exp_w, 1)
-                        delta_sparse_shift[:, -delta_exp_w:] = delta_sparse[:, -1:]
+                        delta_sparse = delta_sparse.repeat_interleave(
+                            delta_exp_w, dim=1
+                        )
+                        
+                        if delta_attention_args_smooth:
+                            # (exp) linear interpolate diff
+                            delta_sparse_shift = torch.roll(delta_sparse, -delta_exp_w, 1)
+                            delta_sparse_shift[:, -delta_exp_w:] = delta_sparse[:, -1:]
 
-                        idx = torch.arange(0, delta_sparse.shape[1], device=delta_sparse.device)
-                        idx = (idx % delta_exp_w).float() / delta_exp_w
-                        delta_sparse = delta_sparse + (delta_sparse_shift - delta_sparse) * idx[None, :, None, None]
+                            idx = torch.arange(0, delta_sparse.shape[1], device=delta_sparse.device)
+                            idx = (idx % delta_exp_w).float() / delta_exp_w
+                            delta_sparse = delta_sparse + (delta_sparse_shift - delta_sparse) * idx[None, :, None, None]
 
-                    context_sparse = context_sw + delta_sparse[:, :context_sw.shape[1]]
+                        context_sparse = context_sw + delta_sparse[:, :context_sw.shape[1]]
+                    elif delta_merge_strategy == 'replace':
+                        context_sw[:, ::delta_exp_w] = context_sparse
+                        context_sparse = context_sw
+                    else:
+                        raise Exception()
                 else:
                     # args_new = args.clone()
                     # k_flat = args.gather_k_from_paged_cache()
