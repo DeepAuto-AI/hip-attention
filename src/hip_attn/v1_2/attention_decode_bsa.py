@@ -322,7 +322,9 @@ def _fwd_kernel_stage1(
     mask_dv = offs_dv < Lv
 
     cur_batch_seq_len = tl.load(
-        B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
+        B_Seqlen 
+        + cur_batch.to(tl.int64) * stride_pos_bsz 
+        + 0 * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 

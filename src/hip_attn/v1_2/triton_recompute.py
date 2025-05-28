@@ -22,6 +22,7 @@ import triton.tools.experimental_descriptor
 from hip_attn.v1_2.attention_metadata import (
     safe_stride,
 )
+from hip_attn.v1_2.utils import capture
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = "cuda:0"
@@ -66,10 +67,15 @@ def _attn_fwd_inner(
     stride_v_cache_hid,
     BLOCK_TABLE,
     stride_block_table_tsrc,
+
+    lo,
+    hi,
+
+    MASKING: tl.constexpr,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
-    lo, hi = 0, tl.max(mask_idx) + 1
+    # lo, hi = 0, tl.max(mask_idx) + 1
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -102,11 +108,12 @@ def _attn_fwd_inner(
                 mask=mask_tsrc[None, :],
                 other=0,
             )
-        qk = tl.dot(q, k)
+        qk = tl.dot(q, k) * qk_scale
 
-        mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
-
-        qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+        if MASKING:
+            mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
+            qk = tl.where(mask, qk, -1.0e6)
+        
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
 
@@ -327,6 +334,10 @@ def _attn_fwd(
             V.dtype.element_ty == tl.float8e5,  #
         )
     else:
+        lo = 0
+        mid = tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N
+        hi = tl.max(mask_idx) + 1
+        
         acc, l_i, m_i = _attn_fwd_inner(
             acc,
             l_i,
@@ -357,6 +368,46 @@ def _attn_fwd(
             stride_v_cache_hid=stride_v_cache_hid,
             BLOCK_TABLE=BLOCK_TABLE,
             stride_block_table_tsrc=stride_block_table_tsrc,
+
+            lo=lo,
+            hi=mid,
+            MASKING=False,
+        )
+
+        acc, l_i, m_i = _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            None,
+            None,
+            mask_idx,
+            start_m,
+            qk_scale,
+            BLOCK_M,
+            HEAD_DIM,
+            BLOCK_N,
+            offs_m,
+            offs_n,
+            N_CTX,
+            N_KV,
+            V_CACHE.dtype.element_ty == tl.float8e5,
+            
+            USING_PAGED_CACHE=USING_PAGED_CACHE,
+            K_CACHE=K_CACHE,
+            stride_k_cache_t=stride_k_cache_t,
+            stride_k_cache_page=stride_k_cache_page,
+            stride_k_cache_hid=stride_k_cache_hid,
+            V_CACHE=V_CACHE,
+            stride_v_cache_t=stride_v_cache_t,
+            stride_v_cache_page=stride_v_cache_page,
+            stride_v_cache_hid=stride_v_cache_hid,
+            BLOCK_TABLE=BLOCK_TABLE,
+            stride_block_table_tsrc=stride_block_table_tsrc,
+
+            lo=mid,
+            hi=hi,
+            MASKING=True,
         )
 
     # epilogue
@@ -379,6 +430,7 @@ def _attn_fwd(
 
 class _attention(torch.autograd.Function):
 
+    @capture
     @staticmethod
     def forward(
         ctx, 

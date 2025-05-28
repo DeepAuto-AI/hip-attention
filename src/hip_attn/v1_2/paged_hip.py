@@ -141,6 +141,9 @@ def forward_paged_hip(
         )
         metadata_new = []
 
+        if cached_metadata is not None:
+            states = cached_metadata.state
+
         start_len = 0
         decoding_reqs = []
         decoding_reqs_positions = []
@@ -160,6 +163,10 @@ def forward_paged_hip(
                         v[idx_batch],
                         offloading_metadata[idx_batch],
                     )
+                
+                if cached_metadata is not None:
+                    if isinstance(states, list):
+                        cached_metadata.state = states[idx_batch]
 
                 o_req, metadata_req = _forward_paged_hip_validate(
                     query=query[start_len : start_len + seq_len],
@@ -867,7 +874,8 @@ def _forward_paged_hip(
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k_new=cu_seqlens_k_new,
-                    max_seqlen_q=cu_seqlens_q.amax().item(),
+                    # max_seqlen_q=cu_seqlens_q.amax().item(),
+                    max_seqlen_q=args.model_context_length,
                     causal=True,
                     softmax_scale=sm_scale,
                 )
@@ -1451,7 +1459,8 @@ def _forward_paged_hip(
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k_new=cu_seqlens_k_new,
-                    max_seqlen_q=cu_seqlens_q.amax().item(),
+                    # max_seqlen_q=cu_seqlens_q.amax().item(),
+                    max_seqlen_q=args.model_context_length,
                     causal=True,
                     softmax_scale=sm_scale,
                 )
@@ -1768,6 +1777,7 @@ class PagedHiPStateful:
         **kwargs,
     ):
         layer_id = kwargs.get('layer_id', None)
+        is_decode = kwargs.get('is_decode', False)
         state = self.states.get(layer_id, None)
 
         cached_metadata = kwargs.pop('cached_metadata', None)
@@ -1793,22 +1803,16 @@ class PagedHiPStateful:
             cached_metadata=cached_metadata,
         )
 
-        if isinstance(metadata, list):
-            assert len(metadata) == 1
-            metadata = metadata[0]
-
-        # print('called', type(metadata.state))
-
-        if metadata is not None:
-            if metadata.state is not None:
-                # if self.states.get(layer_id, None) is None:
-                #     print(f'init cache for {layer_id}')
-                self.states[layer_id] = metadata.state
-            else:
-                # print(id(metadata), 'state is cleared why?')
-                pass
-        else:
-            # print('metadata is none, nothing to cache')
-            pass
+        if not is_decode:
+            state = None
+            if metadata is not None:
+                if isinstance(metadata, list):
+                    if (metadata[0] is not None) and (metadata[0].state is not None):
+                        states = [m.state for m in metadata]
+                else:
+                    if metadata.state is not None:
+                        states = metadata.state
+            if state is not None:
+                self.states[layer_id] = states
 
         return o, metadata

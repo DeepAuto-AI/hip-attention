@@ -102,10 +102,13 @@ def stream_chat_completion(
                             break
                         if verbose:
                             data = json.loads(data_str)
-                            delta_content = data['choices'][0]['delta']['content']
-                            if delta_content:
-                                delta_content = delta_content.replace('\n', '\\n')
-                                print(delta_content, end='', flush=True)
+                            try:
+                                delta_content = data['choices'][0]['delta']['content']
+                                if delta_content:
+                                    delta_content = delta_content.replace('\n', '\\n')
+                                    print(delta_content, end='', flush=True)
+                            except KeyError:
+                                print(data)
 
                         # Otherwise, parse the JSON for the token(s)
                         try:

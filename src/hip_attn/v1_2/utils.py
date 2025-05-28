@@ -1,6 +1,25 @@
 import torch
 import os
 
+try:
+    from sglang.srt.distributed import (
+        get_tensor_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
+        tensor_model_parallel_all_gather,
+        model_parallel_is_initialized,
+    )
+
+    SGLANG_DIST_AVAILABLE = True
+    
+except:
+    SGLANG_DIST_AVAILABLE = False
+
+def get_local_rank():
+    if SGLANG_DIST_AVAILABLE:
+        return get_tensor_model_parallel_rank() if model_parallel_is_initialized() else 0
+    else:
+        return 0
+
 class capture(object):
 
     def __init__(self, callback):
@@ -15,8 +34,9 @@ class capture(object):
     def __call__(self, *args, **kwargs):
         run_benchmark = (
             (not torch.cuda.is_current_stream_capturing()) and
-            (kwargs['q'].shape[1] > 1) and
-            os.getenv('HIP_DEBUG_BENCH', '0') == '1'
+            (kwargs['q'].shape[1] > 1 if 'q' in kwargs else True) and
+            os.getenv('HIP_DEBUG_BENCH', '0') == '1' and
+            (get_local_rank() == 0)
         )
 
         if run_benchmark:

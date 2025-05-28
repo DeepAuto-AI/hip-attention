@@ -485,21 +485,39 @@ def block_sparse_attention_cuda_step(
 
     # if qk_mask == True, then dropped
     if IS_CAUSAL:
+        if len(pos_tdst.shape) > 0:
+            seq_len = tl.max(pos_tdst)
+        else:
+            seq_len = pos_tdst
+        
         if EXCLUDE_SLIDING_WINDOW:
             assert not CHUNKED_SW
-            qk_mask = (
-                ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                | ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :])
-                | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-            )
+            # qk_mask = (
+            #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+            #     | ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :])
+            #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+            # )
+
+            qk_mask = ~(
+                mask_tsrc 
+                & (idx_tsrc < (seq_len - sliding_window_size))
+            )[None, :]
         else:
             # TODO(ainl): we should reduce scanning loop range if CHUNKED_SW is true.
             if not CHUNKED_SW:
+                # qk_mask = (
+                #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                #     | (
+                #         (pos_tdst - 1)[:, None]
+                #         >= (idx_tsrc + sliding_window_size)[None, :]
+                #     )
+                #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+                # )
+
                 qk_mask = (
                     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                    | (
-                        (pos_tdst - 1)[:, None]
-                        >= (idx_tsrc + sliding_window_size)[None, :]
+                    | ~(
+                        idx_tsrc[None, :] >= (seq_len - sliding_window_size)
                     )
                     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                 )
@@ -530,7 +548,7 @@ def block_sparse_attention_cuda_step(
         qk_mask = ~(mask_tdst[:, None] & mask_tsrc[None, :])
 
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
+    # qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
     m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
 
     qk = qk - m_ij
@@ -1838,8 +1856,17 @@ def block_sparse_attention_cuda(
             0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q
         )
         i_tsrc_range_start = i_tsrc_range_start // BLOCK_SIZE_K * BLOCK_SIZE_K
+        i_tsrc_range_start_real = i_tsrc_range_start
+        if not CHUNKED_SW:
+            i_tsrc_range_start_real = i_tsrc_range_start
+        else:
+            i_tsrc_range_start_real = tl.maximum(
+                i_tsrc_range_start,
+                (CURR_TSRC - 1) // sliding_window_size * sliding_window_size - BLOCK_SIZE_Q
+            )
+
         TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
-        for i_tsrc in range(i_tsrc_range_start, CURR_TSRC, TSRC_RANGE_STEP):
+        for i_tsrc in range(i_tsrc_range_start_real, CURR_TSRC, TSRC_RANGE_STEP):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < CURR_TSRC
 
