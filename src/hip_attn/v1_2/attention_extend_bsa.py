@@ -765,6 +765,11 @@ def block_sparse_attention_cuda(
     stride_context_tdst,
     stride_context_head,
     stride_context_hid,
+    MX,
+    NC,
+    stride_mx_bsz,
+    stride_mx_tdst,
+    stride_mx_head,
     HEAD: tl.constexpr,
     BK: tl.constexpr,
     MAX_TDST,
@@ -2265,6 +2270,14 @@ def block_sparse_attention_cuda(
                 CHUNKED_SW=CHUNKED_SW,
             )
 
+    if MX is not None and NC is not None:
+        mx_nc_offsets = idx_bsz * stride_mx_bsz \
+            + idx_tdst[:, None] * stride_mx_tdst \
+            + idx_head * stride_mx_head
+
+        tl.store(MX + mx_nc_offsets, m_i, mask=mask_tdst[:, None])
+        tl.store(NC + mx_nc_offsets, l_i, mask=mask_tdst[:, None])
+
     # epilogue
     m_i += tl.math.log2(l_i)
     acc = acc / (tl.where(l_i == 0.0, 1e-20, l_i))
@@ -2348,6 +2361,9 @@ def block_sparse_attention(
         BLOCK_BK = int(os.environ["SA_BLOCK_BK"])
 
     assert BLOCK_BK > 0, BLOCK_BK
+
+    MX = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
+    NC = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
 
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
 
@@ -2434,6 +2450,9 @@ def block_sparse_attention(
         *safe_stride(ks_start_end, 3),
         context,
         *safe_stride(context, 4),
+        MX,
+        NC,
+        *safe_stride(MX, 3),
         HEAD,
         BK,
         TDST,
@@ -2490,4 +2509,4 @@ def block_sparse_attention(
             + v_cumsum.repeat_interleave(HEAD // KV_HEAD, dim=2) * scaler
         )
 
-    return context
+    return context, MX, NC

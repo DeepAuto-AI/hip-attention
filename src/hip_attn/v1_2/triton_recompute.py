@@ -185,6 +185,8 @@ def _attn_fwd(
     V,
     sm_scale,
     M,
+    MX,
+    NC,
     Out,  #
     MaskIdx,
     stride_qz,
@@ -415,6 +417,15 @@ def _attn_fwd(
         m_i += tl.math.log2(l_i)
         m_ptrs = M + off_hz * N_CTX + offs_m
         tl.store(m_ptrs, m_i, mask=mask_m)
+
+    if MX is not None:
+        m_ptrs = MX + off_hz * N_CTX + offs_m
+        tl.store(m_ptrs, m_i, mask=mask_m)
+
+    if NC is not None:
+        l_ptrs = NC + off_hz * N_CTX + offs_m
+        tl.store(l_ptrs, l_i, mask=mask_m)
+
     acc = acc / l_i[:, None]
     tl.store(
         O_block_ptr,
@@ -471,6 +482,17 @@ class _attention(torch.autograd.Function):
         # )
         M = None
 
+        MX = torch.empty(
+            (q.shape[0], q.shape[1], q.shape[2]),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        NC = torch.empty(
+            (q.shape[0], q.shape[1], q.shape[2]),
+            device=q.device,
+            dtype=torch.float32,
+        )
+
         # assert q.shape[1] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 48, 64, 80, 96,)
         assert q.shape[1] <= 128
         grid = lambda args: (
@@ -486,6 +508,8 @@ class _attention(torch.autograd.Function):
             v,
             sm_scale,
             M,
+            MX,
+            NC,
             o,  #
             mask,
             *safe_stride(q, 4),
@@ -508,7 +532,7 @@ class _attention(torch.autograd.Function):
             **extra_kern_args,
         )
 
-        return o
+        return o, MX, NC
 
     @staticmethod
     def backward(ctx, do):
