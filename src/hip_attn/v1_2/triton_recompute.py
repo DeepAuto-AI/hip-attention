@@ -13,6 +13,7 @@ Extra Credits:
 
 """
 
+import os
 import numpy as np
 import pytest
 import torch
@@ -162,8 +163,8 @@ def _attn_fwd_inner(
 # re-tuning.
 configs = [
     triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-    for BM in [64, 128]
-    for BN in [32, 64]
+    for BM in [16, 32, 64, 128]
+    for BN in [16, 32, 64]
     for s in ([1] if is_hip() else [3, 4, 7])
     for w in [4, 8]
 ]
@@ -221,12 +222,30 @@ def _attn_fwd(
     BLOCK_TABLE,
     stride_block_table_bsz,
     stride_block_table_tsrc,
+    
+    ACC,
+    stride_acc_bsz,
+    stride_acc_head,
+    stride_acc_split,
+    stride_acc_tdst,
+    stride_acc_hid,
+    MI,
+    stride_mi_bsz,
+    stride_mi_head,
+    stride_mi_split,
+    strdie_mi_tdst,
+    LI,
+    stride_li_bsz,
+    stride_li_head,
+    stride_li_split,
+    stride_li_tdst,
 
     Z,
     H,
     N_CTX,  #
     N_KV,
     HEAD_DIM: tl.constexpr,  #
+    N_SPLIT,
     BLOCK_M: tl.constexpr,  #
     BLOCK_N: tl.constexpr,  #
 ):
@@ -237,6 +256,8 @@ def _attn_fwd(
     off_h = off_hz % H
     q_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
     kv_offset = off_z.to(tl.int64) * stride_kz + off_h.to(tl.int64) * stride_kh
+    
+    idx_split = tl.program_id(2).to(tl.int64)
 
     # block pointers
     Q_block_ptr = tl.make_block_ptr(
@@ -338,88 +359,299 @@ def _attn_fwd(
         mid = tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N
         hi = tl.max(mask_idx) + 1
         
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            None,
-            None,
-            mask_idx,
-            start_m,
-            qk_scale,
-            BLOCK_M,
-            HEAD_DIM,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            N_CTX,
-            N_KV,
-            V_CACHE.dtype.element_ty == tl.float8e5,
+        if N_SPLIT > 1:
+            k_chunk_size = tl.cdiv(hi, N_SPLIT)
+            start_k = k_chunk_size * idx_split
+            end_k = k_chunk_size * (idx_split + 1)
             
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
+            # (start_k, end_k) (lo, mid)
+            if tl.maximum(start_k, lo) < tl.minimum(end_k, mid):
+                acc, l_i, m_i = _attn_fwd_inner(
+                    acc,
+                    l_i,
+                    m_i,
+                    q,
+                    None,
+                    None,
+                    mask_idx,
+                    start_m,
+                    qk_scale,
+                    BLOCK_M,
+                    HEAD_DIM,
+                    BLOCK_N,
+                    offs_m,
+                    offs_n,
+                    N_CTX,
+                    N_KV,
+                    V_CACHE.dtype.element_ty == tl.float8e5,
+                    
+                    USING_PAGED_CACHE=USING_PAGED_CACHE,
+                    K_CACHE=K_CACHE,
+                    stride_k_cache_t=stride_k_cache_t,
+                    stride_k_cache_page=stride_k_cache_page,
+                    stride_k_cache_hid=stride_k_cache_hid,
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_t=stride_v_cache_t,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_hid=stride_v_cache_hid,
+                    BLOCK_TABLE=BLOCK_TABLE,
+                    stride_block_table_tsrc=stride_block_table_tsrc,
 
-            lo=lo,
-            hi=mid,
-            MASKING=False,
-        )
+                    lo=tl.maximum(start_k, lo),
+                    hi=tl.minimum(end_k, mid),
+                    MASKING=False,
+                )
+            # (start_k, end_k) (mid, hi)
+            if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
+                acc, l_i, m_i = _attn_fwd_inner(
+                    acc,
+                    l_i,
+                    m_i,
+                    q,
+                    None,
+                    None,
+                    mask_idx,
+                    start_m,
+                    qk_scale,
+                    BLOCK_M,
+                    HEAD_DIM,
+                    BLOCK_N,
+                    offs_m,
+                    offs_n,
+                    N_CTX,
+                    N_KV,
+                    V_CACHE.dtype.element_ty == tl.float8e5,
+                    
+                    USING_PAGED_CACHE=USING_PAGED_CACHE,
+                    K_CACHE=K_CACHE,
+                    stride_k_cache_t=stride_k_cache_t,
+                    stride_k_cache_page=stride_k_cache_page,
+                    stride_k_cache_hid=stride_k_cache_hid,
+                    V_CACHE=V_CACHE,
+                    stride_v_cache_t=stride_v_cache_t,
+                    stride_v_cache_page=stride_v_cache_page,
+                    stride_v_cache_hid=stride_v_cache_hid,
+                    BLOCK_TABLE=BLOCK_TABLE,
+                    stride_block_table_tsrc=stride_block_table_tsrc,
 
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            None,
-            None,
-            mask_idx,
-            start_m,
-            qk_scale,
-            BLOCK_M,
-            HEAD_DIM,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            N_CTX,
-            N_KV,
-            V_CACHE.dtype.element_ty == tl.float8e5,
-            
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
+                    lo=tl.maximum(start_k, mid),
+                    hi=tl.minimum(end_k, hi),
+                    MASKING=True,
+                )
+        else:
+            acc, l_i, m_i = _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                None,
+                None,
+                mask_idx,
+                start_m,
+                qk_scale,
+                BLOCK_M,
+                HEAD_DIM,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                N_CTX,
+                N_KV,
+                V_CACHE.dtype.element_ty == tl.float8e5,
+                
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
 
-            lo=mid,
-            hi=hi,
-            MASKING=True,
-        )
+                lo=lo,
+                hi=mid,
+                MASKING=False,
+            )
+
+            acc, l_i, m_i = _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                None,
+                None,
+                mask_idx,
+                start_m,
+                qk_scale,
+                BLOCK_M,
+                HEAD_DIM,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                N_CTX,
+                N_KV,
+                V_CACHE.dtype.element_ty == tl.float8e5,
+                
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+
+                lo=mid,
+                hi=hi,
+                MASKING=True,
+            )
 
     # epilogue
+    if N_SPLIT > 1:
+        # checkout acc, l_i, m_i
+        tl.store(
+            ACC +
+            off_z * stride_acc_bsz +
+            off_h * stride_acc_head +
+            idx_split * stride_acc_split +
+            offs_m[:, None] * stride_acc_tdst +
+            tl.arange(0, HEAD_DIM)[None, :] * stride_acc_hid,
+            mask=mask_m[:, None],
+            value=acc,
+        )
+        tl.store(
+            MI +
+            off_z * stride_mi_bsz +
+            off_h * stride_mi_head +
+            idx_split * stride_mi_split +
+            offs_m * strdie_mi_tdst,
+            mask=mask_m,
+            value=m_i,
+        )
+        tl.store(
+            LI +
+            off_z * stride_li_bsz +
+            off_h * stride_li_head +
+            idx_split * stride_li_split +
+            offs_m * stride_li_tdst,
+            mask=mask_m,
+            value=l_i,
+        )
     if M is not None:
+        tl.static_assert(N_SPLIT <= 1)
         m_i += tl.math.log2(l_i)
         m_ptrs = M + off_hz * N_CTX + offs_m
         tl.store(m_ptrs, m_i, mask=mask_m)
-    acc = acc / l_i[:, None]
+    if N_SPLIT <= 1:
+        acc = acc / l_i[:, None]
+        tl.store(
+            O_block_ptr,
+            acc.to(Out.type.element_ty),
+            boundary_check=(0,),
+        )
+
+
+@triton.jit
+def _attn_merge(
+    O,
+    stride_o_bsz,
+    stride_o_head,
+    stride_o_tdst,
+    stride_o_hid,
+    
+    ACC,
+    stride_acc_bsz,
+    stride_acc_head,
+    stride_acc_split,
+    stride_acc_tdst,
+    stride_acc_hid,
+    MI,
+    stride_mi_bsz,
+    stride_mi_head,
+    stride_mi_split,
+    stride_mi_tdst,
+    LI,
+    stride_li_bsz,
+    stride_li_head,
+    stride_li_split,
+    stride_li_tdst,
+    
+    TDST,
+    HEAD,
+    HID: tl.constexpr,
+    N_SPLIT,
+    
+    BLOCK_TDST: tl.constexpr,
+):
+    idx_tdst_start = tl.program_id(0).to(tl.int64) * BLOCK_TDST
+    idx_tdst = tl.arange(0, BLOCK_TDST) + idx_tdst_start
+    mask_tdst = idx_tdst < TDST
+    idx_bsz_head = tl.program_id(1).to(tl.int64)
+    idx_bsz = idx_bsz_head // HEAD
+    idx_head = idx_bsz_head % HEAD
+    idx_hid = tl.arange(0, HID)
+    
+    ACC = (
+        ACC + idx_bsz * stride_acc_bsz + idx_head * stride_acc_head
+    )
+    MI = (
+        MI + idx_bsz * stride_mi_bsz + idx_head * stride_mi_head
+    )
+    LI = (
+        LI + idx_bsz * stride_li_bsz + idx_head * stride_li_head
+    )
+    
+    m_i = tl.zeros([BLOCK_TDST], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_TDST], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_TDST, HID], dtype=tl.float32)
+    
+    for idx_split in range(N_SPLIT):
+        m_split = tl.load(
+            MI +
+            idx_split * stride_mi_split +
+            idx_tdst * stride_mi_tdst,
+            mask=mask_tdst,
+        )
+        l_split = tl.load(
+            LI +
+            idx_split * stride_li_split +
+            idx_tdst * stride_li_tdst,
+            mask=mask_tdst,
+        )
+        acc_split = tl.load(
+            ACC +
+            idx_split * stride_acc_split +
+            idx_tdst[:, None] * stride_acc_tdst +
+            idx_hid[None, :] * stride_acc_hid,
+            mask=mask_tdst[:, None],
+        )
+        
+        acc_split = acc_split / l_split[:, None]
+        tlogic = m_split / tl.math.log2(l_split)
+        
+        n_e_max = tl.maximum(tlogic, m_i)
+
+        n_e_max_valid = n_e_max > -1e50
+        old_scale = tl.math.exp2(m_i - n_e_max)
+        exp_logic = tl.math.exp2(tlogic - n_e_max)
+        acc = tl.where(n_e_max_valid, acc * old_scale + exp_logic * acc_split, acc)
+
+        l_i = tl.where(n_e_max_valid, l_i * old_scale + exp_logic, l_i)
+        m_i = n_e_max
+    
     tl.store(
-        O_block_ptr,
-        acc.to(Out.type.element_ty),
-        boundary_check=(0,),
+        O +
+        idx_bsz * stride_o_bsz +
+        idx_head * stride_o_head +
+        idx_tdst[:, None] * stride_o_tdst +
+        idx_hid[None, :] * stride_o_hid,
+        value=(acc / l_i[:, None]).to(O.type.element_ty),
+        mask=mask_tdst[:, None]
     )
 
 
@@ -458,11 +690,16 @@ class _attention(torch.autograd.Function):
         o = torch.empty_like(q)
         stage = 1
         extra_kern_args = {}
-        # Tuning for AMD target
+        # Tuning fo
+        # r AMD target
         if is_hip():
             waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
             extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
 
+        N_CTX = q.shape[2]
+        N_HEAD = q.shape[1]
+        N_BATCH = q.shape[0]
+        
         # NOTE: this is for backward
         # M = torch.empty(
         #     (q.shape[0], q.shape[1], q.shape[2]), 
@@ -471,42 +708,118 @@ class _attention(torch.autograd.Function):
         # )
         M = None
 
-        # assert q.shape[1] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 48, 64, 80, 96,)
-        assert q.shape[1] <= 128
-        grid = lambda args: (
-            triton.cdiv(q.shape[2], args["BLOCK_M"]),
-            q.shape[0] * q.shape[1],
-            1,
-        )
-
+        assert q.shape[1] <= 128 # N HEAD should be smaller than 128. this could be adjusted.
         assert len(mask.size()) == 2, "expecting mask to be 2D"
-        _attn_fwd[grid](
-            q,
-            k,
-            v,
-            sm_scale,
-            M,
-            o,  #
-            mask,
-            *safe_stride(q, 4),
-            *safe_stride(k, 4),
-            *safe_stride(v, 4),
-            *safe_stride(o, 4),
-            *safe_stride(mask, 2),
+        
+        N_CTX_BLOCK = 128
+        N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
+        N_SM = 256 # TODO make a good solution to get this without init CUDA context on GPU 0
+        if (N_PROGRAM < N_SM) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '0') == '1'):
+            N_SPLIT = triton.cdiv(N_SM, N_PROGRAM)
+            N_SPLIT = N_SPLIT
+            grid = lambda args: (
+                triton.cdiv(N_CTX, args["BLOCK_M"]),
+                N_BATCH * N_HEAD,
+                N_SPLIT,
+            )
+            
+            acc = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX, HEAD_DIM_V), dtype=torch.float32, device=q.device)
+            m_i = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
+            l_i = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
+            
+            _attn_fwd[grid](
+                q,
+                k,
+                v,
+                sm_scale,
+                M,
+                o,  #
+                mask,
+                *safe_stride(q, 4),
+                *safe_stride(k, 4),
+                *safe_stride(v, 4),
+                *safe_stride(o, 4),
+                *safe_stride(mask, 2),
 
-            k_cache is not None,
-            q.shape[1] // k_cache.shape[2] if k_cache is not None else q.shape[1] // k.shape[1],
-            k_cache, *safe_stride(k_cache, 4),
-            v_cache, *safe_stride(v_cache, 4),
-            block_table, *safe_stride(block_table, 2),
+                k_cache is not None,
+                q.shape[1] // k_cache.shape[2] if k_cache is not None else q.shape[1] // k.shape[1],
+                k_cache, *safe_stride(k_cache, 4),
+                v_cache, *safe_stride(v_cache, 4),
+                block_table, *safe_stride(block_table, 2),
+                
+                acc, *safe_stride(acc, 5),
+                m_i, *safe_stride(m_i, 4),
+                l_i, *safe_stride(l_i, 4),
 
-            q.shape[0],
-            q.shape[1],  #
-            N_CTX=q.shape[2],  #
-            N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
-            HEAD_DIM=HEAD_DIM_K,  #
-            **extra_kern_args,
-        )
+                q.shape[0],
+                q.shape[1],  #
+                N_CTX=N_CTX,  #
+                N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
+                HEAD_DIM=HEAD_DIM_K,  #
+                N_SPLIT=N_SPLIT,
+                **extra_kern_args,
+            )
+            
+            BLOCK_M = 128
+            grid = (
+                triton.cdiv(N_CTX, BLOCK_M),
+                N_BATCH * N_HEAD,
+                1,
+            )
+            
+            _attn_merge[grid](
+                o, *safe_stride(o, 4),
+                acc, *safe_stride(acc, 5),
+                m_i, *safe_stride(m_i, 4),
+                l_i, *safe_stride(l_i, 4),
+                
+                TDST=N_CTX,
+                HEAD=N_HEAD,
+                HID=HEAD_DIM_V,
+                N_SPLIT=N_SPLIT,
+                
+                BLOCK_TDST=BLOCK_M,
+            )
+        else:
+            grid = lambda args: (
+                triton.cdiv(N_CTX, args["BLOCK_M"]),
+                N_BATCH * N_HEAD,
+                1,
+            )
+            
+            _attn_fwd[grid](
+                q,
+                k,
+                v,
+                sm_scale,
+                M,
+                o,  #
+                mask,
+                *safe_stride(q, 4),
+                *safe_stride(k, 4),
+                *safe_stride(v, 4),
+                *safe_stride(o, 4),
+                *safe_stride(mask, 2),
+
+                k_cache is not None,
+                q.shape[1] // k_cache.shape[2] if k_cache is not None else q.shape[1] // k.shape[1],
+                k_cache, *safe_stride(k_cache, 4),
+                v_cache, *safe_stride(v_cache, 4),
+                block_table, *safe_stride(block_table, 2),
+                
+                # acc, m_i, l_i
+                None, *safe_stride(None, 5),
+                None, *safe_stride(None, 4),
+                None, *safe_stride(None, 4),
+
+                q.shape[0],
+                q.shape[1],  #
+                N_CTX=N_CTX,  #
+                N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
+                HEAD_DIM=HEAD_DIM_K,  #
+                N_SPLIT=1,
+                **extra_kern_args,
+            )
 
         return o
 

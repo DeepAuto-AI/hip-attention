@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import InitVar, dataclass, field
 from typing import List, Optional, Union
+import warnings
 
 from hip_attn.v1_2.attention_metadata import ScanStage
 
@@ -403,22 +404,41 @@ class HiPAttentionConfig:
                 self.using_extend = parsed_json["using_extend"]
                 parsed_json.pop("using_extend")
             if "layers" in parsed_json:
-                self.layers = [
-                    HiPAttentionPerLayerConfig(parsed_json=layer)
-                    for layer in parsed_json["layers"]
-                ]
+                if parsed_json["layers"] is None:
+                    self.layers = None
+                else:
+                    self.layers = [
+                        HiPAttentionPerLayerConfig(parsed_json=layer)
+                        for layer in parsed_json["layers"]
+                    ]
                 parsed_json.pop("layers")
-            if self.prefill_layers is None:
-                self.prefill_layers = self.layers
             if "prefill_layers" in parsed_json:
-                self.prefill_layers = [
-                    HiPAttentionPerLayerConfig(parsed_json=layer)
-                    for layer in parsed_json["prefill_layers"]
-                ]
+                if parsed_json['prefill_layers'] is None:
+                    self.prefill_layers = None
+                else:
+                    self.prefill_layers = [
+                        HiPAttentionPerLayerConfig(parsed_json=layer)
+                        for layer in parsed_json["prefill_layers"]
+                    ]
                 parsed_json.pop("prefill_layers")
+            if "__delta_attention_args" in parsed_json:
+                delta_attention_args = parsed_json['__delta_attention_args']
+                if os.getenv('HIP_DELTA_ATTENTION_ARGS', delta_attention_args) != delta_attention_args:
+                    warnings.warn('envvar HIP_DELTA_ATTENTION_ARGS is overrided by hip attention args')
+                os.environ['HIP_DELTA_ATTENTION_ARGS'] = delta_attention_args
+                parsed_json.pop("__delta_attention_args")
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
-
+        
+        if (self.prefill_layers is None) and (self.layers is not None):
+            self.prefill_layers = self.layers
+        elif (self.prefill_layers is not None) and (self.layers is None):
+            self.layers = self.prefill_layers
+        elif (self.prefill_layers is None) and (self.layers is None):
+            raise Exception('`prefill_layers` or `layers` should be provided')
+        else:
+            pass # okay
+            
         num_stages = len(self.layers[0].stages)
         for layer_config in self.layers:
             assert num_stages == len(layer_config.stages)

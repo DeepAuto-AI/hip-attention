@@ -33,15 +33,23 @@ from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
 
 try:
+    import torch.distributed as dist
     from sglang.srt.distributed import (
-        get_tensor_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
+        split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
-        model_parallel_is_initialized,
+        tensor_model_parallel_all_reduce,
+        get_tensor_model_parallel_world_size,
     )
+    SGLANG_DIST_ACTIVATED = True
+except ImportError as ex:
+    SGLANG_DIST_ACTIVATED = False
 
-    SGLANG_DIST_AVAILABLE = model_parallel_is_initialized()
-except:
-    SGLANG_DIST_AVAILABLE = False
+def get_local_rank() -> 0:
+    if SGLANG_DIST_ACTIVATED:
+        return get_tensor_model_parallel_rank()
+    else:
+        return 0
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
@@ -703,7 +711,7 @@ def dual_stage_quadratic_hip_attention(
                         CHUNK_SIZE=stage_info.stage_chunk_size,
                         SLIDING_WINDOW_SIZE=args.sliding_window_size,
                     )
-                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0
+                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0, f'{args.sink_token_size} % {stage_info.stage_chunk_size}'
                     # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
                     
                     out_scores[:, :, :, :scores.shape[-1]] = scores
@@ -1051,7 +1059,7 @@ def dual_stage_quadratic_hip_attention(
                     # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
 
                     if (
-                        SGLANG_DIST_AVAILABLE
+                        SGLANG_DIST_ACTIVATED
                         and get_tensor_model_parallel_world_size() > 1
                     ):
                         out_scores_tp = out_scores
@@ -1227,7 +1235,12 @@ def dual_stage_quadratic_hip_attention(
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
-            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
+            if (
+                DEBUG 
+                and DEBUG_RENDER 
+                and not torch.cuda.is_current_stream_capturing()
+                and get_local_rank() == 0
+            ):
                 if (i_stage + 1) < len(args.stages):
                     next_stage_k = args.stages[i_stage + 1].stage_k
                 else:
@@ -1392,21 +1405,30 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             out_indices_cpu = indices.cpu().numpy()
             debug = np.zeros(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
+            debug = debug * 255
+            debug = debug.astype(np.uint8)
+            debug = np.repeat(debug[:, :, None], 3, axis=2)
+            cv2.putText(
+                debug, f"Layer: {args.layer_id}", (320, 256), 
+                cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2
+            )
+            
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
                 cv2.imwrite(
                     f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
-                    debug * 255,
+                    debug,
                 )
             else:
-                cv2.imwrite("dummy_sampled_final.png", debug * 255)
+                cv2.imwrite("dummy_sampled_final.png", debug)
             # print('saved dummy_sampled_final.png')
 
         args = args.clone()
@@ -1541,6 +1563,7 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             try:
                 input(f"[{args.layer_id}] >")

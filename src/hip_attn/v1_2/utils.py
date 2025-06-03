@@ -36,6 +36,7 @@ class capture(object):
             (not torch.cuda.is_current_stream_capturing()) and
             (kwargs['q'].shape[1] > 1 if 'q' in kwargs else True) and
             os.getenv('HIP_DEBUG_BENCH', '0') == '1' and
+            os.getenv('HIP_DEBUG_CAPTURE_DECORATOR', '1') == '1' and
             (get_local_rank() == 0)
         )
 

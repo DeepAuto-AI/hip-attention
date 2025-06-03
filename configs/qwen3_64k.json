@@ -1,0 +1,57 @@
+{
+    "__delta_attention_args": "recompute_dense-window_0-diff_1-w_8-exp-expw_4-expsink_32-expwindow_256-dense_decode-iter_corr",
+    "using_extend": false,
+    "dense_layers": [
+        0,
+        1,
+        2,
+        5,
+        8,
+        11,
+        14,
+        17,
+        20,
+        23,
+        26,
+        29,
+        32,
+        35,
+        38,
+        40,
+        41,
+        44,
+        47
+    ],
+    "mask_refresh_interval": [32, 16, 8],
+    "prefill_layers": [
+        {},
+        {
+            "second_stage_k": 1024,
+            "sliding_window_size": 1024,
+            "sink_token_size": 64,
+            "stages": [
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 64,
+                    "stage_k": null,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 32,
+                    "stage_k": 16384,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 1,
+                    "stage_chunk_size": 16,
+                    "stage_k": 4096,
+                    "stage_stride": 1
+                }
+            ]
+        }
+    ]
+}
