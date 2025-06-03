@@ -1197,8 +1197,6 @@ def _forward_paged_hip(
                     
                     if False:
                         context_sparse_raw = context_sparse
-                    
-                    block_start_indices = block_start_indices.sort().values
 
                     query_for_recomp = query[:, block_start_indices, :, :]
                     k_cache = args.get_k_cache()
@@ -1209,6 +1207,7 @@ def _forward_paged_hip(
                         # import matplotlib.pyplot as plt
                         # plt.clf()
                         # plt.hist(block_start_indices.cpu().numpy(), bins=50)
+                        # plt.xlim(0, args.position_ids.amax().item() + 1)
                         # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
                         
                         print('recomp_attn shapes', query_for_recomp.shape, block_start_indices.shape)
@@ -1255,7 +1254,11 @@ def _forward_paged_hip(
                     return block_diff\
                         .squeeze(0)\
                         .norm(dim=-1, keepdim=False)\
-                        .amax(dim=-1, keepdim=False)
+                        .sum(dim=-1, keepdim=False)
+                    # return block_diff\
+                    #     .squeeze(0)\
+                    #     .abs().sum(dim=-1, keepdim=False)\
+                    #     .sum(dim=-1, keepdim=False)
                 
                 context_sparse_raw = context_sparse.clone()
                 
@@ -1267,8 +1270,10 @@ def _forward_paged_hip(
                 )
                 # [T,]
                 block_diff_scores_parent, block_diff_indices = block_diff_to_score(block_diff)\
-                    .topk(k=block_diff.shape[1] // split, dim=0)
+                    .topk(k=block_diff.shape[1] // split, dim=0, sorted=False)
                 block_start_indices_parent = block_start_indices[block_diff_indices]
+                block_start_indices_parent, tind = block_start_indices_parent.sort()
+                block_diff_scores_parent = block_diff_scores_parent[tind]
                 
                 depth = 0
                 max_iter = 4
@@ -1276,6 +1281,9 @@ def _forward_paged_hip(
                     depth += 1
                     block_start_indices_child = block_start_indices_parent + w_size // split
                     w_size = w_size // split
+                    
+                    # if get_local_rank() == 0:
+                    #     print(block_diff_scores_parent)
                     
                     context_sparse, block_diff = perform_correction(
                         context_sparse, 
@@ -1286,9 +1294,11 @@ def _forward_paged_hip(
                     if (w_size // split) > 0:
                         block_diff_scores_child = block_diff_to_score(block_diff)
                         block_diff_scores_parent, next_blocks_location = torch.cat([block_diff_scores_parent, block_diff_scores_child])\
-                            .topk(k=block_diff_scores_parent.shape[0] // 2)
+                            .topk(k=block_diff_scores_parent.shape[0] // 2, sorted=False)
                         block_start_indices_parent = torch.cat([block_start_indices_parent, block_start_indices_child])\
                             [next_blocks_location]
+                        block_start_indices_parent, tind = block_start_indices_parent.sort()
+                        block_diff_scores_parent = block_diff_scores_parent[tind]
                 
                 # fill dense for first and last part
                 dense_indices = torch.cat([
