@@ -422,11 +422,24 @@ class HiPAttentionConfig:
                     ]
                 parsed_json.pop("prefill_layers")
             if "__delta_attention_args" in parsed_json:
-                delta_attention_args = parsed_json['__delta_attention_args']
-                if os.getenv('HIP_DELTA_ATTENTION_ARGS', delta_attention_args) != delta_attention_args:
+                given_args = parsed_json['__delta_attention_args']
+                if os.getenv('HIP_DELTA_ATTENTION_ARGS', given_args) != given_args:
                     warnings.warn('envvar HIP_DELTA_ATTENTION_ARGS is overrided by hip attention args')
-                os.environ['HIP_DELTA_ATTENTION_ARGS'] = delta_attention_args
+                os.environ['HIP_DELTA_ATTENTION_ARGS'] = given_args
                 parsed_json.pop("__delta_attention_args")
+            if "__using_dense_prefill" in parsed_json:
+                given_args = parsed_json['__using_dense_prefill']
+                if os.getenv('HIP_DEBUG_USING_DENSE_PREFILL', given_args) != given_args:
+                    warnings.warn('envvar HIP_DEBUG_USING_DENSE_PREFILL is overrided by hip attention args')
+                os.environ['HIP_DEBUG_USING_DENSE_PREFILL'] = '1' if given_args else '1'
+                parsed_json.pop("__using_dense_prefill")
+            if "__head_reduce" in parsed_json:
+                given_args = parsed_json['__head_reduce']
+                if os.getenv('HIP_HEAD_REDUCE', given_args) != given_args:
+                    warnings.warn('envvar HIP_HEAD_REDUCE is overrided by hip attention args')
+                assert int(str(given_args)) == given_args
+                os.environ['HIP_HEAD_REDUCE'] = str(given_args)
+                parsed_json.pop("__head_reduce")
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
         

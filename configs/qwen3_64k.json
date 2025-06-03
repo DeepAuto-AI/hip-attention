@@ -1,10 +1,14 @@
 {
-    "__delta_attention_args": "recompute_dense-window_0-diff_1-w_8-exp-expw_4-expsink_32-expwindow_256-dense_decode-iter_corr",
+    "__delta_attention_args": "recompute_dense-window_0-diff_1-w_8-exp-expw_4-expsink_32-expwindow_256-dense_decode",
+    "__using_dense_prefill": true,
+    "__head_reduce": 2,
     "using_extend": false,
     "dense_layers": [
         0,
         1,
         2,
+        3,
+        4,
         5,
         8,
         11,
@@ -19,7 +23,11 @@
         38,
         40,
         41,
+        42,
+        43,
         44,
+        45,
+        46,
         47
     ],
     "mask_refresh_interval": [32, 16, 8],
