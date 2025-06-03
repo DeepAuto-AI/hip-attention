@@ -1184,14 +1184,19 @@ def _forward_paged_hip(
                 
                 def perform_correction(
                     context_sparse: torch.Tensor, 
+                    context_sparse_raw: torch.Tensor, 
                     block_start_indices: torch.Tensor, 
                     block_size: int
                 ):
                     assert block_start_indices.ndim == 1
                     assert context_sparse.ndim == 4
+                    assert context_sparse_raw.shape == context_sparse.shape
                     assert not (args.need_apply_rope and args.using_extend)
                     
                     assert args.using_paged_cache
+                    
+                    if False:
+                        context_sparse_raw = context_sparse
                     
                     block_start_indices = block_start_indices.sort().values
 
@@ -1201,6 +1206,11 @@ def _forward_paged_hip(
 
                     assert args.position_ids.shape[0] == 1
                     if get_local_rank() == 0:
+                        # import matplotlib.pyplot as plt
+                        # plt.clf()
+                        # plt.hist(block_start_indices.cpu().numpy(), bins=50)
+                        # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
+                        
                         print('recomp_attn shapes', query_for_recomp.shape, block_start_indices.shape)
                     context_dense = recomp_attn(
                         query_for_recomp.permute(0, 2, 1, 3).contiguous(),
@@ -1216,13 +1226,14 @@ def _forward_paged_hip(
                     
                     if block_size > 1:
                         assert not delta_attention_args_smooth
-                        block_diff = diff = context_dense - context_sparse[:, block_start_indices]
+                        block_diff = diff = context_dense - context_sparse_raw[:, block_start_indices]
                         diff = diff.repeat_interleave(block_size, 1)
                         
                         token_indices = block_start_indices[:, None] + torch.arange(0, block_size, device=context_sparse.device)[None, :]
                         token_indices = token_indices.view(-1)
                         
-                        context_sparse.index_add_(dim=1, index=token_indices, source=diff)
+                        context_sparse_new = diff + context_sparse_raw[:, token_indices]
+                        context_sparse.index_copy_(dim=1, index=token_indices, source=context_sparse_new)
                     else:
                         context_sparse.index_copy_(dim=1, index=block_start_indices, source=context_dense)
                         block_diff = None
@@ -1244,10 +1255,13 @@ def _forward_paged_hip(
                     return block_diff\
                         .squeeze(0)\
                         .norm(dim=-1, keepdim=False)\
-                        .sum(dim=-1, keepdim=False)
+                        .amax(dim=-1, keepdim=False)
+                
+                context_sparse_raw = context_sparse.clone()
                 
                 context_sparse, block_diff = perform_correction(
-                    context_sparse, 
+                    context_sparse,
+                    context_sparse_raw,
                     block_start_indices,
                     w_size,
                 )
@@ -1257,7 +1271,7 @@ def _forward_paged_hip(
                 block_start_indices_parent = block_start_indices[block_diff_indices]
                 
                 depth = 0
-                max_iter = 2
+                max_iter = 4
                 while (w_size // split) > 0 and (depth < max_iter):
                     depth += 1
                     block_start_indices_child = block_start_indices_parent + w_size // split
@@ -1265,6 +1279,7 @@ def _forward_paged_hip(
                     
                     context_sparse, block_diff = perform_correction(
                         context_sparse, 
+                        context_sparse_raw,
                         block_start_indices_child,
                         w_size,
                     )
@@ -1282,6 +1297,7 @@ def _forward_paged_hip(
                 ])
                 context_sparse, _ = perform_correction(
                     context_sparse, 
+                    context_sparse_raw,
                     dense_indices,
                     1,
                 )

@@ -83,8 +83,8 @@ def _attn_fwd_inner(
         V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
     else:
         idx_hid = tl.arange(0, HEAD_DIM)
-        idx_tsrc = tl.arange(0, BLOCK_N) + lo
-        mask_tsrc = idx_tsrc < hi
+        # idx_tsrc = tl.arange(0, BLOCK_N) + lo
+        # mask_tsrc = idx_tsrc < hi
     
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
@@ -97,6 +97,9 @@ def _attn_fwd_inner(
                 padding_option="zero"
             )
         else:
+            idx_tsrc = tl.arange(0, BLOCK_N) + start_n
+            mask_tsrc = idx_tsrc < hi
+            
             idx_t = tl.load(
                 BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                 mask=mask_tsrc,
@@ -153,8 +156,9 @@ def _attn_fwd_inner(
             V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
             K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
         else:
-            idx_tsrc = idx_tsrc + BLOCK_N
-            mask_tsrc = idx_tsrc < hi
+            # idx_tsrc = idx_tsrc + BLOCK_N
+            # mask_tsrc = idx_tsrc < hi
+            pass
     return acc, l_i, m_i
 
 
@@ -163,10 +167,15 @@ def _attn_fwd_inner(
 # re-tuning.
 configs = [
     triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-    for BM in [16, 32, 64, 128]
-    for BN in [16, 32, 64]
+    for BM in [64, 128]
+    for BN in [32, 64]
     for s in ([1] if is_hip() else [3, 4, 7])
     for w in [4, 8]
+    
+    # for BM in [64,]
+    # for BN in [32,]
+    # for s in [3, ]
+    # for w in [4, ]
 ]
 
 
@@ -248,6 +257,7 @@ def _attn_fwd(
     N_SPLIT,
     BLOCK_M: tl.constexpr,  #
     BLOCK_N: tl.constexpr,  #
+    V_FP8: tl.constexpr,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -321,8 +331,8 @@ def _attn_fwd(
         other=0,
     )
     # initialize pointer to m and l
-    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
+    m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float('-inf'))
+    l_i = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     # load scales
     qk_scale = sm_scale
@@ -352,7 +362,7 @@ def _attn_fwd(
             offs_n,
             N_CTX,
             N_KV,
-            V.dtype.element_ty == tl.float8e5,  #
+            V_FP8,  #
         )
     else:
         lo = 0
@@ -383,7 +393,7 @@ def _attn_fwd(
                     offs_n,
                     N_CTX,
                     N_KV,
-                    V_CACHE.dtype.element_ty == tl.float8e5,
+                    V_FP8,
                     
                     USING_PAGED_CACHE=USING_PAGED_CACHE,
                     K_CACHE=K_CACHE,
@@ -420,7 +430,7 @@ def _attn_fwd(
                     offs_n,
                     N_CTX,
                     N_KV,
-                    V_CACHE.dtype.element_ty == tl.float8e5,
+                    V_FP8,
                     
                     USING_PAGED_CACHE=USING_PAGED_CACHE,
                     K_CACHE=K_CACHE,
@@ -456,7 +466,7 @@ def _attn_fwd(
                 offs_n,
                 N_CTX,
                 N_KV,
-                V_CACHE.dtype.element_ty == tl.float8e5,
+                V_FP8,
                 
                 USING_PAGED_CACHE=USING_PAGED_CACHE,
                 K_CACHE=K_CACHE,
@@ -492,7 +502,7 @@ def _attn_fwd(
                 offs_n,
                 N_CTX,
                 N_KV,
-                V_CACHE.dtype.element_ty == tl.float8e5,
+                V_FP8,
                 
                 USING_PAGED_CACHE=USING_PAGED_CACHE,
                 K_CACHE=K_CACHE,
@@ -606,7 +616,7 @@ def _attn_merge(
         LI + idx_bsz * stride_li_bsz + idx_head * stride_li_head
     )
     
-    m_i = tl.zeros([BLOCK_TDST], dtype=tl.float32) - float("inf")
+    m_i = tl.full([BLOCK_TDST], dtype=tl.float32, value=float("-inf"))
     l_i = tl.zeros([BLOCK_TDST], dtype=tl.float32)
     acc = tl.zeros([BLOCK_TDST, HID], dtype=tl.float32)
     
@@ -631,18 +641,19 @@ def _attn_merge(
             mask=mask_tdst[:, None],
         )
         
-        acc_split = acc_split / l_split[:, None]
-        tlogic = m_split / tl.math.log2(l_split)
+        tv = acc_split / l_split[:, None]
+        tlogic = m_split + tl.math.log2(l_split)
         
         n_e_max = tl.maximum(tlogic, m_i)
-
-        n_e_max_valid = n_e_max > -1e50
+        
         old_scale = tl.math.exp2(m_i - n_e_max)
         exp_logic = tl.math.exp2(tlogic - n_e_max)
-        acc = tl.where(n_e_max_valid, acc * old_scale + exp_logic * acc_split, acc)
+        acc = acc * old_scale[:, None] + exp_logic[:, None] * tv
 
-        l_i = tl.where(n_e_max_valid, l_i * old_scale + exp_logic, l_i)
+        l_i = l_i * old_scale + exp_logic
         m_i = n_e_max
+    
+    acc = acc / l_i[:, None]
     
     tl.store(
         O +
@@ -650,7 +661,7 @@ def _attn_merge(
         idx_head * stride_o_head +
         idx_tdst[:, None] * stride_o_tdst +
         idx_hid[None, :] * stride_o_hid,
-        value=(acc / l_i[:, None]).to(O.type.element_ty),
+        value=acc.to(O.type.element_ty),
         mask=mask_tdst[:, None]
     )
 
@@ -699,6 +710,7 @@ class _attention(torch.autograd.Function):
         N_CTX = q.shape[2]
         N_HEAD = q.shape[1]
         N_BATCH = q.shape[0]
+        V_FP8 = v.dtype == torch.float8_e5m2 if not USING_PAGED_CACHE else v_cache.dtype == torch.float8_e5m2
         
         # NOTE: this is for backward
         # M = torch.empty(
@@ -714,18 +726,19 @@ class _attention(torch.autograd.Function):
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
         N_SM = 256 # TODO make a good solution to get this without init CUDA context on GPU 0
-        if (N_PROGRAM < N_SM) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '0') == '1'):
+        if (N_PROGRAM < N_SM) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '1') == '1'):
             N_SPLIT = triton.cdiv(N_SM, N_PROGRAM)
-            N_SPLIT = N_SPLIT
+            # N_SPLIT = 1
+            
             grid = lambda args: (
                 triton.cdiv(N_CTX, args["BLOCK_M"]),
                 N_BATCH * N_HEAD,
                 N_SPLIT,
             )
             
-            acc = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX, HEAD_DIM_V), dtype=torch.float32, device=q.device)
-            m_i = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
-            l_i = torch.empty((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
+            acc = torch.zeros((N_BATCH, N_HEAD, N_SPLIT, N_CTX, HEAD_DIM_V), dtype=torch.float32, device=q.device)
+            m_i = torch.zeros((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
+            l_i = torch.zeros((N_BATCH, N_HEAD, N_SPLIT, N_CTX), dtype=torch.float32, device=q.device)
             
             _attn_fwd[grid](
                 q,
@@ -757,6 +770,7 @@ class _attention(torch.autograd.Function):
                 N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
                 HEAD_DIM=HEAD_DIM_K,  #
                 N_SPLIT=N_SPLIT,
+                V_FP8=V_FP8,
                 **extra_kern_args,
             )
             
@@ -780,12 +794,58 @@ class _attention(torch.autograd.Function):
                 
                 BLOCK_TDST=BLOCK_M,
             )
+            
+            # def sanity_check(t: torch.Tensor):
+            #     assert t.isnan().nonzero().shape[0] == 0
+            #     assert t.isinf().nonzero().shape[0] == 0
+            #     return t
+            
+            # l_i = sanity_check(l_i)
+            # m_i = sanity_check(m_i)
+            # acc = sanity_check(acc)
+            
+            # # l_i = torch.where(l_i <= (1.0 + 1e-4), l_i + 1e-4, l_i)
+            
+            # logits = acc / l_i[:, :, :, :, None]
+            # logits = sanity_check(logits)
+            # stats = m_i + torch.log2(l_i)
+            # stats = sanity_check(stats)
+            
+            # e_sum = torch.zeros_like(l_i[:, :, 0, :].contiguous())
+            # e_max = torch.full_like(m_i[:, :, 0, :].contiguous(), fill_value=float('-inf'))
+            # acc = torch.zeros_like(o, dtype=torch.float32)
+            
+            # for i_split in range(N_SPLIT):
+            #     tv = logits[:, :, i_split, :, :]
+            #     tv = sanity_check(tv)
+            #     tlogic = stats[:, :, i_split, :]
+            #     tlogic = sanity_check(tlogic)
+            #     n_e_max = torch.maximum(tlogic, e_max)
+            #     n_e_max = sanity_check(n_e_max)
+                
+            #     old_scale = torch.exp2(e_max - n_e_max)
+            #     old_scale = sanity_check(old_scale)
+            #     exp_logic = torch.exp2(tlogic - n_e_max)
+            #     exp_logic = sanity_check(exp_logic)
+            #     acc = acc * old_scale[:, :, :, None] + exp_logic[:, :, :, None] * tv
+            #     acc = sanity_check(acc)
+                
+            #     e_sum = e_sum * old_scale + exp_logic
+            #     e_sum = sanity_check(e_sum)
+            #     e_max = n_e_max
+            #     e_max = sanity_check(e_max)
+            
+            # acc = acc / e_sum[:, :, :, None]
+            # acc = sanity_check(acc)
+            
+            # o = acc.to(o.dtype)
         else:
             grid = lambda args: (
                 triton.cdiv(N_CTX, args["BLOCK_M"]),
                 N_BATCH * N_HEAD,
                 1,
             )
+            
             
             _attn_fwd[grid](
                 q,
@@ -818,6 +878,7 @@ class _attention(torch.autograd.Function):
                 N_KV=k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1],
                 HEAD_DIM=HEAD_DIM_K,  #
                 N_SPLIT=1,
+                V_FP8=V_FP8,
                 **extra_kern_args,
             )
 

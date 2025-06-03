@@ -421,7 +421,7 @@ def _fwd_kernel_stage1(
         split_kv_block_start = 0
         split_kv_block_end = 0
 
-    e_max = tl.full([BLOCK_H, 1], -float("inf"), dtype=tl.float32)  # m_i
+    e_max = tl.full([BLOCK_H, 1], float("-inf"), dtype=tl.float32)  # m_i
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
