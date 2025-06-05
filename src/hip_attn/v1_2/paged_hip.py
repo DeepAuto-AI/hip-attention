@@ -1346,9 +1346,6 @@ def _forward_paged_hip(
                     # )
                     # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
 
-                    # take first
-                    context_sparse_for_diff = context_sparse[:, idx]
-
                     idx = torch.cat((idx, torch.arange(num_sparse, num_queries, device=query.device)))
                     query_for_dense = query[:, idx]
                 
@@ -1427,7 +1424,6 @@ def _forward_paged_hip(
                     
                     context = apply_delta(
                         context_dense, 
-                        context_sparse_for_diff,
                         context_sparse,
                         idx,
                         num_last_dense,
