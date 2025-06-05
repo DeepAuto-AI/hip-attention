@@ -30,6 +30,7 @@ def _fused_apply_delta(
     N_DELTA: int,
     HEAD: int,
     
+    ARGS_SMOOTH: tl.constexpr,
     HID: tl.constexpr,
     BLOCK_DELTA: tl.constexpr,
 ):
@@ -80,6 +81,34 @@ def _fused_apply_delta(
     
     delta = dense - sparse_sample
     
+    if ARGS_SMOOTH:
+        idx_tdelta_next = tl.minimum(idx_tdelta + 1, N_DELTA - 1)
+        dense_next = tl.load(
+            DENSE +
+            idx_bsz * stride_dense_bsz +
+            idx_tdelta_next[:, None] * stride_dense_tdelta +
+            idx_head * stride_dense_head +
+            idx_hid[None, :] * stride_dense_hid,
+            mask=mask_tdelta[:, None],
+        )
+        
+        ids_next = tl.load(
+            IDS +
+            idx_tdelta_next * stride_ids_t,
+            mask=mask_tdelta
+        )
+        
+        sparse_sample_next = tl.load(
+            SPARSE +
+            idx_bsz * stride_sparse_bsz +
+            ids_next[:, None] * stride_sparse_t +
+            idx_head * stride_sparse_head +
+            idx_hid[None, :] * stride_sparse_hid,
+            mask=mask_tdelta[:, None]
+        )
+        
+        delta_next = dense_next - sparse_sample_next
+    
     for i in range(1, args_w):
         ids_off = ids + i
         mask_ids_off = (ids_off < T) & mask_tdelta
@@ -91,7 +120,14 @@ def _fused_apply_delta(
             idx_hid[None, :] * stride_sparse_hid,
             mask=mask_ids_off[:, None],
         )
-        sparse_corr = sparse_other + delta
+        
+        if ARGS_SMOOTH:
+            delta_now = delta * ((args_w - i) / args_w) + delta_next * (i / args_w)
+        else:
+            delta_now = delta
+        
+        sparse_corr = sparse_other + delta_now
+        
         tl.store(
             OUT +
             idx_bsz * stride_out_bsz +
@@ -150,6 +186,7 @@ def apply_delta(
             N_DELTA,
             HEAD,
             
+            args_smooth,
             HID,
             BLOCK_DELTA,
         )

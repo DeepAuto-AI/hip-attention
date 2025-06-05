@@ -31,6 +31,7 @@ from hip_attn.v1_2.attention_metadata import (
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
+from hip_attn.v1_2.landmark_sample import landmark_sample
 
 try:
     import torch.distributed as dist
@@ -537,149 +538,15 @@ def dual_stage_quadratic_hip_attention(
                     # and (args.layer_id > 300)
                 ):
                     # chunked sampling
-                    landmark_chunk = 512
-                    def pad_seq(t: torch.Tensor):
-                        if (t.shape[1] % landmark_chunk) == 0:
-                            return t
-                        pad = landmark_chunk - t.shape[1] % landmark_chunk
-                        return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
-                    
-                    landmark_derope = False
-                    def split_half(x: Tensor):
-                        HID = x.shape[-1]
-                        return x[..., :HID//2], x[..., HID//2:]
-                    def merge_half(x: Tensor, y: Tensor):
-                        return torch.cat([x, y], dim=-1)
-                    def de_rope(
-                        vec: Tensor, cos: Tensor, sin: Tensor
-                    ):
-                        c0, ch = split_half(cos)
-                        s0, sh = split_half(sin)
-                        vr0, vrh = split_half(vec)
-
-                        out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
-                        outh = (out0 * c0 - vr0) / (s0 + 1e-20)
-                        out = merge_half(out0, outh)
-                        return out
-                    
                     if landmark_scores is None:
-                        if state is not None:
-                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
-                            position_ids_for_landmark = (
-                                args.position_ids_for_landmark 
-                                if args.position_ids_for_landmark is not None else 
-                                args.position_ids
-                            )
-                            k_chunk = args.gather_extend_k_from_paged_cache(
-                                disable_gqa = False,
-                                gqa_q = q_for_landmark,
-                                position_ids = position_ids_for_landmark
-                            )
-
-                            q_tp = pad_seq(q_for_landmark)
-                            TDST_PADDED = q_tp.shape[1]
-                            k_tp = pad_seq(k_chunk)
-                            TSRC_PADDED = k_tp.shape[1]
-                            assert TDST_PADDED == TSRC_PADDED, f'{TDST_PADDED} == {TSRC_PADDED}'
-
-                            if landmark_derope:
-                                padded_position_ids_for_landmark = pad_seq(
-                                    position_ids_for_landmark[:, :, None, None]
-                                )[:, :, 0, 0]
-                                q_tp = de_rope(
-                                    q_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-                                k_tp = de_rope(
-                                    k_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-
-                            q_tp = q_tp\
-                                .permute(0, 2, 1, 3)\
-                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                            k_tp = k_tp\
-                                .permute(0, 2, 3, 1)\
-                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                                .permute(0, 1, 3, 2, 4)\
-                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
+                        landmark_scores = landmark_sample(
+                            q,
+                            k,
+                            state,
+                            args,
                             
-                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                            
-                            # TODO Need to handle chunked prefill scenario
-                            idx_t = torch.arange(0, landmark_chunk, device=q_for_landmark.device)
-                            mask = idx_t[:, None] >= idx_t[None, :]
-                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                            landmark_scores = landmark_scores.sum(dim=3, dtype=torch.float32) / mask.int().sum(dim=0)[None, None, None, :]
-                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                            landmark_scores[:, :, q_for_landmark.shape[1]:].fill_(float('-inf'))
-                            
-                            q_block_index = args.block_table.gather(dim=1, index=position_ids_for_landmark)
-                            state.landmark_scores[q_block_index] = landmark_scores[:, :, :q_for_landmark.shape[1]].contiguous().permute(0, 2, 1)
-                            landmark_scores = state.landmark_scores[
-                                args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]
-                            ]
-                            landmark_scores = landmark_scores.permute(0, 2, 1)
-
-                            if DEBUG and (BDST > 1):
-                                os.makedirs("./cache/mask_log", exist_ok=True)
-                                t = landmark_scores[0, 0, :].cpu().numpy()
-                                plt.clf()
-                                plt.plot(t)
-                                plt.savefig(f'./cache/mask_log/{__logall_index}_landmark_scores.png')
-
-                            # print('landmark score extended', args.layer_id)
-                        else:
-                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
-                            position_ids_for_landmark = (
-                                args.position_ids_for_landmark 
-                                if args.position_ids_for_landmark is not None else 
-                                args.position_ids
-                            )
-
-                            q_tp = pad_seq(q_for_landmark)
-                            TDST_PADDED = q_tp.shape[1]
-                            k_tp = pad_seq(k)
-                            TSRC_PADDED = k_tp.shape[1]
-                            assert TDST_PADDED == TSRC_PADDED
-
-                            if landmark_derope:
-                                padded_position_ids_for_landmark = pad_seq(
-                                    position_ids_for_landmark[:, :, None, None]
-                                )[:, :, 0, 0]
-                                q_tp = de_rope(
-                                    q_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-                                k_tp = de_rope(
-                                    k_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-
-                            q_tp = q_tp\
-                                .permute(0, 2, 1, 3)\
-                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                            k_tp = k_tp\
-                                .permute(0, 2, 3, 1)\
-                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                                .permute(0, 1, 3, 2, 4)\
-                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
-                            # print(q_tp.shape, k_tp.shape)
-                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                            # TODO Need to handle chunked prefill scenario
-                            # idx_tdst = args.position_ids[0]
-                            idx_t = torch.arange(0, landmark_chunk, device=q.device)
-                            mask = idx_t[:, None] >= idx_t[None, :]
-                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                            landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
-                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                            landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
+                            BSZ, HEAD, HEAD_KV, HID, BDST, DEBUG, __logall_index,
+                        )
 
                     landmarks = landmark_scores\
                         .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
