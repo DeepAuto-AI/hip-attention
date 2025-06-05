@@ -1269,7 +1269,8 @@ def _forward_paged_hip(
                     # redo the normalization constant for the sparse outputs so we calculate the exact delta region
                     # ------------------------------
                     if delta_attention_args_adjust_norm_const:
-                        # denorm, make alpha, scale, renorm
+                        # denorm, make alpha, scale, renorm so that the difference in the following block is the exact difference
+                        # with the correct normalization constant.
                         context_sparse_for_diff = context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None]
                         mx = torch.stack((dense_mx, sparse_mx_for_diff), dim=0).amax(dim=0)
                         alpha = torch.exp2(sparse_mx_for_diff - mx)
@@ -1300,20 +1301,22 @@ def _forward_paged_hip(
                     # ---------------------------------------------------
                     # rescale context sparse to include the normalization constant from the delta region H = (T + H) - T
                     if delta_attention_args_adjust_norm_const:
+                        # get the 'head' normalization constant which is the normalization constant of the non-sparse indices.
                         h_nc = dense_nc - sparse_nc_for_diff # sparse_nc already applied alpha
                         h_nc = h_nc.repeat_interleave(delta_attention_args_w, dim=1)
+
                         mx_repeat = mx.repeat_interleave(delta_attention_args_w, dim=1)
 
                         context_sparse = context_sparse * sparse_nc[:, :, :, None]
-                        mx = torch.stack((mx_repeat, sparse_mx)).amax(dim=0)
-                        # TODO: are the orders of these correct???
-                        alpha_for_sparse = torch.exp2(sparse_mx - mx)
+                        # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+
+                        alpha_for_sparse = torch.exp2(sparse_mx - mx_repeat)
                         context_sparse = context_sparse * alpha_for_sparse[:, :, :, None]
                         sparse_nc = sparse_nc * alpha_for_sparse
 
-                        mx = torch.stack((mx_repeat, sparse_mx)).amax(dim=0)
-                        alpha_for_dense = torch.exp2(mx_repeat - mx)
-                        h_nc = h_nc * alpha_for_dense
+                        # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+                        # alpha_for_dense = torch.exp2(dense_mx_repeat - mx)
+                        # h_nc = h_nc * alpha_for_dense
 
                         nc = h_nc + sparse_nc
                         context_sparse = context_sparse / nc[:, :, :, None]
