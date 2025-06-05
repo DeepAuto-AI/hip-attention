@@ -24,6 +24,7 @@ from hip_attn.v1_2.attention_metadata import (
     safe_stride,
 )
 from hip_attn.v1_2.utils import capture
+from typing import Callable
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = "cuda:0"
@@ -167,15 +168,15 @@ def _attn_fwd_inner(
 # re-tuning.
 configs = [
     triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-    for BM in [64, 128]
-    for BN in [32, 64]
-    for s in ([1] if is_hip() else [3, 4, 7])
-    for w in [4, 8]
+    # for BM in [64, 128]
+    # for BN in [32, 64]
+    # for s in ([1] if is_hip() else [3, 4, 7])
+    # for w in [4, 8]
     
-    # for BM in [64,]
-    # for BN in [32,]
-    # for s in [3, ]
-    # for w in [4, ]
+    for BM in [128,]
+    for BN in [64,]
+    for s in [3, ]
+    for w in [4, ]
 ]
 
 
@@ -889,7 +890,19 @@ class _attention(torch.autograd.Function):
         raise NotImplementedError("bwd not implemented for recompute kernel")
 
 
-attention = _attention.apply
+attention: Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        float,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ], 
+    torch.Tensor
+] = _attention.apply
 
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1024, 64)])

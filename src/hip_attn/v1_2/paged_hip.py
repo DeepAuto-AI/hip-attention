@@ -1423,46 +1423,17 @@ def _forward_paged_hip(
                     context[:, :num_sparse] = context_sparse
                     context[:, idx] = context_dense
                 else:
-                    context_dense, last_context_dense = (
-                        context_dense[:, :-num_last_dense],
-                        context_dense[:, -num_last_dense:],
+                    from .delta.apply_delta import apply_delta
+                    
+                    context = apply_delta(
+                        context_dense, 
+                        context_sparse_for_diff,
+                        context_sparse,
+                        idx,
+                        num_last_dense,
+                        delta_attention_args_w,
+                        delta_attention_args_smooth
                     )
-                    
-                    # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # scale = context_dense_norm / context_sparse_for_diff_norm
-
-                    # take difference
-                    context_diff = context_dense - context_sparse_for_diff# * scale
-                    
-                    context_diff = context_diff.repeat_interleave(
-                        delta_attention_args_w, dim=1
-                    )
-                    
-                    if delta_attention_args_smooth:
-                        # (exp) linear interpolate diff
-                        context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
-                        context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
-
-                        offset = torch.arange(0, context_diff.shape[1], device=context_diff.device)
-                        offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
-                        context_diff = context_diff + (context_diff_shift - context_diff) * offset[None, :, None, None]
-                
-                    # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
-
-                    # context = context_sparse * scale + context_diff
-                    context = context_sparse + context_diff
-                    context = torch.cat([context, last_context_dense], dim=1).to(query.dtype)
-
-                    # if get_local_rank() == 0:
-                    #     print(
-                    #         'hit', layer_id, 
-                    #         context_diff.shape, 
-                    #         context_sparse.shape, 
-                    #         context_diff.abs().mean().item(), 
-                    #         context_sparse.abs().mean().item()
-                    #     )
     elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
         if is_decode:
             if args.using_extend:
