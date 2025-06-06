@@ -1722,7 +1722,7 @@ def decode_block_sparse_attention_stage1(
     BLOCK_H = 16
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
-    token_chunk = triton.cdiv(total_tokens, 8)
+    token_chunk = triton.cdiv(total_tokens, 16)
     NUM_SPARSE_KV_SPLITS = min(
         12, triton.cdiv(args.second_stage_k, token_chunk)
     )  # TODO: apply from server args
@@ -1733,7 +1733,7 @@ def decode_block_sparse_attention_stage1(
         NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
     )
     temp_attn_logits = torch.zeros(
-        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32 // 4),
+        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
         dtype=torch.float32,
         device=q.device,
     )

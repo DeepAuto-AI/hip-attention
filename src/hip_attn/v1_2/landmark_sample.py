@@ -8,18 +8,22 @@ import matplotlib.pyplot as plt
 from typing import Optional
 from .attention_metadata import HiPAttentionState, HiPAttentionArgs, safe_stride
 
-configs = [
-    triton.Config({"BLOCK_TSRC": BLOCK_TSRC, "BLOCK_TDST": BLOCK_TDST}, num_stages=s, num_warps=w)
-    for BLOCK_TSRC in [64, 128]
-    for BLOCK_TDST in [64, 128]
-    for s in [3, 4, 7]
-    for w in [4, 8]
-    
-    # for BM in [128,]
-    # for BN in [64,]
-    # for s in [3, ]
-    # for w in [4, ]
-]
+if os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1':
+    configs = [
+        triton.Config({"BLOCK_TSRC": BLOCK_TSRC, "BLOCK_TDST": BLOCK_TDST}, num_stages=s, num_warps=w)
+        for BLOCK_TSRC in [128]
+        for BLOCK_TDST in [128]
+        for s in [3,]
+        for w in [4,]
+    ]
+else:
+    configs = [
+        triton.Config({"BLOCK_TSRC": BLOCK_TSRC, "BLOCK_TDST": BLOCK_TDST}, num_stages=s, num_warps=w)
+        for BLOCK_TSRC in [64, 128]
+        for BLOCK_TDST in [64, 128]
+        for s in [3, 4, 7]
+        for w in [4, 8]
+    ]
 
 
 def keep(conf):

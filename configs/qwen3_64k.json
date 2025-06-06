@@ -1,5 +1,5 @@
 {
-    "__delta_attention_args": "window_0-diff_1-w_8-expw_4-expsink_32-expwindow_256-dense_decode-smooth",
+    "__delta_attention_args": "window_0-diff_1-w_8-expw_4-expsink_32-expwindow_256-sparse_decode-smooth",
     "__using_dense_prefill": true,
     "__head_reduce": 2,
     "using_extend": false,
@@ -30,7 +30,7 @@
         46,
         47
     ],
-    "mask_refresh_interval": [32, 16, 8],
+    "mask_refresh_interval": [64, 24, 8],
     "prefill_layers": [
         {},
         {

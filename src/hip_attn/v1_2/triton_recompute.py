@@ -166,18 +166,27 @@ def _attn_fwd_inner(
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
-configs = [
-    triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-    for BM in [64, 128]
-    for BN in [32, 64]
-    for s in ([1] if is_hip() else [3, 4, 7])
-    for w in [4, 8]
-    
-    # for BM in [128,]
-    # for BN in [64,]
-    # for s in [3, ]
-    # for w in [4, ]
-]
+if os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1':
+    configs = [
+        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
+        for BM in [128,]
+        for BN in [64,]
+        for s in [3, ]
+        for w in [4, ]
+    ]
+else:
+    configs = [
+        triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
+        for BM in [64, 128]
+        for BN in [32, 64]
+        for s in ([1] if is_hip() else [3, 4, 7])
+        for w in [4, 8]
+        
+        # for BM in [128,]
+        # for BN in [64,]
+        # for s in [3, ]
+        # for w in [4, ]
+    ]
 
 
 def keep(conf):
