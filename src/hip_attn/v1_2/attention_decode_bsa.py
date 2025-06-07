@@ -2005,7 +2005,10 @@ def decode_block_sparse_attention(
     model_context_length: int = 131072,  # 131072
     extend_context_length: int = 131072,  # 196608
     offload_update_cache: bool = False,
+    return_running_statistics: bool = False,
 ):
+    assert not return_running_statistics
+    
     BSZ, TDST, HEAD, HID = q.shape
 
     assert TDST == 1, "TDST must be 1 for flashdecode"

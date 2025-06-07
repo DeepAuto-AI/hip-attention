@@ -33,6 +33,7 @@ from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
 from hip_attn.v1_2.landmark_sample import landmark_sample
 from hip_attn.v1_2.stage_prologue import stage_prologue
+from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
 
 try:
     import torch.distributed as dist
@@ -67,7 +68,7 @@ def num_streaming_multiprocessor():
     return _NUM_STREAMING_MULTIPROCESSOR
 
 
-def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
+def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor) -> type(block_sparse_attention):
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
@@ -490,7 +491,6 @@ def dual_stage_quadratic_hip_attention(
                     
                     assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
                     
-                    from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
                     # k_temp = args.gather_k_from_paged_cache(
                     #     chunk_size=1,
                     #     disable_gqa=False,
@@ -506,6 +506,8 @@ def dual_stage_quadratic_hip_attention(
                         position_ids=args.position_ids, 
                         indices_left=indices_left,
                         landmarks=landmarks,
+                        cos=args.rope_cos,
+                        sin=args.rope_sin,
                         BLOCK_SIZE_Q=stage_info.stage_block_size_q,
                         BLOCK_STRIDE_Q=stage_info.stage_block_stride_q,
                         CHUNK_SIZE=stage_info.stage_chunk_size,
@@ -1436,6 +1438,7 @@ def dual_stage_quadratic_hip_attention(
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
         offload_update_cache=(cached_metadata is None) and args.online_update_cache,
+        return_running_statistics=args.bsa_return_running_statistics,
         # offload_update_cache=args.online_update_cache,
         # offload_update_cache=False,
     )

@@ -6,6 +6,72 @@ import triton
 import triton.language as tl
 from hip_attn.v1_2.attention_metadata import safe_stride
 
+@triton.jit
+def split_half(x: tl.tensor):
+    return tl.split(
+        tl.trans(
+            tl.reshape(
+                x, 
+                [x.shape[0], 2, x.shape[1] // 2]
+            ), 
+            0, 2, 1
+        )
+    )
+
+@triton.jit
+def merge_half(x: tl.tensor, y: tl.tensor):
+    return tl.reshape(
+        tl.trans(
+            tl.join(x, y), 
+            0, 2, 1
+        ), 
+        x.shape[0], x.shape[1] + y.shape[1]
+    )
+
+@triton.jit
+def de_rope(
+    vec: tl.tensor, 
+    cos: tl.tensor, 
+    sin: tl.tensor,
+):
+    c0, ch = split_half(cos.to(tl.float32))
+    s0, sh = split_half(sin.to(tl.float32))
+    vr0, vrh = split_half(vec.to(tl.float32))
+
+    out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
+    outh = (out0 * c0 - vr0) / (s0 + 1e-20)
+    
+    out = merge_half(out0, outh).to(vec.dtype)
+    return out
+
+@triton.jit
+def de_rope_load(
+    vec: tl.tensor,
+    idx_t: tl.tensor,
+    mask_t: tl.tensor,
+    COS, stride_cos_t, stride_cos_hid,
+    SIN, stride_sin_t, stride_sin_hid,
+):
+    cos = tl.load(
+        COS +
+        idx_t[:, None] * stride_cos_t +
+        tl.arange(0, vec.shape[1])[None, :] * stride_cos_hid,
+        mask=mask_t[:, None],
+        other=0,
+    )
+    
+    sin = tl.load(
+        SIN +
+        idx_t[:, None] * stride_sin_t +
+        tl.arange(0, vec.shape[1])[None, :] * stride_sin_hid,
+        mask=mask_t[:, None],
+        other=0,
+    )
+    
+    return de_rope(
+        vec, cos, sin
+    )
+
 configs = [
     triton.Config({"BLOCK_CHUNK": BLOCK_CHUNK, }, num_stages=s, num_warps=w)
     for BLOCK_CHUNK in [64, 128, 256]
@@ -18,11 +84,9 @@ configs = [
     # for w in [4, ]
 ]
 
-
 def keep(conf):
     BLOCK_CHUNK = conf.kwargs["BLOCK_CHUNK"]
     return True
-
 
 @triton.autotune(list(filter(keep, configs)), key=["T"])
 @triton.jit
@@ -63,6 +127,12 @@ def _compute_scores_landmark_cuda(
     stride_scores_bdst,
     stride_scores_head,
     stride_scores_tchunk,
+    COS,
+    stride_cos_t,
+    stride_cos_hid,
+    SIN,
+    stride_sin_t,
+    stride_sin_hid,
     
     HEAD_KV: int,
     HEAD: int,
@@ -76,6 +146,7 @@ def _compute_scores_landmark_cuda(
     BLOCK_K: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     USING_PAGED_CACHE: tl.constexpr,
+    DEROPE: tl.constexpr,
     
     BLOCK_CHUNK: tl.constexpr,
 ):
@@ -153,6 +224,13 @@ def _compute_scores_landmark_cuda(
         other=0,
     )#.to(tl.float8e5)
     
+    if DEROPE:
+        queries = de_rope_load(
+            queries, pos_tdst, mask_tdst, 
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+        )
+    
     for i_chunk in range(0, NUM_CHUNKS, BLOCK_CHUNK):
         idx_chunk = tl.arange(0, BLOCK_CHUNK) + i_chunk
         mask_chunk = idx_chunk < NUM_CHUNKS
@@ -196,6 +274,16 @@ def _compute_scores_landmark_cuda(
                     idx_hid[:, None] * stride_k_cache_hid,
                     mask=mask_tsrc[None, :],
                     other=0
+                )
+            
+            if DEROPE:
+                keys = tl.trans(
+                    de_rope_load(
+                        tl.trans(keys, 1, 0), idx_tsrc, mask_tsrc, 
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                    ),
+                    1, 0
                 )
 
             scores = tl.dot(
@@ -245,6 +333,9 @@ def compute_scores_landmark(
     # [BSZ, TSRC // CHUNK_SIZE, HEAD, K]
     landmarks: Tensor,
     
+    cos: Optional[Tensor],
+    sin: Optional[Tensor],
+    
     BLOCK_SIZE_Q: int,
     BLOCK_STRIDE_Q: int,
     CHUNK_SIZE: int,
@@ -273,6 +364,7 @@ def compute_scores_landmark(
     # assert BLOCK_CHUNK > 0
 
     USING_PAGED_CACHE = k_cache is not None
+    DEROPE = False
     
     scores = torch.full(
         (BSZ, BDST, HEAD, CHUNK_COUNT),
@@ -291,6 +383,8 @@ def compute_scores_landmark(
         indices_left, *safe_stride(indices_left, 4),
         landmarks, *safe_stride(landmarks, 4),
         scores, *safe_stride(scores, 4),
+        cos, *safe_stride(cos, 2),
+        sin, *safe_stride(sin, 2),
         
         HEAD_KV,
         HEAD,
@@ -304,6 +398,7 @@ def compute_scores_landmark(
         BLOCK_K,
         CHUNK_SIZE,
         USING_PAGED_CACHE,
+        DEROPE,
 
         # BLOCK_CHUNK,
         # num_warps=4,

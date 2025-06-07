@@ -14,6 +14,7 @@ Extra Credits:
 """
 
 import os
+import warnings
 import numpy as np
 import pytest
 import torch
@@ -565,10 +566,6 @@ def _attn_fwd(
             value=l_i,
         )
     if N_SPLIT <= 1:
-        if M is not None:
-            m_i += tl.math.log2(l_i)
-            m_ptrs = M + off_hz * N_CTX + offs_m
-            tl.store(m_ptrs, m_i, mask=mask_m)
         
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
@@ -577,6 +574,11 @@ def _attn_fwd(
         if NC is not None:
             l_ptrs = NC + off_hz * N_CTX + offs_m
             tl.store(l_ptrs, l_i, mask=mask_m)
+        
+        if M is not None:
+            m_i += tl.math.log2(l_i)
+            m_ptrs = M + off_hz * N_CTX + offs_m
+            tl.store(m_ptrs, m_i, mask=mask_m)
         
         acc = acc / l_i[:, None]
         tl.store(
@@ -761,8 +763,13 @@ class _attention(torch.autograd.Function):
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
         N_SM = 256 # TODO make a good solution to get this without init CUDA context on GPU 0
-        if (N_PROGRAM < N_SM) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '1') == '1'):
-            N_SPLIT = triton.cdiv(N_SM, N_PROGRAM)
+        N_SPLIT = triton.cdiv(N_SM, N_PROGRAM)
+        if return_running_statistics:
+            if N_SPLIT > 1:
+                warnings.warn('N_SPLIT is ignored. this should be fixed')
+            N_SPLIT = 1
+        
+        if (N_SPLIT > 1) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '1') == '1'):
             # N_SPLIT = 1
             
             grid = lambda args: (
@@ -781,10 +788,10 @@ class _attention(torch.autograd.Function):
                 v,
                 sm_scale,
                 M,
-                o,  #
-                mask,
                 MX,
                 NC,
+                o,  #
+                mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
@@ -922,7 +929,7 @@ class _attention(torch.autograd.Function):
             )
 
         if return_running_statistics:
-            return o, MX, NC
+            return o, (MX, NC)
         else:
             return o
 
@@ -930,21 +937,29 @@ class _attention(torch.autograd.Function):
     def backward(ctx, do):
         raise NotImplementedError("bwd not implemented for recompute kernel")
 
-
-attention: Callable[
-    [
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        float,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        bool,
-    ], 
-    Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
-] = _attention.apply
+# for typing wrapper and provide kwargs
+def attention(
+    q: torch.Tensor, 
+    k: torch.Tensor, 
+    v: torch.Tensor, 
+    mask: torch.Tensor, 
+    sm_scale: float,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    return_running_statistics: bool = False,
+) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    return _attention.apply(
+        q,
+        k,
+        v,
+        mask,
+        sm_scale,
+        k_cache,
+        v_cache,
+        block_table,
+        return_running_statistics,
+    )
 
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 1024, 64)])

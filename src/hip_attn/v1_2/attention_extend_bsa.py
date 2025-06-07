@@ -548,7 +548,7 @@ def block_sparse_attention_cuda_step(
         qk_mask = ~(mask_tdst[:, None] & mask_tsrc[None, :])
 
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    # qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
+    qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
     m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
 
     qk = qk - m_ij
@@ -2269,9 +2269,11 @@ def block_sparse_attention_cuda(
             )
 
     if MX is not None and NC is not None:
-        mx_nc_offsets = idx_bsz * stride_mx_bsz \
-            + idx_tdst[:, None] * stride_mx_tdst \
+        mx_nc_offsets = (
+            idx_bsz * stride_mx_bsz
+            + idx_tdst[:, None] * stride_mx_tdst
             + idx_head * stride_mx_head
+        )
 
         tl.store(MX + mx_nc_offsets, m_i, mask=mask_tdst[:, None])
         tl.store(NC + mx_nc_offsets, l_i, mask=mask_tdst[:, None])
@@ -2312,6 +2314,7 @@ def block_sparse_attention(
     model_context_length: int = 131072,
     extend_context_length: int = 131072,
     offload_update_cache: bool = False,
+    return_running_statistics: bool = False,
 ):
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -2360,8 +2363,11 @@ def block_sparse_attention(
 
     assert BLOCK_BK > 0, BLOCK_BK
 
-    MX = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
-    NC = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
+    if return_running_statistics:
+        MX = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
+        NC = torch.zeros((BSZ, TDST, HEAD), dtype=torch.float32, device=q.device)
+    else:
+        MX = NC = None
 
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
 
@@ -2507,4 +2513,7 @@ def block_sparse_attention(
             + v_cumsum.repeat_interleave(HEAD // KV_HEAD, dim=2) * scaler
         )
 
-    return context, MX, NC
+    if return_running_statistics:
+        return context, (MX, NC)
+    else:
+        return context
