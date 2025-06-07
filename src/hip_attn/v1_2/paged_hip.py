@@ -729,19 +729,56 @@ def _forward_paged_hip(
     # TODO: if delta norm is too high, then just recompute that whole block.
     # TODO: use partial densely decode. delta attention for decode
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
-    # example: HIP_DELTA_ATTENTION_ARGS=recompute_dense-window_0-diff_1-w_32-sparse_decode-smooth
+    # example: HIP_DELTA_ATTENTION_ARGS=window_0-diff_1-w_32-sparse_decode-smooth-exp
     delta_attention_args = os.getenv('HIP_DELTA_ATTENTION_ARGS', None)
     using_delta_attention = delta_attention_args is not None
     
     if using_delta_attention:
-        delta_attention_args_window = int(delta_attention_args.split("-")[1].split("_")[1])
-        delta_attention_args_diff = int(delta_attention_args.split("-")[2].split("_")[1])
-        delta_attention_args_w = int(delta_attention_args.split("-")[3].split("_")[1])
-        delta_attention_args_just_return = 'JUST_RETURN' in delta_attention_args
-        delta_attention_args_smooth = 'smooth' in delta_attention_args
-        delta_attention_args_dense_decode = not ('sparse_decode' in delta_attention_args)
-        delta_attention_args_exp = 'exp' in delta_attention_args
-        delta_attention_args_adjust_norm_const = "adjust_norm_const" in delta_attention_args
+        delta_attention_args_smooth = False
+        delta_attention_args_just_return = False
+        delta_attention_args_window = 0
+        delta_attention_args_diff = 1
+        delta_attention_args_dense_decode = False
+        delta_attention_args_w = 16
+        delta_attention_args_exp = False
+        delta_attention_args_exp_w = 2
+        delta_attention_args_exp_window = 1024
+        delta_attention_args_exp_sink = 128
+        delta_attention_args_iter_corr = False
+        delta_attention_args_adjust_norm_const = False
+        
+        for word in delta_attention_args.split('-'):
+            word = word.strip()
+            if word == 'smooth':
+                delta_attention_args_smooth = True
+            elif word == 'exp':
+                delta_attention_args_exp = True
+            elif word == 'JUST_RETURN':
+                delta_attention_args_just_return = True
+            elif word == 'sparse_decode':
+                delta_attention_args_dense_decode = False
+            elif word == 'dense_decode':
+                delta_attention_args_dense_decode = True
+            elif word == 'recompute_dense':
+                pass # backward compat.
+            elif word == 'iter_corr':
+                delta_attention_args_iter_corr = True
+            elif word == 'adjust_norm_const':
+                delta_attention_args_adjust_norm_const = True
+            elif word.startswith('window_'):
+                delta_attention_args_window = int(word.split("_")[1])
+            elif word.startswith('diff_'):
+                delta_attention_args_diff = int(word.split("_")[1])
+            elif word.startswith('w_'):
+                delta_attention_args_w = int(word.split("_")[1])
+            elif word.startswith('expw_'):
+                delta_attention_args_exp_w = int(word.split("_")[1])
+            elif word.startswith('expsink_'):
+                delta_attention_args_exp_sink = int(word.split("_")[1])
+            elif word.startswith('expwindow_'):
+                delta_attention_args_exp_window = int(word.split("_")[1])
+            else:
+                warnings.warn(f'unknown delta args: {word}')
 
         if (layer_id == 0) and (get_local_rank() == 0):
             warnings.warn(
@@ -750,6 +787,8 @@ def _forward_paged_hip(
                 f'{delta_attention_args_just_return=} '
                 f'{delta_attention_args_smooth=} '
                 f'{delta_attention_args_dense_decode=} '
+                f'{delta_attention_args_exp=} '
+                f'{delta_attention_args_exp_w=} '
             )
         
         # args.sa_extend_backend = "clamp"
@@ -914,11 +953,11 @@ def _forward_paged_hip(
                 delta_exp = delta_attention_args_exp
 
                 if delta_exp:
-                    delta_exp_w = 2
+                    delta_exp_w = delta_attention_args_exp_w
                     delta_exp_bk = 16
                     delta_exp_k = 0
-                    delta_exp_window = 1024
-                    delta_exp_sink = 128
+                    delta_exp_window = delta_attention_args_exp_window
+                    delta_exp_sink = delta_attention_args_exp_sink
                     delta_merge_strategy = 'delta' # replace / delta
                     if delta_exp_k == 0:
                         delta_exp_bk = 64
@@ -1137,6 +1176,149 @@ def _forward_paged_hip(
             # until here, we have only calculated sparse attention
             if delta_attention_args_just_return:
                 context = context_sparse
+            elif delta_attention_args_iter_corr:
+                from hip_attn.v1_2.triton_recompute import attention as recomp_attn
+                
+                w_size = delta_attention_args_w * 2
+                
+                num_queries = query.shape[1]
+                num_dense_first = max(128, w_size)
+                num_dense_last = num_queries % w_size + max(128, w_size)
+                num_sparse = num_queries - num_dense_first - num_dense_last
+                
+                # iteratively correction errors
+                
+                def perform_correction(
+                    context_sparse: torch.Tensor, 
+                    context_sparse_raw: torch.Tensor, 
+                    block_start_indices: torch.Tensor, 
+                    block_size: int
+                ):
+                    assert block_start_indices.ndim == 1
+                    assert context_sparse.ndim == 4
+                    assert context_sparse_raw.shape == context_sparse.shape
+                    assert not (args.need_apply_rope and args.using_extend)
+                    
+                    assert args.using_paged_cache
+                    
+                    if False:
+                        context_sparse_raw = context_sparse
+
+                    query_for_recomp = query[:, block_start_indices, :, :]
+                    k_cache = args.get_k_cache()
+                    v_cache = args.get_v_cache()
+
+                    assert args.position_ids.shape[0] == 1
+                    if get_local_rank() == 0:
+                        # import matplotlib.pyplot as plt
+                        # plt.clf()
+                        # plt.hist(block_start_indices.cpu().numpy(), bins=50)
+                        # plt.xlim(0, args.position_ids.amax().item() + 1)
+                        # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
+                        
+                        print('recomp_attn shapes', query_for_recomp.shape, block_start_indices.shape)
+                    context_dense = recomp_attn(
+                        query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                        None,
+                        None,
+                        args.position_ids[:, block_start_indices],
+                        sm_scale,
+                        k_cache,
+                        v_cache,
+                        args.block_table,
+                    ).permute(0, 2, 1, 3).contiguous() # type: torch.Tensor
+                    assert context_dense.shape[-2:] == query.shape[-2:]
+                    
+                    if block_size > 1:
+                        assert not delta_attention_args_smooth
+                        block_diff = diff = context_dense - context_sparse_raw[:, block_start_indices]
+                        diff = diff.repeat_interleave(block_size, 1)
+                        
+                        token_indices = block_start_indices[:, None] + torch.arange(0, block_size, device=context_sparse.device)[None, :]
+                        token_indices = token_indices.view(-1)
+                        
+                        context_sparse_new = diff + context_sparse_raw[:, token_indices]
+                        context_sparse.index_copy_(dim=1, index=token_indices, source=context_sparse_new)
+                    else:
+                        context_sparse.index_copy_(dim=1, index=block_start_indices, source=context_dense)
+                        block_diff = None
+                    
+                    return context_sparse, block_diff
+                
+                block_start_indices = torch.arange(
+                    num_dense_first,
+                    num_dense_first + num_sparse,
+                    step=w_size,
+                    device=query.device,
+                )
+                assert (num_dense_first % w_size) == 0
+                assert ((num_dense_first + num_sparse) % w_size) == 0
+                
+                split = 2
+                
+                def block_diff_to_score(block_diff: torch.Tensor):
+                    return block_diff\
+                        .squeeze(0)\
+                        .norm(dim=-1, keepdim=False)\
+                        .sum(dim=-1, keepdim=False)
+                    # return block_diff\
+                    #     .squeeze(0)\
+                    #     .abs().sum(dim=-1, keepdim=False)\
+                    #     .sum(dim=-1, keepdim=False)
+                
+                context_sparse_raw = context_sparse.clone()
+                
+                context_sparse, block_diff = perform_correction(
+                    context_sparse,
+                    context_sparse_raw,
+                    block_start_indices,
+                    w_size,
+                )
+                # [T,]
+                block_diff_scores_parent, block_diff_indices = block_diff_to_score(block_diff)\
+                    .topk(k=block_diff.shape[1] // split, dim=0, sorted=False)
+                block_start_indices_parent = block_start_indices[block_diff_indices]
+                block_start_indices_parent, tind = block_start_indices_parent.sort()
+                block_diff_scores_parent = block_diff_scores_parent[tind]
+                
+                depth = 0
+                max_iter = 4
+                while (w_size // split) > 0 and (depth < max_iter):
+                    depth += 1
+                    block_start_indices_child = block_start_indices_parent + w_size // split
+                    w_size = w_size // split
+                    
+                    # if get_local_rank() == 0:
+                    #     print(block_diff_scores_parent)
+                    
+                    context_sparse, block_diff = perform_correction(
+                        context_sparse, 
+                        context_sparse_raw,
+                        block_start_indices_child,
+                        w_size,
+                    )
+                    if (w_size // split) > 0:
+                        block_diff_scores_child = block_diff_to_score(block_diff)
+                        block_diff_scores_parent, next_blocks_location = torch.cat([block_diff_scores_parent, block_diff_scores_child])\
+                            .topk(k=block_diff_scores_parent.shape[0] // 2, sorted=False)
+                        block_start_indices_parent = torch.cat([block_start_indices_parent, block_start_indices_child])\
+                            [next_blocks_location]
+                        block_start_indices_parent, tind = block_start_indices_parent.sort()
+                        block_diff_scores_parent = block_diff_scores_parent[tind]
+                
+                # fill dense for first and last part
+                dense_indices = torch.cat([
+                    torch.arange(0, num_dense_first, device=query.device), 
+                    torch.arange(num_dense_first+num_sparse, num_queries, device=query.device),
+                ])
+                context_sparse, _ = perform_correction(
+                    context_sparse, 
+                    context_sparse_raw,
+                    dense_indices,
+                    1,
+                )
+                
+                context = context_sparse
             else:
                 from hip_attn.v1_2.triton_recompute import attention as recomp_attn
                 
@@ -1171,12 +1353,13 @@ def _forward_paged_hip(
                     #     context_sparse_for_diff.shape[3],
                     # )
                     # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
-
+                    
                     # take first
-                    context_sparse_for_diff = context_sparse[:, idx]
+                    if delta_attention_args_adjust_norm_const:
+                        context_sparse_for_diff = context_sparse[:, idx]
                     sparse_mx_for_diff = sparse_mx[:, idx]
                     sparse_nc_for_diff = sparse_nc[:, idx]
-
+                    
                     idx = torch.cat((idx, torch.arange(num_sparse, num_queries, device=query.device)))
                     query_for_dense = query[:, idx]
                 
@@ -1336,46 +1519,16 @@ def _forward_paged_hip(
                     #         context_sparse.abs().mean().item()
                     #     )
                 else:
-                    context_dense, last_context_dense = (
-                        context_dense[:, :-num_last_dense],
-                        context_dense[:, -num_last_dense:],
+                    from .delta.apply_delta import apply_delta
+                    
+                    context = apply_delta(
+                        context_dense, 
+                        context_sparse,
+                        idx,
+                        num_last_dense,
+                        delta_attention_args_w,
+                        delta_attention_args_smooth
                     )
-                    
-                    # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # scale = context_dense_norm / context_sparse_for_diff_norm
-
-                    # take difference
-                    context_diff = context_dense - context_sparse_for_diff# * scale
-                    
-                    context_diff = context_diff.repeat_interleave(
-                        delta_attention_args_w, dim=1
-                    )
-                    
-                    if delta_attention_args_smooth:
-                        # (exp) linear interpolate diff
-                        context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
-                        context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
-
-                        offset = torch.arange(0, context_diff.shape[1], device=context_diff.device)
-                        offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
-                        context_diff = context_diff + (context_diff_shift - context_diff) * offset[None, :, None, None]
-                
-                    # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
-
-                    # context = context_sparse * scale + context_diff
-                    context = context_sparse + context_diff
-                    context = torch.cat([context, last_context_dense], dim=1).to(query.dtype)
-
-                    # if get_local_rank() == 0:
-                    #     print(
-                    #         'hit', layer_id, 
-                    #         context_diff.shape, 
-                    #         context_sparse.shape, 
-                    #         context_diff.abs().mean().item(), 
-                    #         context_sparse.abs().mean().item()
-                    #     )
     elif (force_dense_decode and is_decode) or (using_dense_prefill and (not is_decode)):
         if is_decode:
             if args.using_extend:

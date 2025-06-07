@@ -6,6 +6,25 @@ import triton
 import triton.language as tl
 from hip_attn.v1_2.attention_metadata import safe_stride
 
+configs = [
+    triton.Config({"BLOCK_CHUNK": BLOCK_CHUNK, }, num_stages=s, num_warps=w)
+    for BLOCK_CHUNK in [64, 128, 256]
+    for s in [3, 4, 7]
+    for w in [4, 8]
+    
+    # for BM in [128,]
+    # for BN in [64,]
+    # for s in [3, ]
+    # for w in [4, ]
+]
+
+
+def keep(conf):
+    BLOCK_CHUNK = conf.kwargs["BLOCK_CHUNK"]
+    return True
+
+
+@triton.autotune(list(filter(keep, configs)), key=["T"])
 @triton.jit
 def _compute_scores_landmark_cuda(
     Q, 
@@ -55,9 +74,10 @@ def _compute_scores_landmark_cuda(
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_STRIDE_Q: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    BLOCK_CHUNK: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     USING_PAGED_CACHE: tl.constexpr,
+    
+    BLOCK_CHUNK: tl.constexpr,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     
@@ -206,6 +226,9 @@ def _compute_scores_landmark_cuda(
                 mask=mask_chunk,
             )
 
+from .utils import capture
+
+@capture
 def compute_scores_landmark(
     # [BSZ, TDST, HEAD, HID]
     q: Tensor,
@@ -246,8 +269,8 @@ def compute_scores_landmark(
         assert k_cache.shape[1] == 1
 
     BLOCK_K = K
-    BLOCK_CHUNK = int(os.getenv('SA_BLOCK_SIZE_LANDMARK', '128')) // BLOCK_K
-    assert BLOCK_CHUNK > 0
+    # BLOCK_CHUNK = int(os.getenv('SA_BLOCK_SIZE_LANDMARK', '128')) // BLOCK_K
+    # assert BLOCK_CHUNK > 0
 
     USING_PAGED_CACHE = k_cache is not None
     
@@ -258,7 +281,7 @@ def compute_scores_landmark(
         fill_value=float('-inf')
     )
     
-    grid = (BSZ * BDST * HEAD,)
+    grid = lambda kwargs: (BSZ * BDST * HEAD,)
     _compute_scores_landmark_cuda[grid](
         q, *safe_stride(q, 4),
         k, *safe_stride(k, 4),
@@ -279,12 +302,12 @@ def compute_scores_landmark(
         BLOCK_SIZE_Q,
         BLOCK_STRIDE_Q,
         BLOCK_K,
-        BLOCK_CHUNK,
         CHUNK_SIZE,
         USING_PAGED_CACHE,
 
-        num_warps=4,
-        num_stages=3,
+        # BLOCK_CHUNK,
+        # num_warps=4,
+        # num_stages=3,
     )
     
     return scores

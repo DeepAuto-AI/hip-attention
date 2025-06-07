@@ -1,5 +1,7 @@
 import torch
 import os
+from typing import Optional, List
+import dataclasses
 
 try:
     from sglang.srt.distributed import (
@@ -20,7 +22,35 @@ def get_local_rank():
     else:
         return 0
 
+@dataclasses.dataclass
+class CaptureEvents:
+    start: torch.cuda.Event
+    end: torch.cuda.Event
+    handle: "capture"
+    _elapsed: Optional[int] = None
+    
+    def elapsed(self):
+        if self._elapsed is not None:
+            return self._elapsed
+        else:
+            self.end.synchronize()
+            self._elapsed = self.start.elapsed_time(self.end)
+            return self._elapsed
+
 class capture(object):
+    buffers: List[CaptureEvents] = []
+    
+    @classmethod
+    def report(cls):
+        for event in capture.buffers:
+            print(f'{event.handle.callback} took {event.elapsed():.2f} ms')
+        capture.buffers.clear()
+    
+    @classmethod
+    def add_event(cls, event: CaptureEvents):
+        capture.buffers.append(event)
+        while len(capture.buffers) > 1024:
+            capture.buffers.pop(0)
 
     def __init__(self, callback):
         self.callback = callback
@@ -36,6 +66,7 @@ class capture(object):
             (not torch.cuda.is_current_stream_capturing()) and
             (kwargs['q'].shape[1] > 1 if 'q' in kwargs else True) and
             os.getenv('HIP_DEBUG_BENCH', '0') == '1' and
+            os.getenv('HIP_DEBUG_CAPTURE_DECORATOR', '1') == '1' and
             (get_local_rank() == 0)
         )
 
@@ -57,10 +88,16 @@ class capture(object):
 
         if run_benchmark:
             end.record()
-            end.synchronize()
-            elapsed = start.elapsed_time(end)
-            # print(args[0].dtype)
-            # print(kwargs['args'].pretty())
-            print(f'{self.callback} took {elapsed:.2f} ms')
+            
+            capture.add_event(CaptureEvents(
+                handle=self,
+                start=start, 
+                end=end
+            ))
+            # end.synchronize()
+            # elapsed = start.elapsed_time(end)
+            # # print(args[0].dtype)
+            # # print(kwargs['args'].pretty())
+            # print(f'{self.callback} took {elapsed:.2f} ms')
         
         return ret
