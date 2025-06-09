@@ -1528,6 +1528,7 @@ def _forward_paged_hip(
                         # context = context_sparse * scale + context_diff
                         context = context_sparse + context_diff
                     else:
+                        scale = 1.0
                         numerator = context_dense * dense_nc[:, :, :, None]
                         denominator = dense_nc[:, :, :, None]
                         
@@ -1540,6 +1541,9 @@ def _forward_paged_hip(
                         # alpha = alpha# * 0 + 1
                         numerator = numerator - alpha * (context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None])
                         denominator = denominator - alpha * sparse_nc_for_diff[:, :, :, None]
+                        
+                        numerator *= scale
+                        denominator *= scale
                         
                         def _repeat_interleave(t: torch.Tensor):
                             t = t.repeat_interleave(delta_attention_args_w, dim=1)

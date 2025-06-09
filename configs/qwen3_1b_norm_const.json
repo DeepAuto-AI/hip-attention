@@ -1,5 +1,5 @@
 {
-    "__delta_attention_args": "window_0-diff_1-w_8-expw_4-expsink_32-expwindow_256-dense_decode-adjust_norm_const",
+    "__delta_attention_args": "window_0-diff_1-w_8-expw_4-expsink_32-expwindow_256-dense_decode-smooth-adjust_norm_const",
     "__using_dense_prefill": true,
     "__head_reduce": 2,
     "using_extend": false,
