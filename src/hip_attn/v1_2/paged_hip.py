@@ -1538,17 +1538,17 @@ def _forward_paged_hip(
                             sparse_mx_for_diff 
                             - torch.maximum(sparse_mx_for_diff, dense_mx) # for numerical stability
                         )[:, :, :, None]
-                        alpha = 1
+                        # alpha = 1
                         numerator = numerator - alpha * (context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None])
                         denominator = denominator - alpha * sparse_nc_for_diff[:, :, :, None]
                         
                         # if get_local_rank() == 0:
                         #     print(denominator[0, :, 0])
                         
-                        # context_diff = context_dense - context_sparse_for_diff
-                        # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
-                        # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
-                        # scale *= context_diff_scale
+                        context_diff = context_dense - context_sparse_for_diff
+                        context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
+                        context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
+                        scale *= context_diff_scale
                         
                         numerator *= scale
                         denominator *= scale
@@ -1578,7 +1578,7 @@ def _forward_paged_hip(
                         mx = torch.maximum(dense_mx, sparse_mx)
                         alpha1 = torch.exp2(sparse_mx - mx)[:, :, :, None]
                         alpha2 = torch.exp2(dense_mx - mx)[:, :, :, None]
-                        alpha1 = alpha2 = 1
+                        # alpha1 = alpha2 = 1
                         numerator = alpha2 * numerator + alpha1 * (context_sparse * sparse_nc[:, :, :, None])
                         denominator = alpha2 * denominator + alpha1 * sparse_nc[:, :, :, None]
                         
