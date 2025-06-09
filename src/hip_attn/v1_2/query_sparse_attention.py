@@ -938,7 +938,7 @@ class _attention(torch.autograd.Function):
         raise NotImplementedError("bwd not implemented for recompute kernel")
 
 # for typing wrapper and provide kwargs
-def attention(
+def query_sparse_attention(
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor, 
