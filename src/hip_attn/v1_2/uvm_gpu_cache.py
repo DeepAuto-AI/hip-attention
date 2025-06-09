@@ -3,7 +3,7 @@ import os
 from typing import Optional, Tuple, Union
 
 import cuda
-import cuda.cudart
+import cuda.bindings.runtime
 import torch
 import tqdm
 import triton
@@ -51,20 +51,20 @@ def debug_print(*args):
 
 
 def uvm_note_cpu(tensor: Tensor, prefetch: bool = False):
-    cuda.cudart.cudaMemAdvise(
+    cuda.bindings.runtime.cudaMemAdvise(
         tensor.data_ptr(),
         tensor.numel() * tensor.element_size(),
-        cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation,
+        cuda.bindings.runtime.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation,
         -1,
     )
-    cuda.cudart.cudaMemAdvise(
+    cuda.bindings.runtime.cudaMemAdvise(
         tensor.data_ptr(),
         tensor.numel() * tensor.element_size(),
-        cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy,
+        cuda.bindings.runtime.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy,
         tensor.device.index,
     )
     if prefetch:
-        cuda.cudart.cudaMemPrefetchAsync(
+        cuda.bindings.runtime.cudaMemPrefetchAsync(
             tensor.data_ptr(), tensor.numel() * tensor.element_size(), -1, 0
         )
 

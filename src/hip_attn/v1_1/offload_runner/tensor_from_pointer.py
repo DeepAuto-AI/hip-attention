@@ -5,7 +5,7 @@ from math import prod
 from typing import Tuple, Union
 
 import cuda
-import cuda.cudart
+import cuda.bindings.runtime
 import cupy
 import numpy as np
 import torch
@@ -95,8 +95,8 @@ def alloc_managed_tensor(
     byte_size = elem_size * numel
     byte_size = byte_size + byte_size % align
 
-    _result_code, pointer = cuda.cudart.cudaMallocManaged(
-        byte_size, cuda.cudart.cudaMemAttachGlobal
+    _result_code, pointer = cuda.bindings.runtime.cudaMallocManaged(
+        byte_size, cuda.bindings.runtime.cudaMemAttachGlobal
     )
 
     t_gpu = tensor_from_pointer(pointer, shape, dtype, device.index)
