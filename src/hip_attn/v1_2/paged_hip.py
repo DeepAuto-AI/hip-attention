@@ -1533,16 +1533,19 @@ def _forward_paged_hip(
                         numerator = context_dense * dense_nc[:, :, :, None]
                         denominator = dense_nc[:, :, :, None]
                         
-                        alpha_sparse = torch.exp2(
-                            sparse_mx_for_diff
-                            - torch.maximum(sparse_mx_for_diff, dense_mx) # for numerical stability
-                        )[:, :, :, None]
-
-                        alpha_dense = torch.exp2(
-                            dense_mx
-                            - torch.maximum(sparse_mx_for_diff, dense_mx) # for numerical stability
-                        )[:, :, :, None]
-                        # alpha = alpha# * 0 + 1
+                        # if get_local_rank() == 0:
+                        #     print('-')
+                        #     print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
+                        #     print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
+                        #     print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
+                        #     print('avg sparse mx', sparse_mx_for_diff.mean())
+                        
+                        t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
+                        
+                        alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[:, :, :, None]
+                        
+                        alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
+                        # alpha_dense = 1
 
                         # this is the delta with denormalized numerator,
                         # denominator is equal to H
@@ -1552,13 +1555,12 @@ def _forward_paged_hip(
                         # if get_local_rank() == 0:
                         #     print(denominator[0, :, 0])
                         
-                        context_diff = context_dense - context_sparse_for_diff
+                        # context_diff = context_dense - context_sparse_for_diff
                         # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
                         # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
                         # scale *= context_diff_scale
-                        
-                        numerator *= scale
-                        denominator *= scale
+                        # delta *= scale
+                        # h_nc *= scale
                         
                         def _repeat_interleave(t: torch.Tensor):
                             t = t.repeat_interleave(delta_attention_args_w, dim=1)
@@ -1579,13 +1581,16 @@ def _forward_paged_hip(
                         delta = _repeat_interleave(delta)
                         h_nc = _repeat_interleave(h_nc)
                         dense_mx = _repeat_interleave(torch.maximum(sparse_mx_for_diff, dense_mx))
+                        # sparse_mx = _repeat_interleave(sparse_mx_for_diff)
+                        # sparse_nc = _repeat_interleave(sparse_nc_for_diff)
 
+                        t_mx = torch.maximum(dense_mx, sparse_mx)
                         alpha_sparse = torch.exp2(
-                            sparse_mx - torch.maximum(dense_mx, sparse_mx)
+                            sparse_mx - t_mx
                         )[:, :, :, None]
 
                         alpha_dense = torch.exp2(
-                            dense_mx - torch.maximum(dense_mx, sparse_mx)
+                            dense_mx - t_mx
                         )[:, :, :, None]
 
                         # alpha_dense_mask = torch.zeros(dense_mx.size(1), device=dense_mx.device, dtype=torch.bool)

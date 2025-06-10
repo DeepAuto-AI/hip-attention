@@ -114,11 +114,26 @@ def _attn_fwd_inner(
                 mask=mask_tsrc[None, :],
                 other=0,
             )
-        qk = tl.dot(q, k) * qk_scale
+        
+        # qk = tl.dot(q, k)
+        
+        q_dtype = q.dtype
 
+        cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+
+        qk = tl.dot(
+            (q * cq).to(q_dtype),
+            (k.to(q_dtype) * ck).to(q_dtype),
+            out_dtype=tl.float32,
+            allow_tf32=True,
+        ).to(tl.float32)
+        
+        qk = qk * 1.44269504
+        
         if MASKING:
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
-            qk = tl.where(mask, qk, -1.0e6)
+            qk = tl.where(mask, qk, float('-inf'))
         
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -127,9 +142,9 @@ def _attn_fwd_inner(
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         alpha = tl.math.exp2(m_i - m_ij)
-        l_i = l_i * alpha + l_ij
+        l_i = (l_i * alpha + l_ij).to(l_i.dtype)
         # -- update output accumulator --
-        acc = acc * alpha[:, None]
+        acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
         if not USING_PAGED_CACHE:
             v = tl.load(
@@ -151,7 +166,12 @@ def _attn_fwd_inner(
         else:
             p = p.to(v.dtype)
 
-        acc = tl.dot(p, v, acc)
+        acc = acc + tl.dot(
+            p.to(q_dtype), 
+            v.to(q_dtype), 
+            out_dtype=tl.float32,
+            allow_tf32=True,
+        )
         # update m_i and l_i
         m_i = m_ij
         if not USING_PAGED_CACHE:
@@ -244,6 +264,15 @@ def _attn_fwd(
     BLOCK_TABLE,
     stride_block_table_bsz,
     stride_block_table_tsrc,
+    
+    RETURN_POOLED_SCORES: tl.constexpr,
+    SCORE_POOLING_BQ: tl.constexpr,
+    SCORE_POOLING_BK: tl.constexpr,
+    SCORES,
+    stride_scores_bsz,
+    stride_scores_head,
+    stride_scores_bdst,
+    stride_scores_bsrc,
     
     ACC,
     stride_acc_bsz,
@@ -702,16 +731,28 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx, 
-        q, 
-        k, 
-        v, 
-        mask, 
-        sm_scale,
-        k_cache,
-        v_cache,
-        block_table,
-        return_running_statistics,
+        
+        q: torch.Tensor, 
+        k: torch.Tensor, 
+        v: torch.Tensor, 
+        
+        mask: torch.Tensor, 
+        
+        sm_scale: float,
+        
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        
+        return_running_statistics: bool,
+        
+        return_pooled_scores: bool,
+        score_pooling_block_size_q: int,
+        score_pooling_block_size_k: int,
+        score_pooling_max_seq_len: int,
     ):
+        q = (q * sm_scale).to(q.dtype)
+        
         USING_PAGED_CACHE = k_cache is not None
         if not USING_PAGED_CACHE:   
             HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
@@ -756,6 +797,28 @@ class _attention(torch.autograd.Function):
                 device=q.device,
                 dtype=torch.float32,
             )
+        
+        
+        if return_pooled_scores:
+            if k is not None:
+                MAX_TSRC = k.shape[2]
+            else:
+                assert score_pooling_max_seq_len is not None
+                MAX_TSRC = score_pooling_max_seq_len
+            
+            scores = torch.full(
+                (
+                    q.shape[0],
+                    q.shape[1],
+                    triton.cdiv(q.shape[2], score_pooling_block_size_q), 
+                    triton.cdiv(MAX_TSRC, score_pooling_block_size_k),
+                ),
+                fill_value=float('-inf'),
+                dtype=torch.float32,
+                device=q.shape,
+            )
+        else:
+            scores = None
         
         assert q.shape[1] <= 128 # N HEAD should be smaller than 128. this could be adjusted.
         assert len(mask.size()) == 2, "expecting mask to be 2D"
@@ -807,6 +870,11 @@ class _attention(torch.autograd.Function):
                 acc, *safe_stride(acc, 5),
                 m_i, *safe_stride(m_i, 4),
                 l_i, *safe_stride(l_i, 4),
+                
+                return_pooled_scores,
+                score_pooling_block_size_q,
+                score_pooling_block_size_k,
+                scores, *safe_stride(scores, 4),
 
                 q.shape[0],
                 q.shape[1],  #
@@ -917,6 +985,11 @@ class _attention(torch.autograd.Function):
                 None, *safe_stride(None, 5),
                 None, *safe_stride(None, 4),
                 None, *safe_stride(None, 4),
+                
+                return_pooled_scores,
+                score_pooling_block_size_q,
+                score_pooling_block_size_k,
+                scores, *safe_stride(scores, 4),
 
                 q.shape[0],
                 q.shape[1],  #
@@ -942,23 +1015,41 @@ def query_sparse_attention(
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor, 
+    
     mask: torch.Tensor, 
+    
     sm_scale: float,
+    
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     block_table: torch.Tensor,
+    
     return_running_statistics: bool = False,
+    
+    return_pooled_scores: bool = False,
+    score_pooling_block_size_q: int = 64,
+    score_pooling_block_size_k: int = 64,
+    score_pooling_max_seq_len: int = None,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
         k,
         v,
+        
         mask,
+        
         sm_scale,
+        
         k_cache,
         v_cache,
         block_table,
+        
         return_running_statistics,
+        
+        return_pooled_scores,
+        score_pooling_block_size_q,
+        score_pooling_block_size_k,
+        score_pooling_max_seq_len,
     )
 
 
