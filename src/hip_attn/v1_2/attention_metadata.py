@@ -126,11 +126,21 @@ class HiPAttentionState:
     landmark_indices: List[torch.Tensor]
     
     @classmethod
-    def from_args(cls, q: torch.Tensor, args: "HiPAttentionArgs"):
-        assert args.using_paged_cache
+    def from_args(
+        cls, 
+        q: torch.Tensor, 
+        args: "HiPAttentionArgs", 
+        k: Optional[torch.Tensor] = None
+    ):
+        if k is None:
+            assert args.using_paged_cache 
         
-        k_cache = args.get_k_cache()
-        num_tokens = k_cache.shape[0]
+        if args.get_k_cache() is not None:
+            k_cache = args.get_k_cache()
+            num_tokens = k_cache.shape[0] * k_cache.shape[1]
+        else:
+            num_tokens = k.shape[1]
+        
         num_heads = q.shape[2]
         landmark_scores = torch.zeros(
             (num_tokens, num_heads), 
@@ -442,25 +452,23 @@ class HiPAttentionArgs:
             )
         
     def get_k_cache(self):
-        if not self.using_paged_cache:
-            return None
-        
         if self.k_cache is not None:
             k_cache = self.k_cache
-        else:
+        elif self.offload_cache is not None:
             k_cache = self.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
+        else:
+            k_cache = None
         
         # k_cache: [MAX_TOKENS, 1, HEAD, HID]
         return k_cache
     
     def get_v_cache(self):
-        if not self.using_paged_cache:
-            return None
-        
         if self.v_cache is not None:
             v_cache = self.v_cache
-        else:
+        elif self.offload_cache is not None:
             v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+        else:
+            v_cache = None
         
         # v_cache: [MAX_TOKENS, 1, HEAD, HID]
         return v_cache

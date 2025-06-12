@@ -177,11 +177,10 @@ def dual_stage_quadratic_hip_attention(
         # if q.shape[1] > 1: print('using cached state')
         state = cached_metadata.state
     elif args.using_paged_cache:
-        # print('using new state')
-        state = HiPAttentionState.from_args(q, args)
+        state = HiPAttentionState.from_args(q, args, k)
     else:
-        # print('state is empty')
-        state = None
+        state = HiPAttentionState.from_args(q, args, k)
+        # state = None
 
     flatten_paged_cache = False
     if q.shape[1] == 1:

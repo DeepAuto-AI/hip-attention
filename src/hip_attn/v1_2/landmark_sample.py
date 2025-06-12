@@ -211,7 +211,6 @@ def landmark_sample(
         assert position_ids_for_landmark.shape[0] == BSZ
         assert position_ids_for_landmark.shape[1] == TDST
         
-        print('asdg13', type(k))
         assert not (args.using_paged_cache and (k is None)), "todo"
         assert not landmark_derope, "todo"
         
