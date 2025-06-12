@@ -40,6 +40,11 @@ def _sw_score_sample(
     stride_q_tdst,
     stride_q_head,
     stride_q_hid,
+    K,
+    stride_k_bsz,
+    stride_k_tsrc,
+    stride_k_head_kv,
+    stride_k_hid,
     POS,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -93,22 +98,33 @@ def _sw_score_sample(
     
     pos_tsrc = tl.arange(0, BLOCK_TSRC) + pos_tdst_start
     
-    tl.static_assert(USING_PAGED_CACHE)
-    idx_page = tl.load(
-        BLOCK_TABLE +
-        idx_bsz * stride_block_table_bsz +
-        pos_tsrc * stride_block_table_tsrc,
-        mask=mask_tsrc,
-    )
-    keys = tl.load(
-        K_CACHE +
-        idx_page[None, :] * stride_k_cache_page +
-        0 * stride_k_cache_offset +
-        idx_head_kv * stride_k_cache_head_kv +
-        idx_hid[:, None] * stride_k_cache_hid,
-        mask=mask_tsrc[None, :],
-        other=0,
-    )
+    if USING_PAGED_CACHE:
+        tl.static_assert(USING_PAGED_CACHE)
+        idx_page = tl.load(
+            BLOCK_TABLE +
+            idx_bsz * stride_block_table_bsz +
+            pos_tsrc * stride_block_table_tsrc,
+            mask=mask_tsrc,
+        )
+        keys = tl.load(
+            K_CACHE +
+            idx_page[None, :] * stride_k_cache_page +
+            0 * stride_k_cache_offset +
+            idx_head_kv * stride_k_cache_head_kv +
+            idx_hid[:, None] * stride_k_cache_hid,
+            mask=mask_tsrc[None, :],
+            other=0,
+        )
+    else:
+        keys = tl.load(
+            K +
+            idx_bsz * stride_k_bsz +
+            pos_tsrc[None, :] * stride_k_tsrc +
+            idx_head_kv * stride_k_head_kv +
+            idx_hid[:, None] * stride_k_hid,
+            mask=mask_tsrc[None, :],
+            other=0
+        )
     
     acc = tl.zeros((BLOCK_TSRC,), dtype=tl.float32) + 42
     
@@ -195,7 +211,8 @@ def landmark_sample(
         assert position_ids_for_landmark.shape[0] == BSZ
         assert position_ids_for_landmark.shape[1] == TDST
         
-        assert args.using_paged_cache, "todo"
+        print('asdg13', type(k))
+        assert not (args.using_paged_cache and (k is None)), "todo"
         assert not landmark_derope, "todo"
         
         TDST_PADDED = TDST if (TDST % landmark_chunk) == 0 else TDST + (landmark_chunk - TDST % landmark_chunk)
@@ -212,6 +229,7 @@ def landmark_sample(
         
         _sw_score_sample[grid](
             q_for_landmark, *safe_stride(q_for_landmark, 4),
+            k, *safe_stride(k, 4),
             position_ids_for_landmark, *safe_stride(position_ids_for_landmark, 2),
             
             args.using_paged_cache,

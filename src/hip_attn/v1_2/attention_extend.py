@@ -481,12 +481,18 @@ def dual_stage_quadratic_hip_attention(
                             BSZ, HEAD, HEAD_KV, HID, BDST, DEBUG, __logall_index,
                         )
 
+                    _TSRC = TSRC
+                    if k is not None:
+                        _TSRC = k.shape[1]
+                    
                     landmarks = landmark_scores\
                         .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
                     num_landmarks = args.landmark_stage_k[i_stage]
                     _, landmarks = torch.topk(landmarks, k=num_landmarks, sorted=False)
-                    landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
-                    assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks), f'{landmarks.shape} == ({BSZ}, {TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks})'
+                    landmarks = landmarks.permute(0, 2, 1, 3)[:, :_TSRC // stage_info.stage_chunk_size].contiguous()
+                    assert landmarks.shape == (BSZ, _TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks), (
+                        f'{landmarks.shape} == ({BSZ}, {_TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks}), {k.shape if k is not None else None}'
+                    )
                     
                     assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
                     
