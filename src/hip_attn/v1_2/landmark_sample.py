@@ -255,6 +255,8 @@ def landmark_sample(
         
         if state is not None:
             q_block_index = args.block_table.gather(dim=1, index=position_ids_for_landmark)
+            # sanity_check = q_block_index.amax().item()
+            # assert sanity_check < state.landmark_scores.shape[0], f'{sanity_check=} < {state.landmark_scores.shape=}[0]'
             state.landmark_scores[q_block_index] = landmark_scores[:, :, :q_for_landmark.shape[1]].contiguous().permute(0, 2, 1)
             landmark_scores = state.landmark_scores[
                 args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]
@@ -339,6 +341,8 @@ def landmark_sample(
             landmark_scores[:, :, q_for_landmark.shape[1]:].fill_(float('-inf'))
             
             q_block_index = args.block_table.gather(dim=1, index=position_ids_for_landmark)
+            # sanity_check = q_block_index.amax().item()
+            # assert sanity_check < state.landmark_scores.shape[0], f'{sanity_check=} < {state.landmark_scores.shape=}[0]'
             state.landmark_scores[q_block_index] = landmark_scores[:, :, :q_for_landmark.shape[1]].contiguous().permute(0, 2, 1)
             landmark_scores = state.landmark_scores[
                 args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]

@@ -140,6 +140,9 @@ class HiPAttentionState:
             num_tokens = k_cache.shape[0] * k_cache.shape[1]
         else:
             num_tokens = k.shape[1]
+            
+        # padding for SGlang
+        num_tokens += 1024
         
         num_heads = q.shape[2]
         landmark_scores = torch.zeros(
@@ -267,6 +270,8 @@ class HiPAttentionArgs:
 
     query_for_landmark: Optional[Tensor] = None
     position_ids_for_landmark: Optional[Tensor] = None
+    
+    is_decode: bool = False
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:

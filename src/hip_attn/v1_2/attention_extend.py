@@ -173,14 +173,14 @@ def dual_stage_quadratic_hip_attention(
     #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
     # )
 
-    if (cached_metadata is not None) and (cached_metadata.state is not None):
+    if not args.is_decode:
         # if q.shape[1] > 1: print('using cached state')
-        state = cached_metadata.state
-    elif args.using_paged_cache:
-        state = HiPAttentionState.from_args(q, args, k)
+        if (cached_metadata is not None) and (cached_metadata.state is not None):
+            state = cached_metadata.state
+        else:
+            state = HiPAttentionState.from_args(q, args, k)
     else:
-        state = HiPAttentionState.from_args(q, args, k)
-        # state = None
+        state = None
 
     flatten_paged_cache = False
     if q.shape[1] == 1:

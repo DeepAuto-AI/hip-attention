@@ -711,6 +711,7 @@ def _forward_paged_hip(
         layer_id=layer_id,
         v_hidden_dim=v_hidden_dim,
         using_chunked_sliding_window=using_chunked_sliding_window,
+        is_decode=is_decode,
     )
 
     using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
@@ -1943,16 +1944,14 @@ class PagedHiPStateful:
         
         assert isinstance(cached_metadata, HiPAttentionOutputMetadata)
         cached_metadata.state = state
-
-        # print('stateful', type(cached_metadata), type(state))
-
+        
         o, metadata = forward_paged_hip(
             **kwargs,
             cached_metadata=cached_metadata,
         )
 
         if not is_decode:
-            state = None
+            states = None
             if metadata is not None:
                 if isinstance(metadata, list):
                     if (metadata[0] is not None) and (metadata[0].state is not None):
@@ -1960,7 +1959,7 @@ class PagedHiPStateful:
                 else:
                     if metadata.state is not None:
                         states = metadata.state
-            if state is not None:
+            if states is not None:
                 self.states[layer_id] = states
 
         return o, metadata
