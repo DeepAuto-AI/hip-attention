@@ -588,40 +588,6 @@ def block_sparse_attention_cuda_step(
     return acc, l_i, m_i
 
 
-def get_block_sparse_attention_configs():
-    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
-    if autotune_disabled:
-        device_name = torch.cuda.get_device_name()
-        defaults = {
-            "NVIDIA A100-SXM4-80GB": dict(
-                num_warps=4,
-                num_stages=2,
-                maxnreg=256,
-            ),
-        }.get(device_name, dict(num_warps=4, num_stages=2))
-        return [triton.Config({}, **defaults)]
-    if os.getenv("HIP_DISABLE_AUTOTUNE_WARNINGS", "0") == "0":
-        warnings.warn(
-            "triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1"
-        )
-
-    NUM_WARPS = [4]  # workaround for triton bug
-    if triton.__version__ >= "3.2.0":
-        NUM_WARPS.append(8)
-
-    configs = []
-    # for block_bk in [4, 8, 16, 32]:
-    # for block_bk in [16, 32,]:
-    for max_nreg in [128, 256, 512]:
-        for num_warps in NUM_WARPS:
-            for num_stages in [1, 2, 4]:
-                configs.append(
-                    triton.Config(
-                        {}, num_warps=num_warps, num_stages=num_stages, maxnreg=max_nreg
-                    )
-                )
-    return configs
-
 
 # def perf_model_block_sparse_attention(**kwargs):
 #     block_bk = kwargs['BLOCK_BK']
@@ -718,6 +684,38 @@ def apply_rope_to_queries(
 
     return queries
 
+def get_block_sparse_attention_configs():
+    autotune_disabled = os.getenv("HIP_DISABLE_AUTOTUNE", "1") == "1"
+    if autotune_disabled:
+        device_name = torch.cuda.get_device_name()
+        defaults = {
+            "NVIDIA A100-SXM4-80GB": dict(
+                num_warps=4,
+                num_stages=2,
+                maxnreg=256,
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2))
+        return [triton.Config({}, **defaults)]
+    if os.getenv("HIP_DISABLE_AUTOTUNE_WARNINGS", "0") == "0":
+        warnings.warn(
+            "Triton autotuning is activated. This should be disabled for faster startup. If you want set HIP_DISABLE_AUTOTUNE=1. Set HIP_DISABLE_AUTOTUNE_WARNINGS=1 to hide this message."
+        )
+
+    NUM_WARPS = [4, 8]  # workaround for triton bug
+    if triton.__version__ < "3.2.0":
+        NUM_WARPS.remove(8)
+
+    configs = []
+    # for block_bk in [4, 8, 16, 32]:
+    # for block_bk in [16, 32,]:
+    for num_warps in NUM_WARPS:
+        for num_stages in [3, 4, 7,]:
+            configs.append(
+                triton.Config(
+                    {}, num_warps=num_warps, num_stages=num_stages
+                )
+            )
+    return configs
 
 @triton.autotune(
     configs=get_block_sparse_attention_configs(),

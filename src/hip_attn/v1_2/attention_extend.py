@@ -31,17 +31,27 @@ from hip_attn.v1_2.attention_metadata import (
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
 from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
+from hip_attn.v1_2.landmark_sample import landmark_sample
+from hip_attn.v1_2.stage_prologue import stage_prologue
 
 try:
+    import torch.distributed as dist
     from sglang.srt.distributed import (
-        get_tensor_model_parallel_world_size,
+        get_tensor_model_parallel_rank,
+        split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
-        model_parallel_is_initialized,
+        tensor_model_parallel_all_reduce,
+        get_tensor_model_parallel_world_size,
     )
+    SGLANG_DIST_ACTIVATED = True
+except ImportError as ex:
+    SGLANG_DIST_ACTIVATED = False
 
-    SGLANG_DIST_AVAILABLE = model_parallel_is_initialized()
-except:
-    SGLANG_DIST_AVAILABLE = False
+def get_local_rank() -> 0:
+    if SGLANG_DIST_ACTIVATED:
+        return get_tensor_model_parallel_rank()
+    else:
+        return 0
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
@@ -353,99 +363,31 @@ def dual_stage_quadratic_hip_attention(
                 # print('last cached stage', i_stage)
                 pass
             elif i_stage > 0:
-                assert (stage_k % chunk_size) == 0, f"{stage_k} % {chunk_size}"
-                indices_left = indices_left[..., : stage_k // chunk_size]
-                require_align = stage_info.require_realign_index
-                if require_align:
-                    indices_left = (
-                        indices_left - args.sink_token_size
-                    ) // chunk_size * chunk_size + args.sink_token_size
-                    indices_right = indices_left + chunk_size
-                else:
-                    indices_right = indices_right[..., : stage_k // chunk_size]
-                out_scores = out_scores[..., : stage_k // chunk_size]
-                # NOTE: revert this
-                if stage_info.require_reset_score:
-                    out_scores.fill_(-32000.0)
-
-                indices_left, t_indices = indices_left.sort(dim=-1)
-                indices_right = indices_right.gather(dim=-1, index=t_indices)
-                out_scores = out_scores.gather(dim=-1, index=t_indices)
-
-                if BLOCK_SIZE_Q != stage_info.stage_block_size_q:
-                    assert stage_info.stage_block_size_q > 0
-                    assert BLOCK_SIZE_Q > stage_info.stage_block_size_q
-                    assert (BLOCK_SIZE_Q % stage_info.stage_block_size_q) == 0
-
-                    num_split = BLOCK_SIZE_Q // stage_info.stage_block_size_q
-                    BLOCK_SIZE_Q = stage_info.stage_block_size_q
-                    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
-                    BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
-
-                    indices_left = indices_left.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-                    indices_right = indices_right.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-                    out_scores = out_scores.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-
-                if STAGE_STRIDE != stage_info.stage_stride:
-                    assert stage_info.stage_stride < STAGE_STRIDE
-                    assert STAGE_STRIDE > 0
-                    indices_left = indices_left.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    indices_right = indices_right.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    out_scores = out_scores.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    STAGE_STRIDE = stage_info.stage_stride
-
-                # if DEBUG and DEBUG_RENDER and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 1):
-                #     out_indices_cpu = indices_left.cpu().numpy()
-                #     debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-                #     render_plot_sampled(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_CHUNK, chunk_count, TDST, args.sink_token_size)
-                #     cv2.imwrite('dummy_sampled.png', debug * 255)
-                #     print('saved dummy_sampled.png')
-
-                assert (chunk_size % stage_chunk_size) == 0
-                splits = chunk_size // stage_chunk_size
-                chunk_sizes = (
-                    (indices_right - indices_left).float() / splits
-                ).clamp_min_(0)
-                indices_left = (
-                    indices_left[..., None]
-                    + (
-                        torch.arange(0, splits, device=q.device)[
-                            None, None, None, None, :
-                        ]
-                        * chunk_sizes[..., None]
-                    )
-                    .floor()
-                    .long()
+                (
+                    indices_left, 
+                    indices_right, 
+                    out_scores, 
+                    BLOCK_SIZE_Q, 
+                    BDST, 
+                    STAGE_STRIDE
+                ) = stage_prologue(
+                    q, 
+                    indices_left,
+                    indices_right,
+                    out_scores,
+                    
+                    stage_k, 
+                    stage_chunk_size, 
+                    chunk_size, 
+                    stage_info, 
+                    
+                    args, 
+                    
+                    TDST,
+                    BDST,
+                    STAGE_STRIDE,
+                    BLOCK_SIZE_Q,
                 )
-                indices_left = indices_left.flatten(-2, -1)
-                indices_right = (
-                    indices_right[..., None]
-                    - (
-                        (
-                            (splits - 1)
-                            - torch.arange(0, splits, device=q.device)[
-                                None, None, None, None, :
-                            ]
-                        )
-                        * chunk_sizes[..., None]
-                    )
-                    .floor()
-                    .long()
-                )
-                indices_right = indices_right.flatten(-2, -1)
-                out_scores = out_scores.repeat_interleave(splits, -1)
             else:
                 assert stage_info.stage_k is None, "first stage always quadratic"
                 assert isinstance(
@@ -529,149 +471,15 @@ def dual_stage_quadratic_hip_attention(
                     # and (args.layer_id > 300)
                 ):
                     # chunked sampling
-                    landmark_chunk = 512
-                    def pad_seq(t: torch.Tensor):
-                        if (t.shape[1] % landmark_chunk) == 0:
-                            return t
-                        pad = landmark_chunk - t.shape[1] % landmark_chunk
-                        return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
-                    
-                    landmark_derope = False
-                    def split_half(x: Tensor):
-                        HID = x.shape[-1]
-                        return x[..., :HID//2], x[..., HID//2:]
-                    def merge_half(x: Tensor, y: Tensor):
-                        return torch.cat([x, y], dim=-1)
-                    def de_rope(
-                        vec: Tensor, cos: Tensor, sin: Tensor
-                    ):
-                        c0, ch = split_half(cos)
-                        s0, sh = split_half(sin)
-                        vr0, vrh = split_half(vec)
-
-                        out0 = (vrh * s0 + vr0 * ch) / (c0 * ch + sh * s0 + 1e-20)
-                        outh = (out0 * c0 - vr0) / (s0 + 1e-20)
-                        out = merge_half(out0, outh)
-                        return out
-                    
                     if landmark_scores is None:
-                        if state is not None:
-                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
-                            position_ids_for_landmark = (
-                                args.position_ids_for_landmark 
-                                if args.position_ids_for_landmark is not None else 
-                                args.position_ids
-                            )
-                            k_chunk = args.gather_extend_k_from_paged_cache(
-                                disable_gqa = False,
-                                gqa_q = q_for_landmark,
-                                position_ids = position_ids_for_landmark
-                            )
-
-                            q_tp = pad_seq(q_for_landmark)
-                            TDST_PADDED = q_tp.shape[1]
-                            k_tp = pad_seq(k_chunk)
-                            TSRC_PADDED = k_tp.shape[1]
-                            assert TDST_PADDED == TSRC_PADDED, f'{TDST_PADDED} == {TSRC_PADDED}'
-
-                            if landmark_derope:
-                                padded_position_ids_for_landmark = pad_seq(
-                                    position_ids_for_landmark[:, :, None, None]
-                                )[:, :, 0, 0]
-                                q_tp = de_rope(
-                                    q_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-                                k_tp = de_rope(
-                                    k_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-
-                            q_tp = q_tp\
-                                .permute(0, 2, 1, 3)\
-                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                            k_tp = k_tp\
-                                .permute(0, 2, 3, 1)\
-                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                                .permute(0, 1, 3, 2, 4)\
-                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
+                        landmark_scores = landmark_sample(
+                            q,
+                            k,
+                            state,
+                            args,
                             
-                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                            
-                            # TODO Need to handle chunked prefill scenario
-                            idx_t = torch.arange(0, landmark_chunk, device=q_for_landmark.device)
-                            mask = idx_t[:, None] >= idx_t[None, :]
-                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                            landmark_scores = landmark_scores.sum(dim=3, dtype=torch.float32) / mask.int().sum(dim=0)[None, None, None, :]
-                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                            landmark_scores[:, :, q_for_landmark.shape[1]:].fill_(float('-inf'))
-                            
-                            q_block_index = args.block_table.gather(dim=1, index=position_ids_for_landmark)
-                            state.landmark_scores[q_block_index] = landmark_scores[:, :, :q_for_landmark.shape[1]].contiguous().permute(0, 2, 1)
-                            landmark_scores = state.landmark_scores[
-                                args.block_table[:, :args.block_table.shape[1] - (args.block_table.shape[1] % landmark_chunk)]
-                            ]
-                            landmark_scores = landmark_scores.permute(0, 2, 1)
-
-                            if DEBUG and (BDST > 1):
-                                os.makedirs("./cache/mask_log", exist_ok=True)
-                                t = landmark_scores[0, 0, :].cpu().numpy()
-                                plt.clf()
-                                plt.plot(t)
-                                plt.savefig(f'./cache/mask_log/{__logall_index}_landmark_scores.png')
-
-                            # print('landmark score extended', args.layer_id)
-                        else:
-                            q_for_landmark = args.query_for_landmark if args.query_for_landmark is not None else q
-                            position_ids_for_landmark = (
-                                args.position_ids_for_landmark 
-                                if args.position_ids_for_landmark is not None else 
-                                args.position_ids
-                            )
-
-                            q_tp = pad_seq(q_for_landmark)
-                            TDST_PADDED = q_tp.shape[1]
-                            k_tp = pad_seq(k)
-                            TSRC_PADDED = k_tp.shape[1]
-                            assert TDST_PADDED == TSRC_PADDED
-
-                            if landmark_derope:
-                                padded_position_ids_for_landmark = pad_seq(
-                                    position_ids_for_landmark[:, :, None, None]
-                                )[:, :, 0, 0]
-                                q_tp = de_rope(
-                                    q_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-                                k_tp = de_rope(
-                                    k_tp,
-                                    args.rope_cos[padded_position_ids_for_landmark, :][:, :, None, :],
-                                    args.rope_sin[padded_position_ids_for_landmark, :][:, :, None, :],
-                                )
-
-                            q_tp = q_tp\
-                                .permute(0, 2, 1, 3)\
-                                .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                            k_tp = k_tp\
-                                .permute(0, 2, 3, 1)\
-                                .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                                .permute(0, 1, 3, 2, 4)\
-                                .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
-                            # print(q_tp.shape, k_tp.shape)
-                            landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                            # TODO Need to handle chunked prefill scenario
-                            # idx_tdst = args.position_ids[0]
-                            idx_t = torch.arange(0, landmark_chunk, device=q.device)
-                            mask = idx_t[:, None] >= idx_t[None, :]
-                            landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                            assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                            landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
-                            landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                            landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
+                            BSZ, HEAD, HEAD_KV, HID, BDST, DEBUG, __logall_index,
+                        )
 
                     landmarks = landmark_scores\
                         .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
@@ -703,7 +511,7 @@ def dual_stage_quadratic_hip_attention(
                         CHUNK_SIZE=stage_info.stage_chunk_size,
                         SLIDING_WINDOW_SIZE=args.sliding_window_size,
                     )
-                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0
+                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0, f'{args.sink_token_size} % {stage_info.stage_chunk_size}'
                     # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
                     
                     out_scores[:, :, :, :scores.shape[-1]] = scores
@@ -1051,7 +859,7 @@ def dual_stage_quadratic_hip_attention(
                     # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
 
                     if (
-                        SGLANG_DIST_AVAILABLE
+                        SGLANG_DIST_ACTIVATED
                         and get_tensor_model_parallel_world_size() > 1
                     ):
                         out_scores_tp = out_scores
@@ -1064,7 +872,6 @@ def dual_stage_quadratic_hip_attention(
                         )
 
                     out_scores = torch.amax(out_scores, keepdim=True, dim=2)
-
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
                 else:
                     args.disable_flashdecode = True
@@ -1227,7 +1034,12 @@ def dual_stage_quadratic_hip_attention(
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
-            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
+            if (
+                DEBUG 
+                and DEBUG_RENDER 
+                and not torch.cuda.is_current_stream_capturing()
+                and get_local_rank() == 0
+            ):
                 if (i_stage + 1) < len(args.stages):
                     next_stage_k = args.stages[i_stage + 1].stage_k
                 else:
@@ -1392,21 +1204,30 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             out_indices_cpu = indices.cpu().numpy()
             debug = np.zeros(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
+            debug = debug * 255
+            debug = debug.astype(np.uint8)
+            debug = np.repeat(debug[:, :, None], 3, axis=2)
+            cv2.putText(
+                debug, f"Layer: {args.layer_id}", (320, 256), 
+                cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2
+            )
+            
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
                 cv2.imwrite(
                     f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
-                    debug * 255,
+                    debug,
                 )
             else:
-                cv2.imwrite("dummy_sampled_final.png", debug * 255)
+                cv2.imwrite("dummy_sampled_final.png", debug)
             # print('saved dummy_sampled_final.png')
 
         args = args.clone()
@@ -1541,6 +1362,7 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             try:
                 input(f"[{args.layer_id}] >")
