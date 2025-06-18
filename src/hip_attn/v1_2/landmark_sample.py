@@ -211,7 +211,7 @@ def landmark_sample(
         assert position_ids_for_landmark.shape[0] == BSZ
         assert position_ids_for_landmark.shape[1] == TDST
         
-        assert not (args.using_paged_cache and (k is None)), "todo"
+        assert ((not args.using_paged_cache) and (k is not None)) or (args.using_paged_cache and (k is None)), "todo"
         assert not landmark_derope, "todo"
         
         TDST_PADDED = TDST if (TDST % landmark_chunk) == 0 else TDST + (landmark_chunk - TDST % landmark_chunk)
