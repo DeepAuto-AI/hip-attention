@@ -780,6 +780,9 @@ def _forward_paged_hip(
                 delta_attention_args_exp_window = int(word.split("_")[1])
             else:
                 warnings.warn(f'unknown delta args: {word}')
+        
+        # if layer_id in [0,1,2,3,4,5,8,11,14,17,20,23,26,29,30,33,36,39,41,42,43,44,45,46,47]:
+        #     delta_attention_args_adjust_norm_const = False
 
         if get_local_rank() == 0:
             info_msg = (
