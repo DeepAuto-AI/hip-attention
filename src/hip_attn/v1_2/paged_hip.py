@@ -1,7 +1,7 @@
 import copy
 import os
 import warnings
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import torch
 import triton
@@ -76,7 +76,7 @@ def forward_paged_hip(
     rope_range: Optional[tuple[int, int]] = None,
     rope_is_neox_style: Optional[bool] = None,
     extend_seq_lens: Optional[torch.Tensor] = None,
-    extend_seq_lens_cpu: Optional[torch.Tensor] = None,
+    extend_seq_lens_cpu: Optional[List[int]] = None,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
     k: Optional[torch.Tensor] = None,
     v: Optional[torch.Tensor] = None,
@@ -611,9 +611,14 @@ def _forward_paged_hip(
     using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
-
-    N, num_heads, hidden_dims = query.shape
-    dst_seq_len = N // batch_size
+    
+    if query.ndim == 3:
+        N, num_heads, hidden_dims = query.shape
+        dst_seq_len = N // batch_size
+    else:
+        _bsz, dst_seq_len, num_heads, hidden_dims = query.shape
+        assert _bsz == batch_size
+        N = _bsz * dst_seq_len
 
     is_dense = layer_id in hip_config.dense_layers
     if not is_decode:
@@ -633,7 +638,11 @@ def _forward_paged_hip(
         query_for_mask = query_for_mask.view(batch_size, -1, num_heads, hidden_dims)
 
     if k_cache is not None:
-        N_PAGE, num_heads_kv, hidden_dims_v = v_cache.shape
+        if v_cache.ndim == 4:
+            N_PAGE, _, num_heads_kv, hidden_dims_v = v_cache.shape
+        else:
+            assert v_cache.ndim == 3
+            N_PAGE, num_heads_kv, hidden_dims_v = v_cache.shape
         assert N_PAGE == k_cache.shape[0], f"{N_PAGE} != {k_cache.shape[0]}"
 
         k_cache = k_cache.view(N_PAGE, 1, num_heads_kv, k_cache.shape[-1])
@@ -800,7 +809,12 @@ def _forward_paged_hip(
             )
         
         # args.sa_extend_backend = "clamp"
-
+    
+    sliding_window_size = os.getenv('HIP_DEBUG_SLLM_WINDOW', sliding_window_size)
+    if isinstance(sliding_window_size, str):
+        sliding_window_size = int(sliding_window_size)
+    sliding_window_sink = int(os.getenv('HIP_DEBUG_SLLM_SINK', 0))
+    
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)
 
@@ -816,7 +830,7 @@ def _forward_paged_hip(
         args.block_size_q = args.block_sparse_block_size_q
         args.block_size_k = args.stages[-1].stage_chunk_size
         args.second_stage_k = 0
-        args.sink_token_size = 0
+        args.sink_token_size = sliding_window_sink
         args.sliding_window_size = (
             sliding_window_size if sliding_window_size is not None else 1024
         )

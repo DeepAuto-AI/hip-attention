@@ -1,0 +1,11 @@
+{
+    "__head_reduce": 1,
+    "using_extend": true,
+    "dense_layers": [
+        0,
+        1,
+        2,
+        3
+    ],
+    "mask_refresh_interval": [96, 24, 8]
+}

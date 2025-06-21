@@ -2404,7 +2404,7 @@ def block_sparse_attention(
             f"{args.rope_range[0]=}",
             f"{args.rope_range[1]=}",
             f"{args.using_paged_cache=}",
-            f"{args.k_cache.shape[1]=}",
+            f"{args.k_cache.shape[1] if args.k_cache is not None else None=}",
             f"{args.is_causal=}",
             f"{args.block_size_q=}",
             f"{args.block_size_k=}",
