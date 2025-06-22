@@ -1720,14 +1720,26 @@ def decode_block_sparse_attention_stage1(
 ):
     batch = q.shape[0]
     BLOCK_H = 16
+    NUM_SM = 144 # GH100
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
-    token_chunk = triton.cdiv(total_tokens, 16)
+    MAX_PROGRAM = int(os.getenv('SA_DECODE_MAX_PROGRAM', triton.cdiv(NUM_SM, batch)))
+    token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
+    
+    BLOCK_SIZE = min(
+        args.block_size_k * BLOCK_BK,
+        triton.next_power_of_2(token_chunk)
+    )
+    BLOCK_BK = max(
+        triton.cdiv(32, args.block_size_k),
+        triton.cdiv(BLOCK_SIZE, args.block_size_k)
+    )
+    
     NUM_SPARSE_KV_SPLITS = min(
-        12, triton.cdiv(args.second_stage_k, token_chunk)
+        MAX_PROGRAM, triton.cdiv(args.second_stage_k, token_chunk)
     )  # TODO: apply from server args
-    NUM_SINK_KV_SPLITS = min(12, triton.cdiv(args.sink_token_size, token_chunk))
-    NUM_SLIDING_KV_SPLITS = min(12, triton.cdiv(args.sliding_window_size, token_chunk))
+    NUM_SINK_KV_SPLITS = min(MAX_PROGRAM, triton.cdiv(args.sink_token_size, token_chunk))
+    NUM_SLIDING_KV_SPLITS = min(MAX_PROGRAM, triton.cdiv(args.sliding_window_size, token_chunk))
 
     NUM_TOTAL_KV_SPLITS = (
         NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
