@@ -883,7 +883,8 @@ def load_tokens(
         )
     else:
         seq_len = tl.load(
-            CACHE_SEQ_LENS + idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
+            CACHE_SEQ_LENS 
+            + idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
         )
         mask_tsrc = (idx_tsrc >= 0) & (idx_tsrc < seq_len)
         ptrs = (
@@ -895,6 +896,7 @@ def load_tokens(
             ptrs,
             mask=mask_tsrc,
             other=0,
+            cache_modifier=".cg",
         ).to(tl.int64)
         offset_page = idx_tsrc % PAGE_SIZE
 
@@ -1048,6 +1050,7 @@ def load_tokens(
             + idx_hid.to(tl.int64) * stride_k_cache_hid,
             mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
+            cache_modifier=".cg",
         )
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
