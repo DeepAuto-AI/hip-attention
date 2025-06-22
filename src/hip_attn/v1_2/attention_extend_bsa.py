@@ -463,20 +463,26 @@ def block_sparse_attention_cuda_step(
 
     cq = tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0))
     ck = 1 / tl.sqrt(tl.sqrt(HID * 1.0))
+    
+    # if q_dtype == tl.float16:
+    #     dot_dtype = tl.float8e5
+    # elif q_dtype == tl.bfloat16:
+    #     dot_dtype = tl.float8e5
+    # else:
+    #     dot_dtype = q_dtype
+    dot_dtype = q_dtype
 
     qk = tl.dot(
-        (queries_0 * cq).to(q_dtype),
-        (keys_0.to(q_dtype) * ck).to(q_dtype),
-        out_dtype=tl.float32,
-        allow_tf32=True,
+        (queries_0 * cq).to(dot_dtype),
+        (keys_0.to(q_dtype) * ck).to(dot_dtype),
+        out_dtype=tl.float32
     ).to(tl.float32)
 
     if HID_BLOCK_1 > 0:
         qk += tl.dot(
-            (queries_1 * cq).to(q_dtype),
-            (keys_1.to(q_dtype) * ck).to(q_dtype),
-            out_dtype=tl.float32,
-            allow_tf32=True,
+            (queries_1 * cq).to(dot_dtype),
+            (keys_1.to(q_dtype) * ck).to(dot_dtype),
+            out_dtype=tl.float32
         ).to(tl.float32)
 
     if LOGIT_SOFTCAP is not None:
@@ -548,7 +554,7 @@ def block_sparse_attention_cuda_step(
         qk_mask = ~(mask_tdst[:, None] & mask_tsrc[None, :])
 
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
-    # qk = tl.where(qk_mask, tl.full(qk.shape, float("-inf"), qk.dtype), qk)
+    qk = tl.where(qk_mask, float("-inf"), qk).to(qk.dtype)
     m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
 
     qk = qk - m_ij
