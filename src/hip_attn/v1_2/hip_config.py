@@ -421,6 +421,8 @@ class HiPAttentionConfig:
                         for layer in parsed_json["prefill_layers"]
                     ]
                 parsed_json.pop("prefill_layers")
+            
+            # FIXME following args are just temporary. need to be removed when features are stabled
             if "__delta_attention_args" in parsed_json:
                 given_args = parsed_json['__delta_attention_args']
                 if os.getenv('HIP_DELTA_ATTENTION_ARGS', given_args) != given_args:
@@ -440,6 +442,14 @@ class HiPAttentionConfig:
                 assert int(str(given_args)) == given_args
                 os.environ['HIP_HEAD_REDUCE'] = str(given_args)
                 parsed_json.pop("__head_reduce")
+            if "__using_landmark" in parsed_json:
+                given_args = parsed_json['__using_landmark']
+                if os.getenv('HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE', given_args) != given_args:
+                    warnings.warn('envvar HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE is overrided by hip attention args')
+                assert (int('1' if given_args else '0') == 1) == given_args
+                os.environ['HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE'] = '1' if given_args else '0'
+                parsed_json.pop("__using_landmark")
+            
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
         
