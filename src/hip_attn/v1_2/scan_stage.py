@@ -5,6 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
+from hip_attn.v1_2.attention_metadata import safe_stride
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
@@ -480,6 +481,7 @@ def pool_queries(
                         queries_iter,
                     )
                 else:
+                    raise Exception()
                     queries_iter = adjust_rope(
                         queries_iter,
                         old_tdst,
@@ -538,18 +540,16 @@ def get_scan_stage_configs():
         NUM_WARPS.append(8)
 
     configs = []
-    for LOAD_Q_EACH_TIME in [False, True]:
-        for max_nreg in [128, 256, 512]:
-            for num_warps in NUM_WARPS:
-                for num_stages in [1, 2, 4]:
-                    configs.append(
-                        triton.Config(
-                            {"LOAD_Q_EACH_TIME": LOAD_Q_EACH_TIME},
-                            num_warps=num_warps,
-                            num_stages=num_stages,
-                            maxnreg=max_nreg,
-                        )
+    for LOAD_Q_EACH_TIME in [False,]:
+        for num_warps in NUM_WARPS:
+            for num_stages in [1, 2, 4]:
+                configs.append(
+                    triton.Config(
+                        {"LOAD_Q_EACH_TIME": LOAD_Q_EACH_TIME},
+                        num_warps=num_warps,
+                        num_stages=num_stages,
                     )
+                )
     return configs
 
 
@@ -668,6 +668,7 @@ def chunk_controllable_sampling_mask_cuda(
     UPDATE_CACHE: tl.constexpr = True,
     ORACLE_MAXIMUM: tl.constexpr = False,
     LOAD_Q_EACH_TIME: tl.constexpr = False,
+    COMPUTE_MLA_ROPE: tl.constexpr = False
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)
@@ -804,7 +805,7 @@ def chunk_controllable_sampling_mask_cuda(
                             model_context_length,
                             sliding_window_size,
                             USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                            NEED_APPLY_ROPE,
+                            NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                             EXTEND_BACKEND,
                             BLOCK_SIZE_Q,
                             HID_BLOCK_0,
@@ -898,7 +899,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE,
+                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1146,7 +1147,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE,
+                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1219,7 +1220,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 num_sinks,
                                 USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
-                                NEED_APPLY_ROPE,
+                                NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                 BLOCK_CHUNK,
                                 HID_BLOCK_0,
                                 HID_DIM,
@@ -1354,12 +1355,13 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_is_neox_style,
                                 )
 
-                                scores_left += tl.dot(
-                                    (queries_1 * cq).to(q_dtype),
-                                    (keys_left_1.to(q_dtype) * ck).to(q_dtype),
-                                    allow_tf32=True,
-                                    out_dtype=tl.float32,
-                                ).to(q_dtype)
+                                if COMPUTE_MLA_ROPE:
+                                    scores_left += tl.dot(
+                                        (queries_1 * cq).to(q_dtype),
+                                        (keys_left_1.to(q_dtype) * ck).to(q_dtype),
+                                        allow_tf32=True,
+                                        out_dtype=tl.float32,
+                                    ).to(q_dtype)
 
                         if REDUCE == "max":
                             scores_left = tl.where(
@@ -1673,7 +1675,7 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE,
+                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1746,7 +1748,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 num_sinks,
                                 USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
-                                NEED_APPLY_ROPE,
+                                NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                 BLOCK_CHUNK,
                                 HID_BLOCK_0,
                                 HID_DIM,
@@ -1881,12 +1883,13 @@ def chunk_controllable_sampling_mask_cuda(
                                     rope_is_neox_style,
                                 )
 
-                                scores_right += tl.dot(
-                                    (queries_1 * cq).to(q_dtype),
-                                    (keys_right_1.to(q_dtype) * ck).to(q_dtype),
-                                    allow_tf32=True,
-                                    out_dtype=tl.float32,
-                                ).to(q_dtype)
+                                if COMPUTE_MLA_ROPE:
+                                    scores_right += tl.dot(
+                                        (queries_1 * cq).to(q_dtype),
+                                        (keys_right_1.to(q_dtype) * ck).to(q_dtype),
+                                        allow_tf32=True,
+                                        out_dtype=tl.float32,
+                                    ).to(q_dtype)
 
                         if REDUCE == "max":
                             scores_right = tl.where(
@@ -1978,3 +1981,103 @@ def chunk_controllable_sampling_mask_cuda(
                         value=scores,
                         mask=mask_chunk,
                     )
+
+from hip_attn.v1_2.utils import capture
+
+@capture
+def chunk_controllable_sampling_mask(
+    args,
+    chunk_count,
+    BLOCK_CHUNK,
+    TDST, 
+    BLOCK_SIZE_Q,
+    STAGE_STRIDE,
+    HEAD,
+    BSZ,
+    q,
+    k_mask,
+    position_ids,
+    indices_left,
+    indices_right,
+    out_scores,
+    mask_access_counter,
+    mask_cache_miss_counter,
+    MAX_TSRC,
+    HID,
+    HID_BLOCK,
+    stage_block_stride_q,
+    HEAD_KV,
+    extend_backend,
+):
+    if not (args.online_update_cache and (args.offload_cache is not None)):
+        grid = (
+            BSZ
+            * triton.cdiv(chunk_count, BLOCK_CHUNK)
+            * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
+            * HEAD,
+        )
+        njobs = grid[0]
+        group_jobs = 1
+    else:
+        njobs = (
+            BSZ
+            * triton.cdiv(chunk_count, BLOCK_CHUNK)
+            * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
+            * HEAD
+        )
+        sm_count = num_streaming_multiprocessor()
+        group_jobs = triton.cdiv(njobs, sm_count)
+        grid = (min(sm_count, njobs),)
+    
+    chunk_controllable_sampling_mask_cuda[grid](
+        q,
+        *q.stride(),
+        k_mask,
+        *safe_stride(k_mask, 4),
+        position_ids,
+        *position_ids.stride(),
+        *args.args_paged_kv_cache(disable_cache=k_mask is not None),
+        *args.args_offload_cache(
+            True, disable_cache=k_mask is not None
+        ),
+        indices_left,
+        *indices_left.stride(),
+        indices_right,
+        *indices_right.stride(),
+        out_scores,
+        *out_scores.stride(),
+        args.rope_cos,
+        *safe_stride(args.rope_cos, 2),
+        args.rope_sin,
+        *safe_stride(args.rope_sin, 2),
+        args.rope_range[0],
+        args.rope_range[1],
+        args.rope_is_neox_style,
+        mask_access_counter,
+        *safe_stride(mask_access_counter, 3),
+        mask_cache_miss_counter,
+        *safe_stride(mask_cache_miss_counter, 3),
+        chunk_count,
+        MAX_TSRC,
+        q.shape[1],
+        HEAD,
+        args.sliding_window_size,
+        args.sink_token_size,
+        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
+        args.model_context_length,
+        group_jobs,
+        njobs,
+        HID_DIM=HID,
+        HID_BLOCK_0=HID_BLOCK,
+        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+        STRIDE_Q=stage_block_stride_q,
+        BLOCK_CHUNK=BLOCK_CHUNK,
+        HEAD_GROUP=HEAD // HEAD_KV,
+        USING_EXTEND=args.using_extend and (extend_backend != 'none'),
+        EXTEND_BACKEND=extend_backend,
+        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != 'none'),
+        TERMINATE_SIZE=args.stage_early_terminate,
+        SCAN_STRIDE=STAGE_STRIDE,
+        UPDATE_CACHE=args.online_update_cache,
+        ORACLE_MAXIMUM=False,  # NOTE: seems has bug... but why?
+    )

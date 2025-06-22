@@ -191,10 +191,12 @@ def landmark_sample(
     state: Optional[HiPAttentionState],
     args: HiPAttentionArgs,
     
-    BSZ, HEAD, HEAD_KV, HID, BDST, DEBUG, __logall_index,
+    BSZ, HEAD, HEAD_KV, BDST, DEBUG, __logall_index,
 ):
     landmark_chunk = 512
     landmark_derope = False
+    
+    HID = q.shape[-1]
     
     __fused = True
     
@@ -216,6 +218,10 @@ def landmark_sample(
         
         TDST_PADDED = TDST if (TDST % landmark_chunk) == 0 else TDST + (landmark_chunk - TDST % landmark_chunk)
         
+        k_cache = args.get_k_cache()
+        if k_cache is not None:
+            k_cache = k_cache[..., :q.shape[-1]]
+        
         landmark_scores = torch.full(
             (BSZ, HEAD, TDST_PADDED), 
             fill_value=float('-inf'), 
@@ -232,7 +238,7 @@ def landmark_sample(
             position_ids_for_landmark, *safe_stride(position_ids_for_landmark, 2),
             
             args.using_paged_cache,
-            args.get_k_cache(), *safe_stride(args.get_k_cache(), 4),
+            k_cache, *safe_stride(k_cache, 4),
             args.block_table, *safe_stride(args.block_table, 2),
             
             landmark_scores, *safe_stride(landmark_scores, 3),

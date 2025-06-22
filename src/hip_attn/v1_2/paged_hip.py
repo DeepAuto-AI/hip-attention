@@ -65,6 +65,7 @@ def forward_paged_hip(
     seq_lens: torch.Tensor,
     req_to_tokens: torch.Tensor,
     req_pool_indices: torch.Tensor,
+    block_table: torch.Tensor,
     rope_cos: Optional[torch.Tensor],
     rope_sin: Optional[torch.Tensor],
     layer_id: int,
@@ -120,7 +121,9 @@ def forward_paged_hip(
                 ) or offload_cache is not None
                 k = v = None
 
-    if not is_decode and extend_seq_lens_cpu is not None:
+    if not is_decode:
+        assert extend_seq_lens_cpu is not None
+        
         # Handle jagged inputs
         if is_kv_cache_offload_enabled is None:
             warnings.warn(
@@ -132,7 +135,24 @@ def forward_paged_hip(
             assert isinstance(offloading_metadata, list)
             offload_cache = k_cache = v_cache = None
 
-        BSZ_TDST, HEAD, _ = query.shape
+        if query.ndim == 4:
+            # NOTE FIXME this seems not correct behavior.
+            if extend_seq_lens_cpu is not None:
+                if len(extend_seq_lens_cpu) != query.shape[0]:
+                    assert (len(extend_seq_lens_cpu) % query.shape[0]) == 0
+                    n_repeat = len(extend_seq_lens_cpu) // query.shape[0]
+                    # query = query.repeat_interleave(n_repeat, 0)
+                    # if k is not None:
+                    #     k = k.repeat_interleave(n_repeat, 0)
+                    # if v is not None:
+                    #     v = v.repeat_interleave(n_repeat, 0)
+                    extend_seq_lens_cpu = extend_seq_lens_cpu[::n_repeat]
+            BSZ_TDST = query.shape[0] * query.shape[1]
+            HEAD = query.shape[2]
+        elif query.ndim == 3:
+            BSZ_TDST, HEAD, _ = query.shape
+        else: 
+            raise Exception()
 
         # Output tensor
         o = torch.empty(
@@ -172,13 +192,21 @@ def forward_paged_hip(
                         v[idx_batch],
                         offloading_metadata[idx_batch],
                     )
+                if k_chunk is None:
+                    k_chunk = (k[idx_batch:idx_batch+1] if k.ndim == 4 else k[start_len:start_len+seq_len]) if k is not None else None
+                if v_chunk is None:
+                    v_chunk = (v[idx_batch:idx_batch+1] if v.ndim == 4 else v[start_len:start_len+seq_len]) if v is not None else None
                 
                 if cached_metadata is not None:
                     if isinstance(states, list):
                         cached_metadata.state = states[idx_batch]
 
                 o_req, metadata_req = _forward_paged_hip_validate(
-                    query=query[start_len : start_len + seq_len],
+                    query=(
+                        query[start_len : start_len + seq_len] 
+                        if query.ndim == 3 else 
+                        query[idx_batch : idx_batch + 1]
+                    ),
                     sm_scale=sm_scale,
                     batch_size=1,
                     k=k_chunk,
@@ -190,6 +218,7 @@ def forward_paged_hip(
                     seq_lens=seq_lens[idx_batch : idx_batch + 1],
                     req_to_tokens=req_to_tokens,
                     req_pool_indices=req_pool_indices[idx_batch : idx_batch + 1],
+                    block_table=None,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     rope_range=rope_range,
@@ -230,6 +259,7 @@ def forward_paged_hip(
             seq_lens=seq_lens,
             req_to_tokens=req_to_tokens,
             req_pool_indices=req_pool_indices,
+            block_table=block_table,
             rope_cos=rope_cos,
             rope_sin=rope_sin,
             rope_range=rope_range,
@@ -267,6 +297,7 @@ def _forward_paged_hip_validate(
     seq_lens: torch.Tensor,
     req_to_tokens: torch.Tensor,
     req_pool_indices: torch.Tensor,
+    block_table: torch.Tensor,
     rope_cos: Optional[torch.Tensor],
     rope_sin: Optional[torch.Tensor],
     layer_id: int,
@@ -343,6 +374,7 @@ def _forward_paged_hip_validate(
         seq_lens=seq_lens,
         req_to_tokens=req_to_tokens,
         req_pool_indices=req_pool_indices,
+        block_table=block_table,
         rope_cos=rope_cos,
         rope_sin=rope_sin,
         rope_range=rope_range,
@@ -590,6 +622,7 @@ def _forward_paged_hip(
     seq_lens: torch.Tensor,
     req_to_tokens: torch.Tensor,
     req_pool_indices: torch.Tensor,
+    block_table: torch.Tensor,
     rope_cos: Optional[torch.Tensor],
     rope_sin: Optional[torch.Tensor],
     layer_id: int,
@@ -617,7 +650,7 @@ def _forward_paged_hip(
         dst_seq_len = N // batch_size
     else:
         _bsz, dst_seq_len, num_heads, hidden_dims = query.shape
-        assert _bsz == batch_size
+        assert _bsz == batch_size, f'{query.shape=} {batch_size}'
         N = _bsz * dst_seq_len
 
     is_dense = layer_id in hip_config.dense_layers
@@ -649,7 +682,8 @@ def _forward_paged_hip(
         v_cache = v_cache.view(N_PAGE, 1, num_heads_kv, hidden_dims_v)
 
     # FIXME: this operation is linear during decoding
-    block_table = req_to_tokens.index_select(dim=0, index=req_pool_indices)
+    if block_table is None:
+        block_table = req_to_tokens.index_select(dim=0, index=req_pool_indices)
 
     BLOCK_TABLE_BSZ, MODEL_SEQ_LEN = block_table.shape
     assert batch_size == BLOCK_TABLE_BSZ
@@ -1561,79 +1595,90 @@ def _forward_paged_hip(
             #     causal=True, 
             #     softmax_scale=sm_scale,
             # )
+            
+            if args.using_paged_cache:
+                if args.need_apply_rope and args.using_extend:
+                    k_unpack = args.gather_k_from_paged_cache()
+                    v_unpack = args.gather_v_from_paged_cache()
+                    
+                    seq_len = args.position_ids.amax().item() + 1
 
-            if args.need_apply_rope and args.using_extend:
-                k_unpack = args.gather_k_from_paged_cache()
-                v_unpack = args.gather_v_from_paged_cache()
-                
-                seq_len = args.position_ids.amax().item() + 1
+                    k_unpack = k_unpack[:, :seq_len]
+                    v_unpack = v_unpack[:, :seq_len]
 
-                k_unpack = k_unpack[:, :seq_len]
-                v_unpack = v_unpack[:, :seq_len]
+                    cos = args.rope_cos
+                    sin = args.rope_sin
+                    assert cos.ndim == 2, cos.shape
+                    assert sin.shape == cos.shape, sin.shape
+                    
+                    cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+                    sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+                    
+                    idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+                    idx_tsrc.clamp_min_(seq_len - args.model_context_length)
 
-                cos = args.rope_cos
-                sin = args.rope_sin
-                assert cos.ndim == 2, cos.shape
-                assert sin.shape == cos.shape, sin.shape
-                
-                cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-                sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-                
-                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
-                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+                    k_unpack = (
+                        (k_unpack * cos[:, idx_tsrc, :, :]) 
+                        + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+                    ).to(k_unpack.dtype)
 
-                k_unpack = (
-                    (k_unpack * cos[:, idx_tsrc, :, :]) 
-                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
-                ).to(k_unpack.dtype)
+                    query = (
+                        (query * cos[:, args.position_ids.view(-1), :, :]) 
+                        + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
+                    ).to(query.dtype)
 
-                query = (
-                    (query * cos[:, args.position_ids.view(-1), :, :]) 
-                    + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
-                ).to(query.dtype)
+                    k_unpack = k_unpack[:, :seq_len]
+                    v_unpack = v_unpack[:, :seq_len]
+                    
+                    context = flash_attn_func(
+                        query, 
+                        k_unpack, 
+                        v_unpack, 
+                        causal=True, 
+                        softmax_scale=sm_scale,
+                    )
+                else:
+                    assert args.using_paged_cache
 
-                k_unpack = k_unpack[:, :seq_len]
-                v_unpack = v_unpack[:, :seq_len]
-                
+                    k_cache = args.get_k_cache()
+                    v_cache = args.get_v_cache()
+
+                    q_reshaped = query.contiguous().view(-1, query.shape[2], query.shape[3])
+
+                    # print(k_cache.shape, v_cache.shape)
+
+                    cu_seqlens_q = torch.arange(0, query.shape[0] + 1, device=query.device, dtype=torch.int32) * query.shape[1]
+                    cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
+                    cu_seqlens_k_new = torch.zeros(
+                        (args.position_ids.shape[0] + 1,), 
+                        dtype=torch.int32, 
+                        device=q_reshaped.device,
+                    )
+                    cu_seqlens_k_new[1:] = cache_seqlens
+
+                    block_table = args.block_table
+
+                    context = flash_attn_with_kvcache(
+                        q=q_reshaped,
+                        k_cache=k_cache,
+                        v_cache=v_cache,
+                        page_table=block_table,
+                        cache_seqlens=cache_seqlens,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k_new=cu_seqlens_k_new,
+                        # max_seqlen_q=cu_seqlens_q.amax().item(),
+                        max_seqlen_q=args.model_context_length,
+                        causal=True,
+                        softmax_scale=sm_scale,
+                    )
+            else:
+                print(query.shape, v.shape, k.shape)
+                assert batch_size
                 context = flash_attn_func(
                     query, 
-                    k_unpack, 
-                    v_unpack, 
+                    k, 
+                    v, 
                     causal=True, 
-                    softmax_scale=sm_scale,
-                )
-            else:
-                assert args.using_paged_cache
-
-                k_cache = args.get_k_cache()
-                v_cache = args.get_v_cache()
-
-                q_reshaped = query.contiguous().view(-1, query.shape[2], query.shape[3])
-
-                # print(k_cache.shape, v_cache.shape)
-
-                cu_seqlens_q = torch.arange(0, query.shape[0] + 1, device=query.device, dtype=torch.int32) * query.shape[1]
-                cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
-                cu_seqlens_k_new = torch.zeros(
-                    (args.position_ids.shape[0] + 1,), 
-                    dtype=torch.int32, 
-                    device=q_reshaped.device,
-                )
-                cu_seqlens_k_new[1:] = cache_seqlens
-
-                block_table = args.block_table
-
-                context = flash_attn_with_kvcache(
-                    q=q_reshaped,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    page_table=block_table,
-                    cache_seqlens=cache_seqlens,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k_new=cu_seqlens_k_new,
-                    # max_seqlen_q=cu_seqlens_q.amax().item(),
-                    max_seqlen_q=args.model_context_length,
-                    causal=True,
                     softmax_scale=sm_scale,
                 )
             

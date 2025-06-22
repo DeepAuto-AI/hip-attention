@@ -140,6 +140,8 @@ class HiPAttentionState:
             num_tokens = k_cache.shape[0] * k_cache.shape[1]
         else:
             num_tokens = k.shape[1]
+        
+        num_tokens = max(args.model_context_length, num_tokens)
             
         # padding for SGlang
         num_tokens += 1024

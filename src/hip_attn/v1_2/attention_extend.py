@@ -30,7 +30,7 @@ from hip_attn.v1_2.attention_metadata import (
 )
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
-from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
+from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask
 from hip_attn.v1_2.landmark_sample import landmark_sample
 from hip_attn.v1_2.stage_prologue import stage_prologue
 
@@ -427,25 +427,6 @@ def dual_stage_quadratic_hip_attention(
                     else stage_info.stage_extend_backend
                 )
 
-                if not (args.online_update_cache and (args.offload_cache is not None)):
-                    grid = (
-                        BSZ
-                        * triton.cdiv(chunk_count, BLOCK_CHUNK)
-                        * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
-                        * HEAD,
-                    )
-                    njobs = grid[0]
-                    group_jobs = 1
-                else:
-                    njobs = (
-                        BSZ
-                        * triton.cdiv(chunk_count, BLOCK_CHUNK)
-                        * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
-                        * HEAD
-                    )
-                    sm_count = num_streaming_multiprocessor()
-                    group_jobs = triton.cdiv(njobs, sm_count)
-                    grid = (min(sm_count, njobs),)
                 # if args.offload_cache is not None:
                 #     print('before masking')
                 #     args.offload_cache.mask_k_cache._verify_cache()
@@ -469,15 +450,20 @@ def dual_stage_quadratic_hip_attention(
                     and (args.position_ids.shape[0] == 1)
                     # and (args.layer_id > 300)
                 ):
+                    if triton.next_power_of_2(q.shape[-1]) > q.shape[-1]:
+                        NOPE_HID = triton.next_power_of_2(q.shape[-1]) // 2
+                    else:
+                        NOPE_HID = q.shape[-1]
+                    
                     # chunked sampling
                     if landmark_scores is None:
                         landmark_scores = landmark_sample(
-                            q,
-                            k,
+                            q[..., :NOPE_HID],
+                            k[..., :NOPE_HID] if k is not None else k,
                             state,
                             args,
                             
-                            BSZ, HEAD, HEAD_KV, HID, BDST, DEBUG, __logall_index,
+                            BSZ, HEAD, HEAD_KV, BDST, DEBUG, __logall_index,
                         )
 
                     _TSRC = TSRC
@@ -502,11 +488,11 @@ def dual_stage_quadratic_hip_attention(
                     #     gqa_q=q,
                     # )
                     scores = compute_scores_landmark(
-                        q=q, 
+                        q=q[..., :NOPE_HID], 
                         # k=k_temp, 
                         # k_cache=None,
-                        k=k, 
-                        k_cache=args.get_k_cache(),
+                        k=k[..., :NOPE_HID] if k is not None else k, 
+                        k_cache=args.get_k_cache()[..., :NOPE_HID] if args.get_k_cache() is not None else None,
                         block_table=args.block_table,
                         position_ids=args.position_ids, 
                         indices_left=indices_left,
@@ -799,57 +785,29 @@ def dual_stage_quadratic_hip_attention(
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, : scores.shape[-1]] = scores
                 else:
-                    chunk_controllable_sampling_mask_cuda[grid](
-                        q,
-                        *q.stride(),
-                        k_mask,
-                        *safe_stride(k_mask, 4),
-                        position_ids,
-                        *position_ids.stride(),
-                        *args.args_paged_kv_cache(disable_cache=k_mask is not None),
-                        *args.args_offload_cache(
-                            True, disable_cache=k_mask is not None
-                        ),
-                        indices_left,
-                        *indices_left.stride(),
-                        indices_right,
-                        *indices_right.stride(),
-                        out_scores,
-                        *out_scores.stride(),
-                        args.rope_cos,
-                        *safe_stride(args.rope_cos, 2),
-                        args.rope_sin,
-                        *safe_stride(args.rope_sin, 2),
-                        args.rope_range[0],
-                        args.rope_range[1],
-                        args.rope_is_neox_style,
-                        mask_access_counter,
-                        *safe_stride(mask_access_counter, 3),
-                        mask_cache_miss_counter,
-                        *safe_stride(mask_cache_miss_counter, 3),
+                    chunk_controllable_sampling_mask(
+                        args,
                         chunk_count,
-                        MAX_TSRC,
-                        q.shape[1],
+                        BLOCK_CHUNK,
+                        TDST, 
+                        BLOCK_SIZE_Q,
+                        STAGE_STRIDE,
                         HEAD,
-                        args.sliding_window_size,
-                        args.sink_token_size,
-                        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                        args.model_context_length,
-                        group_jobs,
-                        njobs,
-                        HID_DIM=HID,
-                        HID_BLOCK_0=HID_BLOCK,
-                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                        STRIDE_Q=stage_block_stride_q,
-                        BLOCK_CHUNK=BLOCK_CHUNK,
-                        HEAD_GROUP=HEAD // HEAD_KV,
-                        USING_EXTEND=args.using_extend and (extend_backend != 'none'),
-                        EXTEND_BACKEND=extend_backend,
-                        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != 'none'),
-                        TERMINATE_SIZE=args.stage_early_terminate,
-                        SCAN_STRIDE=STAGE_STRIDE,
-                        UPDATE_CACHE=args.online_update_cache,
-                        ORACLE_MAXIMUM=False,  # NOTE: seems has bug... but why?
+                        BSZ,
+                        q,
+                        k_mask,
+                        position_ids,
+                        indices_left,
+                        indices_right,
+                        out_scores,
+                        mask_access_counter,
+                        mask_cache_miss_counter,
+                        MAX_TSRC,
+                        HID,
+                        HID_BLOCK,
+                        stage_block_stride_q,
+                        HEAD_KV,
+                        extend_backend,
                     )
 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
