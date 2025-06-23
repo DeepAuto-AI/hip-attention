@@ -17,7 +17,8 @@ class SglangModel:
         verbose=True,
         need_chat_prompt=False,
         system_message="You are helpful assistant.",
-        handle_deepseek=False,
+        handle_deepseek=True,
+        disable_thinking=os.getenv('DISABLE_THINKING', '0') == '1',
     ) -> str:
         if input_text is None:
             assert input_ids is not None
@@ -67,18 +68,25 @@ class SglangModel:
                 ]
                 if system_message is None:
                     input_text.pop(0)
+            
+            json_data = {
+                "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
+                "messages": input_text,
+                "max_tokens": max_tokens,
+                "top_p": 0.000000000001,
+            }
+
+            if disable_thinking:
+                json_data.update({
+                    "chat_template_kwargs": {"enable_thinking": False}
+                })
 
             response = requests.post(
                 f"{self.endpoint}/v1/chat/completions",
                 headers={
                     "Authorization": f'Bearer {os.getenv("HIP_SGLANG_APIKEY", "sk-dummy")}'
                 },
-                json={
-                    "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
-                    "messages": input_text,
-                    "max_tokens": max_tokens,
-                    "top_p": 0.000000000001,
-                },
+                json=json_data,
             )
 
             if verbose:
