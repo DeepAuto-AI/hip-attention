@@ -1454,23 +1454,41 @@ def _forward_paged_hip(
                         None
                     ).permute(0, 2, 1, 3).contiguous()
                 else:
-                    assert args.using_paged_cache
+                    if args.using_paged_cache:
+                        assert args.using_paged_cache
 
-                    query_for_recomp = query_for_dense
-                    k_cache = args.get_k_cache()
-                    v_cache = args.get_v_cache()
+                        query_for_recomp = query_for_dense
+                        k_cache = args.get_k_cache()
+                        v_cache = args.get_v_cache()
 
-                    assert args.position_ids.shape[0] == 1
-                    context_dense = recomp_attn(
-                        query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                        None, 
-                        None, 
-                        args.position_ids[:, idx],
-                        sm_scale,
-                        k_cache,
-                        v_cache,
-                        args.block_table,
-                    ).permute(0, 2, 1, 3).contiguous()
+                        assert args.position_ids.shape[0] == 1
+                        context_dense = recomp_attn(
+                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                            None, 
+                            None, 
+                            args.position_ids[:, idx],
+                            sm_scale,
+                            k_cache,
+                            v_cache,
+                            args.block_table,
+                        ).permute(0, 2, 1, 3).contiguous()
+                    else:
+                        assert k is not None
+                        assert v is not None
+                        
+                        query_for_recomp = query_for_dense
+                        
+                        assert args.position_ids.shape[0] == 1
+                        context_dense = recomp_attn(
+                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                            k.permute(0, 2, 1, 3),
+                            v.permute(0, 2, 1, 3),
+                            args.position_ids[:, idx],
+                            sm_scale,
+                            None,
+                            None,
+                            None,
+                        ).permute(0, 2, 1, 3).contiguous()
 
                 
                 if delta_attention_args_diff == 0:
