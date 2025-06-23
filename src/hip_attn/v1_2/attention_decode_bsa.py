@@ -2017,7 +2017,10 @@ def decode_block_sparse_attention(
     model_context_length: int = 131072,  # 131072
     extend_context_length: int = 131072,  # 196608
     offload_update_cache: bool = False,
+    return_running_statistics: bool = False,
 ):
+    assert not return_running_statistics
+    
     BSZ, TDST, HEAD, HID = q.shape
 
     assert TDST == 1, "TDST must be 1 for flashdecode"
@@ -2042,7 +2045,7 @@ def decode_block_sparse_attention(
 
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
-    max_block_size = int(os.getenv("SA_DECODE_BLOCK_SIZE", "32"))
+    max_block_size = int(os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32")))
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if "SA_BLOCK_BK" in os.environ:

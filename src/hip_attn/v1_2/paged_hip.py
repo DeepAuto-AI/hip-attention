@@ -19,6 +19,7 @@ from hip_attn.v1_2.attention_metadata import (
 )
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
+from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
 
 try:
     import torch.distributed as dist
@@ -798,6 +799,7 @@ def _forward_paged_hip(
         delta_attention_args_exp_window = 1024
         delta_attention_args_exp_sink = 128
         delta_attention_args_iter_corr = False
+        delta_attention_args_adjust_norm_const = False
         
         for word in delta_attention_args.split('-'):
             word = word.strip()
@@ -815,6 +817,8 @@ def _forward_paged_hip(
                 pass # backward compat.
             elif word == 'iter_corr':
                 delta_attention_args_iter_corr = True
+            elif word == 'adjust_norm_const':
+                delta_attention_args_adjust_norm_const = True
             elif word.startswith('window_'):
                 delta_attention_args_window = int(word.split("_")[1])
             elif word.startswith('diff_'):
@@ -830,9 +834,11 @@ def _forward_paged_hip(
             else:
                 warnings.warn(f'unknown delta args: {word}')
         
+        # if layer_id in [0,1,2,3,4,5,8,11,14,17,20,23,26,29,30,33,36,39,41,42,43,44,45,46,47]:
+        #     delta_attention_args_adjust_norm_const = False
 
-        if (layer_id == 0) and (get_local_rank() == 0):
-            warnings.warn(
+        if get_local_rank() == 0:
+            info_msg = (
                 f'Delta Attention is activated {delta_attention_args_window=} '
                 f'{delta_attention_args_diff=} {delta_attention_args_w=} '
                 f'{delta_attention_args_just_return=} '
@@ -840,7 +846,9 @@ def _forward_paged_hip(
                 f'{delta_attention_args_dense_decode=} '
                 f'{delta_attention_args_exp=} '
                 f'{delta_attention_args_exp_w=} '
+                f'{delta_attention_args_adjust_norm_const=} '
             )
+            warnings.warn(info_msg)
         
         # args.sa_extend_backend = "clamp"
     
@@ -901,6 +909,7 @@ def _forward_paged_hip(
         metadata = None
     elif using_delta_attention and ((not is_decode) or (is_decode and delta_attention_args_dense_decode)):
         if (is_decode and delta_attention_args_dense_decode) or (using_dense_prefill and (not is_decode)) or ((query.shape[1] < 256) and (not is_decode)):
+            # for dense decode, BUG this is so slow why?
             if args.need_apply_rope and args.using_extend:
                 k_unpack = args.gather_k_from_paged_cache()
                 v_unpack = args.gather_v_from_paged_cache()
@@ -1165,6 +1174,8 @@ def _forward_paged_hip(
                     #     cached_metadata=cached_metadata,
                     # )
 
+                    args.bsa_return_running_statistics = delta_attention_args_adjust_norm_const
+                    
                     context_sparse, metadata = dual_stage_quadratic_hip_attention(
                         q=(query * sm_scale).to(query.dtype),
                         k=k,
@@ -1172,9 +1183,16 @@ def _forward_paged_hip(
                         args=args,
                         cached_metadata=cached_metadata,
                     )
+                    
+                    if delta_attention_args_adjust_norm_const:
+                        context_sparse, (sparse_mx, sparse_nc) = context_sparse
 
                     context_sparse = context_sparse.to(query.dtype)
                     context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+                    
+                    if delta_attention_args_adjust_norm_const:
+                        sparse_mx = sparse_mx[:, -query.shape[1]:].contiguous()
+                        sparse_nc = sparse_nc[:, -query.shape[1]:].contiguous()
             else:
                 assert delta_attention_args_window > 0
                 bsa_fn = get_block_sparse_backend(args, query)
@@ -1220,17 +1238,23 @@ def _forward_paged_hip(
                     model_context_length=args_sw.model_context_length,
                     extend_context_length=args_sw.extend_context_length,
                     offload_update_cache=False,
+                    return_running_statistics=delta_attention_args_adjust_norm_const,
                     args=args_sw,
                 )
+                if delta_attention_args_adjust_norm_const:
+                    context_sparse, (sparse_mx, sparse_nc) = context_sparse
+
                 context_sparse = context_sparse.to(query.dtype)
                 context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+                if delta_attention_args_adjust_norm_const:
+                    sparse_mx = sparse_mx[:, -query.shape[1]:].contiguous()
+                    sparse_nc = sparse_nc[:, -query.shape[1]:].contiguous()
                 metadata = None
             
+            # until here, we have only calculated sparse attention
             if delta_attention_args_just_return:
                 context = context_sparse
             elif delta_attention_args_iter_corr:
-                from hip_attn.v1_2.triton_recompute import attention as recomp_attn
-                
                 w_size = delta_attention_args_w * 2
                 
                 num_queries = query.shape[1]
@@ -1269,7 +1293,7 @@ def _forward_paged_hip(
                         # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
                         
                         print('recomp_attn shapes', query_for_recomp.shape, block_start_indices.shape)
-                    context_dense = recomp_attn(
+                    context_dense = query_sparse_attention(
                         query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                         None,
                         None,
@@ -1372,13 +1396,14 @@ def _forward_paged_hip(
                 
                 context = context_sparse
             else:
-                from hip_attn.v1_2.triton_recompute import attention as recomp_attn
-                
                 num_queries = query.shape[1]
                 num_last_dense = num_queries % delta_attention_args_w + max(128, delta_attention_args_w)
                 num_sparse = num_queries - num_last_dense
                 
                 context_sparse = context_sparse[:, :num_sparse]
+                if delta_attention_args_adjust_norm_const:
+                    sparse_mx = sparse_mx[:, :num_sparse]
+                    sparse_nc = sparse_nc[:, :num_sparse]
                 
                 if num_last_dense > 0:
                     idx = torch.arange(
@@ -1403,7 +1428,13 @@ def _forward_paged_hip(
                     #     context_sparse_for_diff.shape[3],
                     # )
                     # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
-
+                    
+                    # take first
+                    if delta_attention_args_adjust_norm_const:
+                        context_sparse_for_diff = context_sparse[:, idx]
+                        sparse_mx_for_diff = sparse_mx[:, idx]
+                        sparse_nc_for_diff = sparse_nc[:, idx]
+                    
                     idx = torch.cat((idx, torch.arange(num_sparse, num_queries, device=query.device)))
                     query_for_dense = query[:, idx]
                 
@@ -1442,7 +1473,7 @@ def _forward_paged_hip(
                     ).to(query_for_recomp.dtype)
 
                     assert args.position_ids.shape[0] == 1
-                    context_dense = recomp_attn(
+                    context_dense = query_sparse_attention(
                         query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                         repeated_k.permute(0, 2, 1, 3).contiguous(), 
                         repeated_v.permute(0, 2, 1, 3).contiguous(), 
@@ -1462,7 +1493,7 @@ def _forward_paged_hip(
                         v_cache = args.get_v_cache()
 
                         assert args.position_ids.shape[0] == 1
-                        context_dense = recomp_attn(
+                        context_dense, (dense_mx, dense_nc) = query_sparse_attention(
                             query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                             None, 
                             None, 
@@ -1471,30 +1502,198 @@ def _forward_paged_hip(
                             k_cache,
                             v_cache,
                             args.block_table,
-                        ).permute(0, 2, 1, 3).contiguous()
+                            return_running_statistics=True,
+                        )
                     else:
                         assert k is not None
                         assert v is not None
-                        
-                        query_for_recomp = query_for_dense
-                        
-                        assert args.position_ids.shape[0] == 1
-                        context_dense = recomp_attn(
+                        context_dense, (dense_mx, dense_nc) = query_sparse_attention(
                             query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                            k.permute(0, 2, 1, 3),
-                            v.permute(0, 2, 1, 3),
+                            k.permute(0, 2, 1, 3).contiguous(), 
+                            v.permute(0, 2, 1, 3).contiguous(), 
                             args.position_ids[:, idx],
                             sm_scale,
                             None,
                             None,
                             None,
-                        ).permute(0, 2, 1, 3).contiguous()
+                            return_running_statistics=True,
+                        )
 
-                
+                    dense_mx = dense_mx.permute(0, 2, 1)
+                    dense_nc = dense_nc.permute(0, 2, 1)
+                    context_dense = context_dense.permute(0, 2, 1, 3).contiguous()
+
                 if delta_attention_args_diff == 0:
                     context = torch.zeros_like(query)
                     context[:, :num_sparse] = context_sparse
                     context[:, idx] = context_dense
+                elif delta_attention_args_adjust_norm_const:
+                    idx_dense, idx_last = (
+                        idx[:-num_last_dense],
+                        idx[-num_last_dense:]
+                    )
+                    context_dense, last_context_dense = (
+                        context_dense[:, :-num_last_dense],
+                        context_dense[:, -num_last_dense:],
+                    )
+
+                    dense_mx = dense_mx[:, :-num_last_dense]
+                    dense_nc = dense_nc[:, :-num_last_dense]
+                    
+                    # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
+                    # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
+                    # scale = context_dense_norm / context_sparse_for_diff_norm
+
+                    using_jeff = False
+                    if using_jeff or (not delta_attention_args_adjust_norm_const):
+                        # redo the normalization constant for the sparse outputs so we calculate the exact delta region
+                        # ------------------------------
+                        if delta_attention_args_adjust_norm_const:
+                            # denorm, make alpha, scale, renorm so that the difference in the following block is the exact difference
+                            # with the correct normalization constant.
+                            context_sparse_for_diff = context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None]
+                            mx = torch.stack((dense_mx, sparse_mx_for_diff), dim=0).amax(dim=0)
+                            alpha = torch.exp2(sparse_mx_for_diff - mx)
+                            context_sparse_for_diff = context_sparse_for_diff * alpha[:, :, :, None]
+                            sparse_nc_for_diff = sparse_nc_for_diff * alpha
+                            context_sparse_for_diff = context_sparse_for_diff / sparse_nc_for_diff[:, :, :, None]
+                        # ------------------------------
+
+                        # take difference
+                        context_diff = context_dense - context_sparse_for_diff# * scale
+                        
+                        context_diff = context_diff.repeat_interleave(
+                            delta_attention_args_w, dim=1
+                        )
+                        
+                        if delta_attention_args_smooth:
+                            # (exp) linear interpolate diff
+                            context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
+                            context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
+
+                            offset = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                            offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
+                            context_diff = context_diff + (context_diff_shift - context_diff) * offset[None, :, None, None]
+                    
+                        # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
+                        # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
+
+                        # ---------------------------------------------------
+                        # rescale context sparse to include the normalization constant from the delta region H = (T + H) - T
+                        if delta_attention_args_adjust_norm_const:
+                            # get the 'head' normalization constant which is the normalization constant of the non-sparse indices.
+                            h_nc = dense_nc - sparse_nc_for_diff # sparse_nc already applied alpha
+                            h_nc = h_nc.repeat_interleave(delta_attention_args_w, dim=1)
+
+                            mx_repeat = mx.repeat_interleave(delta_attention_args_w, dim=1)
+
+                            context_sparse = context_sparse * sparse_nc[:, :, :, None]
+                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+
+                            alpha_for_sparse = torch.exp2(sparse_mx - mx_repeat)
+                            context_sparse = context_sparse * alpha_for_sparse[:, :, :, None]
+                            sparse_nc = sparse_nc * alpha_for_sparse
+
+                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+                            # alpha_for_dense = torch.exp2(dense_mx_repeat - mx)
+                            # h_nc = h_nc * alpha_for_dense
+
+                            nc = h_nc + sparse_nc
+                            context_sparse = context_sparse / nc[:, :, :, None]
+                        # ---------------------------------------------------
+
+                        # context = context_sparse * scale + context_diff
+                        context = context_sparse + context_diff
+                    else:
+                        scale = 1.0
+                        numerator = context_dense * dense_nc[:, :, :, None]
+                        denominator = dense_nc[:, :, :, None]
+                        
+                        # if get_local_rank() == 0:
+                        #     print('-')
+                        #     print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
+                        #     print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
+                        #     print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
+                        #     print('avg sparse mx', sparse_mx_for_diff.mean())
+                        
+                        t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
+                        
+                        alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[:, :, :, None]
+                        
+                        alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
+                        # alpha_dense = 1
+
+                        # this is the delta with denormalized numerator,
+                        # denominator is equal to H
+                        delta = numerator * alpha_dense - alpha_sparse * (context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None])
+                        h_nc = denominator * alpha_dense - alpha_sparse * sparse_nc_for_diff[:, :, :, None]
+                        
+                        # if get_local_rank() == 0:
+                        #     print(denominator[0, :, 0])
+                        
+                        # context_diff = context_dense - context_sparse_for_diff
+                        # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
+                        # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
+                        # scale *= context_diff_scale
+                        # delta *= scale
+                        # h_nc *= scale
+                        
+                        def _repeat_interleave(t: torch.Tensor):
+                            t = t.repeat_interleave(delta_attention_args_w, dim=1)
+                            
+                            if delta_attention_args_smooth:
+                                # (exp) linear interpolate diff
+                                t_shift = torch.roll(t, -delta_attention_args_w, 1)
+                                t_shift[:, -delta_attention_args_w:] = t[:, -1:]
+
+                                offset = torch.arange(0, t.shape[1], device=t.device)
+                                offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
+                                if t.ndim == 4:
+                                    t = t + (t_shift - t) * offset[None, :, None, None]
+                                else:
+                                    t = t + (t_shift - t) * offset[None, :, None]
+                            return t
+                        
+                        delta = _repeat_interleave(delta)
+                        h_nc = _repeat_interleave(h_nc)
+                        dense_mx = _repeat_interleave(torch.maximum(sparse_mx_for_diff, dense_mx))
+                        # sparse_mx = _repeat_interleave(sparse_mx_for_diff)
+                        # sparse_nc = _repeat_interleave(sparse_nc_for_diff)
+
+                        t_mx = torch.maximum(dense_mx, sparse_mx)
+                        alpha_sparse = torch.exp2(
+                            sparse_mx - t_mx
+                        )[:, :, :, None]
+
+                        alpha_dense = torch.exp2(
+                            dense_mx - t_mx
+                        )[:, :, :, None]
+
+                        # alpha_dense_mask = torch.zeros(dense_mx.size(1), device=dense_mx.device, dtype=torch.bool)
+                        # alpha_dense_mask = alpha_dense_mask.view(-1, delta_attention_args_w)
+                        # alpha_dense_mask[:, 0] = 1
+                        # alpha_dense_mask = alpha_dense_mask.view(-1)[None, :, None, None]
+                        # alpha_dense = alpha_dense_mask * 1 + ~alpha_dense_mask * alpha_dense_mask
+
+                        numerator = alpha_dense * delta + alpha_sparse * (context_sparse * sparse_nc[:, :, :, None])
+                        denominator = alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None]
+                        
+                        context = numerator / denominator
+                    
+                    context = context.to(query.dtype)
+                    context.index_copy_(
+                        dim=1, index=idx_dense, source=context_dense
+                    )
+                    context = torch.cat([context, last_context_dense], dim=1)
+
+                    # if get_local_rank() == 0:
+                    #     print(
+                    #         'hit', layer_id, 
+                    #         context_diff.shape, 
+                    #         context_sparse.shape, 
+                    #         context_diff.abs().mean().item(), 
+                    #         context_sparse.abs().mean().item()
+                    #     )
                 else:
                     from .delta.apply_delta import apply_delta
                     
@@ -2000,6 +2199,7 @@ def _forward_paged_hip(
                 _CHECKOUT_COUNTER += 1
             print(f"saved {filename}")
 
+    assert context.dtype == query.dtype
     return context.view(N, num_heads, context.shape[-1]), metadata
 
 class PagedHiPStateful:

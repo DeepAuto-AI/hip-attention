@@ -274,6 +274,8 @@ class HiPAttentionArgs:
     position_ids_for_landmark: Optional[Tensor] = None
     
     is_decode: bool = False
+    
+    bsa_return_running_statistics: bool = False
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
