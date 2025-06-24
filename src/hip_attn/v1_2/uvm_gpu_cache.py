@@ -879,6 +879,7 @@ def load_tokens(
             + idx_hid.to(tl.int64) * stride_k_hid,
             mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
+            cache_modifier=".cg",
             # cache_modifier='.cs', # TODO: uncomment this
         )
     else:
@@ -913,8 +914,8 @@ def load_tokens(
             tl.store(
                 ACCESS_COUNTER
                 + idx_bsz.to(tl.int64) * stride_access_counter_bsz
-                + idx_kv_head * stride_access_counter_head_kv
-                + idx_page * stride_access_counter_tsrc,
+                + idx_kv_head.to(tl.int64) * stride_access_counter_head_kv
+                + idx_page.to(tl.int64) * stride_access_counter_tsrc,
                 mask=mask_keys,
                 value=1,
             )
@@ -1070,8 +1071,8 @@ def load_tokens(
                     tl.store(
                         CACHE_MISS_COUNTER
                         + idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz
-                        + idx_kv_head * stride_cache_miss_counter_head_kv
-                        + idx_page * stride_cache_miss_counter_tsrc,
+                        + idx_kv_head.to(tl.int64) * stride_cache_miss_counter_head_kv
+                        + idx_page.to(tl.int64) * stride_cache_miss_counter_tsrc,
                         mask=mask_keys_cache_miss,
                         value=1,
                     )

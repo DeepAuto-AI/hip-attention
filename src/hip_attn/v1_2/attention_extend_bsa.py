@@ -270,14 +270,14 @@ def apply_rope_to_keys(
             cos_new = tl.load(
                 COS
                 + new_tsrc[None, :].to(tl.int64) * stride_cos_t
-                + cos_sin_idx[:, None] * stride_cos_hid,
+                + cos_sin_idx[:, None].to(tl.int64) * stride_cos_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
             ).to(keys.dtype)
             sin_new = tl.load(
                 SIN
                 + new_tsrc[None, :].to(tl.int64) * stride_sin_t
-                + cos_sin_idx[:, None] * stride_sin_hid,
+                + cos_sin_idx[:, None].to(tl.int64) * stride_sin_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
             ).to(keys.dtype)
@@ -301,7 +301,7 @@ def apply_rope_to_keys(
                     cos_zero = tl.load(
                         COS
                         + streaming_tsrc[None, :].to(tl.int64) * stride_cos_t
-                        + cos_sin_idx[:, None] * stride_cos_hid,
+                        + cos_sin_idx[:, None].to(tl.int64) * stride_cos_hid,
                         mask=rope_mask[:, None],
                         # mask=mask_tsrc[None, :],
                         other=0.0,
@@ -309,7 +309,7 @@ def apply_rope_to_keys(
                     sin_zero = tl.load(
                         SIN
                         + streaming_tsrc[None, :].to(tl.int64) * stride_sin_t
-                        + cos_sin_idx[:, None] * stride_sin_hid,
+                        + cos_sin_idx[:, None].to(tl.int64) * stride_sin_hid,
                         mask=rope_mask[:, None],
                         # mask=mask_tsrc[None, :],
                         other=0.0,
@@ -655,10 +655,10 @@ def apply_rope_to_queries(
 
     queries_rot = tl.load(
         Q
-        + idx_bsz * stride_q_bsz
-        + idx_tdst[:, None] * stride_q_tdst
-        + idx_head * stride_q_head
-        + rope_rot_idx[None, :] * stride_q_hid,
+        + idx_bsz.to(tl.int64) * stride_q_bsz
+        + idx_tdst[:, None].to(tl.int64) * stride_q_tdst
+        + idx_head.to(tl.int64) * stride_q_head
+        + rope_rot_idx[None, :].to(tl.int64) * stride_q_hid,
         mask=mask_tdst[:, None] & rope_mask[None, :],
         other=0.0,
     )
@@ -668,14 +668,14 @@ def apply_rope_to_queries(
     cos_new = tl.load(
         COS
         + rope_tdst[:, None].to(tl.int64) * stride_cos_t
-        + cos_sin_idx[None, :] * stride_cos_hid,
+        + cos_sin_idx[None, :].to(tl.int64) * stride_cos_hid,
         mask=mask_tdst[:, None] & rope_mask[None, :],
         other=0.0,
     ).to(queries.dtype)
     sin_new = tl.load(
         SIN
         + rope_tdst[:, None].to(tl.int64) * stride_sin_t
-        + cos_sin_idx[None, :] * stride_sin_hid,
+        + cos_sin_idx[None, :].to(tl.int64) * stride_sin_hid,
         mask=mask_tdst[:, None] & rope_mask[None, :],
         other=0.0,
     ).to(queries.dtype)
@@ -876,7 +876,9 @@ def block_sparse_attention_cuda(
         mask_tdst = idx_tdst < MAX_TDST
     if IS_CAUSAL:
         pos_tdst = tl.load(
-            POS + idx_bsz * stride_pos_bsz + idx_tdst * stride_pos_tdst,
+            POS + 
+            idx_bsz.to(tl.int64) * stride_pos_bsz + 
+            idx_tdst.to(tl.int64) * stride_pos_tdst,
             mask=mask_tdst,
             other=0,
         )
@@ -941,15 +943,15 @@ def block_sparse_attention_cuda(
 
     range_start = tl.load(
         KS_START_END
-        + idx_b * stride_ks_start_end_b
-        + idx_bdst * stride_ks_start_end_bdst
-        + idx_g * stride_ks_start_end_g
+        + idx_b.to(tl.int64) * stride_ks_start_end_b
+        + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
+        + idx_g.to(tl.int64) * stride_ks_start_end_g
     )
     range_end = tl.load(
         KS_START_END
-        + idx_b * stride_ks_start_end_b
-        + idx_bdst * stride_ks_start_end_bdst
-        + (idx_g + 1) * stride_ks_start_end_g
+        + idx_b.to(tl.int64) * stride_ks_start_end_b
+        + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
+        + (idx_g + 1).to(tl.int64) * stride_ks_start_end_g
     )
     if BK <= 0:
         range_start = 0
@@ -957,10 +959,10 @@ def block_sparse_attention_cuda(
 
     queries_0 = tl.load(
         Q
-        + idx_bsz * stride_q_bsz
-        + idx_tdst[:, None] * stride_q_tdst
-        + idx_head * stride_q_head
-        + idx_hid_q0[None, :] * stride_q_hid,
+        + idx_bsz.to(tl.int64) * stride_q_bsz
+        + idx_tdst[:, None].to(tl.int64) * stride_q_tdst
+        + idx_head.to(tl.int64) * stride_q_head
+        + idx_hid_q0[None, :].to(tl.int64) * stride_q_hid,
         mask=mask_tdst[:, None] & (idx_hid_q0[None, :] < HID),
         other=0.0,
     )
@@ -970,10 +972,10 @@ def block_sparse_attention_cuda(
     if HID_BLOCK_1 > 0:
         queries_1 = tl.load(
             Q
-            + idx_bsz * stride_q_bsz
-            + idx_tdst[:, None] * stride_q_tdst
-            + idx_head * stride_q_head
-            + idx_hid_q1[None, :] * stride_q_hid,
+            + idx_bsz.to(tl.int64) * stride_q_bsz
+            + idx_tdst[:, None].to(tl.int64) * stride_q_tdst
+            + idx_head.to(tl.int64) * stride_q_head
+            + idx_hid_q1[None, :].to(tl.int64) * stride_q_hid,
             mask=mask_tdst[:, None] & (idx_hid_q1[None, :] < HID),
             other=0.0,
         )
@@ -1053,9 +1055,9 @@ def block_sparse_attention_cuda(
             if i_bk < range_end:
                 idx_tsrc_start = tl.load(
                     INDICES
-                    + idx_b * stride_indices_b
-                    + idx_bdst * stride_indices_bdst
-                    + idx_bk * stride_indices_bk,
+                    + idx_b.to(tl.int64) * stride_indices_b
+                    + idx_bdst.to(tl.int64) * stride_indices_bdst
+                    + idx_bk.to(tl.int64) * stride_indices_bk,
                     mask=mask_bk,
                 )
                 idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
@@ -2276,9 +2278,9 @@ def block_sparse_attention_cuda(
 
     if MX is not None and NC is not None:
         mx_nc_offsets = (
-            idx_bsz * stride_mx_bsz
-            + idx_tdst[:, None] * stride_mx_tdst
-            + idx_head * stride_mx_head
+            idx_bsz.to(tl.int64) * stride_mx_bsz
+            + idx_tdst[:, None].to(tl.int64) * stride_mx_tdst
+            + idx_head.to(tl.int64) * stride_mx_head
         )
 
         tl.store(MX + mx_nc_offsets, m_i, mask=mask_tdst[:, None])
@@ -2290,10 +2292,10 @@ def block_sparse_attention_cuda(
 
     tl.store(
         CONTEXT
-        + idx_bsz * stride_context_bsz
-        + idx_tdst[:, None] * stride_context_tdst
-        + idx_head * stride_context_head
-        + idx_hid_v[None, :] * stride_context_hid,
+        + idx_bsz.to(tl.int64) * stride_context_bsz
+        + idx_tdst[:, None].to(tl.int64) * stride_context_tdst
+        + idx_head.to(tl.int64) * stride_context_head
+        + idx_hid_v[None, :].to(tl.int64) * stride_context_hid,
         mask=mask_tdst[:, None] & (idx_hid_v < HID_V),
         value=acc.to(CONTEXT.type.element_ty),
         # eviction_policy='evict_first',

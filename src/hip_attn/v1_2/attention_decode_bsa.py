@@ -52,11 +52,13 @@ def load_queries(
     offs_q = (
         cur_batch.to(tl.int64) * stride_q_bsz
         + 0 * stride_q_tdst
-        + cur_head[:, None] * stride_q_head
-        + offs_d[None, :] * stride_q_hid
+        + cur_head[:, None].to(tl.int64) * stride_q_head
+        + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
+        Q + offs_q, 
+        mask=(mask_h[:, None]) & (mask_d[None, :]), 
+        other=0.0
     )  # [BLOCK_H, BLOCK_DMODEL]
     if q.dtype == tl.float8e5:
         q = q.to(tl.float16)
@@ -100,8 +102,8 @@ def load_queries(
             Q
             + cur_batch.to(tl.int64) * stride_q_bsz
             + 0 * stride_q_tdst
-            + cur_head[:, None] * stride_q_head
-            + rope_rot_idx[None, :] * stride_q_hid,
+            + cur_head[:, None].to(tl.int64) * stride_q_head
+            + rope_rot_idx[None, :].to(tl.int64) * stride_q_hid,
             mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
             other=0.0,
         )  # [BLOCK_H, BLOCK_DMODEL]
@@ -111,7 +113,7 @@ def load_queries(
         cos_new = tl.load(
             COS
             + rope_tdst.to(tl.int64) * stride_cos_t
-            + cos_sin_idx[None, :] * stride_cos_hid,
+            + cos_sin_idx[None, :].to(tl.int64) * stride_cos_hid,
             mask=mask_d[None, :] & rope_mask[None, :],
             other=0.0,
         ).to(
@@ -120,7 +122,7 @@ def load_queries(
         sin_new = tl.load(
             SIN
             + rope_tdst.to(tl.int64) * stride_sin_t
-            + cos_sin_idx[None, :] * stride_sin_hid,
+            + cos_sin_idx[None, :].to(tl.int64) * stride_sin_hid,
             mask=mask_d[None, :] & rope_mask[None, :],
             other=0.0,
         ).to(
@@ -402,9 +404,9 @@ def _fwd_kernel_stage1(
     )
     range_end = tl.load(
         KS_START_END
-        + cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
-        + 0 * stride_ks_start_end_bdst
-        + 1 * stride_ks_start_end_g,
+        + ((cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
+        + 0 * stride_ks_start_end_bdst)
+        + 1 * stride_ks_start_end_g),
         mask=cur_head_begin < q_head_num,
         other=0,
     )
@@ -437,7 +439,7 @@ def _fwd_kernel_stage1(
                     INDICES
                     + cur_flattened_batch.to(tl.int64) * stride_indices_b
                     + 0 * stride_indices_bdst
-                    + idx_bk * stride_indices_bk,
+                    + idx_bk.to(tl.int64) * stride_indices_bk,
                     mask=mask_bk & (cur_head_begin < q_head_num),
                     other=0,
                 )  # [BLOCK_BK]
@@ -1673,25 +1675,25 @@ def _fwd_kernel_stage1(
     # Store results
     offs_mid_o = (
         cur_batch.to(tl.int64) * stride_attn_logits_bsz
-        + cur_head[:, None] * stride_attn_logits_head
-        + split_kv_id * stride_attn_logits_kv_split
-        + offs_dv[None, :] * stride_attn_logits_hid
+        + cur_head[:, None].to(tl.int64) * stride_attn_logits_head
+        + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
+        + offs_dv[None, :].to(tl.int64) * stride_attn_logits_hid
     )
     tl.store(
         ATTN_LOGITS + offs_mid_o,
-        acc / e_sum,
+        value=acc / e_sum,
         mask=(mask_h[:, None]) & (mask_dv[None, :]),
     )
 
     offs_mid_o_1 = (
         cur_batch.to(tl.int64) * stride_attn_logits_bsz
-        + cur_head * stride_attn_logits_head
-        + split_kv_id * stride_attn_logits_kv_split
+        + cur_head.to(tl.int64) * stride_attn_logits_head
+        + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
         + Lv * stride_attn_logits_hid
     )
     tl.store(
         ATTN_LOGITS + offs_mid_o_1[:, None],
-        e_max + tl.math.log2(e_sum),
+        value=e_max + tl.math.log2(e_sum),
         mask=mask_h[:, None],
     )
 
@@ -1723,7 +1725,7 @@ def decode_block_sparse_attention_stage1(
     NUM_SM = 144 # GH100
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
-    MAX_PROGRAM = int(os.getenv('SA_DECODE_MAX_PROGRAM', triton.cdiv(NUM_SM, batch)))
+    MAX_PROGRAM = int(os.getenv('SA_DECODE_MAX_PROGRAM', triton.cdiv(NUM_SM, triton.cdiv(batch, 2))))
     token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
     
     BLOCK_SIZE = min(
@@ -1840,7 +1842,9 @@ def _fwd_kernel_stage2(
     cur_head = tl.program_id(1).to(tl.int64)
 
     cur_batch_seq_len = tl.load(
-        B_SEQ_LEN + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
+        B_SEQ_LEN 
+        + cur_batch.to(tl.int64) * stride_pos_bsz 
+        + 0 * stride_pos_tdst
     )
 
     offs_d = tl.arange(0, BLOCK_DV)
@@ -1865,14 +1869,14 @@ def _fwd_kernel_stage2(
         tv = tl.load(
             ATTN_LOGITS
             + offs_v.to(tl.int64)
-            + split_kv_id * stride_attn_logits_kv_split,
+            + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split,
             mask=mask_d,
             other=0.0,
         )
         tlogic = tl.load(
             ATTN_LOGITS
             + offs_logic.to(tl.int64)
-            + split_kv_id * stride_attn_logits_kv_split
+            + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
         )
         n_e_max = tl.maximum(tlogic, e_max)
 
