@@ -1988,6 +1988,7 @@ def _forward_paged_hip(
         seq_thresh_fa3 = int(os.getenv('HIP_DEBUG_SEQ_THRESH_FA3', 64 * 1024))
         
         context_fa3 = None
+        metadata = None
         
         if (not args.using_paged_cache) and (k is not None):
             max_context_len = min(max_context_len, k.shape[1])
