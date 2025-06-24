@@ -449,6 +449,13 @@ class HiPAttentionConfig:
                 assert (int('1' if given_args else '0') == 1) == given_args
                 os.environ['HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE'] = '1' if given_args else '0'
                 parsed_json.pop("__using_landmark")
+            if "__last_dense" in parsed_json:
+                given_args = parsed_json['__last_dense']
+                if os.getenv('HIP_DEBUG_LAST_DENSE', given_args) != given_args:
+                    warnings.warn('envvar HIP_DEBUG_LAST_DENSE is overrided by hip attention args')
+                assert int(str(given_args)) == given_args
+                os.environ['HIP_DEBUG_LAST_DENSE'] = str(given_args)
+                parsed_json.pop("__last_dense")
             
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")

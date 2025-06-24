@@ -425,6 +425,7 @@ def block_sparse_attention_cuda_step(
             )
 
         if HID_BLOCK_1 > 0:
+            tl.static_assert(queries_1.shape[-1] == HID_BLOCK_1)
             queries_1, keys_1 = apply_rope_to_keys(
                 queries_1,
                 keys_1,
