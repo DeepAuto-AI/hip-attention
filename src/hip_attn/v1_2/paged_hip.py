@@ -1985,12 +1985,15 @@ def _forward_paged_hip(
         # TODO use flash attention under 64K
         # TODO use sparse setting under 128K
         
-        seq_thresh_fa3 = int(os.getenv('HIP_DEBUG_SEQ_THRESH_FA3', 64 * 1024))
+        seq_thresh_fa3 = min(
+            args.model_context_length, 
+            int(os.getenv('HIP_DEBUG_SEQ_THRESH_FA3', 32 * 1024))
+        )
         
         context_fa3 = None
         metadata = None
         
-        if (not args.using_paged_cache) and (k is not None):
+        if (seq_thresh_fa3 > 0) and (not args.using_paged_cache) and (k is not None):
             max_context_len = min(max_context_len, k.shape[1])
             min_context_len = max(0, max_context_len - query.shape[1])
             
@@ -1998,16 +2001,18 @@ def _forward_paged_hip(
             len_query_for_hip = query.shape[1] - len_query_for_fa3
             if len_query_for_hip < 1024:
                 len_query_for_fa3 += len_query_for_hip
-                len_query_for_hip = 0
+                len_query_for_hip -= len_query_for_hip
             
             if len_query_for_fa3 > 0:
                 assert not is_decode
                 # assert not args.using_extend, "todo"
                 
                 query_fa3 = query[:, :len_query_for_fa3].contiguous()
-                k_fa3 = k[:, :-len_query_for_hip].contiguous()
+                len_kv = k.shape[1] - len_query_for_hip
+                k_fa3 = k[:, :len_kv].contiguous()
+                v_fa3 = v[:, :len_kv].contiguous()
                 
-                if (args.using_extend and args.need_apply_rope):
+                if (args.using_extend and args.need_apply_rope) and True:
                     # FIXME do better infer method
                     use_mla = triton.next_power_of_2(k_fa3.shape[-1]) != k_fa3.shape[-1]
                     if use_mla:
@@ -2025,10 +2030,10 @@ def _forward_paged_hip(
                         key_rot = k_fa3[..., -rope_dim:]
                         
                         assert args.position_ids.shape[0] == 1
-                        cos_q = args.rope_cos[None, args.position_ids[0, :len_query_for_fa3], None, ::2].repeat_interleave(2, -1)
-                        sin_q = args.rope_sin[None, args.position_ids[0, :len_query_for_fa3], None, ::2].repeat_interleave(2, -1)
-                        cos_k = args.rope_cos[None, :key_rot.shape[1], None, ::2].repeat_interleave(2, -1)
-                        sin_k = args.rope_sin[None, :key_rot.shape[1], None, ::2].repeat_interleave(2, -1)
+                        cos_q = args.rope_cos[None, args.position_ids[0, :len_query_for_fa3], None, :rope_dim//2].repeat_interleave(2, -1)
+                        sin_q = args.rope_sin[None, args.position_ids[0, :len_query_for_fa3], None, :rope_dim//2].repeat_interleave(2, -1)
+                        cos_k = args.rope_cos[None, :key_rot.shape[1], None, :rope_dim//2].repeat_interleave(2, -1)
+                        sin_k = args.rope_sin[None, :key_rot.shape[1], None, :rope_dim//2].repeat_interleave(2, -1)
                         
                         query_rot = query_rot * cos_q + rotate_fn(query_rot) * sin_q
                         key_rot = key_rot * cos_k + rotate_fn(key_rot) * sin_k
@@ -2050,7 +2055,6 @@ def _forward_paged_hip(
                     else:
                         raise Exception()
                 
-                v_fa3 = v[:, :-len_query_for_hip].contiguous()
                 tp_q_head, tp_q_dim = query_fa3.shape[2:]
                 tp_k_head, tp_k_dim = k_fa3.shape[2:]
                 tp_v_head, tp_v_dim = v_fa3.shape[2:]
@@ -2068,7 +2072,7 @@ def _forward_paged_hip(
                 cu_seqlens_k = torch.tensor([0, k_fa3.shape[1]], dtype=torch.int32, device=k.device)
                 max_seqlen_k = k_fa3.shape[1]
                 
-                # print(query_fa3.shape, k.shape, v.shape, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, sm_scale)
+                # print(query_fa3.shape, k_fa3.shape, v_fa3.shape, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, sm_scale)
                 
                 context_fa3 = flash_attn_varlen_func(
                     q=query_fa3.view(-1, tp_q_head, tp_q_dim).contiguous(),
@@ -2112,7 +2116,7 @@ def _forward_paged_hip(
                 cached_metadata=cached_metadata,
             )
         context = context.to(query.dtype)
-        context = context[:, -query.shape[1] :, :, :].contiguous()
+        # context = context[:, -query.shape[1] :, :, :].contiguous()
     else:
         assert not is_decode
         assert last_dense > 0
