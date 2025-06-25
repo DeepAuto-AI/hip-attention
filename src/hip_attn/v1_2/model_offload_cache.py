@@ -482,7 +482,11 @@ class HiPModelOffloadCache:
                 window = 0
             else:
                 # for chunked attention
-                window = self.chunked_attention_size + np.amax(extend_seq_lens_cpu).item() + 1024
+                window = (
+                    self.chunked_attention_size
+                    + np.amax(extend_seq_lens_cpu).item()
+                    + 1024
+                )
         else:
             window = 0
 
@@ -493,7 +497,12 @@ class HiPModelOffloadCache:
                 : extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch],
             ]
             if window > 0:
-                pad = max(0, extend_prefix_lens_cpu[ibatch] + extend_seq_lens_cpu[ibatch] - window)
+                pad = max(
+                    0,
+                    extend_prefix_lens_cpu[ibatch]
+                    + extend_seq_lens_cpu[ibatch]
+                    - window,
+                )
                 block_table = block_table[pad:].contiguous()
             else:
                 pad = 0
@@ -507,7 +516,12 @@ class HiPModelOffloadCache:
             )
 
     def _prefetch_prefix_kv_buffer(
-        self, layer_id: int, batch_id: int, table: Tensor, prefix_seq_len: int, pad: int,
+        self,
+        layer_id: int,
+        batch_id: int,
+        table: Tensor,
+        prefix_seq_len: int,
+        pad: int,
     ) -> threading.Thread:
         # you must call before get fetched prefix
         assert table.ndim == 1
@@ -540,11 +554,17 @@ class HiPModelOffloadCache:
                         )
                         assert k.device == self.device
                         assert v.device == self.device
-                    
+
                     copy_event = torch.cuda.Event()
                     copy_event.record(stream)
 
-                    self.prefetched_kv[handle_id] = (k, v, prefix_seq_len, table, copy_event)
+                    self.prefetched_kv[handle_id] = (
+                        k,
+                        v,
+                        prefix_seq_len,
+                        table,
+                        copy_event,
+                    )
                 except Exception as ex:
                     print(f"{handle_id} thread dead")
                     raise Exception("thread dead") from ex

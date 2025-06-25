@@ -617,11 +617,14 @@ class HiPOffloadCache:
         return self.k_uvm.bank_cpu.shape[0]
 
     def prefetch_prefix_kv_buffer(
-        self, table: Tensor, device: torch.device, pad: int,
+        self,
+        table: Tensor,
+        device: torch.device,
+        pad: int,
     ) -> Tuple[Tensor, Tensor]:
         if table.device != torch.device("cpu"):
             table = table.to("cpu", non_blocking=False)
-        
+
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
 
@@ -629,8 +632,12 @@ class HiPOffloadCache:
         v = v.to(device, non_blocking=True).unsqueeze(0)
 
         if pad > 0:
-            k = torch.nn.functional.pad(k, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(k.dtype)
-            v = torch.nn.functional.pad(v, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(v.dtype)
+            k = torch.nn.functional.pad(
+                k, pad=(0, 0, 0, 0, pad, 0), mode="constant", value=0
+            ).to(k.dtype)
+            v = torch.nn.functional.pad(
+                v, pad=(0, 0, 0, 0, pad, 0), mode="constant", value=0
+            ).to(v.dtype)
 
         return k, v
 
@@ -655,7 +662,7 @@ class HiPOffloadCache:
             elif cache_k.dtype in [torch.uint8, torch.float8_e5m2]:
                 view_dtype = torch.uint8
             else:
-                raise Exception(f'not supported dtype {cache_k.dtype}')
+                raise Exception(f"not supported dtype {cache_k.dtype}")
 
             set_kv_buffer_(
                 self.k_uvm.bank_cpu.view(view_dtype).numpy(),
@@ -884,8 +891,7 @@ def load_tokens(
         )
     else:
         seq_len = tl.load(
-            CACHE_SEQ_LENS 
-            + idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
+            CACHE_SEQ_LENS + idx_bsz.to(tl.int64) * stride_cache_seq_lens_b,
         )
         mask_tsrc = (idx_tsrc >= 0) & (idx_tsrc < seq_len)
         ptrs = (

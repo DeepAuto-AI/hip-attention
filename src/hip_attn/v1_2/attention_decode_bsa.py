@@ -56,9 +56,7 @@ def load_queries(
         + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, 
-        mask=(mask_h[:, None]) & (mask_d[None, :]), 
-        other=0.0
+        Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
     )  # [BLOCK_H, BLOCK_DMODEL]
     if q.dtype == tl.float8e5:
         q = q.to(tl.float16)
@@ -90,7 +88,7 @@ def load_queries(
             rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
 
         # rope_tdst = cur_batch_seq_len - 1
-        if EXTEND_BACKEND == 'streaming':
+        if EXTEND_BACKEND == "streaming":
             rope_tdst = cur_batch_seq_len - 1
             activate_len = sink_token_size + sliding_window_size + sparse_token_size
             rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
@@ -324,9 +322,7 @@ def _fwd_kernel_stage1(
     mask_dv = offs_dv < Lv
 
     cur_batch_seq_len = tl.load(
-        B_Seqlen 
-        + cur_batch.to(tl.int64) * stride_pos_bsz 
-        + 0 * stride_pos_tdst
+        B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
@@ -404,9 +400,13 @@ def _fwd_kernel_stage1(
     )
     range_end = tl.load(
         KS_START_END
-        + ((cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
-        + 0 * stride_ks_start_end_bdst)
-        + 1 * stride_ks_start_end_g),
+        + (
+            (
+                cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
+                + 0 * stride_ks_start_end_bdst
+            )
+            + 1 * stride_ks_start_end_g
+        ),
         mask=cur_head_begin < q_head_num,
         other=0,
     )
@@ -831,13 +831,12 @@ def _fwd_kernel_stage1(
                     rope_range_end,
                     rope_is_neox_style,
                     model_context_length,
-
                     tl.reshape(
-                        idx_bk[:, None] * BLOCK_SIZE_K 
+                        idx_bk[:, None] * BLOCK_SIZE_K
                         + tl.arange(0, BLOCK_SIZE_K)[None, :],
-                        BLOCK_SIZE_K * BLOCK_BK
-                    ) + sink_token_size,
-
+                        BLOCK_SIZE_K * BLOCK_BK,
+                    )
+                    + sink_token_size,
                     cur_batch_seq_len,
                     offs_d_0,
                     offs_d_1,
@@ -1238,9 +1237,7 @@ def _fwd_kernel_stage1(
                 rope_range_end,
                 rope_is_neox_style,
                 model_context_length,
-
                 idx_tsrc,
-                
                 cur_batch_seq_len,
                 offs_d_0,
                 offs_d_1,
@@ -1618,10 +1615,10 @@ def _fwd_kernel_stage1(
             #     + (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
             # )
             idx_rope = (
-                idx_tsrc 
-                - cur_batch_seq_len 
+                idx_tsrc
+                - cur_batch_seq_len
                 + sliding_window_size
-                + sink_token_size 
+                + sink_token_size
                 + sparse_token_size
             )
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
@@ -1722,26 +1719,28 @@ def decode_block_sparse_attention_stage1(
 ):
     batch = q.shape[0]
     BLOCK_H = 16
-    NUM_SM = 144 # GH100
+    NUM_SM = 144  # GH100
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
-    MAX_PROGRAM = int(os.getenv('SA_DECODE_MAX_PROGRAM', triton.cdiv(NUM_SM, triton.cdiv(batch, 2))))
+    MAX_PROGRAM = int(
+        os.getenv("SA_DECODE_MAX_PROGRAM", triton.cdiv(NUM_SM, triton.cdiv(batch, 2)))
+    )
     token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
-    
-    BLOCK_SIZE = min(
-        args.block_size_k * BLOCK_BK,
-        triton.next_power_of_2(token_chunk)
-    )
+
+    BLOCK_SIZE = min(args.block_size_k * BLOCK_BK, triton.next_power_of_2(token_chunk))
     BLOCK_BK = max(
-        triton.cdiv(32, args.block_size_k),
-        triton.cdiv(BLOCK_SIZE, args.block_size_k)
+        triton.cdiv(32, args.block_size_k), triton.cdiv(BLOCK_SIZE, args.block_size_k)
     )
-    
+
     NUM_SPARSE_KV_SPLITS = min(
         MAX_PROGRAM, triton.cdiv(args.second_stage_k, token_chunk)
     )  # TODO: apply from server args
-    NUM_SINK_KV_SPLITS = min(MAX_PROGRAM, triton.cdiv(args.sink_token_size, token_chunk))
-    NUM_SLIDING_KV_SPLITS = min(MAX_PROGRAM, triton.cdiv(args.sliding_window_size, token_chunk))
+    NUM_SINK_KV_SPLITS = min(
+        MAX_PROGRAM, triton.cdiv(args.sink_token_size, token_chunk)
+    )
+    NUM_SLIDING_KV_SPLITS = min(
+        MAX_PROGRAM, triton.cdiv(args.sliding_window_size, token_chunk)
+    )
 
     NUM_TOTAL_KV_SPLITS = (
         NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
@@ -1842,9 +1841,7 @@ def _fwd_kernel_stage2(
     cur_head = tl.program_id(1).to(tl.int64)
 
     cur_batch_seq_len = tl.load(
-        B_SEQ_LEN 
-        + cur_batch.to(tl.int64) * stride_pos_bsz 
-        + 0 * stride_pos_tdst
+        B_SEQ_LEN + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
     )
 
     offs_d = tl.arange(0, BLOCK_DV)
@@ -2024,7 +2021,7 @@ def decode_block_sparse_attention(
     return_running_statistics: bool = False,
 ):
     assert not return_running_statistics
-    
+
     BSZ, TDST, HEAD, HID = q.shape
 
     assert TDST == 1, "TDST must be 1 for flashdecode"
@@ -2049,7 +2046,9 @@ def decode_block_sparse_attention(
 
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
-    max_block_size = int(os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32")))
+    max_block_size = int(
+        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+    )
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if "SA_BLOCK_BK" in os.environ:

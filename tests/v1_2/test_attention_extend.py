@@ -29,7 +29,7 @@ def main_debug():
     k_group_size = int(os.getenv("K_GROUP_SIZE", "1"))
 
     assert seq_dups > 0
-    
+
     using_extend = True
 
     q, k, v, out, cos, sin = load_checkouts(
@@ -195,7 +195,7 @@ def main_debug():
             mask_only=mask_only,
         ),
     )
-    
+
     ls_hip_extend = []
     ls_hip = []
     ls_fa = []
@@ -224,7 +224,8 @@ def main_debug():
 
         end.synchronize()
         latency = start.elapsed_time(end)
-        if i > 3: ls_hip_extend.append(latency)
+        if i > 3:
+            ls_hip_extend.append(latency)
         print(latency)
 
     print("-" * 20)
@@ -259,7 +260,8 @@ def main_debug():
 
         end.synchronize()
         latency = start.elapsed_time(end)
-        if i > 3: ls_hip.append(latency)
+        if i > 3:
+            ls_hip.append(latency)
         print(latency)
 
     print("-" * 20)
@@ -285,14 +287,16 @@ def main_debug():
 
         end.synchronize()
         latency = start.elapsed_time(end)
-        if i > 3: ls_fa.append(latency)
+        if i > 3:
+            ls_fa.append(latency)
         print(latency)
-    
-    print("-" * 20)
-    
-    print(f'hip_extend,{sum(ls_hip_extend) / len(ls_hip_extend)}')
-    print(f'hip,{sum(ls_hip) / len(ls_hip)}')
-    print(f'fa,{sum(ls_fa) / len(ls_fa)}')
 
-if __name__ == '__main__':
+    print("-" * 20)
+
+    print(f"hip_extend,{sum(ls_hip_extend) / len(ls_hip_extend)}")
+    print(f"hip,{sum(ls_hip) / len(ls_hip)}")
+    print(f"fa,{sum(ls_fa) / len(ls_fa)}")
+
+
+if __name__ == "__main__":
     main_debug()

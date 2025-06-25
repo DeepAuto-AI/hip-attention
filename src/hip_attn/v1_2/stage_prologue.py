@@ -1,7 +1,9 @@
 import torch
 import triton
-from .attention_metadata import Stage, HiPAttentionArgs
+
+from .attention_metadata import HiPAttentionArgs, Stage
 from .utils import capture
+
 
 @capture
 def stage_prologue(
@@ -9,14 +11,11 @@ def stage_prologue(
     indices_left: torch.Tensor,
     indices_right: torch.Tensor,
     out_scores: torch.Tensor,
-    
     stage_k: int,
     stage_chunk_size: int,
     chunk_size: int,
     stage_info: Stage,
-    
     args: HiPAttentionArgs,
-    
     TDST,
     BDST,
     STAGE_STRIDE,
@@ -56,9 +55,7 @@ def stage_prologue(
         indices_right = indices_right.repeat_interleave(num_split, 1)[
             :, -BDST:
         ].contiguous()
-        out_scores = out_scores.repeat_interleave(num_split, 1)[
-            :, -BDST:
-        ].contiguous()
+        out_scores = out_scores.repeat_interleave(num_split, 1)[:, -BDST:].contiguous()
 
     if STAGE_STRIDE != stage_info.stage_stride:
         assert stage_info.stage_stride < STAGE_STRIDE
@@ -76,15 +73,11 @@ def stage_prologue(
 
     assert (chunk_size % stage_chunk_size) == 0
     splits = chunk_size // stage_chunk_size
-    chunk_sizes = (
-        (indices_right - indices_left).float() / splits
-    ).clamp_min_(0)
+    chunk_sizes = ((indices_right - indices_left).float() / splits).clamp_min_(0)
     indices_left = (
         indices_left[..., None]
         + (
-            torch.arange(0, splits, device=q.device)[
-                None, None, None, None, :
-            ]
+            torch.arange(0, splits, device=q.device)[None, None, None, None, :]
             * chunk_sizes[..., None]
         )
         .floor()
@@ -96,9 +89,7 @@ def stage_prologue(
         - (
             (
                 (splits - 1)
-                - torch.arange(0, splits, device=q.device)[
-                    None, None, None, None, :
-                ]
+                - torch.arange(0, splits, device=q.device)[None, None, None, None, :]
             )
             * chunk_sizes[..., None]
         )
@@ -107,5 +98,5 @@ def stage_prologue(
     )
     indices_right = indices_right.flatten(-2, -1)
     out_scores = out_scores.repeat_interleave(splits, -1)
-    
+
     return indices_left, indices_right, out_scores, BLOCK_SIZE_Q, BDST, STAGE_STRIDE

@@ -1,14 +1,12 @@
 import torch
-from hip_attn.v1_2.attention_extend_bsa import (
-    block_sparse_attention,
-    HiPAttentionArgs,
-)
-from sglang.srt.layers.attention.flashattention_backend import (
-    make_local_attention_virtual_batches
-)
 import triton
+from sglang.srt.layers.attention.flashattention_backend import (
+    make_local_attention_virtual_batches,
+)
 
-device = torch.device('cuda:0')
+from hip_attn.v1_2.attention_extend_bsa import HiPAttentionArgs, block_sparse_attention
+
+device = torch.device("cuda:0")
 dtype = torch.bfloat16
 seq_len = 256 * 1024
 head = 40
@@ -17,9 +15,12 @@ tp_size = 8
 hid = 5120
 
 q = torch.zeros((1, seq_len, head // tp_size, hid // head), device=device, dtype=dtype)
-k = torch.zeros((1, seq_len, head_kv // tp_size, hid // head), device=device, dtype=dtype)
+k = torch.zeros(
+    (1, seq_len, head_kv // tp_size, hid // head), device=device, dtype=dtype
+)
 v = k.clone()
 position_ids = torch.arange(0, seq_len, dtype=torch.long, device=device)[None, :]
+
 
 def sample():
     BSZ, TDST, HEAD, HID = q.shape
@@ -46,8 +47,8 @@ def sample():
         model_context_length=seq_len,
         extend_context_length=seq_len,
         block_sparse_block_size_q=64,
-        scan_extend_backend='relative',
-        sa_extend_backend='streaming',
+        scan_extend_backend="relative",
+        sa_extend_backend="streaming",
         online_update_cache=False,
         require_cache_statistics=False,
         disable_flashdecode=True,
@@ -72,9 +73,7 @@ def sample():
     indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=q.device)
     ks = torch.zeros((BH, BDST), dtype=torch.int64, device=q.device)
     ks_count = ks.unsqueeze(-1)
-    ks_start_end = torch.zeros(
-        (BH, BDST, 2), dtype=torch.int64, device=q.device
-    )
+    ks_start_end = torch.zeros((BH, BDST, 2), dtype=torch.int64, device=q.device)
 
     context = block_sparse_attention(
         q=q,
@@ -96,6 +95,7 @@ def sample():
     context = context.to(q.dtype)
     # metadata = None
 
+
 samples = []
 for i in range(10):
     start_event = torch.cuda.Event(True)
@@ -105,9 +105,9 @@ for i in range(10):
     end_event.record()
     end_event.synchronize()
     latency = start_event.elapsed_time(end_event)
-    
+
     print(latency)
-    
+
     if i > 2:
         samples.append(latency)
 

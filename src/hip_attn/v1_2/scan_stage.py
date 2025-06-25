@@ -5,8 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
-from hip_attn.v1_2.attention_metadata import safe_stride
 from hip_attn.utils.rope import adjust_rope
+from hip_attn.v1_2.attention_metadata import safe_stride
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
 
@@ -540,7 +540,9 @@ def get_scan_stage_configs():
         NUM_WARPS.append(8)
 
     configs = []
-    for LOAD_Q_EACH_TIME in [False,]:
+    for LOAD_Q_EACH_TIME in [
+        False,
+    ]:
         for num_warps in NUM_WARPS:
             for num_stages in [1, 2, 4]:
                 configs.append(
@@ -668,7 +670,7 @@ def chunk_controllable_sampling_mask_cuda(
     UPDATE_CACHE: tl.constexpr = True,
     ORACLE_MAXIMUM: tl.constexpr = False,
     LOAD_Q_EACH_TIME: tl.constexpr = False,
-    COMPUTE_MLA_ROPE: tl.constexpr = False
+    COMPUTE_MLA_ROPE: tl.constexpr = False,
 ):
     BDST = tl.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = tl.cdiv(BDST, SCAN_STRIDE)
@@ -899,7 +901,8 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
+                                    NEED_APPLY_ROPE
+                                    and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1147,7 +1150,8 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
+                                    NEED_APPLY_ROPE
+                                    and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1675,7 +1679,8 @@ def chunk_controllable_sampling_mask_cuda(
                                     model_context_length,
                                     sliding_window_size,
                                     USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                    NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
+                                    NEED_APPLY_ROPE
+                                    and (rope_range_begin < HID_BLOCK_0),
                                     EXTEND_BACKEND,
                                     BLOCK_SIZE_Q,
                                     HID_BLOCK_0,
@@ -1982,14 +1987,16 @@ def chunk_controllable_sampling_mask_cuda(
                         mask=mask_chunk,
                     )
 
+
 from hip_attn.v1_2.utils import capture
+
 
 @capture
 def chunk_controllable_sampling_mask(
     args,
     chunk_count,
     BLOCK_CHUNK,
-    TDST, 
+    TDST,
     BLOCK_SIZE_Q,
     STAGE_STRIDE,
     HEAD,
@@ -2028,7 +2035,7 @@ def chunk_controllable_sampling_mask(
         sm_count = num_streaming_multiprocessor()
         group_jobs = triton.cdiv(njobs, sm_count)
         grid = (min(sm_count, njobs),)
-    
+
     chunk_controllable_sampling_mask_cuda[grid](
         q,
         *q.stride(),
@@ -2037,9 +2044,7 @@ def chunk_controllable_sampling_mask(
         position_ids,
         *position_ids.stride(),
         *args.args_paged_kv_cache(disable_cache=k_mask is not None),
-        *args.args_offload_cache(
-            True, disable_cache=k_mask is not None
-        ),
+        *args.args_offload_cache(True, disable_cache=k_mask is not None),
         indices_left,
         *indices_left.stride(),
         indices_right,
@@ -2073,9 +2078,9 @@ def chunk_controllable_sampling_mask(
         STRIDE_Q=stage_block_stride_q,
         BLOCK_CHUNK=BLOCK_CHUNK,
         HEAD_GROUP=HEAD // HEAD_KV,
-        USING_EXTEND=args.using_extend and (extend_backend != 'none'),
+        USING_EXTEND=args.using_extend and (extend_backend != "none"),
         EXTEND_BACKEND=extend_backend,
-        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != 'none'),
+        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != "none"),
         TERMINATE_SIZE=args.stage_early_terminate,
         SCAN_STRIDE=STAGE_STRIDE,
         UPDATE_CACHE=args.online_update_cache,

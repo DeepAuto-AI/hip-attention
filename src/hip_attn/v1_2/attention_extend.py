@@ -28,25 +28,27 @@ from hip_attn.v1_2.attention_metadata import (
     ScanStage,
     safe_stride,
 )
+from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
-from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask
 from hip_attn.v1_2.landmark_sample import landmark_sample
+from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask
 from hip_attn.v1_2.stage_prologue import stage_prologue
-from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
 
 try:
     import torch.distributed as dist
     from sglang.srt.distributed import (
         get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
-        get_tensor_model_parallel_world_size,
     )
+
     SGLANG_DIST_ACTIVATED = True
 except ImportError as ex:
     SGLANG_DIST_ACTIVATED = False
+
 
 def get_local_rank() -> 0:
     if SGLANG_DIST_ACTIVATED:
@@ -54,9 +56,10 @@ def get_local_rank() -> 0:
     else:
         return 0
 
+
 _NUM_STREAMING_MULTIPROCESSOR = None
 
-DEFAULT_VALUE_HIP_HEAD_REDUCE = '1'
+DEFAULT_VALUE_HIP_HEAD_REDUCE = "1"
 
 
 def num_streaming_multiprocessor():
@@ -68,7 +71,9 @@ def num_streaming_multiprocessor():
     return _NUM_STREAMING_MULTIPROCESSOR
 
 
-def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor) -> type(block_sparse_attention):
+def get_block_sparse_backend(
+    args: HiPAttentionArgs, q: torch.Tensor
+) -> type(block_sparse_attention):
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
@@ -345,7 +350,7 @@ def dual_stage_quadratic_hip_attention(
             indices_left = last_stage_cache.indices_left.clone()
             indices_right = last_stage_cache.indices_right.clone()
             out_scores = last_stage_cache.out_scores.clone()
-        
+
         landmark_scores = None
 
         for i_stage, stage_info in enumerate(args.stages):
@@ -364,25 +369,22 @@ def dual_stage_quadratic_hip_attention(
                 pass
             elif i_stage > 0:
                 (
-                    indices_left, 
-                    indices_right, 
-                    out_scores, 
-                    BLOCK_SIZE_Q, 
-                    BDST, 
-                    STAGE_STRIDE
-                ) = stage_prologue(
-                    q, 
                     indices_left,
                     indices_right,
                     out_scores,
-                    
-                    stage_k, 
-                    stage_chunk_size, 
-                    chunk_size, 
-                    stage_info, 
-                    
-                    args, 
-                    
+                    BLOCK_SIZE_Q,
+                    BDST,
+                    STAGE_STRIDE,
+                ) = stage_prologue(
+                    q,
+                    indices_left,
+                    indices_right,
+                    out_scores,
+                    stage_k,
+                    stage_chunk_size,
+                    chunk_size,
+                    stage_info,
+                    args,
                     TDST,
                     BDST,
                     STAGE_STRIDE,
@@ -455,7 +457,7 @@ def dual_stage_quadratic_hip_attention(
                         NOPE_HID = triton.next_power_of_2(q.shape[-1]) // 2
                     else:
                         NOPE_HID = q.shape[-1]
-                    
+
                     # chunked sampling
                     if landmark_scores is None:
                         landmark_scores = landmark_sample(
@@ -463,38 +465,60 @@ def dual_stage_quadratic_hip_attention(
                             k[..., :NOPE_HID] if k is not None else k,
                             state,
                             args,
-                            
-                            BSZ, HEAD, HEAD_KV, BDST, DEBUG, __logall_index,
+                            BSZ,
+                            HEAD,
+                            HEAD_KV,
+                            BDST,
+                            DEBUG,
+                            __logall_index,
                         )
 
                     _TSRC = TSRC
                     if k is not None:
                         _TSRC = k.shape[1]
-                    
-                    landmarks = landmark_scores\
-                        .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
+
+                    landmarks = landmark_scores.view(
+                        BSZ,
+                        HEAD,
+                        landmark_scores.shape[-1] // stage_info.stage_chunk_size,
+                        stage_info.stage_chunk_size,
+                    )
                     num_landmarks = args.landmark_stage_k[i_stage]
                     _, landmarks = torch.topk(landmarks, k=num_landmarks, sorted=False)
-                    landmarks = landmarks.permute(0, 2, 1, 3)[:, :_TSRC // stage_info.stage_chunk_size].contiguous()
-                    assert landmarks.shape == (BSZ, _TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks), (
-                        f'{landmarks.shape} == ({BSZ}, {_TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks}), {k.shape if k is not None else None}'
+                    landmarks = landmarks.permute(0, 2, 1, 3)[
+                        :, : _TSRC // stage_info.stage_chunk_size
+                    ].contiguous()
+                    assert landmarks.shape == (
+                        BSZ,
+                        _TSRC // stage_info.stage_chunk_size,
+                        HEAD,
+                        num_landmarks,
+                    ), f"{landmarks.shape} == ({BSZ}, {_TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks}), {k.shape if k is not None else None}"
+
+                    assert indices_left.shape == (
+                        BSZ,
+                        BDST_SCAN,
+                        HEAD,
+                        indices_left.shape[-1],
                     )
-                    
-                    assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
-                    
+
                     # k_temp = args.gather_k_from_paged_cache(
                     #     chunk_size=1,
                     #     disable_gqa=False,
                     #     gqa_q=q,
                     # )
                     scores = compute_scores_landmark(
-                        q=q[..., :NOPE_HID], 
-                        # k=k_temp, 
+                        q=q[..., :NOPE_HID],
+                        # k=k_temp,
                         # k_cache=None,
-                        k=k[..., :NOPE_HID] if k is not None else k, 
-                        k_cache=args.get_k_cache()[..., :NOPE_HID] if args.get_k_cache() is not None else None,
+                        k=k[..., :NOPE_HID] if k is not None else k,
+                        k_cache=(
+                            args.get_k_cache()[..., :NOPE_HID]
+                            if args.get_k_cache() is not None
+                            else None
+                        ),
                         block_table=args.block_table,
-                        position_ids=args.position_ids, 
+                        position_ids=args.position_ids,
                         indices_left=indices_left,
                         landmarks=landmarks,
                         cos=args.rope_cos,
@@ -504,11 +528,13 @@ def dual_stage_quadratic_hip_attention(
                         CHUNK_SIZE=stage_info.stage_chunk_size,
                         SLIDING_WINDOW_SIZE=args.sliding_window_size,
                     )
-                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0, f'{args.sink_token_size} % {stage_info.stage_chunk_size}'
+                    assert (
+                        args.sink_token_size % stage_info.stage_chunk_size
+                    ) == 0, f"{args.sink_token_size} % {stage_info.stage_chunk_size}"
                     # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
-                    
-                    out_scores[:, :, :, :scores.shape[-1]] = scores
-                    out_scores[:, :, :, scores.shape[-1]:].fill_(float('-inf'))
+
+                    out_scores[:, :, :, : scores.shape[-1]] = scores
+                    out_scores[:, :, :, scores.shape[-1] :].fill_(float("-inf"))
                     # indices_left = (indices_left + indices_right) // 2
                     # indices_right = indices_left.clone()
 
@@ -791,7 +817,7 @@ def dual_stage_quadratic_hip_attention(
                         args,
                         chunk_count,
                         BLOCK_CHUNK,
-                        TDST, 
+                        TDST,
                         BLOCK_SIZE_Q,
                         STAGE_STRIDE,
                         HEAD,
@@ -815,9 +841,14 @@ def dual_stage_quadratic_hip_attention(
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
                 if (
                     # always reduce the head.
-                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "1") or 
+                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "1")
+                    or
                     # reduce only when decode. this is for handling flash-decode kernel.
-                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "2" and BDST == 1)
+                    (
+                        os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE)
+                        == "2"
+                        and BDST == 1
+                    )
                 ):
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
@@ -1000,8 +1031,8 @@ def dual_stage_quadratic_hip_attention(
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
             if (
-                DEBUG 
-                and DEBUG_RENDER 
+                DEBUG
+                and DEBUG_RENDER
                 and not torch.cuda.is_current_stream_capturing()
                 and get_local_rank() == 0
             ):
@@ -1180,10 +1211,15 @@ def dual_stage_quadratic_hip_attention(
             debug = debug.astype(np.uint8)
             debug = np.repeat(debug[:, :, None], 3, axis=2)
             cv2.putText(
-                debug, f"Layer: {args.layer_id}", (320, 256), 
-                cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2
+                debug,
+                f"Layer: {args.layer_id}",
+                (320, 256),
+                cv2.FONT_HERSHEY_PLAIN,
+                2,
+                (0, 255, 0),
+                2,
             )
-            
+
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
@@ -1378,7 +1414,7 @@ def dual_stage_quadratic_hip_attention(
         )
     elif args.sliding_window_size > 0:
         args.sliding_window_size += args.block_size_q
-    
+
     if flatten_paged_cache:
         k = None
         v = None
@@ -1412,7 +1448,7 @@ def dual_stage_quadratic_hip_attention(
     #     print('context', context[0, :, DEBUG_HEAD, :], context.shape)
     #     print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
     #     print('ks', ks[0 + DEBUG_HEAD, -1], ks.shape)
-    
+
     metadata = HiPAttentionOutputMetadata(
         indices=indices,
         ks=ks,
