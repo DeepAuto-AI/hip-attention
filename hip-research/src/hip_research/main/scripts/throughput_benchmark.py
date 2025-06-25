@@ -16,6 +16,7 @@ import itertools
 import json
 import math
 import os
+import random
 import time
 import traceback
 from dataclasses import dataclass
@@ -158,7 +159,7 @@ def shuffle(lst):
 
 
 def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
-    header = "There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
+    header = f"{random.randint(0, 1000)} There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
     passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
     footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
     filler = (
@@ -170,15 +171,22 @@ def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
         + " "
     )
     len_filler = tokenizer(filler, return_tensors="pt").input_ids.shape[-1]
-    num_filler = math.ceil(seq_len * 1024 / len_filler * 0.95)
+    num_filler = math.ceil(seq_len * 1024 / len_filler * 1.2)
 
     text = (
         header
-        + filler * (num_filler // 2)
+        + filler * (num_filler // 4)
         + passkey
-        + filler * (num_filler // 2)
+        + filler * ((num_filler // 4) * 3)
         + footer
     )
+
+    input_ids = tokenizer.encode(text)
+    if len(input_ids) > ((seq_len - 1) * 1024):
+        input_ids = (
+            input_ids[: (seq_len - 1) * 512] + input_ids[-((seq_len - 1) * 512) :]
+        )
+    text = tokenizer.decode(input_ids)
 
     return [
         {
@@ -232,6 +240,7 @@ def benchmark(
                 False,
             )
         # sample
+        example = get_random_example(tokenizer, dataset, seq_len)
         result = stream_chat_completion(
             endpoint, example, seq_len * 1024, decode_len, num_concurrent, verbose
         )
