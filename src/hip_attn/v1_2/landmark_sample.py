@@ -35,7 +35,11 @@ else:
         )
         for BLOCK_TSRC in [64, 128]
         for BLOCK_TDST in [64, 128]
-        for s in [3, 4, 7]
+        for s in [
+            1,
+            3,
+            4,
+        ]
         for w in [4, 8]
     ]
 
@@ -46,7 +50,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["T"])
+@triton.autotune(list(filter(keep, configs)), key=["HID", "T"])
 @triton.jit
 def _sw_score_sample(
     Q,

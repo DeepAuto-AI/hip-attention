@@ -148,6 +148,7 @@ def forward_paged_hip(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
@@ -313,6 +314,7 @@ def forward_paged_hip(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
                 )
                 metadata_new.append(metadata_req)
@@ -356,6 +358,7 @@ def forward_paged_hip(
             query_for_mask=query_for_mask,
             diag_sliding_window_indices=diag_sliding_window_indices,
             sliding_window_size=sliding_window_size,
+            sliding_window_sink=sliding_window_sink,
             using_chunked_sliding_window=using_chunked_sliding_window,
         )
 
@@ -394,6 +397,7 @@ def _forward_paged_hip_validate(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
@@ -469,6 +473,7 @@ def _forward_paged_hip_validate(
         query_for_mask=query_for_mask,
         diag_sliding_window_indices=diag_sliding_window_indices,
         sliding_window_size=sliding_window_size,
+        sliding_window_sink=sliding_window_sink,
         using_chunked_sliding_window=using_chunked_sliding_window,
     )
 
@@ -503,6 +508,7 @@ def _forward_paged_hip_validate(
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
                 sliding_window_size=sliding_window_size,
+                sliding_window_sink=sliding_window_sink,
                 using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
@@ -539,6 +545,7 @@ def _forward_paged_hip_validate(
                 query_for_mask=query_for_mask,
                 diag_sliding_window_indices=diag_sliding_window_indices,
                 sliding_window_size=sliding_window_size,
+                sliding_window_sink=sliding_window_sink,
                 using_chunked_sliding_window=using_chunked_sliding_window,
             )
 
@@ -615,6 +622,7 @@ def _forward_paged_hip_validate(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
                 )
 
@@ -650,6 +658,7 @@ def _forward_paged_hip_validate(
                     query_for_mask=query_for_mask,
                     diag_sliding_window_indices=diag_sliding_window_indices,
                     sliding_window_size=sliding_window_size,
+                    sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
                 )
                 err_uvm = sse(o, o_uvm)
@@ -717,6 +726,7 @@ def _forward_paged_hip(
     query_for_mask: Optional[torch.Tensor] = None,
     diag_sliding_window_indices: Optional[torch.Tensor] = None,
     sliding_window_size: Optional[int] = -1,
+    sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
@@ -736,7 +746,7 @@ def _forward_paged_hip(
         else:
             layer_config = hip_config.prefill_layers[layer_id]
     else:
-        assert dst_seq_len == 1
+        # assert dst_seq_len == 1
         if len(hip_config.layers) == 2:
             layer_config = hip_config.layers[0 if is_dense else 1]
         else:
@@ -775,13 +785,14 @@ def _forward_paged_hip(
         raise Exception()
     is_gemma = hidden_size > 128
 
+    # NOTE this is not needed when offload cache is not needed right..?
     require_cache_statistics = False
     if cached_metadata is None:
-        require_cache_statistics = True
+        require_cache_statistics = offload_cache is not None
     elif cached_metadata.indices is None:
-        require_cache_statistics = True
+        require_cache_statistics = offload_cache is not None
     elif os.getenv("HIP_DISABLE_COMPUTE_STATISTICS", "1") == "0":
-        require_cache_statistics = True
+        require_cache_statistics = offload_cache is not None
 
     args = HiPAttentionArgs(
         k_cache=(
@@ -930,7 +941,9 @@ def _forward_paged_hip(
     sliding_window_size = os.getenv("HIP_DEBUG_SLLM_WINDOW", sliding_window_size)
     if isinstance(sliding_window_size, str):
         sliding_window_size = int(sliding_window_size)
-    sliding_window_sink = int(os.getenv("HIP_DEBUG_SLLM_SINK", 0))
+    sliding_window_sink = int(
+        os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
+    )
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)

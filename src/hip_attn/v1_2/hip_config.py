@@ -499,3 +499,12 @@ class HiPAttentionConfig:
             self.mask_refresh_interval = [
                 self.mask_refresh_interval,
             ] * num_stages
+
+        assert (
+            self.block_sparse_block_size_q
+            <= self.layers[-1].stages[-1].stage_block_size_q
+        )
+        assert (
+            self.block_sparse_block_size_q
+            <= self.prefill_layers[-1].stages[-1].stage_block_size_q
+        )

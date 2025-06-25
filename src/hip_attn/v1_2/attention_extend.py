@@ -78,7 +78,7 @@ def get_block_sparse_backend(
 
     # Use flashdecode
     if (
-        (q.shape[1] == 1)
+        (q.shape[1] < int(os.getenv("HIP_FLASHDECODE_THRESH", "32")))
         and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
         and (not args.disable_flashdecode)
     ):
@@ -179,7 +179,9 @@ def dual_stage_quadratic_hip_attention(
     #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
     # )
 
-    if not args.is_decode:
+    require_state = args.using_landmark
+
+    if require_state and (not args.is_decode):
         # if q.shape[1] > 1: print('using cached state')
         if (cached_metadata is not None) and (cached_metadata.state is not None):
             state = cached_metadata.state
@@ -449,10 +451,13 @@ def dual_stage_quadratic_hip_attention(
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
                     args.using_landmark
+                    and (not args.is_decode)
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
                     # and (args.layer_id > 300)
                 ):
+                    assert not torch.cuda.is_current_stream_capturing()
+
                     if triton.next_power_of_2(q.shape[-1]) > q.shape[-1]:
                         NOPE_HID = triton.next_power_of_2(q.shape[-1]) // 2
                     else:
@@ -1398,10 +1403,17 @@ def dual_stage_quadratic_hip_attention(
         args.using_extend = args.using_extend and True
 
         assert cached_metadata is not None
-        indices = cached_metadata.indices.clone()
-        ks = cached_metadata.ks.clone()
-        ks_count = cached_metadata.ks_count.clone()
-        ks_start_end = cached_metadata.ks_start_end.clone()
+        require_cache_clone = False
+        if require_cache_clone:
+            indices = cached_metadata.indices.clone()
+            ks = cached_metadata.ks.clone()
+            ks_count = cached_metadata.ks_count.clone()
+            ks_start_end = cached_metadata.ks_start_end.clone()
+        else:
+            indices = cached_metadata.indices
+            ks = cached_metadata.ks
+            ks_count = cached_metadata.ks_count
+            ks_start_end = cached_metadata.ks_start_end
 
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
 

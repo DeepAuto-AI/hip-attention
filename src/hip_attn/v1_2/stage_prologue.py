@@ -6,6 +6,7 @@ from .utils import capture
 
 
 @capture
+@torch.compile
 def stage_prologue(
     q: torch.Tensor,
     indices_left: torch.Tensor,
