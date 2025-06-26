@@ -258,7 +258,9 @@ class HiPMetadataCachePool:
         cached_stages: Optional[int],
         block_size_q: int = 64,
     ) -> Optional[HiPAttentionOutputMetadata]:
-        assert triton.cdiv(tdst, block_size_q) == batch_size
+        assert (
+            triton.cdiv(tdst // batch_size, block_size_q) == 1
+        ), f"triton.cdiv({tdst} // {batch_size}, {block_size_q}) == 1"
 
         if (cached_stages is None) or (
             cached_stages == len(self.layer_configs[layer_id].stages)
@@ -318,7 +320,7 @@ class HiPMetadataCachePool:
         metadata: HiPAttentionOutputMetadata,
         block_size_q: int = 64,
     ):
-        assert triton.cdiv(tdst, block_size_q) == batch_size
+        assert triton.cdiv(tdst // batch_size, block_size_q) == 1
 
         self.set_buffer(layer_id, "indices", metadata.indices)
         self.set_buffer(layer_id, "ks", metadata.ks)
