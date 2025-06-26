@@ -116,6 +116,7 @@ class HiPAttentionPerLayerConfig:
     second_stage_k: int = 2048
     sliding_window_size: int = 1024
     sink_token_size: int = 256
+    landmark_stage_k: int = field(default_factory=lambda: [1, 1, 1])
     sa_extend_backend: str = "streaming"
     scan_extend_backend: Optional[str] = None
     stages: list[ScanStage] = field(default_factory=lambda: _DEFAULT_STAGES)
@@ -143,6 +144,9 @@ class HiPAttentionPerLayerConfig:
             if "stages" in parsed_json:
                 self.stages = [ScanStage(**stage) for stage in parsed_json["stages"]]
                 parsed_json.pop("stages")
+            if "landmark_stage_k" in parsed_json:
+                self.landmark_stage_k = parsed_json["landmark_stage_k"]
+                parsed_json.pop("landmark_stage_k")
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
 

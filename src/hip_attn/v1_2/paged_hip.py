@@ -854,6 +854,7 @@ def _forward_paged_hip(
         v_hidden_dim=v_hidden_dim,
         using_chunked_sliding_window=using_chunked_sliding_window,
         is_decode=is_decode,
+        landmark_stage_k=layer_config.landmark_stage_k,
     )
 
     using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
