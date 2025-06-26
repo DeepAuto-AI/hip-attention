@@ -280,9 +280,17 @@ def landmark_sample(
         )
 
         # print(q_for_landmark.shape, HEAD, HEAD_KV, TDST, triton.cdiv(TDST, BLOCK_TSRC), position_ids_for_landmark.shape)
-        # plt.clf()
-        # plt.plot(landmark_scores[0, 0,].cpu().numpy())
-        # plt.savefig('dummy_after.png')
+        if DEBUG:
+            plt.clf()
+            plt.plot(
+                landmark_scores[
+                    0,
+                    0,
+                ]
+                .cpu()
+                .numpy()
+            )
+            plt.savefig("dummy_landmark.png")
 
         if state is not None:
             q_block_index = args.block_table.gather(

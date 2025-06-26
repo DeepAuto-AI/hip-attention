@@ -79,6 +79,7 @@
         {
             "sliding_window_size": 1024,
             "second_stage_k": 1024,
+            "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
             "scan_extend_backend": "streaming",
             "stages": [
@@ -109,6 +110,7 @@
             "sliding_window_size": 512,
             "second_stage_k": 1024,
             "sink_token_size": 64,
+            "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
             "scan_extend_backend": "relative",
             "stages": [
