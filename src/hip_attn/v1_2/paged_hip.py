@@ -794,6 +794,9 @@ def _forward_paged_hip(
     elif os.getenv("HIP_DISABLE_COMPUTE_STATISTICS", "1") == "0":
         require_cache_statistics = offload_cache is not None
 
+    if torch.cuda.is_current_stream_capturing():
+        assert is_decode
+
     args = HiPAttentionArgs(
         k_cache=(
             k_cache.view(torch.uint8)

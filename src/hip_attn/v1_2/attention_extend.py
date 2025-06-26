@@ -77,6 +77,7 @@ def get_block_sparse_backend(
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
+    # print(q.shape, int(os.getenv("HIP_FLASHDECODE_THRESH", "32")), (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1"), (not args.disable_flashdecode))
     if (
         (q.shape[1] < int(os.getenv("HIP_FLASHDECODE_THRESH", "32")))
         and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
@@ -844,16 +845,18 @@ def dual_stage_quadratic_hip_attention(
                     )
 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
+                HEAD_REDUCE_MODE = os.getenv(
+                    "HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE
+                )
                 if (
                     # always reduce the head.
-                    (os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "1")
+                    (HEAD_REDUCE_MODE == "1")
                     or
                     # reduce only when decode. this is for handling flash-decode kernel.
-                    (
-                        os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE)
-                        == "2"
-                        and BDST == 1
-                    )
+                    (HEAD_REDUCE_MODE == "2" and BDST == 1)
+                    or
+                    # reduce only within tp. this will be incorrect in tp size
+                    (HEAD_REDUCE_MODE == "3")
                 ):
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
@@ -862,6 +865,7 @@ def dual_stage_quadratic_hip_attention(
                     if (
                         SGLANG_DIST_ACTIVATED
                         and get_tensor_model_parallel_world_size() > 1
+                        and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
                         out_scores_tp = out_scores
                         out_scores = (
