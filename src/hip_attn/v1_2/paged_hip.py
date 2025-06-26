@@ -2179,7 +2179,7 @@ def _forward_paged_hip(
 
         seq_thresh_fa3 = min(
             args.model_context_length,
-            int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 32 * 1024)),
+            int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 0 * 1024)),
         )
 
         context_fa3 = None
