@@ -45,6 +45,10 @@
     - [32K -\> 5M Context (with cache offloading)](#32k---5m-context-with-cache-offloading)
       - [Local](#local-11)
       - [Docker](#docker-9)
+  - [`deepseek-ai/DeepSeek-V3`](#deepseek-aideepseek-v3)
+    - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading)
+      - [Local](#local-12)
+      - [Docker](#docker-10)
 
 ## Prerequisites
 
