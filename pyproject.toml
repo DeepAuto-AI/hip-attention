@@ -81,6 +81,7 @@ flash-attn = [
 ]
 sglang = [
     # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python"
+    # To update sglang, run `uv lock --upgrade-package sglang`
     { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" },
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },
