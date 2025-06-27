@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hip-attn"  # Name of package when installed using pip
-version = "1.2.4"
+version = "1.2.5"
 description = "HiP Attention"
 authors = [
     { name="DeepAuto.ai", email="contact@deepauto.ai" },
@@ -94,6 +94,11 @@ no-build-isolation-package = ["flash-attn"]
 [[tool.uv.index]]
 name = "flashinfer_cu124_torch26"
 url = "https://flashinfer.ai/whl/cu124/torch2.6/"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer_cu126_torch26"
+url = "https://flashinfer.ai/whl/cu126/torch2.6/"
 explicit = true
 
 [tool.uv.workspace]

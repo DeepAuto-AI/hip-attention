@@ -20,7 +20,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv python install 3.9
+RUN uv python install 3.12
 
 WORKDIR /sgl-workspace
 
