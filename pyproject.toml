@@ -45,8 +45,8 @@ dependencies = [
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",
-    # Multimodal
-    "opencv-python>=4.11.0.86",
+    # Debugging, multimodal
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [project.urls]
@@ -69,7 +69,7 @@ sglang = [
 [tool.uv.sources]
 hip-attn = { workspace = true }
 flashinfer-python = [
-  { index = "flashinfer_cu126_torch26" },
+  { index = "flashinfer_cu124_torch26" },
 ]
 flash-attn = [
     # pip format: "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
@@ -80,9 +80,9 @@ flash-attn = [
     { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.13'" },
 ]
 sglang = [
-    # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/release#subdirectory=python"
+    # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/dev#subdirectory=python"
     # To update sglang, run `uv lock --upgrade-package sglang`
-    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/release" },
+    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/dev" },
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },
 ]
@@ -92,8 +92,8 @@ hip-research = { workspace = true }
 no-build-isolation-package = ["flash-attn"]
 
 [[tool.uv.index]]
-name = "flashinfer_cu126_torch26"
-url = "https://flashinfer.ai/whl/cu126/torch2.6/"
+name = "flashinfer_cu124_torch26"
+url = "https://flashinfer.ai/whl/cu124/torch2.6/"
 explicit = true
 
 [tool.uv.workspace]
