@@ -1,40 +1,67 @@
 import json
 import os
+import warnings
 from dataclasses import InitVar, dataclass, field
 from typing import List, Optional, Union
 
 from hip_attn.v1_2.attention_metadata import ScanStage
 
-HIP_CONFIG_PRESET = os.getenv('HIP_CONFIG_PRESET', 'default')
+HIP_CONFIG_PRESET = os.getenv("HIP_CONFIG_PRESET", "default")
 
 HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
-    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
+    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
 )
+HIP_DEBUG_DELTA_EXP = "exp" in os.getenv("HIP_DELTA_ATTENTION_ARGS", "")
 
 if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
-    _DEFAULT_STAGES = [
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=2,
-            stage_chunk_size=64,
-            stage_k=None,
-            stage_stride=1,
-        ),
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=2,
-            stage_chunk_size=16,
-            stage_k=32768,
-            stage_stride=1,
-        ),
-        ScanStage(
-            stage_block_size_q=64,
-            stage_block_stride_q=1,
-            stage_chunk_size=4,
-            stage_k=8192,
-            stage_stride=1,
-        ),
-    ]
+    if HIP_DEBUG_DELTA_EXP:
+        _DEFAULT_STAGES = [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=64,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=16,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=4,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ]
+    else:
+        _DEFAULT_STAGES = [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=4,
+                stage_chunk_size=64,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=4,
+                stage_chunk_size=16,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=4,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ]
     _DEFAULT_STAGES_DECODE = [
         ScanStage(
             stage_block_size_q=64,
@@ -89,6 +116,7 @@ class HiPAttentionPerLayerConfig:
     second_stage_k: int = 2048
     sliding_window_size: int = 1024
     sink_token_size: int = 256
+    landmark_stage_k: int = field(default_factory=lambda: [1, 1, 1])
     sa_extend_backend: str = "streaming"
     scan_extend_backend: Optional[str] = None
     stages: list[ScanStage] = field(default_factory=lambda: _DEFAULT_STAGES)
@@ -116,26 +144,50 @@ class HiPAttentionPerLayerConfig:
             if "stages" in parsed_json:
                 self.stages = [ScanStage(**stage) for stage in parsed_json["stages"]]
                 parsed_json.pop("stages")
+            if "landmark_stage_k" in parsed_json:
+                self.landmark_stage_k = parsed_json["landmark_stage_k"]
+                parsed_json.pop("landmark_stage_k")
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
 
 
-if HIP_CONFIG_PRESET == 'default':
+if HIP_CONFIG_PRESET == "default":
     _DEFAULT_LAEYRS = [
         HiPAttentionPerLayerConfig(
             # sliding_window_size = 777, # NOTE: debugging sw
             second_stage_k=4096,
             sa_extend_backend="streaming",
             scan_extend_backend="streaming",
+            stages=_DEFAULT_STAGES,
         ),
         HiPAttentionPerLayerConfig(
             # sliding_window_size = 777, # NOTE: debugging sw
+            sliding_window_size=1024,
             second_stage_k=2048,
             sa_extend_backend="streaming",
             scan_extend_backend="relative",
+            stages=_DEFAULT_STAGES,
         ),
     ]
     if HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+        _DEFAULT_LAEYRS = [
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                second_stage_k=4096,
+                sa_extend_backend="streaming",
+                scan_extend_backend="streaming",
+                stages=_DEFAULT_STAGES,
+            ),
+            HiPAttentionPerLayerConfig(
+                # sliding_window_size = 777, # NOTE: debugging sw
+                sliding_window_size=1024,
+                second_stage_k=2048,
+                sa_extend_backend="streaming",
+                scan_extend_backend="relative",
+                stages=_DEFAULT_STAGES,
+            ),
+        ]
+
         _DEFAULT_LAEYRS_DECODE = [
             HiPAttentionPerLayerConfig(
                 # sliding_window_size = 777, # NOTE: debugging sw
@@ -154,7 +206,7 @@ if HIP_CONFIG_PRESET == 'default':
         ]
     else:
         _DEFAULT_LAEYRS_DECODE = _DEFAULT_LAEYRS
-elif HIP_CONFIG_PRESET == 'llama4':
+elif HIP_CONFIG_PRESET == "llama4":
     _DEFAULT_LAEYRS = [
         HiPAttentionPerLayerConfig(
             second_stage_k=4096,
@@ -204,7 +256,7 @@ elif HIP_CONFIG_PRESET == 'llama4':
             stages=_DEFAULT_STAGES_DECODE,
         ),
     ]
-elif HIP_CONFIG_PRESET == 'qwen3':
+elif HIP_CONFIG_PRESET == "qwen3":
     _DEFAULT_LAEYRS = [
         HiPAttentionPerLayerConfig(
             second_stage_k=4096,
@@ -280,12 +332,19 @@ elif HIP_CONFIG_PRESET == 'qwen3':
         ),
     ]
 else:
-    raise Exception(f'unknown preset `{HIP_CONFIG_PRESET}`')
+    raise Exception(f"unknown preset `{HIP_CONFIG_PRESET}`")
 
 
 @dataclass
 class HiPAttentionConfig:
-    dense_layers: list[int] = field(default_factory=lambda: [0, 1, 2, 3,])
+    dense_layers: list[int] = field(
+        default_factory=lambda: [
+            0,
+            1,
+            2,
+            3,
+        ]
+    )
     block_sparse_block_size_q: int = 64
     metadata_cache_max_batch_size: int = 32
     mask_refresh_interval: Union[int, List[int]] = field(
@@ -356,21 +415,85 @@ class HiPAttentionConfig:
                 self.using_extend = parsed_json["using_extend"]
                 parsed_json.pop("using_extend")
             if "layers" in parsed_json:
-                self.layers = [
-                    HiPAttentionPerLayerConfig(parsed_json=layer)
-                    for layer in parsed_json["layers"]
-                ]
+                if parsed_json["layers"] is None:
+                    self.layers = None
+                else:
+                    self.layers = [
+                        HiPAttentionPerLayerConfig(parsed_json=layer)
+                        for layer in parsed_json["layers"]
+                    ]
                 parsed_json.pop("layers")
-            if self.prefill_layers is None:
-                self.prefill_layers = self.layers
             if "prefill_layers" in parsed_json:
-                self.prefill_layers = [
-                    HiPAttentionPerLayerConfig(parsed_json=layer)
-                    for layer in parsed_json["prefill_layers"]
-                ]
+                if parsed_json["prefill_layers"] is None:
+                    self.prefill_layers = None
+                else:
+                    self.prefill_layers = [
+                        HiPAttentionPerLayerConfig(parsed_json=layer)
+                        for layer in parsed_json["prefill_layers"]
+                    ]
                 parsed_json.pop("prefill_layers")
+
+            # FIXME following args are just temporary. need to be removed when features are stabled
+            if "__delta_attention_args" in parsed_json:
+                given_args = parsed_json["__delta_attention_args"]
+                if os.getenv("HIP_DELTA_ATTENTION_ARGS", given_args) != given_args:
+                    warnings.warn(
+                        "envvar HIP_DELTA_ATTENTION_ARGS is overrided by hip attention args"
+                    )
+                os.environ["HIP_DELTA_ATTENTION_ARGS"] = given_args
+                parsed_json.pop("__delta_attention_args")
+            if "__using_dense_prefill" in parsed_json:
+                given_args = parsed_json["__using_dense_prefill"]
+                if os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", given_args) != given_args:
+                    warnings.warn(
+                        "envvar HIP_DEBUG_USING_DENSE_PREFILL is overrided by hip attention args"
+                    )
+                os.environ["HIP_DEBUG_USING_DENSE_PREFILL"] = "1" if given_args else "1"
+                parsed_json.pop("__using_dense_prefill")
+            if "__head_reduce" in parsed_json:
+                given_args = parsed_json["__head_reduce"]
+                if os.getenv("HIP_HEAD_REDUCE", given_args) != given_args:
+                    warnings.warn(
+                        "envvar HIP_HEAD_REDUCE is overrided by hip attention args"
+                    )
+                assert int(str(given_args)) == given_args
+                os.environ["HIP_HEAD_REDUCE"] = str(given_args)
+                parsed_json.pop("__head_reduce")
+            if "__using_landmark" in parsed_json:
+                given_args = parsed_json["__using_landmark"]
+                if (
+                    os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", given_args)
+                    != given_args
+                ):
+                    warnings.warn(
+                        "envvar HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE is overrided by hip attention args"
+                    )
+                assert (int("1" if given_args else "0") == 1) == given_args
+                os.environ["HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE"] = (
+                    "1" if given_args else "0"
+                )
+                parsed_json.pop("__using_landmark")
+            if "__last_dense" in parsed_json:
+                given_args = parsed_json["__last_dense"]
+                if os.getenv("HIP_DEBUG_LAST_DENSE", given_args) != given_args:
+                    warnings.warn(
+                        "envvar HIP_DEBUG_LAST_DENSE is overrided by hip attention args"
+                    )
+                assert int(str(given_args)) == given_args
+                os.environ["HIP_DEBUG_LAST_DENSE"] = str(given_args)
+                parsed_json.pop("__last_dense")
+
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
+
+        if (self.prefill_layers is None) and (self.layers is not None):
+            self.prefill_layers = self.layers
+        elif (self.prefill_layers is not None) and (self.layers is None):
+            self.layers = self.prefill_layers
+        elif (self.prefill_layers is None) and (self.layers is None):
+            raise Exception("`prefill_layers` or `layers` should be provided")
+        else:
+            pass  # okay
 
         num_stages = len(self.layers[0].stages)
         for layer_config in self.layers:
@@ -380,3 +503,12 @@ class HiPAttentionConfig:
             self.mask_refresh_interval = [
                 self.mask_refresh_interval,
             ] * num_stages
+
+        assert (
+            self.block_sparse_block_size_q
+            <= self.layers[-1].stages[-1].stage_block_size_q
+        )
+        assert (
+            self.block_sparse_block_size_q
+            <= self.prefill_layers[-1].stages[-1].stage_block_size_q
+        )

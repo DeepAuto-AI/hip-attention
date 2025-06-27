@@ -10,6 +10,7 @@ from torch import Tensor
 
 from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention_cuda_step
 from hip_attn.v1_2.attention_metadata import safe_stride
+from hip_attn.v1_2.utils import capture
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ MAX_INT: tl.constexpr = 2_147_483_647
 def load_queries(
     cur_batch,
     cur_head,
+    idx_tdst,
     offs_d,
     mask_h,
     mask_d,
@@ -51,9 +53,9 @@ def load_queries(
 ):
     offs_q = (
         cur_batch.to(tl.int64) * stride_q_bsz
-        + 0 * stride_q_tdst
-        + cur_head[:, None] * stride_q_head
-        + offs_d[None, :] * stride_q_hid
+        + idx_tdst * stride_q_tdst
+        + cur_head[:, None].to(tl.int64) * stride_q_head
+        + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
         Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
@@ -88,7 +90,7 @@ def load_queries(
             rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(q.dtype)
 
         # rope_tdst = cur_batch_seq_len - 1
-        if EXTEND_BACKEND == 'streaming':
+        if EXTEND_BACKEND == "streaming":
             rope_tdst = cur_batch_seq_len - 1
             activate_len = sink_token_size + sliding_window_size + sparse_token_size
             rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
@@ -99,9 +101,9 @@ def load_queries(
         queries_rot = tl.load(
             Q
             + cur_batch.to(tl.int64) * stride_q_bsz
-            + 0 * stride_q_tdst
-            + cur_head[:, None] * stride_q_head
-            + rope_rot_idx[None, :] * stride_q_hid,
+            + idx_tdst * stride_q_tdst
+            + cur_head[:, None].to(tl.int64) * stride_q_head
+            + rope_rot_idx[None, :].to(tl.int64) * stride_q_hid,
             mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
             other=0.0,
         )  # [BLOCK_H, BLOCK_DMODEL]
@@ -111,7 +113,7 @@ def load_queries(
         cos_new = tl.load(
             COS
             + rope_tdst.to(tl.int64) * stride_cos_t
-            + cos_sin_idx[None, :] * stride_cos_hid,
+            + cos_sin_idx[None, :].to(tl.int64) * stride_cos_hid,
             mask=mask_d[None, :] & rope_mask[None, :],
             other=0.0,
         ).to(
@@ -120,7 +122,7 @@ def load_queries(
         sin_new = tl.load(
             SIN
             + rope_tdst.to(tl.int64) * stride_sin_t
-            + cos_sin_idx[None, :] * stride_sin_hid,
+            + cos_sin_idx[None, :].to(tl.int64) * stride_sin_hid,
             mask=mask_d[None, :] & rope_mask[None, :],
             other=0.0,
         ).to(
@@ -168,11 +170,13 @@ def _fwd_kernel_stage1(
     stride_ks_start_end_g,
     ATTN_LOGITS,
     stride_attn_logits_bsz,
+    stride_attn_logits_tdst,
     stride_attn_logits_head,
     stride_attn_logits_kv_split,
     stride_attn_logits_hid,
     q_head_num: tl.constexpr,
     BK: tl.constexpr,
+    num_query,
     MAX_TDST,
     MAX_TSRC,
     kv_group_num: tl.constexpr,
@@ -254,10 +258,28 @@ def _fwd_kernel_stage1(
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0).to(tl.int64)
-    cur_head_id = tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    TOTAL_HEAD_BLOCKS = tl.cdiv(q_head_num, tl.minimum(BLOCK_H, kv_group_num))
+    idx_head_block = pid % TOTAL_HEAD_BLOCKS
+    pid = pid // TOTAL_HEAD_BLOCKS
+
+    TOTAL_SPLITS = NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
+    idx_split = pid % TOTAL_SPLITS
+    pid = pid // TOTAL_SPLITS
+
+    idx_tdst = pid % num_query
+    idx_batch = pid // num_query
+
+    # cur_batch = tl.program_id(0).to(tl.int64)
+    # cur_head_id = tl.program_id(1).to(tl.int64)
+    # cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
+    # split_kv_id = tl.program_id(2).to(tl.int64)
+
+    cur_batch = idx_batch
+    cur_head_id = idx_head_block
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
-    split_kv_id = tl.program_id(2).to(tl.int64)
+    split_kv_id = idx_split
+
     sink_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS
     sliding_split_kv_id = split_kv_id - NUM_SPARSE_KV_SPLITS - NUM_SINK_KV_SPLITS
     sparse_token_size = BK * BLOCK_SIZE_K
@@ -322,13 +344,14 @@ def _fwd_kernel_stage1(
     mask_dv = offs_dv < Lv
 
     cur_batch_seq_len = tl.load(
-        B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
+        B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + idx_tdst * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
     q_0 = load_queries(
         cur_batch,
         cur_head,
+        idx_tdst,
         offs_d_0,
         mask_h,
         mask_d_0,
@@ -360,6 +383,7 @@ def _fwd_kernel_stage1(
         q_1 = load_queries(
             cur_batch,
             cur_head,
+            idx_tdst,
             offs_d_1,
             mask_h,
             mask_d_1,
@@ -400,9 +424,13 @@ def _fwd_kernel_stage1(
     )
     range_end = tl.load(
         KS_START_END
-        + cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
-        + 0 * stride_ks_start_end_bdst
-        + 1 * stride_ks_start_end_g,
+        + (
+            (
+                cur_flattened_batch.to(tl.int64) * stride_ks_start_end_b
+                + 0 * stride_ks_start_end_bdst
+            )
+            + 1 * stride_ks_start_end_g
+        ),
         mask=cur_head_begin < q_head_num,
         other=0,
     )
@@ -419,7 +447,7 @@ def _fwd_kernel_stage1(
         split_kv_block_start = 0
         split_kv_block_end = 0
 
-    e_max = tl.full([BLOCK_H, 1], -float("inf"), dtype=tl.float32)  # m_i
+    e_max = tl.full([BLOCK_H, 1], float("-inf"), dtype=tl.float32)  # m_i
     e_sum = tl.full([BLOCK_H, 1], 1.0, dtype=tl.float32)  # l_i
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
@@ -435,7 +463,7 @@ def _fwd_kernel_stage1(
                     INDICES
                     + cur_flattened_batch.to(tl.int64) * stride_indices_b
                     + 0 * stride_indices_bdst
-                    + idx_bk * stride_indices_bk,
+                    + idx_bk.to(tl.int64) * stride_indices_bk,
                     mask=mask_bk & (cur_head_begin < q_head_num),
                     other=0,
                 )  # [BLOCK_BK]
@@ -804,7 +832,7 @@ def _fwd_kernel_stage1(
                     values,
                     idx_tsrc,
                     mask_tsrc,
-                    tl.zeros([1], dtype=tl.int32),
+                    tl.zeros([1], dtype=tl.int32) + idx_tdst,
                     tl.full((1,), 1, dtype=tl.int1),
                     acc,
                     e_sum,
@@ -827,13 +855,12 @@ def _fwd_kernel_stage1(
                     rope_range_end,
                     rope_is_neox_style,
                     model_context_length,
-
                     tl.reshape(
-                        idx_bk[:, None] * BLOCK_SIZE_K 
+                        idx_bk[:, None] * BLOCK_SIZE_K
                         + tl.arange(0, BLOCK_SIZE_K)[None, :],
-                        BLOCK_SIZE_K * BLOCK_BK
-                    ) + sink_token_size,
-
+                        BLOCK_SIZE_K * BLOCK_BK,
+                    )
+                    + sink_token_size,
                     cur_batch_seq_len,
                     offs_d_0,
                     offs_d_1,
@@ -1211,7 +1238,7 @@ def _fwd_kernel_stage1(
                 values,
                 idx_tsrc,
                 mask_tsrc,
-                tl.zeros([1], dtype=tl.int32),
+                tl.zeros([1], dtype=tl.int32) + idx_tdst,
                 tl.full((1,), 1, dtype=tl.int1),
                 acc,
                 e_sum,
@@ -1234,9 +1261,7 @@ def _fwd_kernel_stage1(
                 rope_range_end,
                 rope_is_neox_style,
                 model_context_length,
-
                 idx_tsrc,
-                
                 cur_batch_seq_len,
                 offs_d_0,
                 offs_d_1,
@@ -1614,10 +1639,10 @@ def _fwd_kernel_stage1(
             #     + (cur_batch_seq_len - 1 - sliding_window_size) // BLOCK_SIZE_K
             # )
             idx_rope = (
-                idx_tsrc 
-                - cur_batch_seq_len 
+                idx_tsrc
+                - cur_batch_seq_len
                 + sliding_window_size
-                + sink_token_size 
+                + sink_token_size
                 + sparse_token_size
             )
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
@@ -1630,7 +1655,7 @@ def _fwd_kernel_stage1(
                 values,
                 idx_tsrc,
                 mask_tsrc,
-                tl.zeros([1], dtype=tl.int32),
+                tl.zeros([1], dtype=tl.int32) + idx_tdst,
                 tl.full((1,), 1, dtype=tl.int1),
                 acc,
                 e_sum,
@@ -1671,25 +1696,27 @@ def _fwd_kernel_stage1(
     # Store results
     offs_mid_o = (
         cur_batch.to(tl.int64) * stride_attn_logits_bsz
-        + cur_head[:, None] * stride_attn_logits_head
-        + split_kv_id * stride_attn_logits_kv_split
-        + offs_dv[None, :] * stride_attn_logits_hid
+        + idx_tdst * stride_attn_logits_tdst
+        + cur_head[:, None].to(tl.int64) * stride_attn_logits_head
+        + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
+        + offs_dv[None, :].to(tl.int64) * stride_attn_logits_hid
     )
     tl.store(
         ATTN_LOGITS + offs_mid_o,
-        acc / e_sum,
+        value=acc / e_sum,
         mask=(mask_h[:, None]) & (mask_dv[None, :]),
     )
 
     offs_mid_o_1 = (
         cur_batch.to(tl.int64) * stride_attn_logits_bsz
-        + cur_head * stride_attn_logits_head
-        + split_kv_id * stride_attn_logits_kv_split
+        + idx_tdst * stride_attn_logits_tdst
+        + cur_head.to(tl.int64) * stride_attn_logits_head
+        + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
         + Lv * stride_attn_logits_hid
     )
     tl.store(
         ATTN_LOGITS + offs_mid_o_1[:, None],
-        e_max + tl.math.log2(e_sum),
+        value=e_max + tl.math.log2(e_sum),
         mask=mask_h[:, None],
     )
 
@@ -1717,29 +1744,62 @@ def decode_block_sparse_attention_stage1(
     offload_update_cache: bool,
 ):
     batch = q.shape[0]
-    BLOCK_H = 16
+    num_query = q.shape[1]
+    assert q.ndim == 4
+    BLOCK_H = max(16, q.shape[2])
+    NUM_SM = 144 + 16  # GH100 + Slack
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
-    token_chunk = triton.cdiv(total_tokens, 8)
+    MAX_PROGRAM = int(
+        os.getenv(
+            "SA_DECODE_MAX_PROGRAM", min(16, triton.cdiv(NUM_SM, batch * num_query))
+        )
+    )
+    token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
+
+    BLOCK_SIZE = min(args.block_size_k * BLOCK_BK, triton.next_power_of_2(token_chunk))
+    BLOCK_BK = max(
+        triton.cdiv(32, args.block_size_k), triton.cdiv(BLOCK_SIZE, args.block_size_k)
+    )
+
     NUM_SPARSE_KV_SPLITS = min(
-        12, triton.cdiv(args.second_stage_k, token_chunk)
+        MAX_PROGRAM,
+        max(
+            1 if args.second_stage_k > 0 else 0,
+            round(args.second_stage_k / token_chunk),
+        ),
     )  # TODO: apply from server args
-    NUM_SINK_KV_SPLITS = min(12, triton.cdiv(args.sink_token_size, token_chunk))
-    NUM_SLIDING_KV_SPLITS = min(12, triton.cdiv(args.sliding_window_size, token_chunk))
+    NUM_SINK_KV_SPLITS = min(
+        MAX_PROGRAM,
+        max(
+            1 if args.sink_token_size > 0 else 0,
+            round(args.sink_token_size / token_chunk),
+        ),
+    )
+    NUM_SLIDING_KV_SPLITS = min(
+        MAX_PROGRAM,
+        max(
+            1 if args.sliding_window_size > 0 else 0,
+            round(args.sliding_window_size / token_chunk),
+        ),
+    )
 
     NUM_TOTAL_KV_SPLITS = (
         NUM_SPARSE_KV_SPLITS + NUM_SINK_KV_SPLITS + NUM_SLIDING_KV_SPLITS
     )
+    # print('asdf', batch, num_query, NUM_TOTAL_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SPARSE_KV_SPLITS, NUM_SLIDING_KV_SPLITS)
+
     temp_attn_logits = torch.zeros(
-        (batch, head_num, NUM_TOTAL_KV_SPLITS, HID + 32 // 4),
+        (batch, num_query, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
         dtype=torch.float32,
         device=q.device,
     )
 
     grid = (
-        batch,
-        triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
-        NUM_TOTAL_KV_SPLITS,
+        batch
+        * num_query
+        * NUM_TOTAL_KV_SPLITS
+        * triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
     )
 
     if args.rope_range[0] == 0 and args.rope_range[1] == HID:
@@ -1765,9 +1825,10 @@ def decode_block_sparse_attention_stage1(
         ks_start_end,
         *safe_stride(ks_start_end, 3),
         temp_attn_logits,
-        *safe_stride(temp_attn_logits, 4),
+        *safe_stride(temp_attn_logits, 5),
         head_num,
         BK,
+        num_query,
         MAX_TDST,
         MAX_TSRC,
         kv_group_num,
@@ -1807,6 +1868,7 @@ def decode_block_sparse_attention_stage1(
 def _fwd_kernel_stage2(
     ATTN_LOGITS,
     stride_attn_logits_bsz,
+    stride_attn_logits_tdst,
     stride_attn_logits_head,
     stride_attn_logits_kv_split,
     stride_attn_logits_hid,
@@ -1823,10 +1885,11 @@ def _fwd_kernel_stage2(
     Lv: tl.constexpr,
 ):
     cur_batch = tl.program_id(0).to(tl.int64)
-    cur_head = tl.program_id(1).to(tl.int64)
+    idx_tdst = tl.program_id(1).to(tl.int64)
+    cur_head = tl.program_id(2).to(tl.int64)
 
     cur_batch_seq_len = tl.load(
-        B_SEQ_LEN + cur_batch.to(tl.int64) * stride_pos_bsz + 0 * stride_pos_tdst
+        B_SEQ_LEN + cur_batch.to(tl.int64) * stride_pos_bsz + idx_tdst * stride_pos_tdst
     )
 
     offs_d = tl.arange(0, BLOCK_DV)
@@ -1838,11 +1901,13 @@ def _fwd_kernel_stage2(
 
     offs_v = (
         cur_batch * stride_attn_logits_bsz
+        + idx_tdst * stride_attn_logits_tdst
         + cur_head * stride_attn_logits_head
         + offs_d * stride_attn_logits_hid
     )
     offs_logic = (
         cur_batch * stride_attn_logits_bsz
+        + idx_tdst * stride_attn_logits_tdst
         + cur_head * stride_attn_logits_head
         + Lv * stride_attn_logits_hid
     )
@@ -1851,14 +1916,14 @@ def _fwd_kernel_stage2(
         tv = tl.load(
             ATTN_LOGITS
             + offs_v.to(tl.int64)
-            + split_kv_id * stride_attn_logits_kv_split,
+            + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split,
             mask=mask_d,
             other=0.0,
         )
         tlogic = tl.load(
             ATTN_LOGITS
             + offs_logic.to(tl.int64)
-            + split_kv_id * stride_attn_logits_kv_split
+            + split_kv_id.to(tl.int64) * stride_attn_logits_kv_split
         )
         n_e_max = tl.maximum(tlogic, e_max)
 
@@ -1875,7 +1940,7 @@ def _fwd_kernel_stage2(
     tl.store(
         O
         + cur_batch.to(tl.int64) * stride_o_bsz
-        + 0 * stride_o_tdst
+        + idx_tdst * stride_o_tdst
         + cur_head * stride_o_head
         + offs_d * stride_o_hid,
         value=acc / e_sum,
@@ -1891,16 +1956,16 @@ def decode_block_sparse_attention_stage2(
     num_total_kv_splits,
     HID_V: int,
 ):
-    batch, head_num = q.shape[0], q.shape[2]
+    batch, num_query, head_num = q.shape[:3]
     Lv = HID_V
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     NUM_KV_SPLITS = num_total_kv_splits
 
-    grid = (batch, head_num)
+    grid = (batch, num_query, head_num)
     _fwd_kernel_stage2[grid](
         logits,
-        *safe_stride(logits, 4),
+        *safe_stride(logits, 5),
         o,
         *safe_stride(o, 4),
         b_seq_len,
@@ -1980,6 +2045,7 @@ def decode_block_sparse_attention_impl(
     return attn_logits
 
 
+@capture
 def decode_block_sparse_attention(
     q: Tensor,  # [1, 1 (TDST), 32 (Q_HEAD), 128]
     k: Optional[Tensor],  # None
@@ -2003,10 +2069,13 @@ def decode_block_sparse_attention(
     model_context_length: int = 131072,  # 131072
     extend_context_length: int = 131072,  # 196608
     offload_update_cache: bool = False,
+    return_running_statistics: bool = False,
 ):
+    assert not return_running_statistics
+
     BSZ, TDST, HEAD, HID = q.shape
 
-    assert TDST == 1, "TDST must be 1 for flashdecode"
+    assert TDST < args.block_sparse_block_size_q, "TDST must be 1 for flashdecode"
 
     if k is not None:
         _, TSRC, KV_HEAD, _ = k.shape
@@ -2028,7 +2097,12 @@ def decode_block_sparse_attention(
 
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
-    max_block_size = int(os.getenv("SA_BLOCK_SIZE", "16"))
+    max_block_size = int(
+        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+    )
+    if HID >= 512:
+        max_block_size = min(max_block_size, 32)
+
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if "SA_BLOCK_BK" in os.environ:

@@ -23,26 +23,43 @@ from hip_attn.v1_2.attention_metadata import (
     HiPAttentionCacheAccessStatistics,
     HiPAttentionOutputMetadata,
     HiPAttentionStageInputCache,
+    HiPAttentionState,
     NopStage,
     ScanStage,
     safe_stride,
 )
+from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
 from hip_attn.v1_2.compute_v_cos import compute_v_cos
 from hip_attn.v1_2.eval_stage import calculate_chunk_score
-from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask_cuda
+from hip_attn.v1_2.landmark_sample import landmark_sample
+from hip_attn.v1_2.scan_stage import chunk_controllable_sampling_mask
+from hip_attn.v1_2.stage_prologue import stage_prologue
 
 try:
+    import torch.distributed as dist
     from sglang.srt.distributed import (
+        get_tensor_model_parallel_rank,
         get_tensor_model_parallel_world_size,
+        split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
-        model_parallel_is_initialized,
+        tensor_model_parallel_all_reduce,
     )
 
-    SGLANG_DIST_AVAILABLE = model_parallel_is_initialized()
-except:
-    SGLANG_DIST_AVAILABLE = False
+    SGLANG_DIST_ACTIVATED = True
+except ImportError as ex:
+    SGLANG_DIST_ACTIVATED = False
+
+
+def get_local_rank() -> 0:
+    if SGLANG_DIST_ACTIVATED:
+        return get_tensor_model_parallel_rank()
+    else:
+        return 0
+
 
 _NUM_STREAMING_MULTIPROCESSOR = None
+
+DEFAULT_VALUE_HIP_HEAD_REDUCE = "1"
 
 
 def num_streaming_multiprocessor():
@@ -54,12 +71,15 @@ def num_streaming_multiprocessor():
     return _NUM_STREAMING_MULTIPROCESSOR
 
 
-def get_block_sparse_backend(args: HiPAttentionArgs, q: torch.Tensor):
+def get_block_sparse_backend(
+    args: HiPAttentionArgs, q: torch.Tensor
+) -> type(block_sparse_attention):
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
+    # print(q.shape, int(os.getenv("HIP_FLASHDECODE_THRESH", "32")), (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1"), (not args.disable_flashdecode))
     if (
-        (q.shape[1] == 1)
+        (q.shape[1] < int(os.getenv("HIP_FLASHDECODE_THRESH", "32")))
         and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
         and (not args.disable_flashdecode)
     ):
@@ -141,6 +161,10 @@ __logall_index = 0
 DEBUG_RENDER = os.getenv("HIP_DEBUG_RENDER", "1") == "1"
 
 
+from .utils import capture
+
+
+@capture
 def dual_stage_quadratic_hip_attention(
     q: Tensor,
     k: Optional[Tensor],
@@ -152,30 +176,41 @@ def dual_stage_quadratic_hip_attention(
     global DEBUG
     DEBUG_HEAD = -1
 
-    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE = (
-        os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "0") == "1"
-    )
+    # HIP_LANDMARK_BASED_SCAN_STAGE = (
+    #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
+    # )
+
+    require_state = args.using_landmark
+
+    if require_state and (not args.is_decode):
+        # if q.shape[1] > 1: print('using cached state')
+        if (cached_metadata is not None) and (cached_metadata.state is not None):
+            state = cached_metadata.state
+        else:
+            state = HiPAttentionState.from_args(q, args, k)
+    else:
+        state = None
 
     flatten_paged_cache = False
     if q.shape[1] == 1:
         pass
-    elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
-        # FIXME: just for dev
-        if k is None:
-            flatten_paged_cache = True
-            seq_len = args.position_ids.amax().item() + 1
-            k = args.gather_k_from_paged_cache(
-                chunk_size=args.stages[0].stage_chunk_size,
-                disable_gqa=True,
-                gqa_q=q,
-            )
-            k = k[:, :seq_len]
-            # v = args.gather_v_from_paged_cache(
-            #     chunk_size=args.stages[0].stage_chunk_size,
-            #     disable_gqa=True,
-            #     gqa_q=q,
-            # )
-            # v = v[:, :seq_len]
+    # elif HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE:
+    #     # FIXME: just for dev
+    #     if k is None:
+    #         flatten_paged_cache = True
+    #         seq_len = args.position_ids.amax().item() + 1
+    #         k = args.gather_k_from_paged_cache(
+    #             chunk_size=args.stages[0].stage_chunk_size,
+    #             disable_gqa=True,
+    #             gqa_q=q,
+    #         )
+    #         k = k[:, :seq_len]
+    #         # v = args.gather_v_from_paged_cache(
+    #         #     chunk_size=args.stages[0].stage_chunk_size,
+    #         #     disable_gqa=True,
+    #         #     gqa_q=q,
+    #         # )
+    #         # v = v[:, :seq_len]
 
     if args.q_mask is None:
         q_bsa = q
@@ -318,7 +353,7 @@ def dual_stage_quadratic_hip_attention(
             indices_left = last_stage_cache.indices_left.clone()
             indices_right = last_stage_cache.indices_right.clone()
             out_scores = last_stage_cache.out_scores.clone()
-        
+
         landmark_scores = None
 
         for i_stage, stage_info in enumerate(args.stages):
@@ -336,99 +371,28 @@ def dual_stage_quadratic_hip_attention(
                 # print('last cached stage', i_stage)
                 pass
             elif i_stage > 0:
-                assert (stage_k % chunk_size) == 0, f"{stage_k} % {chunk_size}"
-                indices_left = indices_left[..., : stage_k // chunk_size]
-                require_align = stage_info.require_realign_index
-                if require_align:
-                    indices_left = (
-                        indices_left - args.sink_token_size
-                    ) // chunk_size * chunk_size + args.sink_token_size
-                    indices_right = indices_left + chunk_size
-                else:
-                    indices_right = indices_right[..., : stage_k // chunk_size]
-                out_scores = out_scores[..., : stage_k // chunk_size]
-                # NOTE: revert this
-                if stage_info.require_reset_score:
-                    out_scores.fill_(-32000.0)
-
-                indices_left, t_indices = indices_left.sort(dim=-1)
-                indices_right = indices_right.gather(dim=-1, index=t_indices)
-                out_scores = out_scores.gather(dim=-1, index=t_indices)
-
-                if BLOCK_SIZE_Q != stage_info.stage_block_size_q:
-                    assert stage_info.stage_block_size_q > 0
-                    assert BLOCK_SIZE_Q > stage_info.stage_block_size_q
-                    assert (BLOCK_SIZE_Q % stage_info.stage_block_size_q) == 0
-
-                    num_split = BLOCK_SIZE_Q // stage_info.stage_block_size_q
-                    BLOCK_SIZE_Q = stage_info.stage_block_size_q
-                    BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
-                    BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
-
-                    indices_left = indices_left.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-                    indices_right = indices_right.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-                    out_scores = out_scores.repeat_interleave(num_split, 1)[
-                        :, -BDST:
-                    ].contiguous()
-
-                if STAGE_STRIDE != stage_info.stage_stride:
-                    assert stage_info.stage_stride < STAGE_STRIDE
-                    assert STAGE_STRIDE > 0
-                    indices_left = indices_left.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    indices_right = indices_right.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    out_scores = out_scores.repeat_interleave(
-                        STAGE_STRIDE // stage_info.stage_stride, 1
-                    )[:, -BDST:].contiguous()
-                    STAGE_STRIDE = stage_info.stage_stride
-
-                # if DEBUG and DEBUG_RENDER and (not torch.cuda.is_current_stream_capturing()) and (BDST > 10) and (i_stage == 1):
-                #     out_indices_cpu = indices_left.cpu().numpy()
-                #     debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_CHUNK)))
-                #     render_plot_sampled(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_CHUNK, chunk_count, TDST, args.sink_token_size)
-                #     cv2.imwrite('dummy_sampled.png', debug * 255)
-                #     print('saved dummy_sampled.png')
-
-                assert (chunk_size % stage_chunk_size) == 0
-                splits = chunk_size // stage_chunk_size
-                chunk_sizes = (
-                    (indices_right - indices_left).float() / splits
-                ).clamp_min_(0)
-                indices_left = (
-                    indices_left[..., None]
-                    + (
-                        torch.arange(0, splits, device=q.device)[
-                            None, None, None, None, :
-                        ]
-                        * chunk_sizes[..., None]
-                    )
-                    .floor()
-                    .long()
+                (
+                    indices_left,
+                    indices_right,
+                    out_scores,
+                    BLOCK_SIZE_Q,
+                    BDST,
+                    STAGE_STRIDE,
+                ) = stage_prologue(
+                    q,
+                    indices_left,
+                    indices_right,
+                    out_scores,
+                    stage_k,
+                    stage_chunk_size,
+                    chunk_size,
+                    stage_info,
+                    args,
+                    TDST,
+                    BDST,
+                    STAGE_STRIDE,
+                    BLOCK_SIZE_Q,
                 )
-                indices_left = indices_left.flatten(-2, -1)
-                indices_right = (
-                    indices_right[..., None]
-                    - (
-                        (
-                            (splits - 1)
-                            - torch.arange(0, splits, device=q.device)[
-                                None, None, None, None, :
-                            ]
-                        )
-                        * chunk_sizes[..., None]
-                    )
-                    .floor()
-                    .long()
-                )
-                indices_right = indices_right.flatten(-2, -1)
-                out_scores = out_scores.repeat_interleave(splits, -1)
             else:
                 assert stage_info.stage_k is None, "first stage always quadratic"
                 assert isinstance(
@@ -469,25 +433,6 @@ def dual_stage_quadratic_hip_attention(
                     else stage_info.stage_extend_backend
                 )
 
-                if not (args.online_update_cache and (args.offload_cache is not None)):
-                    grid = (
-                        BSZ
-                        * triton.cdiv(chunk_count, BLOCK_CHUNK)
-                        * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
-                        * HEAD,
-                    )
-                    njobs = grid[0]
-                    group_jobs = 1
-                else:
-                    njobs = (
-                        BSZ
-                        * triton.cdiv(chunk_count, BLOCK_CHUNK)
-                        * triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE)
-                        * HEAD
-                    )
-                    sm_count = num_streaming_multiprocessor()
-                    group_jobs = triton.cdiv(njobs, sm_count)
-                    grid = (min(sm_count, njobs),)
                 # if args.offload_cache is not None:
                 #     print('before masking')
                 #     args.offload_cache.mask_k_cache._verify_cache()
@@ -506,73 +451,100 @@ def dual_stage_quadratic_hip_attention(
 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
-                    HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE
+                    args.using_landmark
+                    and (not args.is_decode)
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
                     # and (args.layer_id > 300)
                 ):
-                    assert TDST == TSRC
+                    assert not torch.cuda.is_current_stream_capturing()
+
+                    if triton.next_power_of_2(q.shape[-1]) > q.shape[-1]:
+                        NOPE_HID = triton.next_power_of_2(q.shape[-1]) // 2
+                    else:
+                        NOPE_HID = q.shape[-1]
+
+                    # chunked sampling
                     if landmark_scores is None:
-                        # chunked sampling
-                        landmark_chunk = 512
+                        landmark_scores = landmark_sample(
+                            q[..., :NOPE_HID],
+                            k[..., :NOPE_HID] if k is not None else k,
+                            state,
+                            args,
+                            BSZ,
+                            HEAD,
+                            HEAD_KV,
+                            BDST,
+                            DEBUG,
+                            __logall_index,
+                        )
 
-                        def pad_seq(t: torch.Tensor):
-                            if (t.shape[1] % landmark_chunk) == 0:
-                                return t
-                            pad = landmark_chunk - t.shape[1] % landmark_chunk
-                            return torch.nn.functional.pad(t, pad=(0, 0, 0, 0, 0, pad))
+                    _TSRC = TSRC
+                    if k is not None:
+                        _TSRC = k.shape[1]
 
-                        q_tp = pad_seq(q)
-                        TDST_PADDED = q_tp.shape[1]
-                        q_tp = q_tp\
-                            .permute(0, 2, 1, 3)\
-                            .reshape(BSZ, HEAD, TDST_PADDED // landmark_chunk, landmark_chunk, HID)
-                        k_tp = pad_seq(k)
-                        TSRC_PADDED = k_tp.shape[1]
-                        k_tp = k_tp\
-                            .permute(0, 2, 3, 1)\
-                            .reshape(BSZ, HEAD_KV, HID, TSRC_PADDED // landmark_chunk, landmark_chunk)\
-                            .permute(0, 1, 3, 2, 4)\
-                            .repeat_interleave(dim=1, repeats=HEAD // HEAD_KV)
-                        # print(q_tp.shape, k_tp.shape)
-                        landmark_scores = torch.matmul(q_tp, k_tp)#.to(torch.float32)
-                        # TODO Need to handle chunked prefill scenario
-                        # idx_tdst = args.position_ids[0]
-                        idx_t = torch.arange(0, landmark_chunk, device=q.device)
-                        mask = idx_t[:, None] >= idx_t[None, :]
-                        landmark_scores = landmark_scores * mask[None, None, None, :, :]
-                        assert landmark_scores.shape == (BSZ, HEAD, TSRC_PADDED // landmark_chunk, landmark_chunk, landmark_chunk)
-                        landmark_scores = landmark_scores.sum(dim=3) / mask.int().sum(dim=0)[None, None, None, :]
-                        landmark_scores = landmark_scores.view(BSZ, HEAD, TSRC_PADDED)
-                        landmark_scores[:, :, k.shape[1]:].fill_(float('-inf'))
+                    landmarks = landmark_scores.view(
+                        BSZ,
+                        HEAD,
+                        landmark_scores.shape[-1] // stage_info.stage_chunk_size,
+                        stage_info.stage_chunk_size,
+                    )
+                    num_landmarks = args.landmark_stage_k[i_stage]
+                    _, landmarks = torch.topk(landmarks, k=num_landmarks, sorted=False)
+                    landmarks = landmarks.permute(0, 2, 1, 3)[
+                        :, : _TSRC // stage_info.stage_chunk_size
+                    ].contiguous()
+                    assert landmarks.shape == (
+                        BSZ,
+                        _TSRC // stage_info.stage_chunk_size,
+                        HEAD,
+                        num_landmarks,
+                    ), f"{landmarks.shape} == ({BSZ}, {_TSRC // stage_info.stage_chunk_size}, {HEAD}, {num_landmarks}), {k.shape if k is not None else None}"
 
-                    landmarks = landmark_scores\
-                        .view(BSZ, HEAD, landmark_scores.shape[-1] // stage_info.stage_chunk_size, stage_info.stage_chunk_size)
-                    num_landmarks = [1, 1, 1][i_stage]
-                    _, landmarks = torch.topk(landmarks, k=num_landmarks)
-                    landmarks = landmarks.permute(0, 2, 1, 3)[:, :TSRC // stage_info.stage_chunk_size].contiguous()
-                    assert landmarks.shape == (BSZ, TSRC // stage_info.stage_chunk_size, HEAD, num_landmarks)
-                    
-                    assert indices_left.shape == (BSZ, BDST_SCAN, HEAD, indices_left.shape[-1])
-                    
-                    from hip_attn.v1_2.compute_scores_landmark import compute_scores_landmark
+                    assert indices_left.shape == (
+                        BSZ,
+                        BDST_SCAN,
+                        HEAD,
+                        indices_left.shape[-1],
+                    )
+
+                    # k_temp = args.gather_k_from_paged_cache(
+                    #     chunk_size=1,
+                    #     disable_gqa=False,
+                    #     gqa_q=q,
+                    # )
                     scores = compute_scores_landmark(
-                        q=q, 
-                        k=k, 
-                        position_ids=args.position_ids, 
+                        q=q[..., :NOPE_HID],
+                        # k=k_temp,
+                        # k_cache=None,
+                        k=k[..., :NOPE_HID] if k is not None else k,
+                        k_cache=(
+                            args.get_k_cache()[..., :NOPE_HID]
+                            if args.get_k_cache() is not None
+                            else None
+                        ),
+                        block_table=args.block_table,
+                        position_ids=args.position_ids,
                         indices_left=indices_left,
                         landmarks=landmarks,
+                        cos=args.rope_cos,
+                        sin=args.rope_sin,
                         BLOCK_SIZE_Q=stage_info.stage_block_size_q,
                         BLOCK_STRIDE_Q=stage_info.stage_block_stride_q,
                         CHUNK_SIZE=stage_info.stage_chunk_size,
                         SLIDING_WINDOW_SIZE=args.sliding_window_size,
                     )
-                    assert (args.sink_token_size % stage_info.stage_chunk_size) == 0
+                    assert (
+                        args.sink_token_size % stage_info.stage_chunk_size
+                    ) == 0, f"{args.sink_token_size} % {stage_info.stage_chunk_size}"
                     # scores = scores[:, :, :, args.sink_token_size // stage_info.stage_chunk_size:]
-                    out_scores.fill_(float('-inf'))
-                    out_scores[:, :, :, :scores.shape[-1]] = scores
+
+                    out_scores[:, :, :, : scores.shape[-1]] = scores
+                    out_scores[:, :, :, scores.shape[-1] :].fill_(float("-inf"))
                     # indices_left = (indices_left + indices_right) // 2
                     # indices_right = indices_left.clone()
+
+                    # print('landmark based sampling', args.layer_id)
                 elif (
                     os.getenv("HIP_DEBUG_TOPKMEAN", "0") == "1"
                     and (i_stage == 0)
@@ -847,68 +819,53 @@ def dual_stage_quadratic_hip_attention(
                     scores = scores.permute(0, 2, 1, 3)
                     out_scores[:, :, :, : scores.shape[-1]] = scores
                 else:
-                    chunk_controllable_sampling_mask_cuda[grid](
-                        q,
-                        *q.stride(),
-                        k_mask,
-                        *safe_stride(k_mask, 4),
-                        position_ids,
-                        *position_ids.stride(),
-                        *args.args_paged_kv_cache(disable_cache=k_mask is not None),
-                        *args.args_offload_cache(
-                            True, disable_cache=k_mask is not None
-                        ),
-                        indices_left,
-                        *indices_left.stride(),
-                        indices_right,
-                        *indices_right.stride(),
-                        out_scores,
-                        *out_scores.stride(),
-                        args.rope_cos,
-                        *safe_stride(args.rope_cos, 2),
-                        args.rope_sin,
-                        *safe_stride(args.rope_sin, 2),
-                        args.rope_range[0],
-                        args.rope_range[1],
-                        args.rope_is_neox_style,
-                        mask_access_counter,
-                        *safe_stride(mask_access_counter, 3),
-                        mask_cache_miss_counter,
-                        *safe_stride(mask_cache_miss_counter, 3),
+                    chunk_controllable_sampling_mask(
+                        args,
                         chunk_count,
-                        MAX_TSRC,
-                        q.shape[1],
+                        BLOCK_CHUNK,
+                        TDST,
+                        BLOCK_SIZE_Q,
+                        STAGE_STRIDE,
                         HEAD,
-                        args.sliding_window_size,
-                        args.sink_token_size,
-                        # model_context_length if (not scan_extend_backend == 'streaming') else 0,
-                        args.model_context_length,
-                        group_jobs,
-                        njobs,
-                        HID_DIM=HID,
-                        HID_BLOCK_0=HID_BLOCK,
-                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-                        STRIDE_Q=stage_block_stride_q,
-                        BLOCK_CHUNK=BLOCK_CHUNK,
-                        HEAD_GROUP=HEAD // HEAD_KV,
-                        USING_EXTEND=args.using_extend and (extend_backend != 'none'),
-                        EXTEND_BACKEND=extend_backend,
-                        NEED_APPLY_ROPE=args.need_apply_rope and (extend_backend != 'none'),
-                        TERMINATE_SIZE=args.stage_early_terminate,
-                        SCAN_STRIDE=STAGE_STRIDE,
-                        UPDATE_CACHE=args.online_update_cache,
-                        ORACLE_MAXIMUM=False,  # NOTE: seems has bug... but why?
+                        BSZ,
+                        q,
+                        k_mask,
+                        position_ids,
+                        indices_left,
+                        indices_right,
+                        out_scores,
+                        mask_access_counter,
+                        mask_cache_miss_counter,
+                        MAX_TSRC,
+                        HID,
+                        HID_BLOCK,
+                        stage_block_stride_q,
+                        HEAD_KV,
+                        extend_backend,
                     )
 
                 # TODO: OPTIMIZE THIS. Add head unified version of HiP.
-                if os.getenv("HIP_HEAD_REDUCE", "1") == "1":
+                HEAD_REDUCE_MODE = os.getenv(
+                    "HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE
+                )
+                if (
+                    # always reduce the head.
+                    (HEAD_REDUCE_MODE == "1")
+                    or
+                    # reduce only when decode. this is for handling flash-decode kernel.
+                    (HEAD_REDUCE_MODE == "2" and BDST == 1)
+                    or
+                    # reduce only within tp. this will be incorrect in tp size
+                    (HEAD_REDUCE_MODE == "3")
+                ):
                     ori_shape = out_scores.shape
                     # out_scores = out_scores.softmax(dim=2) # NOTE: not good idea
                     # out_scores, _ = torch.max(out_scores, keepdim=True, dim=2)
 
                     if (
-                        SGLANG_DIST_AVAILABLE
+                        SGLANG_DIST_ACTIVATED
                         and get_tensor_model_parallel_world_size() > 1
+                        and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
                         out_scores_tp = out_scores
                         out_scores = (
@@ -920,7 +877,6 @@ def dual_stage_quadratic_hip_attention(
                         )
 
                     out_scores = torch.amax(out_scores, keepdim=True, dim=2)
-
                     out_scores = torch.broadcast_to(out_scores, ori_shape).contiguous()
                 else:
                     args.disable_flashdecode = True
@@ -1083,7 +1039,12 @@ def dual_stage_quadratic_hip_attention(
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
-            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
+            if (
+                DEBUG
+                and DEBUG_RENDER
+                and not torch.cuda.is_current_stream_capturing()
+                and get_local_rank() == 0
+            ):
                 if (i_stage + 1) < len(args.stages):
                     next_stage_k = args.stages[i_stage + 1].stage_k
                 else:
@@ -1141,7 +1102,7 @@ def dual_stage_quadratic_hip_attention(
 
         # NOTE: union head masks
         if os.getenv("HIP_DEBUG_UNION_HEAD", "0") == "1":
-            assert os.getenv("HIP_HEAD_REDUCE", "1") == "0"
+            assert os.getenv("HIP_HEAD_REDUCE", DEFAULT_VALUE_HIP_HEAD_REDUCE) == "0"
             # args.disable_flashdecode = True
             # B BDST H CHUNK
             indices = indices.flatten(-2, -1).unsqueeze(-2).repeat(1, 1, HEAD, 1)
@@ -1248,21 +1209,35 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             out_indices_cpu = indices.cpu().numpy()
             debug = np.zeros(
                 (triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q))
             )
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
+            debug = debug * 255
+            debug = debug.astype(np.uint8)
+            debug = np.repeat(debug[:, :, None], 3, axis=2)
+            cv2.putText(
+                debug,
+                f"Layer: {args.layer_id}",
+                (320, 256),
+                cv2.FONT_HERSHEY_PLAIN,
+                2,
+                (0, 255, 0),
+                2,
+            )
+
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
                 cv2.imwrite(
                     f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
-                    debug * 255,
+                    debug,
                 )
             else:
-                cv2.imwrite("dummy_sampled_final.png", debug * 255)
+                cv2.imwrite("dummy_sampled_final.png", debug)
             # print('saved dummy_sampled_final.png')
 
         args = args.clone()
@@ -1397,6 +1372,7 @@ def dual_stage_quadratic_hip_attention(
             and DEBUG_RENDER
             and not torch.cuda.is_current_stream_capturing()
             and (BDST > 10)
+            and get_local_rank() == 0
         ):
             try:
                 input(f"[{args.layer_id}] >")
@@ -1431,10 +1407,17 @@ def dual_stage_quadratic_hip_attention(
         args.using_extend = args.using_extend and True
 
         assert cached_metadata is not None
-        indices = cached_metadata.indices.clone()
-        ks = cached_metadata.ks.clone()
-        ks_count = cached_metadata.ks_count.clone()
-        ks_start_end = cached_metadata.ks_start_end.clone()
+        require_cache_clone = False
+        if require_cache_clone:
+            indices = cached_metadata.indices.clone()
+            ks = cached_metadata.ks.clone()
+            ks_count = cached_metadata.ks_count.clone()
+            ks_start_end = cached_metadata.ks_start_end.clone()
+        else:
+            indices = cached_metadata.indices
+            ks = cached_metadata.ks
+            ks_count = cached_metadata.ks_count
+            ks_start_end = cached_metadata.ks_start_end
 
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
 
@@ -1447,7 +1430,7 @@ def dual_stage_quadratic_hip_attention(
         )
     elif args.sliding_window_size > 0:
         args.sliding_window_size += args.block_size_q
-    
+
     if flatten_paged_cache:
         k = None
         v = None
@@ -1470,6 +1453,7 @@ def dual_stage_quadratic_hip_attention(
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
         offload_update_cache=(cached_metadata is None) and args.online_update_cache,
+        return_running_statistics=args.bsa_return_running_statistics,
         # offload_update_cache=args.online_update_cache,
         # offload_update_cache=False,
     )
@@ -1481,7 +1465,7 @@ def dual_stage_quadratic_hip_attention(
     #     print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
     #     print('ks', ks[0 + DEBUG_HEAD, -1], ks.shape)
 
-    return context, HiPAttentionOutputMetadata(
+    metadata = HiPAttentionOutputMetadata(
         indices=indices,
         ks=ks,
         ks_count=ks_count,
@@ -1499,4 +1483,10 @@ def dual_stage_quadratic_hip_attention(
             cache_miss_counter=sa_cache_miss_counter,
         ),
         stage_caches=stage_caches,
+        state=state,
     )
+
+    # if BDST > 1:
+    #     print(id(metadata), type(state))
+
+    return context, metadata

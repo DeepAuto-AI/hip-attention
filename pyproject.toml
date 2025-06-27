@@ -45,7 +45,7 @@ dependencies = [
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",
-    # Debugging
+    # Debugging, multimodal
     "opencv-python-headless>=4.11.0.86",
 ]
 
@@ -81,6 +81,7 @@ flash-attn = [
 ]
 sglang = [
     # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/dev#subdirectory=python"
+    # To update sglang, run `uv lock --upgrade-package sglang`
     { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/dev" },
     # For local devs, you can use this instead:
     # { path = "../sglang/python", editable = true },

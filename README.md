@@ -143,13 +143,13 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ```bibtex
 @misc{willette2025_delta_attention,
-      title={Delta Attention: Fast and Accurate Sparse Attention Inference by Delta Correction}, 
+      title={Delta Attention: Fast and Accurate Sparse Attention Inference by Delta Correction},
       author={Jeffrey Willette and Heejun Lee and Sung Ju Hwang},
       year={2025},
       eprint={2505.11254},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2505.11254}, 
+      url={https://arxiv.org/abs/2505.11254},
 }
 
 @misc{lee2025_infinite_hip,

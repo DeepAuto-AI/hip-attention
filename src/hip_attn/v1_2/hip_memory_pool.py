@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 import torch
 import triton
@@ -13,6 +13,9 @@ from hip_attn.v1_2.attention_metadata import (
     HiPAttentionOutputMetadata,
     HiPAttentionStageInputCache,
 )
+
+if TYPE_CHECKING:
+    from hip_attn.v1_2.hip_config import HiPAttentionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -250,11 +253,14 @@ class HiPMetadataCachePool:
     def get_hip_metadata_cache(
         self,
         layer_id: int,
-        size: int,
+        tdst: int,
         batch_size: int,
         cached_stages: Optional[int],
+        block_size_q: int = 64,
     ) -> Optional[HiPAttentionOutputMetadata]:
-        assert size == batch_size
+        assert (
+            triton.cdiv(tdst // batch_size, block_size_q) == 1
+        ), f"triton.cdiv({tdst} // {batch_size}, {block_size_q}) == 1"
 
         if (cached_stages is None) or (
             cached_stages == len(self.layer_configs[layer_id].stages)
@@ -309,11 +315,12 @@ class HiPMetadataCachePool:
     def set_hip_metadata_cache(
         self,
         layer_id: int,
-        size: int,
+        tdst: int,
         batch_size: int,
         metadata: HiPAttentionOutputMetadata,
+        block_size_q: int = 64,
     ):
-        assert size == batch_size
+        assert triton.cdiv(tdst // batch_size, block_size_q) == 1
 
         self.set_buffer(layer_id, "indices", metadata.indices)
         self.set_buffer(layer_id, "ks", metadata.ks)

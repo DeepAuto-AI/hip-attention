@@ -3,7 +3,7 @@ import os
 from typing import Optional, Tuple, Union
 
 import cuda
-import cuda.cudart
+import cuda.bindings.runtime
 import torch
 import tqdm
 import triton
@@ -51,20 +51,20 @@ def debug_print(*args):
 
 
 def uvm_note_cpu(tensor: Tensor, prefetch: bool = False):
-    cuda.cudart.cudaMemAdvise(
+    cuda.bindings.runtime.cudaMemAdvise(
         tensor.data_ptr(),
         tensor.numel() * tensor.element_size(),
-        cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation,
+        cuda.bindings.runtime.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation,
         -1,
     )
-    cuda.cudart.cudaMemAdvise(
+    cuda.bindings.runtime.cudaMemAdvise(
         tensor.data_ptr(),
         tensor.numel() * tensor.element_size(),
-        cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy,
+        cuda.bindings.runtime.cudaMemoryAdvise.cudaMemAdviseSetAccessedBy,
         tensor.device.index,
     )
     if prefetch:
-        cuda.cudart.cudaMemPrefetchAsync(
+        cuda.bindings.runtime.cudaMemPrefetchAsync(
             tensor.data_ptr(), tensor.numel() * tensor.element_size(), -1, 0
         )
 
@@ -617,11 +617,14 @@ class HiPOffloadCache:
         return self.k_uvm.bank_cpu.shape[0]
 
     def prefetch_prefix_kv_buffer(
-        self, table: Tensor, device: torch.device, pad: int,
+        self,
+        table: Tensor,
+        device: torch.device,
+        pad: int,
     ) -> Tuple[Tensor, Tensor]:
         if table.device != torch.device("cpu"):
             table = table.to("cpu", non_blocking=False)
-        
+
         k = self.k_uvm.gather_cpu(table, pin_memory=True)
         v = self.v_uvm.gather_cpu(table, pin_memory=True)
 
@@ -629,8 +632,12 @@ class HiPOffloadCache:
         v = v.to(device, non_blocking=True).unsqueeze(0)
 
         if pad > 0:
-            k = torch.nn.functional.pad(k, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(k.dtype)
-            v = torch.nn.functional.pad(v, pad=(0,0, 0,0, pad,0), mode='constant', value=0).to(v.dtype)
+            k = torch.nn.functional.pad(
+                k, pad=(0, 0, 0, 0, pad, 0), mode="constant", value=0
+            ).to(k.dtype)
+            v = torch.nn.functional.pad(
+                v, pad=(0, 0, 0, 0, pad, 0), mode="constant", value=0
+            ).to(v.dtype)
 
         return k, v
 
@@ -655,7 +662,7 @@ class HiPOffloadCache:
             elif cache_k.dtype in [torch.uint8, torch.float8_e5m2]:
                 view_dtype = torch.uint8
             else:
-                raise Exception(f'not supported dtype {cache_k.dtype}')
+                raise Exception(f"not supported dtype {cache_k.dtype}")
 
             set_kv_buffer_(
                 self.k_uvm.bank_cpu.view(view_dtype).numpy(),
@@ -879,6 +886,7 @@ def load_tokens(
             + idx_hid.to(tl.int64) * stride_k_hid,
             mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
+            cache_modifier=".cg",
             # cache_modifier='.cs', # TODO: uncomment this
         )
     else:
@@ -895,6 +903,7 @@ def load_tokens(
             ptrs,
             mask=mask_tsrc,
             other=0,
+            cache_modifier=".cg",
         ).to(tl.int64)
         offset_page = idx_tsrc % PAGE_SIZE
 
@@ -911,8 +920,8 @@ def load_tokens(
             tl.store(
                 ACCESS_COUNTER
                 + idx_bsz.to(tl.int64) * stride_access_counter_bsz
-                + idx_kv_head * stride_access_counter_head_kv
-                + idx_page * stride_access_counter_tsrc,
+                + idx_kv_head.to(tl.int64) * stride_access_counter_head_kv
+                + idx_page.to(tl.int64) * stride_access_counter_tsrc,
                 mask=mask_keys,
                 value=1,
             )
@@ -1048,6 +1057,7 @@ def load_tokens(
             + idx_hid.to(tl.int64) * stride_k_cache_hid,
             mask=mask_keys & (idx_hid < HID_DIM),
             other=0.0,
+            cache_modifier=".cg",
         )
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
@@ -1067,8 +1077,8 @@ def load_tokens(
                     tl.store(
                         CACHE_MISS_COUNTER
                         + idx_bsz.to(tl.int64) * stride_cache_miss_counter_bsz
-                        + idx_kv_head * stride_cache_miss_counter_head_kv
-                        + idx_page * stride_cache_miss_counter_tsrc,
+                        + idx_kv_head.to(tl.int64) * stride_cache_miss_counter_head_kv
+                        + idx_page.to(tl.int64) * stride_cache_miss_counter_tsrc,
                         mask=mask_keys_cache_miss,
                         value=1,
                     )

@@ -632,7 +632,7 @@ class LlamaCustomAttention(LlamaAttention):
         bsz, q_len, _ = hidden_states.size()
 
         if self.attention_method in ["hip", "skewed"]:
-            force_extend = os.getenv('HIP_EXTEND', '1') == '1'
+            force_extend = os.getenv("HIP_EXTEND", "1") == "1"
             need_apply_rope = force_extend
             model_context_length = 131072
         else:

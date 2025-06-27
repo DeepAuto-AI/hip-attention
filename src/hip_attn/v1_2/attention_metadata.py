@@ -1,6 +1,6 @@
 import copy
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
 import torch
@@ -8,6 +8,11 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from hip_attn.v1_2.uvm_gpu_cache import HiPOffloadCache
+
+
+HIP_DEBUG_ALLOW_GATHER_KV_CACHE = (
+    os.getenv("HIP_DEBUG_ALLOW_GATHER_KV_CACHE", "0") == "1"
+)
 
 
 def safe_stride(x: Optional[Tensor], ndim: int):
@@ -116,6 +121,42 @@ class HiPAttentionStageInputCache:
 
 
 @dataclass
+class HiPAttentionState:
+    # [MAX_NUM_TOKENS, HEAD]
+    landmark_scores: torch.Tensor
+    # [NUM_STAGES, MAX_NUM_TOKENS // CHUNK_SIZE, K]
+    landmark_indices: List[torch.Tensor]
+
+    @classmethod
+    def from_args(
+        cls, q: torch.Tensor, args: "HiPAttentionArgs", k: Optional[torch.Tensor] = None
+    ):
+        if k is None:
+            assert args.using_paged_cache
+
+        if args.get_k_cache() is not None:
+            k_cache = args.get_k_cache()
+            num_tokens = k_cache.shape[0] * k_cache.shape[1]
+        else:
+            num_tokens = k.shape[1]
+
+        num_tokens = max(args.extend_context_length, num_tokens)
+
+        # padding for SGlang
+        num_tokens += 1024
+
+        num_heads = q.shape[2]
+        landmark_scores = torch.zeros(
+            (num_tokens, num_heads), dtype=torch.float32, device=q.device
+        )
+
+        return HiPAttentionState(
+            landmark_scores=landmark_scores,
+            landmark_indices=None,
+        )
+
+
+@dataclass
 class HiPAttentionOutputMetadata:
     indices: Optional[Tensor]
     ks: Optional[Tensor]
@@ -128,6 +169,8 @@ class HiPAttentionOutputMetadata:
 
     # stage caches
     stage_caches: Optional[List[HiPAttentionStageInputCache]]
+
+    state: Optional[HiPAttentionState] = None
 
 
 @dataclass
@@ -169,6 +212,12 @@ class HiPAttentionArgs:
     )
     model_context_length: int = 131072
     extend_context_length: int = 512 * 1024
+
+    using_landmark: bool = field(
+        default_factory=lambda: os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "1")
+        == "1"
+    )
+    landmark_stage_k: List[int] = field(default_factory=lambda: [1, 1, 1])
 
     # kernel args,
     mask_only: bool = False
@@ -218,6 +267,13 @@ class HiPAttentionArgs:
 
     # NOTE: use only for debugging purpose
     layer_id: int = 31
+
+    query_for_landmark: Optional[Tensor] = None
+    position_ids_for_landmark: Optional[Tensor] = None
+
+    is_decode: bool = False
+
+    bsa_return_running_statistics: bool = False
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -402,14 +458,61 @@ class HiPAttentionArgs:
                 0,
             )
 
-    def gather_k_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
-    ):
+    def get_k_cache(self):
         if self.k_cache is not None:
-            assert self.k_cache is not None
             k_cache = self.k_cache
-        else:
+        elif self.offload_cache is not None:
             k_cache = self.offload_cache.k_uvm.bank_gpu.unsqueeze(1)
+        else:
+            k_cache = None
+
+        # k_cache: [MAX_TOKENS, 1, HEAD, HID]
+        return k_cache
+
+    def get_v_cache(self):
+        if self.v_cache is not None:
+            v_cache = self.v_cache
+        elif self.offload_cache is not None:
+            v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+        else:
+            v_cache = None
+
+        # v_cache: [MAX_TOKENS, 1, HEAD, HID]
+        return v_cache
+
+    def gather_extend_k_from_paged_cache(
+        self,
+        disable_gqa=False,
+        gqa_q: torch.Tensor = None,
+        position_ids: torch.Tensor = None,
+    ):
+        k_cache = self.get_k_cache()
+        # self.block_table[BLOCK_TABLE_BSZ, MODEL_SEQ_LEN]
+        assert self.block_table is not None
+        if position_ids is None:
+            position_ids = self.position_ids
+        assert position_ids is not None
+        assert (
+            position_ids.shape[0] == self.block_table.shape[0]
+        ), f"{position_ids.shape} == {self.block_table.shape}"
+        # k_cache: [T, HEAD, HID]
+        k = k_cache[:, 0, :, :][self.block_table.gather(dim=1, index=position_ids)]
+        if gqa_q is not None:
+            B, T, H, D = gqa_q.shape
+            assert k.shape == (B, T, k.shape[2], D), f"{gqa_q.shape} {k.shape}"
+        if disable_gqa:
+            k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
+        return k
+
+    def gather_k_from_paged_cache(
+        self, chunk_size: int = 1, disable_gqa=False, gqa_q: torch.Tensor = None
+    ):
+        if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
+            raise Exception(
+                "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
+            )
+
+        k_cache = self.get_k_cache()
         assert self.block_table is not None
         k = k_cache[:, 0, :, :][
             self.block_table[
@@ -424,6 +527,11 @@ class HiPAttentionArgs:
     def gather_v_from_paged_cache(
         self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
     ):
+        if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
+            raise Exception(
+                "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
+            )
+
         if self.v_cache is not None:
             assert self.v_cache is not None
             v_cache = self.v_cache
@@ -439,3 +547,10 @@ class HiPAttentionArgs:
         if disable_gqa:
             v = v.repeat_interleave(gqa_q.shape[2] // v.shape[2], dim=2)
         return v
+
+    def pretty(self) -> str:
+        json = asdict(self)
+        for k, v in json.items():
+            if isinstance(v, torch.Tensor):
+                json[k] = f"{v.dtype}{list(v.shape)}@{str(v.device)}"
+        return str(json)
