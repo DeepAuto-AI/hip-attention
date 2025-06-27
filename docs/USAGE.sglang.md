@@ -211,7 +211,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=1024000" \
 hip-sglang:latest \
@@ -297,7 +297,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=1024000" \
 --env "HIP_HEAD_REDUCE=1" \
@@ -389,7 +389,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
@@ -486,7 +486,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_DEBUG_UNION_HEAD=$HIP_DEBUG_UNION_HEAD" \
 --env "HIP_HEAD_REDUCE=$HIP_HEAD_REDUCE" \
@@ -577,7 +577,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_HEAD_REDUCE=2" \
 --env "PASSKEY_LEN=1000" \
@@ -663,7 +663,7 @@ docker run --rm --runtime nvidia \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
 hip-sglang:latest \
@@ -735,7 +735,7 @@ docker run --rm \
 --name deepauto-llama-4-scout-1m-ctx \
 -p 30000:30000 \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_CONFIG_PRESET=llama4" \
 --env "HIP_DISABLE_FLASHDECODE=0" \
@@ -809,7 +809,7 @@ docker run --rm \
 --name deepauto-llama-4-maverick-2m-ctx \
 -p 30000:30000 \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_CONFIG_PRESET=llama4" \
 --env "HIP_DISABLE_FLASHDECODE=0" \
@@ -882,7 +882,7 @@ docker run --rm \
 --name deepauto-qwen3-30b-a3b-2m-ctx \
 -p 30000:30000 \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_CONFIG_PRESET=qwen3" \
 --env "HIP_DISABLE_FLASHDECODE=0" \
@@ -951,7 +951,7 @@ docker run --rm \
 --name deepauto-qwen3-30b-a3b-5m-ctx \
 -p 30000:30000 \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "HIP_CONFIG_PRESET=qwen3" \
 --env "HIP_DISABLE_FLASHDECODE=0" \
@@ -1029,7 +1029,7 @@ docker run --rm \
 --name deepauto-deepseek-v3-320k-ctx \
 -p 33330:33330 \
 --ipc=host \
--v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
 --env "PASSKEY_LEN=120" \
 --env "SA_BLOCK_SIZE=64" \
