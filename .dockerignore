@@ -2,3 +2,4 @@
 !src
 !pyproject.toml
 !uv.lock
+!configs

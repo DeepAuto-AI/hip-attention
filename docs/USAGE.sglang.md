@@ -52,14 +52,17 @@
 
 ```bash
 export HF_TOKEN=<secret>
+
+# Optional
+export HF_HOME="<path-to-your-huggingface-cache>"
 ```
 
 ## Testing
 
 ```bash
-SRT_PORT=30000 uv run scripts/test_openai.py
+SRT_PORT=33330 uv run scripts/test_openai.py
 # 1M tokens
-SRT_PORT=30000 uv run scripts/test_openai_long.py
+SRT_PORT=33330 uv run scripts/test_openai_long.py
 ```
 
 ## `meta-llama/Llama-3.1-8B-Instruct`
@@ -518,22 +521,22 @@ python \
 - Cache offloading enabled
 - Tested model: `Qwen/QwQ-32B`
 - Tested GPU: 4x A100 40GB
-- Tested at: 2025-04-06
+- Tested at: 2025-06-26
 - Tested version:
-  - `hip-attention`: `600d3b614e6da8dd26c38f91d0245d046a90a046`
-  - `sglang`: `cf7158db50590ef4fe98c5b5d17d15946a6eef87`
+  - `hip-attention`: `953d829014fba9c77b481ac6104cd3a671fe819d`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `95e52327fbf119a8cf491621faf004e70e09081d`
 
 #### Local
 
 ```bash
-export SRT_PORT=8921
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export CONTEXT_LENGTH=1048576
-export SRT_WARMUP_PASSKEY_LENGTH=1000000
-export CHUNK_SIZE=32768
-export SRT_MODEL_PATH="Qwen/QwQ-32B"
-export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx"
+export SRT_PORT=33330;
+export CONTEXT_LENGTH=1048576;
+export CHUNK_SIZE=32768;
+export SRT_MODEL_PATH="Qwen/QwQ-32B";
+export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx";
 
+HIP_HEAD_REDUCE=2 \
+PASSKEY_LEN=1000 \
 uv run -m sglang.launch_server \
 --host 0.0.0.0 \
 --port $SRT_PORT \
@@ -543,37 +546,38 @@ uv run -m sglang.launch_server \
 --tp-size 4 \
 --chunked-prefill-size $CHUNK_SIZE \
 --max-prefill-tokens $CHUNK_SIZE \
---cuda-graph-bs 1 2 4 8 \
+--cuda-graph-bs 1 2 4 8 16 24 32  \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 8 \
---enable-hip-attention \
---hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
---enable-hip-offload \
---hip-max-sa-cache-token-size 3000 \
---hip-max-mask-cache-token-size 32000
+--max-running-requests 32 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/qwq_32b_1m.json \
+--enable-hip-kv-cache-offload \
+--hip-max-sa-cache-size 8000 \
+--hip-max-mask-cache-size 64000 \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
 ```
 
 #### Docker
 
 ```bash
-export SRT_PORT=8921
-export CONTEXT_LENGTH=1048576
-export SRT_WARMUP_PASSKEY_LENGTH=1000000
-export CHUNK_SIZE=32768
+export SRT_PORT=33330;
+export CONTEXT_LENGTH=1048576;
+export CHUNK_SIZE=32768;
+export SRT_MODEL_PATH="Qwen/QwQ-32B";
+export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx";
 export DOCKER_NAME="qwen-32b-1b-ctx"
-export SRT_MODEL_PATH="Qwen/QwQ-32B"
-export SRT_SERVED_MODEL_NAME="deepauto/qwq-32b-1m-ctx"
 
 docker run --rm --runtime nvidia \
 --gpus '"device=0,1,2,3"' \
 --name $DOCKER_NAME \
 -p $SRT_PORT:$SRT_PORT \
 --ipc=host \
--v ~/.cache/huggingface:/root/.cache/huggingface \
+-v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
---env "SRT_WARMUP_PASSKEY_LENGTH=$SRT_WARMUP_PASSKEY_LENGTH" \
-hip-sglang:latest \
+--env "HIP_HEAD_REDUCE=2" \
+--env "PASSKEY_LEN=1000" \
+deepauto/hip-attention:v1.2.6-sglang \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
@@ -584,15 +588,16 @@ python \
 --tp-size 4 \
 --chunked-prefill-size $CHUNK_SIZE \
 --max-prefill-tokens $CHUNK_SIZE \
---cuda-graph-bs 1 2 4 8 \
+--cuda-graph-bs 1 2 4 8 16 24 32  \
 --context-length $CONTEXT_LENGTH \
 --max-total-tokens $CONTEXT_LENGTH \
---max-running-requests 8 \
---enable-hip-attention \
---hip-attention-config '{"dense_layers": [0,1,2], "mask_refresh_interval": [96, 24, 8]}' \
---enable-hip-offload \
---hip-max-sa-cache-token-size 3000 \
---hip-max-mask-cache-token-size 32000
+--max-running-requests 32 \
+--attention-backend hip_attention \
+--hip-attention-config /sgl-workspace/configs/qwq_32b_1m.json \
+--enable-hip-kv-cache-offload \
+--hip-max-sa-cache-size 8000 \
+--hip-max-mask-cache-size 64000 \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
 ```
 
 ## `meta-llama/Llama-3.3-70B-Instruct` with AWQ
@@ -966,4 +971,88 @@ python \
 --enable-hip-kv-cache-offload \
 --hip-max-mask-cache-size 266144 \
 --hip-max-sa-cache-size 16384
+```
+
+## `deepseek-ai/DeepSeek-V3`
+
+### Multi GPU (without cache offloading)
+
+- 1M context length
+- Cache offloading disabled
+- Tested model: `deepseek-ai/DeepSeek-V3`
+- Testwd GPU: 8x H200 141GB
+- Tested at: 2025-06-26
+- Tested version:
+  - `hip-attention`: `953d829014fba9c77b481ac6104cd3a671fe819d`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `95e52327fbf119a8cf491621faf004e70e09081d`
+
+#### Local
+
+```bash
+PASSKEY_LEN=120 \
+SA_BLOCK_SIZE=64 \
+SA_DECODE_BLOCK_SIZE=32 \
+HIP_DISABLE_FLASHDECODE=0 \
+HIP_DISABLE_AUTOTUNE=0 \
+HIP_VERBOSE=0 \
+HIP_DEBUG=0 \
+HIP_DEBUG_BENCH=0 \
+HIP_DEBUG_CAPTURE_DECORATOR=0 \
+CUDA_LAUNCH_BLOCKING=0 \
+uv run -m sglang.launch_server \
+--host 0.0.0.0 \
+--port 33330 \
+--model-path deepseek-ai/DeepSeek-V3 \
+--kv-cache-dtype auto \
+--tp-size 8 \
+--chunked-prefill-size 131072 \
+--max-prefill-tokens 131072 \
+--cuda-graph-bs 1 \
+--context-length 320000 \
+--max-total-tokens 320000 \
+--max-running-requests 1 \
+--attention-backend hip_attention \
+--hip-attention-config-path ./configs/deepseek_v2_lite_chat.json \
+--json-model-override-args '{"max_position_embeddings": 320000}' \
+--trust-remote-code
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-deepseek-v3-320k-ctx \
+-p 33330:33330 \
+--ipc=host \
+-v ${HF_HOME:-"~/.cache/huggingface"}:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "PASSKEY_LEN=120" \
+--env "SA_BLOCK_SIZE=64" \
+--env "SA_DECODE_BLOCK_SIZE=32" \
+--env "HIP_DISABLE_FLASHDECODE=0" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
+--env "HIP_VERBOSE=0" \
+--env "HIP_DEBUG=0" \
+--env "HIP_DEBUG_BENCH=0" \
+--env "HIP_DEBUG_CAPTURE_DECORATOR=0" \
+--env "CUDA_LAUNCH_BLOCKING=0" \
+deepauto/hip-attention:v1.2.6-sglang \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port 33330 \
+--model-path deepseek-ai/DeepSeek-V3 \
+--kv-cache-dtype auto \
+--tp-size 8 \
+--chunked-prefill-size 131072 \
+--max-prefill-tokens 131072 \
+--cuda-graph-bs 1 \
+--context-length 320000 \
+--max-total-tokens 320000 \
+--max-running-requests 1 \
+--attention-backend hip_attention \
+--hip-attention-config-path /sgl-workspace/configs/deepseek_v2_lite_chat.json \
+--json-model-override-args '{"max_position_embeddings": 320000}' \
+--trust-remote-code
 ```
