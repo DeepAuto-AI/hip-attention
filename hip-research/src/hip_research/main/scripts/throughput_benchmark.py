@@ -181,6 +181,8 @@ def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
         + footer
     )
 
+    assert seq_len > 1
+
     input_ids = tokenizer.encode(text)
     if len(input_ids) > ((seq_len - 1) * 1024):
         input_ids = (
