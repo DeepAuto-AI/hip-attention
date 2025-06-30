@@ -141,6 +141,7 @@ class HiPAttentionState:
             num_tokens = k.shape[1]
 
         num_tokens = max(args.extend_context_length, num_tokens)
+        num_tokens = max(int(os.getenv("HIP_DEBUG_MAX_TOKENS", "0")), num_tokens)
 
         # padding for SGlang
         num_tokens += 1024
