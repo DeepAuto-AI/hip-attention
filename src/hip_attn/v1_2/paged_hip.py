@@ -2183,6 +2183,10 @@ def _forward_paged_hip(
             int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 0 * 1024)),
         )
 
+        if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
+            if layer_id in hip_config.dense_layers:
+                seq_thresh_fa3 = query.shape[1]
+
         context_fa3 = None
         metadata = None
 
