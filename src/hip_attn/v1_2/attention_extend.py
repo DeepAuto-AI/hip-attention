@@ -449,13 +449,22 @@ def dual_stage_quadratic_hip_attention(
                 #     else:
                 #         k_mask = k_mask_original
 
+                debug_exclude_landmark = []
+                if "HIP_DEBUG_EXCLUDE_LANDMARK" in os.environ:
+                    debug_exclude_landmark = list(
+                        map(
+                            lambda x: int(x),
+                            os.environ["HIP_DEBUG_EXCLUDE_LANDMARK"].split(","),
+                        )
+                    )
+
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
                     args.using_landmark
                     and (not args.is_decode)
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
-                    # and (args.layer_id > 300)
+                    and (args.layer_id not in debug_exclude_landmark)
                 ):
                     assert not torch.cuda.is_current_stream_capturing()
 

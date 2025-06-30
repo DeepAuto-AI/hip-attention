@@ -2085,4 +2085,5 @@ def chunk_controllable_sampling_mask(
         SCAN_STRIDE=STAGE_STRIDE,
         UPDATE_CACHE=args.online_update_cache,
         ORACLE_MAXIMUM=False,  # NOTE: seems has bug... but why?
+        COMPUTE_MLA_ROPE=os.getenv("HIP_DEBUG_SCAN_COMPUTE_MLA_ROPE", "0") == "1",
     )
