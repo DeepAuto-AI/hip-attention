@@ -832,6 +832,7 @@ class _attention(torch.autograd.Function):
                 warnings.warn('N_SPLIT is ignored. this should be fixed')
             N_SPLIT = 1
         
+        # print(f"{N_SPLIT=} {N_SM=} {N_PROGRAM=}")
         if (N_SPLIT > 1) and (os.getenv('HIP_DEBUG_RECOMPUTE_SPLIT', '1') == '1'):
             # N_SPLIT = 1
             

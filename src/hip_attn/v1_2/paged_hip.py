@@ -1451,7 +1451,17 @@ def _forward_paged_hip(
                     context = torch.zeros_like(query)
                     context[:, :num_sparse] = context_sparse
                     context[:, idx] = context_dense
-                elif delta_attention_args_adjust_norm_const:
+                elif delta_attention_args_adjust_norm_const and layer_id % 2 == 0:
+                    from .delta.apply_delta import apply_delta
+                    context_original = apply_delta(
+                        context_dense, 
+                        context_sparse,
+                        idx,
+                        num_last_dense,
+                        delta_attention_args_w,
+                        delta_attention_args_smooth
+                    )
+
                     idx_dense, idx_last = (
                         idx[:-num_last_dense],
                         idx[-num_last_dense:]
@@ -1468,148 +1478,137 @@ def _forward_paged_hip(
                     # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
                     # scale = context_dense_norm / context_sparse_for_diff_norm
 
-                    using_jeff = False
-                    if using_jeff or (not delta_attention_args_adjust_norm_const):
-                        # redo the normalization constant for the sparse outputs so we calculate the exact delta region
-                        # ------------------------------
-                        if delta_attention_args_adjust_norm_const:
-                            # denorm, make alpha, scale, renorm so that the difference in the following block is the exact difference
-                            # with the correct normalization constant.
-                            context_sparse_for_diff = context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None]
-                            mx = torch.stack((dense_mx, sparse_mx_for_diff), dim=0).amax(dim=0)
-                            alpha = torch.exp2(sparse_mx_for_diff - mx)
-                            context_sparse_for_diff = context_sparse_for_diff * alpha[:, :, :, None]
-                            sparse_nc_for_diff = sparse_nc_for_diff * alpha
-                            context_sparse_for_diff = context_sparse_for_diff / sparse_nc_for_diff[:, :, :, None]
-                        # ------------------------------
+                    # sparse_mx_for_diff = sparse_mx_for_diff.to(torch.float64)
+                    # sparse_mx = sparse_mx.to(torch.float64)
+                    # sparse_nc = sparse_nc.to(torch.float64)
+                    # sparse_nc_for_diff = sparse_nc_for_diff.to(torch.float64)
+                    # dense_mx = dense_mx.to(torch.float64)
 
-                        # take difference
-                        context_diff = context_dense - context_sparse_for_diff# * scale
-                        
-                        context_diff = context_diff.repeat_interleave(
-                            delta_attention_args_w, dim=1
-                        )
+                    # dense_nc = dense_nc.to(torch.float64)
+                    # context_dense = context_dense.to(torch.float64)
+                    # context_sparse = context_sparse.to(torch.float64)
+                    # context_sparse_for_diff = context_sparse_for_diff.to(torch.float64)
+
+                    scale = 1.0
+                    numerator = context_dense * dense_nc[:, :, :, None]
+                    denominator = dense_nc[:, :, :, None]
+                    
+                    t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
+                    alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[:, :, :, None]
+                    alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
+                    # alpha_dense = 1
+
+                    # if get_local_rank() == 0:
+                    #     print('-' * 20 + f"{layer_id=}" + '-' * 20)
+                    #     diff = dense_nc - sparse_nc_for_diff
+                    #     print(f"{diff.abs().mean()=} {diff.abs().amax()=} {diff.abs().amin()=} dense > sparse mean: {(diff > 0).float().mean()=}")
+
+                    #     diff = dense_nc[:, :, :, None] * alpha_dense - sparse_nc_for_diff[:, :, :, None] * alpha_sparse
+                    #     print(f"{diff.abs().mean()=} {diff.abs().amax()=} {diff.abs().amin()=} dense > sparse mean: {(diff > 0).float().mean()=}")
+
+                    #     # print(f"{dense_nc.mean()=} {sparse_nc_for_diff.mean()=}")
+
+                    #     # print(f"{sparse_nc_for_diff=}\n{dense_nc=}")
+                    #     # print(f"{alpha_sparse.amax()=} {alpha_sparse.amin()=} {alpha_sparse.mean()=}")
+                    #     # print(f"{alpha_dense.amax()=} {alpha_dense.amin()=} {alpha_dense.mean()=}")
+
+                    #     mask = sparse_nc_for_diff > dense_nc
+                    #     # indices = mask.nonzero()
+                    #     # for row in indices:
+                    #     #     print(row)
+                    #     diff = ((sparse_nc_for_diff - dense_nc) * mask).sum() / mask.sum()
+                    #     print(f"sparse nc larger than dense nc avg. before scaling: {diff} {mask.sum()=}")
+
+                    #     scaled_dense_nc = (dense_nc[:, :, :, None] * alpha_dense)
+                    #     scaled_sparse_nc = (sparse_nc_for_diff[:, :, :, None] * alpha_sparse)
+                    #     # print(f"{torch.all(scaled_dense_nc > scaled_sparse_nc)=}")
+
+                    #     mask = scaled_sparse_nc > scaled_dense_nc
+                    #     diff = ((scaled_sparse_nc - scaled_dense_nc) * mask).sum() / mask.sum()
+                    #     print(f"sparse nc larger than dense nc avg.: {diff} {mask.sum()=}")
+
+                    #     # print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
+                    #     # print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
+                    #     # print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
+                    #     # print('avg sparse mx', sparse_mx_for_diff.mean())
+                    
+
+                    # this is the delta with denormalized numerator,
+                    # denominator is equal to H
+                    delta = numerator * alpha_dense - alpha_sparse * (context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None])
+                    h_nc = denominator * alpha_dense - alpha_sparse * sparse_nc_for_diff[:, :, :, None]
+                    # delta = delta / h_nc
+                    # delta = delta / (dense_nc[:, :, :, None] * alpha_dense)
+                    
+                    # if get_local_rank() == 0:
+                    #     print(denominator[0, :, 0])
+                    
+                    # context_diff = context_dense - context_sparse_for_diff
+                    # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
+                    # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
+                    # scale *= context_diff_scale
+                    # delta *= scale
+                    # h_nc *= scale
+                    
+                    def _repeat_interleave(t: torch.Tensor):
+                        t = t.repeat_interleave(delta_attention_args_w, dim=1)
                         
                         if delta_attention_args_smooth:
                             # (exp) linear interpolate diff
-                            context_diff_shift = torch.roll(context_diff, -delta_attention_args_w, 1)
-                            context_diff_shift[:, -delta_attention_args_w:] = context_diff[:, -1:]
+                            t_shift = torch.roll(t, -delta_attention_args_w, 1)
+                            t_shift[:, -delta_attention_args_w:] = t[:, -1:]
 
-                            offset = torch.arange(0, context_diff.shape[1], device=context_diff.device)
+                            offset = torch.arange(0, t.shape[1], device=t.device)
                             offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
-                            context_diff = context_diff + (context_diff_shift - context_diff) * offset[None, :, None, None]
-                    
-                        # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
-                        # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
+                            if t.ndim == 4:
+                                t = t + (t_shift - t) * offset[None, :, None, None]
+                            else:
+                                t = t + (t_shift - t) * offset[None, :, None]
+                        return t
 
-                        # ---------------------------------------------------
-                        # rescale context sparse to include the normalization constant from the delta region H = (T + H) - T
-                        if delta_attention_args_adjust_norm_const:
-                            # get the 'head' normalization constant which is the normalization constant of the non-sparse indices.
-                            h_nc = dense_nc - sparse_nc_for_diff # sparse_nc already applied alpha
-                            h_nc = h_nc.repeat_interleave(delta_attention_args_w, dim=1)
 
-                            mx_repeat = mx.repeat_interleave(delta_attention_args_w, dim=1)
+                    delta = _repeat_interleave(delta)
+                    h_nc = _repeat_interleave(h_nc)
+                    dense_mx = _repeat_interleave(t_mx)
 
-                            context_sparse = context_sparse * sparse_nc[:, :, :, None]
-                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+                    t_mx = torch.maximum(dense_mx, sparse_mx)
 
-                            alpha_for_sparse = torch.exp2(sparse_mx - mx_repeat)
-                            context_sparse = context_sparse * alpha_for_sparse[:, :, :, None]
-                            sparse_nc = sparse_nc * alpha_for_sparse
+                    alpha_sparse = torch.exp2(sparse_mx - t_mx)[:, :, :, None]
+                    alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
 
-                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
-                            # alpha_for_dense = torch.exp2(dense_mx_repeat - mx)
-                            # h_nc = h_nc * alpha_for_dense
+                    numerator = alpha_dense * delta + alpha_sparse * (context_sparse * sparse_nc[:, :, :, None])
+                    denominator = alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None]
+                    context = numerator / denominator
 
-                            nc = h_nc + sparse_nc
-                            context_sparse = context_sparse / nc[:, :, :, None]
-                        # ---------------------------------------------------
+                    # ---------------------------------
+                    # delta = _repeat_interleave(delta)
+                    # context = delta + context_sparse
+                    # ---------------------------------
 
-                        # context = context_sparse * scale + context_diff
-                        context = context_sparse + context_diff
-                    else:
-                        scale = 1.0
-                        numerator = context_dense * dense_nc[:, :, :, None]
-                        denominator = dense_nc[:, :, :, None]
-                        
-                        # if get_local_rank() == 0:
-                        #     print('-')
-                        #     print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
-                        #     print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
-                        #     print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
-                        #     print('avg sparse mx', sparse_mx_for_diff.mean())
-                        
-                        t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
-                        
-                        alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[:, :, :, None]
-                        
-                        alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
-                        # alpha_dense = 1
+                    # ---------------------------------
+                    # delta = _repeat_interleave(delta)
+                    # h_nc = _repeat_interleave(h_nc)
+                    # dense_mx = _repeat_interleave(t_mx)
 
-                        # this is the delta with denormalized numerator,
-                        # denominator is equal to H
-                        delta = numerator * alpha_dense - alpha_sparse * (context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None])
-                        h_nc = denominator * alpha_dense - alpha_sparse * sparse_nc_for_diff[:, :, :, None]
-                        
-                        # if get_local_rank() == 0:
-                        #     print(denominator[0, :, 0])
-                        
-                        # context_diff = context_dense - context_sparse_for_diff
-                        # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
-                        # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
-                        # scale *= context_diff_scale
-                        # delta *= scale
-                        # h_nc *= scale
-                        
-                        def _repeat_interleave(t: torch.Tensor):
-                            t = t.repeat_interleave(delta_attention_args_w, dim=1)
-                            
-                            if delta_attention_args_smooth:
-                                # (exp) linear interpolate diff
-                                t_shift = torch.roll(t, -delta_attention_args_w, 1)
-                                t_shift[:, -delta_attention_args_w:] = t[:, -1:]
+                    # t_mx = torch.maximum(dense_mx, sparse_mx)
 
-                                offset = torch.arange(0, t.shape[1], device=t.device)
-                                offset = (offset % delta_attention_args_w).float() / delta_attention_args_w
-                                if t.ndim == 4:
-                                    t = t + (t_shift - t) * offset[None, :, None, None]
-                                else:
-                                    t = t + (t_shift - t) * offset[None, :, None]
-                            return t
-                        
-                        delta = _repeat_interleave(delta)
-                        h_nc = _repeat_interleave(h_nc)
-                        dense_mx = _repeat_interleave(torch.maximum(sparse_mx_for_diff, dense_mx))
-                        # sparse_mx = _repeat_interleave(sparse_mx_for_diff)
-                        # sparse_nc = _repeat_interleave(sparse_nc_for_diff)
+                    # alpha_sparse = torch.exp2(sparse_mx - t_mx)[:, :, :, None]
+                    # alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
 
-                        t_mx = torch.maximum(dense_mx, sparse_mx)
-                        alpha_sparse = torch.exp2(
-                            sparse_mx - t_mx
-                        )[:, :, :, None]
-
-                        alpha_dense = torch.exp2(
-                            dense_mx - t_mx
-                        )[:, :, :, None]
-
-                        # alpha_dense_mask = torch.zeros(dense_mx.size(1), device=dense_mx.device, dtype=torch.bool)
-                        # alpha_dense_mask = alpha_dense_mask.view(-1, delta_attention_args_w)
-                        # alpha_dense_mask[:, 0] = 1
-                        # alpha_dense_mask = alpha_dense_mask.view(-1)[None, :, None, None]
-                        # alpha_dense = alpha_dense_mask * 1 + ~alpha_dense_mask * alpha_dense_mask
-
-                        numerator = alpha_dense * delta + alpha_sparse * (context_sparse * sparse_nc[:, :, :, None])
-                        denominator = alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None]
-                        
-                        context = numerator / denominator
+                    # context = delta + (alpha_sparse * (context_sparse * sparse_nc[:, :, :, None])) / (alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None])
+                    # ---------------------------------
                     
                     context = context.to(query.dtype)
                     context.index_copy_(
-                        dim=1, index=idx_dense, source=context_dense
+                        dim=1, index=idx_dense, source=context_dense.to(query.dtype)
                     )
                     context = torch.cat([context, last_context_dense], dim=1)
 
+                    diff = context - context_original
+                    diff = diff[0, :, :, :].abs()
+                    print(f"{layer_id=}: {diff.amax().item()=:.4f} {diff.amin().item()=:.4f} {diff.mean().item()=:.4f} {diff.median().item()=:.4f}")
+                    cos = torch.nn.functional.cosine_similarity(context, context_original, dim=-1)
+                    print(f"{layer_id=}: {cos.amax().item()=:.4f} {cos.amin().item()=:.4f} {cos.mean().item()=:.4f} {cos.median().item()=:.4f}")
                     # if get_local_rank() == 0:
                     #     print(
                     #         'hit', layer_id, 
