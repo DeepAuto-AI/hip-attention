@@ -43,6 +43,7 @@ try:
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
+        model_parallel_is_initialized,
     )
 
     SGLANG_DIST_ACTIVATED = True
@@ -50,12 +51,21 @@ except ImportError as ex:
     SGLANG_DIST_ACTIVATED = False
 
 
-def get_local_rank() -> 0:
+def get_local_rank() -> int:
     if SGLANG_DIST_ACTIVATED:
+        if not model_parallel_is_initialized():
+            return 0
         return get_tensor_model_parallel_rank()
     else:
         return 0
 
+def get_world_size() -> int:
+    if SGLANG_DIST_ACTIVATED:
+        if not model_parallel_is_initialized():
+            return 1
+        return get_tensor_model_parallel_world_size()
+    else:
+        return 1
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
@@ -873,7 +883,7 @@ def dual_stage_quadratic_hip_attention(
 
                     if (
                         SGLANG_DIST_ACTIVATED
-                        and get_tensor_model_parallel_world_size() > 1
+                        and get_world_size() > 1
                         and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
                         out_scores_tp = out_scores
@@ -1445,6 +1455,8 @@ def dual_stage_quadratic_hip_attention(
         v = None
 
     block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
+    # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
+    # block_sparse_attention_backend = tilelang_bsa
 
     context = block_sparse_attention_backend(
         q=q_bsa,

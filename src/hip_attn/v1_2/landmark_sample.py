@@ -293,9 +293,13 @@ def landmark_sample(
             plt.savefig("dummy_landmark.png")
 
         if state is not None:
-            q_block_index = args.block_table.gather(
-                dim=1, index=position_ids_for_landmark
-            )
+            if args.block_table is not None:
+                q_block_index = args.block_table.gather(
+                    dim=1, index=position_ids_for_landmark
+                )
+            else:
+                assert args.position_ids.shape[0] == 1
+                q_block_index = args.position_ids[0]
             # sanity_check = q_block_index.amax().item()
             # assert sanity_check < state.landmark_scores.shape[0], f'{sanity_check=} < {state.landmark_scores.shape=}[0]'
             state.landmark_scores[q_block_index] = (
@@ -303,13 +307,18 @@ def landmark_sample(
                 .contiguous()
                 .permute(0, 2, 1)
             )
-            landmark_scores = state.landmark_scores[
-                args.block_table[
-                    :,
-                    : args.block_table.shape[1]
-                    - (args.block_table.shape[1] % landmark_chunk),
+            if args.block_table is not None:
+                landmark_scores = state.landmark_scores[
+                    args.block_table[
+                        :,
+                        : args.block_table.shape[1]
+                        - (args.block_table.shape[1] % landmark_chunk),
+                    ]
                 ]
-            ]
+            else:
+                assert k is not None
+                assert k.shape[0] == 1
+                landmark_scores = state.landmark_scores[None, :k.shape[1], :]
             landmark_scores = landmark_scores.permute(0, 2, 1)
     else:
 
