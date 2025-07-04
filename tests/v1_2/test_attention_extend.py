@@ -17,6 +17,7 @@ class TestAttentionExtend(unittest.TestCase):
         main_debug()
 
 
+@torch.inference_mode(True)
 def main_debug():
     IS_DEBUG = os.getenv("DEBUG", "0") == "1"
     if os.getenv("HIP_DEBUG_BENCH", "0") == "0":
@@ -35,7 +36,7 @@ def main_debug():
 
     assert seq_dups > 0
 
-    using_extend = True
+    using_extend = False
 
     q, k, v, out, cos, sin = load_checkouts(
         idx=0,

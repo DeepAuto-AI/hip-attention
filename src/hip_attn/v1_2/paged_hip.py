@@ -951,6 +951,9 @@ def _forward_paged_hip(
     sliding_window_sink = int(
         os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
     )
+    if args.second_stage_k == 0:
+        sliding_window_size = args.sliding_window_size
+        sliding_window_sink = args.sink_token_size
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
         bsa_fn = get_block_sparse_backend(args, query)
@@ -2479,7 +2482,7 @@ class PagedHiPStateful:
             states = None
             if metadata is not None:
                 if isinstance(metadata, list):
-                    if any(map(lambda x: x is None, metadata)) and any(map(lambda x: x[0].state is None, metadata)):
+                    if (not any(map(lambda x: x is None, metadata))) and (not any(map(lambda x: x.state is None, metadata))):
                         states = [m.state for m in metadata]
                 else:
                     if metadata.state is not None:
