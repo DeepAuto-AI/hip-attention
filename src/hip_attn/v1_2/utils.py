@@ -45,16 +45,30 @@ class CaptureEvents:
 
 class capture(object):
     buffers: List[CaptureEvents] = []
+    call_depth: int = 0
 
     @classmethod
     def report(cls):
-        for event in capture.buffers:
-            print(f"{event.handle.callback} took {event.elapsed():.2f} ms")
+        last_elapsed_sum = {}
+        last_depth = 0
+        for depth, event in capture.buffers:
+            if depth < last_depth:
+                print('--' * last_depth, f'[level {last_depth}] took {last_elapsed_sum.get(last_depth, 0)} ms', sep='')
+                last_elapsed_sum[last_depth] = 0
+            last_depth = depth
+            
+            elapsed = event.elapsed()
+            
+            if not depth in last_elapsed_sum:
+                last_elapsed_sum[depth] = 0
+            last_elapsed_sum[depth] += elapsed
+            
+            print("--" * depth, f"{event.handle.callback} took {elapsed:.2f} ms", sep='')
         capture.buffers.clear()
 
     @classmethod
-    def add_event(cls, event: CaptureEvents):
-        capture.buffers.append(event)
+    def add_event(cls, depth: int, event: CaptureEvents):
+        capture.buffers.append((depth, event))
         while len(capture.buffers) > 1024:
             capture.buffers.pop(0)
 
@@ -75,31 +89,24 @@ class capture(object):
             and os.getenv("HIP_DEBUG_CAPTURE_DECORATOR", "1") == "1"
             and (get_local_rank() == 0)
         )
-
+        
         if run_benchmark:
             start = torch.cuda.Event(True)
             end = torch.cuda.Event(True)
 
-            # hip_args = kwargs['args']
-            # hip_args.rope_cos = hip_args.rope_cos.to(torch.bfloat16)
-            # hip_args.rope_sin = hip_args.rope_sin.to(torch.bfloat16)
-            # hip_args.disable_flashdecode = True
-            # hip_args.online_update_cache = False
-            # hip_args.v_hidden_dim = 128
-            # hip_args.rope_is_neox_style = True
-
             start.record()
-
+        
+        my_call_depth = capture.call_depth
+        capture.call_depth += 1
         ret = self.callback(*args, **kwargs)
+        capture.call_depth -= 1
 
         if run_benchmark:
             end.record()
 
-            capture.add_event(CaptureEvents(handle=self, start=start, end=end))
-            # end.synchronize()
-            # elapsed = start.elapsed_time(end)
-            # # print(args[0].dtype)
-            # # print(kwargs['args'].pretty())
-            # print(f'{self.callback} took {elapsed:.2f} ms')
+            capture.add_event(
+                my_call_depth, 
+                CaptureEvents(handle=self, start=start, end=end)
+            )
 
         return ret

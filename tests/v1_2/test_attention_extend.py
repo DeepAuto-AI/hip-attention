@@ -9,6 +9,7 @@ from hip_research.utils.load_checkouts import load_checkouts
 import hip_attn.v1_2.attention_extend
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
+from hip_attn.v1_2.utils import capture
 
 
 class TestAttentionExtend(unittest.TestCase):
@@ -17,6 +18,10 @@ class TestAttentionExtend(unittest.TestCase):
 
 
 def main_debug():
+    IS_DEBUG = os.getenv("DEBUG", "0") == "1"
+    if os.getenv("HIP_DEBUG_BENCH", "0") == "0":
+        os.environ["HIP_DEBUG_BENCH"] = "1" if IS_DEBUG else "0"
+    
     seq_len = int(os.getenv("SEQ_LEN", "131072"))
     query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
     seq_dups = int(os.getenv("DUPS", "1"))
@@ -89,45 +94,22 @@ def main_debug():
         "mid": [
             ScanStage(
                 stage_block_size_q=64,
-                stage_block_stride_q=4,
-                stage_chunk_size=128,
-                stage_k=None,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=4,
+                stage_block_stride_q=2,
                 stage_chunk_size=32,
-                stage_k=32768,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=1,
-                stage_chunk_size=8,
-                stage_k=8192,
-                stage_stride=1,
-            ),
-        ],
-        "high": [
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=2,
-                stage_chunk_size=64,
                 stage_k=None,
                 stage_stride=1,
             ),
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=2,
-                stage_chunk_size=16,
+                stage_chunk_size=8,
                 stage_k=32768,
                 stage_stride=1,
             ),
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
-                stage_chunk_size=4,
+                stage_chunk_size=2,
                 stage_k=8192,
                 stage_stride=1,
             ),
@@ -157,15 +139,11 @@ def main_debug():
         ],
     }[preset]
     config_second_k = {
-        "high": 2048,
         "mid": 2048,
-        "low": 2048,
         "debug": 128,
     }[preset]
     config_sa_extend_backend = {
-        "high": "streaming",
         "mid": "streaming",
-        "low": "streaming",
         "debug": "streaming",
     }[preset]
 
@@ -209,7 +187,7 @@ def main_debug():
 
         start.record()
         if i == 0:
-            hip_attn.v1_2.attention_extend.DEBUG = os.getenv("DEBUG", "0") == "1"
+            hip_attn.v1_2.attention_extend.DEBUG = IS_DEBUG
 
         _, metadata = dual_stage_quadratic_hip_attention(
             **dual_stage_kwargs, cached_metadata=metadata
@@ -226,6 +204,7 @@ def main_debug():
         latency = start.elapsed_time(end)
         if i > 3:
             ls_hip_extend.append(latency)
+        capture.report()
         print(latency)
 
     print("-" * 20)
@@ -262,6 +241,7 @@ def main_debug():
         latency = start.elapsed_time(end)
         if i > 3:
             ls_hip.append(latency)
+        capture.report()
         print(latency)
 
     print("-" * 20)
