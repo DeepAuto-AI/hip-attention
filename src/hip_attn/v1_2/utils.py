@@ -64,6 +64,11 @@ class capture(object):
             last_elapsed_sum[depth] += elapsed
             
             print("--" * depth, f"{event.handle.callback} took {elapsed:.2f} ms", sep='')
+        
+        if len(capture.buffers) > 0:
+            allocated = torch.cuda.memory_allocated()
+            print(f'{allocated / 1024 / 1024:.2f} MB allocated')
+        
         capture.buffers.clear()
 
     @classmethod
