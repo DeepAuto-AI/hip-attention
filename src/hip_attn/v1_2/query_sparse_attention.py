@@ -763,6 +763,10 @@ class _attention(torch.autograd.Function):
             )
 
         if return_pooled_scores:
+            warnings.warn(
+                "Pooled score should not be returned for efficient inference."
+            )
+
             if k is not None:
                 MAX_TSRC = k.shape[2]
             else:
