@@ -238,6 +238,9 @@ def forward_paged_hip(
         decoding_reqs = []
         decoding_reqs_positions = []
         for idx_batch, seq_len in enumerate(extend_seq_lens_cpu):
+            if query.ndim == 4:
+                seq_len = query.shape[1]
+            
             if seq_len == 0:  # Skip empty sequences
                 decoding_reqs.append(idx_batch)
                 decoding_reqs_positions.append(start_len)
@@ -2476,7 +2479,7 @@ class PagedHiPStateful:
             states = None
             if metadata is not None:
                 if isinstance(metadata, list):
-                    if (metadata[0] is not None) and (metadata[0].state is not None):
+                    if any(map(lambda x: x is None, metadata)) and any(map(lambda x: x[0].state is None, metadata)):
                         states = [m.state for m in metadata]
                 else:
                     if metadata.state is not None:
