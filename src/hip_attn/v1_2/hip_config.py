@@ -448,7 +448,7 @@ class HiPAttentionConfig:
                     warnings.warn(
                         "envvar HIP_DEBUG_USING_DENSE_PREFILL is overrided by hip attention args"
                     )
-                os.environ["HIP_DEBUG_USING_DENSE_PREFILL"] = "1" if given_args else "1"
+                os.environ["HIP_DEBUG_USING_DENSE_PREFILL"] = "1" if given_args else "0"
                 parsed_json.pop("__using_dense_prefill")
             if "__head_reduce" in parsed_json:
                 given_args = parsed_json["__head_reduce"]
