@@ -7,12 +7,7 @@
         1,
         2,
         3,
-        7,
-        11,
-        15,
-        19,
-        23,
-        26
+        4
     ],
     "mask_refresh_interval": [96, 24, 12],
     "layers": [
@@ -77,8 +72,8 @@
     ],
     "prefill_layers": [
         {
-            "sliding_window_size": 1024,
-            "second_stage_k": 1024,
+            "sliding_window_size": 8192,
+            "second_stage_k": 0,
             "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
             "scan_extend_backend": "streaming",
@@ -108,7 +103,7 @@
         },
         {
             "sliding_window_size": 512,
-            "second_stage_k": 1024,
+            "second_stage_k": 2048,
             "sink_token_size": 64,
             "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
