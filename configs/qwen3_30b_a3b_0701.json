@@ -1,0 +1,72 @@
+{
+    "__using_dense_prefill": false,
+    "__head_reduce": 3,
+    "using_extend": true,
+    "dense_layers": [
+        0,
+        1,
+        2,
+        3,
+        4
+    ],
+    "mask_refresh_interval": [96, 36, 12],
+    "prefill_layers": [
+        {
+            "scan_extend_backend": "streaming",
+            "sliding_window_size": 1024,
+            "second_stage_k": 2048,
+            "sink_token_size": 128,
+            "stages": [
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 64,
+                    "stage_k": null,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 32,
+                    "stage_k": 32768,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 1,
+                    "stage_chunk_size": 8,
+                    "stage_k": 8192,
+                    "stage_stride": 1
+                }
+            ]
+        },
+        {
+            "sliding_window_size": 1024,
+            "second_stage_k": 2048,
+            "sink_token_size": 128,
+            "stages": [
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 16,
+                    "stage_k": null,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 4,
+                    "stage_k": 32768,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 1,
+                    "stage_chunk_size": 1,
+                    "stage_k": 8192,
+                    "stage_stride": 1
+                }
+            ]
+        }
+    ]
+}
