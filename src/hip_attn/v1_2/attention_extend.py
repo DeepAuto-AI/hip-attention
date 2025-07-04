@@ -16,6 +16,7 @@ from torch import Tensor
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_decode_bsa import decode_block_sparse_attention
 from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
+from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention_tilelang
 from hip_attn.v1_2.attention_metadata import (
     EnsembleScoreStage,
     EvalScoreStage,
@@ -84,6 +85,8 @@ def num_streaming_multiprocessor():
 def get_block_sparse_backend(
     args: HiPAttentionArgs, q: torch.Tensor
 ) -> type(block_sparse_attention):
+    # return block_sparse_attention_tilelang
+    
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
