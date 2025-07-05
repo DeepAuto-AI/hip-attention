@@ -36,7 +36,7 @@ def main_debug():
 
     assert seq_dups > 0
 
-    using_extend = False
+    using_extend = True
 
     q, k, v, out, cos, sin = load_checkouts(
         idx=0,

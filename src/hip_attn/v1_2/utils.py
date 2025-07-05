@@ -74,7 +74,7 @@ class capture(object):
     @classmethod
     def add_event(cls, depth: int, event: CaptureEvents):
         capture.buffers.append((depth, event))
-        while len(capture.buffers) > 1024:
+        while len(capture.buffers) > 32:
             capture.buffers.pop(0)
 
     def __init__(self, callback):

@@ -2101,7 +2101,10 @@ def decode_block_sparse_attention(
         os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "64"))
     )
     if HID >= 512:
-        max_block_size = min(max_block_size, 32)
+        # NOTE: when MLA
+        max_block_size = min(max_block_size, int(
+            os.getenv("SA_DECODE_MLA_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+        ))
 
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
