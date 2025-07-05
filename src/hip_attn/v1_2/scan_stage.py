@@ -544,7 +544,7 @@ def get_scan_stage_configs():
         False,
     ]:
         for num_warps in NUM_WARPS:
-            for num_stages in [1, 2, 4]:
+            for num_stages in [1, 2, 3]:
                 configs.append(
                     triton.Config(
                         {"LOAD_Q_EACH_TIME": LOAD_Q_EACH_TIME},
@@ -857,7 +857,11 @@ def chunk_controllable_sampling_mask_cuda(
                     # max_chunk_size 
                     # while max_chunk_size >= TERMINATE_SIZE:
                     #     max_chunk_size /= 2.0
-                    for _ in tl.range(0, tl.ceil(tl.log2(max_chunk_size / TERMINATE_SIZE)).to(tl.int32), num_stages=3):
+                    for _ in tl.range(
+                        0, 
+                        tl.ceil(tl.log2(max_chunk_size / TERMINATE_SIZE)).to(tl.int32), 
+                        num_stages=1 if USING_EXTEND else 3
+                    ):
                         mask_tsrc_active = (
                             mask_chunk
                             & (idx_tsrc_left < idx_tsrc_right)
