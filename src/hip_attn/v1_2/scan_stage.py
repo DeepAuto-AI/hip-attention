@@ -681,12 +681,12 @@ def chunk_controllable_sampling_mask_cuda(
     for i in range(group_jobs):
         pid = pid_group * group_jobs + i
         if pid < total_jobs:
+            idx_head = pid % HEAD
+            pid = pid // HEAD
             idx_bdst_scan = pid % BDST_SCAN
             pid = pid // BDST_SCAN
             idx_bchunk = pid % BCHUNK
             pid = pid // BCHUNK
-            idx_head = pid % HEAD
-            pid = pid // HEAD
             idx_bsz = pid
 
             # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // STRIDE_Q) * STRIDE_Q
