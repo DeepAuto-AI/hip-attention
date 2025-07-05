@@ -260,7 +260,7 @@ def dual_stage_quadratic_hip_attention(
     BLOCK_SIZE_Q = args.stages[0].stage_block_size_q
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
-    BLOCK_CHUNK = args.block_size_k
+    BLOCK_CHUNK = int(os.getenv('SCAN_BLOCK_CHUNK', '64'))
     chunk_size = args.stages[0].stage_chunk_size
     chunk_count = triton.cdiv(
         max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size
