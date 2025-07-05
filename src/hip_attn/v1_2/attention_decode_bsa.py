@@ -2098,7 +2098,7 @@ def decode_block_sparse_attention(
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
     max_block_size = int(
-        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "64"))
     )
     if HID >= 512:
         max_block_size = min(max_block_size, 32)
