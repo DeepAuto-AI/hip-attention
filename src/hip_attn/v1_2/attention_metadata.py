@@ -60,6 +60,7 @@ class EvalScoreStage(Stage):
 @dataclass
 class ScanStage(Stage):
     stage_extend_backend: Optional[str] = None
+    using_landmark: Optional[bool] = None
     require_realign_index: bool = True
     require_reset_score: bool = True
     require_post_sort: bool = True
