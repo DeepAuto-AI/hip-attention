@@ -13,7 +13,7 @@
     "mask_refresh_interval": [96, 24, 12],
     "layers": [
         {
-            "sliding_window_size": 8192,
+            "sliding_window_size": 12288,
             "second_stage_k": 0,
             "sa_extend_backend": "streaming"
         },
@@ -54,8 +54,8 @@
             "sa_extend_backend": "streaming"
         },
         {
-            "sliding_window_size": 512,
-            "second_stage_k": 2048,
+            "sliding_window_size": 1024,
+            "second_stage_k": 4096,
             "sink_token_size": 256,
             "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
@@ -64,7 +64,7 @@
                 {
                     "stage_block_size_q":128,
                     "stage_block_stride_q":4,
-                    "stage_chunk_size":256,
+                    "stage_chunk_size":128,
                     "stage_k":null,
                     "stage_stride":1,
                     "using_landmark":false

@@ -193,7 +193,10 @@ def dual_stage_quadratic_hip_attention(
     #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
     # )
 
-    require_state = args.using_landmark
+    require_state = (
+        args.using_landmark or
+        any([s.using_landmark if isinstance(s, ScanStage) else False for s in args.stages])
+    )
 
     if require_state and (not args.is_decode):
         # if q.shape[1] > 1: print('using cached state')
@@ -473,7 +476,7 @@ def dual_stage_quadratic_hip_attention(
 
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
-                    args.using_landmark
+                    (args.using_landmark or stage_info.using_landmark)
                     and (not args.is_decode)
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
@@ -525,10 +528,10 @@ def dual_stage_quadratic_hip_attention(
 
                     assert indices_left.shape == (
                         BSZ,
-                        BDST_SCAN,
+                        BDST,
                         HEAD,
                         indices_left.shape[-1],
-                    )
+                    ), f'{indices_left.shape} == ({BSZ},{BDST},{HEAD},{indices_left.shape[-1]},)'
 
                     # k_temp = args.gather_k_from_paged_cache(
                     #     chunk_size=1,

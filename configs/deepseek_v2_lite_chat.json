@@ -72,7 +72,7 @@
     ],
     "prefill_layers": [
         {
-            "sliding_window_size": 8192,
+            "sliding_window_size": 12288,
             "second_stage_k": 0,
             "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "streaming",
