@@ -872,6 +872,35 @@ def _forward_paged_hip(
 
     if last_dense > 0:
         last_dense += dst_seq_len % args.block_sparse_block_size_q
+    
+    # Plan 1
+    # TODO use flash attention under 100K
+
+    # Plan 2
+    # TODO use flash attention under 64K
+    # TODO use sparse setting under 128K
+
+    seq_thresh_fa3 = min(
+        args.model_context_length,
+        int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 0 * 1024)),
+    )
+
+    if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
+        if layer_id in hip_config.dense_layers:
+            seq_thresh_fa3 = query.shape[1]
+
+    sliding_window_size_for_masking_step = layer_config.sliding_window_size_for_masking_step
+    if (
+        isinstance(sliding_window_size_for_masking_step, list) 
+        and (cached_metadata is not None) 
+        and (cached_metadata.indices is None)
+    ):
+        larger_sw_size = sliding_window_size_for_masking_step[
+            max(0, len(cached_metadata.stage_caches) - 1) 
+            if cached_metadata.stage_caches is not None else 
+            0
+        ]
+        args.bsa_sliding_window_size = larger_sw_size
 
     # TODO: if delta norm is too high, then just recompute that whole block.
     # TODO: use partial densely decode. delta attention for decode
@@ -2176,23 +2205,7 @@ def _forward_paged_hip(
         #         cached_metadata=cached_metadata,
         #     )
         # else:
-
-        # Plan 1
-        # TODO use flash attention under 100K
-
-        # Plan 2
-        # TODO use flash attention under 64K
-        # TODO use sparse setting under 128K
-
-        seq_thresh_fa3 = min(
-            args.model_context_length,
-            int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 0 * 1024)),
-        )
-
-        if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
-            if layer_id in hip_config.dense_layers:
-                seq_thresh_fa3 = query.shape[1]
-
+        
         context_fa3 = None
         metadata = None
 

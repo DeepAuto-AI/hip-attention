@@ -110,11 +110,11 @@ else:
         ),
     ]
 
-
 @dataclass
 class HiPAttentionPerLayerConfig:
     second_stage_k: int = 2048
     sliding_window_size: int = 1024
+    sliding_window_size_for_masking_step: Optional[List[int]] = None
     sink_token_size: int = 256
     landmark_stage_k: int = field(default_factory=lambda: [1, 1, 1])
     sa_extend_backend: str = "streaming"
@@ -132,6 +132,9 @@ class HiPAttentionPerLayerConfig:
             if "sliding_window_size" in parsed_json:
                 self.sliding_window_size = parsed_json["sliding_window_size"]
                 parsed_json.pop("sliding_window_size")
+            if "sliding_window_size_for_masking_step" in parsed_json:
+                self.sliding_window_size_for_masking_step = parsed_json["sliding_window_size_for_masking_step"]
+                parsed_json.pop("sliding_window_size_for_masking_step")
             if "sink_token_size" in parsed_json:
                 self.sink_token_size = parsed_json["sink_token_size"]
                 parsed_json.pop("sink_token_size")

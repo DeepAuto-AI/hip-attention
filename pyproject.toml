@@ -42,6 +42,7 @@ dependencies = [
     "seaborn",
     "sympy",
     "bitsandbytes",
+    "tilelang",
     # CUDA 12
     "cupy-cuda12x",
     "nvtx",

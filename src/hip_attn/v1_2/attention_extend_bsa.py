@@ -40,6 +40,7 @@ def apply_rope_to_keys(
     model_context_length,
     sink_token_size,
     mask_k,
+    sparse_token_size,
     sliding_window_size,
     HID: tl.constexpr,
     BLOCK_TQ: tl.constexpr,
@@ -207,11 +208,21 @@ def apply_rope_to_keys(
                 rope_mult = ((idx_rope_range % 2 == 0) * (-2) + 1).to(queries.dtype)
 
             if EXCLUDE_SLIDING_WINDOW:
+                # NOTE this is seq len
                 pos_tdst_max = pos_tdst_min + tl.sum(mask_tdst.to(tl.int32))
 
                 if EXTEND_BACKEND == "streaming":
                     # streaming
                     new_tsrc = idx_rope
+                    num_sparse_tokens = (
+                        sliding_window_size + 
+                        sink_token_size + 
+                        sparse_token_size
+                    )
+                    if num_sparse_tokens > model_context_length:
+                        new_tsrc = new_tsrc - (
+                            num_sparse_tokens - model_context_length
+                        )
                     # new_tsrc = tl.maximum(
                     #     0,
                     #     new_tsrc
@@ -262,6 +273,15 @@ def apply_rope_to_keys(
             else:
                 if EXTEND_BACKEND == "streaming":
                     new_tsrc = idx_rope
+                    num_sparse_tokens = (
+                        sliding_window_size + 
+                        sink_token_size + 
+                        sparse_token_size
+                    )
+                    if num_sparse_tokens > model_context_length:
+                        new_tsrc = new_tsrc - (
+                            num_sparse_tokens - model_context_length
+                        )
                     new_tsrc = tl.maximum(0, new_tsrc)
                 else:
                     new_tsrc = idx_tsrc
@@ -359,6 +379,7 @@ def block_sparse_attention_cuda_step(
     # TSRC,
     sliding_window_size,
     sink_token_size,
+    sparse_token_size,
     mask_k,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
     HAS_FIRST_TOKEN: tl.constexpr,
@@ -414,6 +435,7 @@ def block_sparse_attention_cuda_step(
                 model_context_length,
                 sink_token_size,
                 mask_k,
+                sparse_token_size,
                 sliding_window_size,
                 HID,
                 BLOCK_TQ,
@@ -450,6 +472,7 @@ def block_sparse_attention_cuda_step(
                 model_context_length,
                 sink_token_size,
                 mask_k,
+                sparse_token_size,
                 sliding_window_size,
                 HID,
                 BLOCK_TQ,
@@ -893,6 +916,8 @@ def block_sparse_attention_cuda(
     ROPE_DIM = rope_range_end - rope_range_begin
 
     HID_BLOCK_1: tl.constexpr = HID - HID_BLOCK_0
+    
+    sparse_token_size: tl.constexpr = BK * BLOCK_SIZE_K
 
     idx_hid_q0 = tl.arange(0, HID_BLOCK_0)
     rope_mask_0 = (rope_range_begin <= idx_hid_q0) & (idx_hid_q0 < rope_range_end)
@@ -993,7 +1018,7 @@ def block_sparse_attention_cuda(
             activate_len = sink_token_size + sliding_window_size + BK * BLOCK_SIZE_K
             max_seq_len = tl.max(pos_tdst * mask_tdst)
             rope_tdst = rope_tdst - max_seq_len + activate_len
-            rope_tdst = tl.maximum(0, rope_tdst)
+            rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
         else:
             rope_tdst = pos_tdst - 1
 
@@ -1408,6 +1433,7 @@ def block_sparse_attention_cuda(
                 m_i,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 True,
                 True,
@@ -1813,6 +1839,7 @@ def block_sparse_attention_cuda(
                 m_i,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 False,
                 False,
@@ -2243,6 +2270,7 @@ def block_sparse_attention_cuda(
                     m_i,
                     sliding_window_size,
                     sink_token_size,
+                    sparse_token_size,
                     (range_end - range_start) * BLOCK_SIZE_K,
                     True,
                     False,
