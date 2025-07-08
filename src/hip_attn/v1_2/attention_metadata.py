@@ -276,6 +276,7 @@ class HiPAttentionArgs:
     is_decode: bool = False
 
     bsa_return_running_statistics: bool = False
+    bsa_sliding_window_size: int = -1
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:

@@ -1463,6 +1463,9 @@ def dual_stage_quadratic_hip_attention(
     block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
     # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
     # block_sparse_attention_backend = tilelang_bsa
+    
+    if args.bsa_sliding_window_size > 0:
+        args.sliding_window_size = args.bsa_sliding_window_size
 
     context = block_sparse_attention_backend(
         q=q_bsa,

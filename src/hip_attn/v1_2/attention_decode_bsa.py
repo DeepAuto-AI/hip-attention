@@ -44,6 +44,7 @@ def load_queries(
     sink_token_size,
     sliding_window_size,
     sparse_token_size,
+    model_context_length,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
     rope_is_neox_style: tl.constexpr,
@@ -94,7 +95,7 @@ def load_queries(
             rope_tdst = cur_batch_seq_len - 1
             activate_len = sink_token_size + sliding_window_size + sparse_token_size
             rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
-            rope_tdst = tl.maximum(0, rope_tdst)
+            rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
         else:
             rope_tdst = cur_batch_seq_len - 1
 
@@ -371,6 +372,7 @@ def _fwd_kernel_stage1(
         sink_token_size,
         sliding_window_size,
         sparse_token_size,
+        model_context_length,
         rope_range_begin,
         rope_range_end,
         rope_is_neox_style,
@@ -839,6 +841,7 @@ def _fwd_kernel_stage1(
                     e_max,
                     sliding_window_size,
                     sink_token_size,
+                    sparse_token_size,
                     (range_end - range_start) * BLOCK_SIZE_K,  # mask_k
                     True,
                     False,
@@ -1245,6 +1248,7 @@ def _fwd_kernel_stage1(
                 e_max,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 True,
                 True,
@@ -1662,6 +1666,7 @@ def _fwd_kernel_stage1(
                 e_max,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 False,
                 False,
