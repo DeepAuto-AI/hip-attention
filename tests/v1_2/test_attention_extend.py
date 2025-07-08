@@ -22,7 +22,7 @@ def main_debug():
     IS_DEBUG = os.getenv("DEBUG", "0") == "1"
     if os.getenv("HIP_DEBUG_BENCH", "0") == "0":
         os.environ["HIP_DEBUG_BENCH"] = "1" if IS_DEBUG else "0"
-    
+
     seq_len = int(os.getenv("SEQ_LEN", "131072"))
     query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
     seq_dups = int(os.getenv("DUPS", "1"))

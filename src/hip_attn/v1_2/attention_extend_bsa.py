@@ -215,14 +215,10 @@ def apply_rope_to_keys(
                     # streaming
                     new_tsrc = idx_rope
                     num_sparse_tokens = (
-                        sliding_window_size + 
-                        sink_token_size + 
-                        sparse_token_size
+                        sliding_window_size + sink_token_size + sparse_token_size
                     )
                     if num_sparse_tokens > model_context_length:
-                        new_tsrc = new_tsrc - (
-                            num_sparse_tokens - model_context_length
-                        )
+                        new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
                     # new_tsrc = tl.maximum(
                     #     0,
                     #     new_tsrc
@@ -274,14 +270,10 @@ def apply_rope_to_keys(
                 if EXTEND_BACKEND == "streaming":
                     new_tsrc = idx_rope
                     num_sparse_tokens = (
-                        sliding_window_size + 
-                        sink_token_size + 
-                        sparse_token_size
+                        sliding_window_size + sink_token_size + sparse_token_size
                     )
                     if num_sparse_tokens > model_context_length:
-                        new_tsrc = new_tsrc - (
-                            num_sparse_tokens - model_context_length
-                        )
+                        new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
                     new_tsrc = tl.maximum(0, new_tsrc)
                 else:
                     new_tsrc = idx_tsrc
@@ -916,7 +908,7 @@ def block_sparse_attention_cuda(
     ROPE_DIM = rope_range_end - rope_range_begin
 
     HID_BLOCK_1: tl.constexpr = HID - HID_BLOCK_0
-    
+
     sparse_token_size: tl.constexpr = BK * BLOCK_SIZE_K
 
     idx_hid_q0 = tl.arange(0, HID_BLOCK_0)
@@ -1077,7 +1069,9 @@ def block_sparse_attention_cuda(
     # 6ms
     if (sink_token_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
-        for i_tsrc in tl.range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K, num_stages=1):
+        for i_tsrc in tl.range(
+            0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K, num_stages=1
+        ):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < tl.minimum(CURR_TSRC, sink_token_size)
 
@@ -1483,7 +1477,9 @@ def block_sparse_attention_cuda(
             )
 
         TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
-        for i_tsrc in tl.range(i_tsrc_range_start_real, CURR_TSRC, TSRC_RANGE_STEP, num_stages=1):
+        for i_tsrc in tl.range(
+            i_tsrc_range_start_real, CURR_TSRC, TSRC_RANGE_STEP, num_stages=1
+        ):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
             mask_tsrc = idx_tsrc < CURR_TSRC
 
@@ -1886,7 +1882,9 @@ def block_sparse_attention_cuda(
 
     # 60ms
     if (BK > 0) and True:
-        for i_bk in tl.range(range_start, range_start + (BK * G), BLOCK_BK, num_stages=1):
+        for i_bk in tl.range(
+            range_start, range_start + (BK * G), BLOCK_BK, num_stages=1
+        ):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
 

@@ -852,15 +852,15 @@ def chunk_controllable_sampling_mask_cuda(
                             )
                         else:
                             queries_1 = None
-                    
+
                     matmul_dtype = q_dtype
-                    # max_chunk_size 
+                    # max_chunk_size
                     # while max_chunk_size >= TERMINATE_SIZE:
                     #     max_chunk_size /= 2.0
                     for _ in tl.range(
-                        0, 
-                        tl.ceil(tl.log2(max_chunk_size / TERMINATE_SIZE)).to(tl.int32), 
-                        num_stages=1 if USING_EXTEND else 3
+                        0,
+                        tl.ceil(tl.log2(max_chunk_size / TERMINATE_SIZE)).to(tl.int32),
+                        num_stages=1 if USING_EXTEND else 3,
                     ):
                         mask_tsrc_active = (
                             mask_chunk
@@ -870,8 +870,10 @@ def chunk_controllable_sampling_mask_cuda(
                         )
                         idx_tsrc_center = (idx_tsrc_left + idx_tsrc_right) // 2
 
-                        assert not ORACLE_MAXIMUM, "this is deprecated at fad90fea0d37ba88c04e90f2c5597e6800e97e8f"
-                        
+                        assert (
+                            not ORACLE_MAXIMUM
+                        ), "this is deprecated at fad90fea0d37ba88c04e90f2c5597e6800e97e8f"
+
                         idx_tsrc = (idx_tsrc_left + idx_tsrc_center) // 2
 
                         if LOAD_Q_EACH_TIME:
@@ -904,8 +906,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 model_context_length,
                                 sliding_window_size,
                                 USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                NEED_APPLY_ROPE
-                                and (rope_range_begin < HID_BLOCK_0),
+                                NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
                                 BLOCK_SIZE_Q,
                                 HID_BLOCK_0,
@@ -992,7 +993,7 @@ def chunk_controllable_sampling_mask_cuda(
 
                         scores_left = tl.dot(
                             (queries_0 * cq).to(matmul_dtype),
-                            (keys_left_0.to(q_dtype) * ck).to(matmul_dtype)
+                            (keys_left_0.to(q_dtype) * ck).to(matmul_dtype),
                         ).to(scores.dtype)
 
                         if HID_BLOCK_1 > 0:
@@ -1139,7 +1140,7 @@ def chunk_controllable_sampling_mask_cuda(
                         scores_left = tl.where(
                             mask_tsrc_active, scores_left, float("-inf")
                         ).to(scores_left.dtype)
-                        
+
                         idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
 
                         if LOAD_Q_EACH_TIME:
@@ -1172,8 +1173,7 @@ def chunk_controllable_sampling_mask_cuda(
                                 model_context_length,
                                 sliding_window_size,
                                 USING_EXTEND and (rope_range_begin < HID_BLOCK_0),
-                                NEED_APPLY_ROPE
-                                and (rope_range_begin < HID_BLOCK_0),
+                                NEED_APPLY_ROPE and (rope_range_begin < HID_BLOCK_0),
                                 EXTEND_BACKEND,
                                 BLOCK_SIZE_Q,
                                 HID_BLOCK_0,

@@ -240,7 +240,7 @@ def forward_paged_hip(
         for idx_batch, seq_len in enumerate(extend_seq_lens_cpu):
             if query.ndim == 4:
                 seq_len = query.shape[1]
-            
+
             if seq_len == 0:  # Skip empty sequences
                 decoding_reqs.append(idx_batch)
                 decoding_reqs_positions.append(start_len)
@@ -872,7 +872,7 @@ def _forward_paged_hip(
 
     if last_dense > 0:
         last_dense += dst_seq_len % args.block_sparse_block_size_q
-    
+
     # Plan 1
     # TODO use flash attention under 100K
 
@@ -889,16 +889,20 @@ def _forward_paged_hip(
         if layer_id in hip_config.dense_layers:
             seq_thresh_fa3 = query.shape[1]
 
-    sliding_window_size_for_masking_step = layer_config.sliding_window_size_for_masking_step
+    sliding_window_size_for_masking_step = (
+        layer_config.sliding_window_size_for_masking_step
+    )
     if (
-        isinstance(sliding_window_size_for_masking_step, list) 
-        and (cached_metadata is not None) 
+        isinstance(sliding_window_size_for_masking_step, list)
+        and (cached_metadata is not None)
         and (cached_metadata.indices is None)
     ):
         larger_sw_size = sliding_window_size_for_masking_step[
-            max(0, len(cached_metadata.stage_caches) - 1) 
-            if cached_metadata.stage_caches is not None else 
-            0
+            (
+                max(0, len(cached_metadata.stage_caches) - 1)
+                if cached_metadata.stage_caches is not None
+                else 0
+            )
         ]
         args.bsa_sliding_window_size = larger_sw_size
 
@@ -2205,7 +2209,7 @@ def _forward_paged_hip(
         #         cached_metadata=cached_metadata,
         #     )
         # else:
-        
+
         context_fa3 = None
         metadata = None
 
@@ -2495,7 +2499,9 @@ class PagedHiPStateful:
             states = None
             if metadata is not None:
                 if isinstance(metadata, list):
-                    if (not any(map(lambda x: x is None, metadata))) and (not any(map(lambda x: x.state is None, metadata))):
+                    if (not any(map(lambda x: x is None, metadata))) and (
+                        not any(map(lambda x: x.state is None, metadata))
+                    ):
                         states = [m.state for m in metadata]
                 else:
                     if metadata.state is not None:

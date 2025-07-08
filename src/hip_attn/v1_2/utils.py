@@ -53,22 +53,28 @@ class capture(object):
         last_depth = 0
         for depth, event in capture.buffers:
             if depth < last_depth:
-                print('--' * last_depth, f'[level {last_depth}] took {last_elapsed_sum.get(last_depth, 0)} ms', sep='')
+                print(
+                    "--" * last_depth,
+                    f"[level {last_depth}] took {last_elapsed_sum.get(last_depth, 0)} ms",
+                    sep="",
+                )
                 last_elapsed_sum[last_depth] = 0
             last_depth = depth
-            
+
             elapsed = event.elapsed()
-            
+
             if not depth in last_elapsed_sum:
                 last_elapsed_sum[depth] = 0
             last_elapsed_sum[depth] += elapsed
-            
-            print("--" * depth, f"{event.handle.callback} took {elapsed:.2f} ms", sep='')
-        
+
+            print(
+                "--" * depth, f"{event.handle.callback} took {elapsed:.2f} ms", sep=""
+            )
+
         if len(capture.buffers) > 0:
             allocated = torch.cuda.memory_allocated()
-            print(f'{allocated / 1024 / 1024:.2f} MB allocated')
-        
+            print(f"{allocated / 1024 / 1024:.2f} MB allocated")
+
         capture.buffers.clear()
 
     @classmethod
@@ -94,13 +100,13 @@ class capture(object):
             and os.getenv("HIP_DEBUG_CAPTURE_DECORATOR", "1") == "1"
             and (get_local_rank() == 0)
         )
-        
+
         if run_benchmark:
             start = torch.cuda.Event(True)
             end = torch.cuda.Event(True)
 
             start.record()
-        
+
         my_call_depth = capture.call_depth
         capture.call_depth += 1
         ret = self.callback(*args, **kwargs)
@@ -110,8 +116,7 @@ class capture(object):
             end.record()
 
             capture.add_event(
-                my_call_depth, 
-                CaptureEvents(handle=self, start=start, end=end)
+                my_call_depth, CaptureEvents(handle=self, start=start, end=end)
             )
 
         return ret

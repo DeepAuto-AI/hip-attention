@@ -110,6 +110,7 @@ else:
         ),
     ]
 
+
 @dataclass
 class HiPAttentionPerLayerConfig:
     second_stage_k: int = 2048
@@ -133,7 +134,9 @@ class HiPAttentionPerLayerConfig:
                 self.sliding_window_size = parsed_json["sliding_window_size"]
                 parsed_json.pop("sliding_window_size")
             if "sliding_window_size_for_masking_step" in parsed_json:
-                self.sliding_window_size_for_masking_step = parsed_json["sliding_window_size_for_masking_step"]
+                self.sliding_window_size_for_masking_step = parsed_json[
+                    "sliding_window_size_for_masking_step"
+                ]
                 parsed_json.pop("sliding_window_size_for_masking_step")
             if "sink_token_size" in parsed_json:
                 self.sink_token_size = parsed_json["sink_token_size"]

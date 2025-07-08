@@ -41,10 +41,10 @@ try:
     from sglang.srt.distributed import (
         get_tensor_model_parallel_rank,
         get_tensor_model_parallel_world_size,
+        model_parallel_is_initialized,
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
-        model_parallel_is_initialized,
     )
 
     SGLANG_DIST_ACTIVATED = True
@@ -60,6 +60,7 @@ def get_local_rank() -> int:
     else:
         return 0
 
+
 def get_world_size() -> int:
     if SGLANG_DIST_ACTIVATED:
         if not model_parallel_is_initialized():
@@ -67,6 +68,7 @@ def get_world_size() -> int:
         return get_tensor_model_parallel_world_size()
     else:
         return 1
+
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
@@ -86,7 +88,7 @@ def get_block_sparse_backend(
     args: HiPAttentionArgs, q: torch.Tensor
 ) -> type(block_sparse_attention):
     # return block_sparse_attention_tilelang
-    
+
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
@@ -193,9 +195,8 @@ def dual_stage_quadratic_hip_attention(
     #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
     # )
 
-    require_state = (
-        args.using_landmark or
-        any([s.using_landmark if isinstance(s, ScanStage) else False for s in args.stages])
+    require_state = args.using_landmark or any(
+        [s.using_landmark if isinstance(s, ScanStage) else False for s in args.stages]
     )
 
     if require_state and (not args.is_decode):
@@ -263,7 +264,7 @@ def dual_stage_quadratic_hip_attention(
     BLOCK_SIZE_Q = args.stages[0].stage_block_size_q
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
-    BLOCK_CHUNK = int(os.getenv('SCAN_BLOCK_CHUNK', '64'))
+    BLOCK_CHUNK = int(os.getenv("SCAN_BLOCK_CHUNK", "64"))
     chunk_size = args.stages[0].stage_chunk_size
     chunk_count = triton.cdiv(
         max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size
@@ -531,7 +532,7 @@ def dual_stage_quadratic_hip_attention(
                         BDST,
                         HEAD,
                         indices_left.shape[-1],
-                    ), f'{indices_left.shape} == ({BSZ},{BDST},{HEAD},{indices_left.shape[-1]},)'
+                    ), f"{indices_left.shape} == ({BSZ},{BDST},{HEAD},{indices_left.shape[-1]},)"
 
                     # k_temp = args.gather_k_from_paged_cache(
                     #     chunk_size=1,
@@ -1463,7 +1464,7 @@ def dual_stage_quadratic_hip_attention(
     block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
     # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
     # block_sparse_attention_backend = tilelang_bsa
-    
+
     if args.bsa_sliding_window_size > 0:
         args.sliding_window_size = args.bsa_sliding_window_size
 

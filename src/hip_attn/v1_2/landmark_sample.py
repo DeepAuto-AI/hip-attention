@@ -278,8 +278,8 @@ def landmark_sample(
             # BLOCK_TDST,
             # BLOCK_TSRC,
         )
-        
-        landmark_scores[:, :, -min(landmark_chunk, 32):].fill_(0)
+
+        landmark_scores[:, :, -min(landmark_chunk, 32) :].fill_(0)
 
         if state is not None:
             if args.block_table is not None:
@@ -307,9 +307,9 @@ def landmark_sample(
             else:
                 assert k is not None
                 assert k.shape[0] == 1
-                landmark_scores = state.landmark_scores[None, :k.shape[1], :]
+                landmark_scores = state.landmark_scores[None, : k.shape[1], :]
             landmark_scores = landmark_scores.permute(0, 2, 1)
-        
+
         # print(q_for_landmark.shape, HEAD, HEAD_KV, TDST, triton.cdiv(TDST, BLOCK_TSRC), position_ids_for_landmark.shape)
         if DEBUG:
             plt.clf()
