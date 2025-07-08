@@ -331,7 +331,7 @@ def apply_rope_to_keys(
 
                     cos_new = (cos_zero * 0.75 + cos_new * 0.25).to(cos_new.dtype)
                     sin_new = (sin_zero * 0.75 + sin_new * 0.25).to(sin_new.dtype)
-
+            
             keys_rot *= rope_mult[:, None]
 
             keys_adjusted = tl.where(

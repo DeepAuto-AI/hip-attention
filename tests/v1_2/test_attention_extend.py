@@ -91,8 +91,9 @@ def main_debug():
     is_decode = q.shape[1] == 1
 
     preset = os.getenv("HIP_PRESET", "mid")
-    config_stage = {
-        "mid": [
+    using_landmark = os.getenv("HIP_DEBUG_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
+    if using_landmark:
+        mid_preset = [
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=2,
@@ -114,7 +115,33 @@ def main_debug():
                 stage_k=8192,
                 stage_stride=1,
             ),
-        ],
+        ]
+    else:
+        mid_preset = [
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=64,
+                stage_k=None,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=2,
+                stage_chunk_size=32,
+                stage_k=32768,
+                stage_stride=1,
+            ),
+            ScanStage(
+                stage_block_size_q=64,
+                stage_block_stride_q=1,
+                stage_chunk_size=8,
+                stage_k=8192,
+                stage_stride=1,
+            ),
+        ]
+    config_stage = {
+        "mid": mid_preset,
         "debug": [
             ScanStage(
                 stage_block_size_q=64,
@@ -219,7 +246,7 @@ def main_debug():
     dual_stage_kwargs["args"].need_apply_rope = False
 
     metadata = None
-    for i in range(min(num_samples, 5)):
+    for i in range(min(num_samples, 0)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
 
@@ -250,7 +277,7 @@ def main_debug():
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
-    for i in range(min(num_samples, 5)):
+    for i in range(min(num_samples, 0)):
         start = torch.cuda.Event(True)
         end = torch.cuda.Event(True)
 
@@ -274,9 +301,9 @@ def main_debug():
 
     print("-" * 20)
 
-    print(f"hip_extend,{sum(ls_hip_extend) / len(ls_hip_extend)}")
-    print(f"hip,{sum(ls_hip) / len(ls_hip)}")
-    print(f"fa,{sum(ls_fa) / len(ls_fa)}")
+    if len(ls_hip_extend) > 0: print(f"hip_extend,{sum(ls_hip_extend) / len(ls_hip_extend)}")
+    if len(ls_hip) > 0: print(f"hip,{sum(ls_hip) / len(ls_hip)}")
+    if len(ls_fa) > 0: print(f"fa,{sum(ls_fa) / len(ls_fa)}")
 
 
 if __name__ == "__main__":
