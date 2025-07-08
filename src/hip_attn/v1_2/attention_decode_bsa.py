@@ -405,6 +405,7 @@ def _fwd_kernel_stage1(
             sink_token_size,
             sliding_window_size,
             sparse_token_size,
+            model_context_length,
             rope_range_begin,
             rope_range_end,
             rope_is_neox_style,
@@ -2110,7 +2111,7 @@ def decode_block_sparse_attention(
         max_block_size = min(
             max_block_size,
             int(
-                os.getenv("SA_DECODE_MLA_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+                os.getenv("SA_DECODE_MLA_BLOCK_SIZE", "32")
             ),
         )
 
