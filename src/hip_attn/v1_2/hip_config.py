@@ -340,6 +340,7 @@ elif HIP_CONFIG_PRESET == "qwen3":
 else:
     raise Exception(f"unknown preset `{HIP_CONFIG_PRESET}`")
 
+
 def try_parse_json(json_or_path: str):
     if json_or_path is None:
         parsed_json = {}
@@ -351,6 +352,7 @@ def try_parse_json(json_or_path: str):
         with open(json_or_path, "r") as f:
             parsed_json = json.load(f)
     return parsed_json
+
 
 @dataclass
 class HiPAttentionConfig:
@@ -386,8 +388,8 @@ class HiPAttentionConfig:
     json_override: InitVar[Optional[str]] = None
 
     def __post_init__(
-        self, 
-        json_or_path: Optional[str], 
+        self,
+        json_or_path: Optional[str],
         json_override: Optional[str],
     ):
         super().__init__()
