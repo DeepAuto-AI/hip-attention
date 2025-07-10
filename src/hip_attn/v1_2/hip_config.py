@@ -340,6 +340,17 @@ elif HIP_CONFIG_PRESET == "qwen3":
 else:
     raise Exception(f"unknown preset `{HIP_CONFIG_PRESET}`")
 
+def try_parse_json(json_or_path: str):
+    if json_or_path is None:
+        parsed_json = {}
+    elif isinstance(json_or_path, dict):
+        parsed_json = json_or_path
+    elif json_or_path.startswith("{"):
+        parsed_json = json.loads(json_or_path)
+    else:
+        with open(json_or_path, "r") as f:
+            parsed_json = json.load(f)
+    return parsed_json
 
 @dataclass
 class HiPAttentionConfig:
@@ -372,17 +383,18 @@ class HiPAttentionConfig:
     prefill_dense_threshold: int = 8192
 
     json_or_path: InitVar[Optional[str]] = None
+    json_override: InitVar[Optional[str]] = None
 
-    def __post_init__(self, json_or_path: Optional[str]):
+    def __post_init__(
+        self, 
+        json_or_path: Optional[str], 
+        json_override: Optional[str],
+    ):
         super().__init__()
 
-        if json_or_path is None:
-            parsed_json = {}
-        elif json_or_path.startswith("{"):
-            parsed_json = json.loads(json_or_path)
-        else:
-            with open(json_or_path, "r") as f:
-                parsed_json = json.load(f)
+        parsed_json = try_parse_json(json_or_path)
+        parsed_json_override = try_parse_json(json_override)
+        parsed_json.update(parsed_json_override)
 
         if parsed_json is not None:
             if "apply_v_dot" in parsed_json:
