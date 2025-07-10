@@ -888,6 +888,7 @@ def _forward_partial_fa3(
     cached_metadata: HiPAttentionOutputMetadata,
     is_decode: bool,
     seq_thresh_fa3: int,
+    mixing_len: int,
     args: HiPAttentionArgs,
     max_context_len: int,
     inner_function,
@@ -901,14 +902,12 @@ def _forward_partial_fa3(
         if args.using_paged_cache:
             pass
         else:
+            assert k is not None
             max_context_len = min(max_context_len, k.shape[1])
         min_context_len = max(0, max_context_len - query.shape[1])
 
-        len_query_for_fa3 = seq_thresh_fa3 - min_context_len
-        len_query_for_hip = query.shape[1] - len_query_for_fa3
-        if len_query_for_hip < 1024:
-            len_query_for_fa3 += len_query_for_hip
-            len_query_for_hip -= len_query_for_hip
+        len_query_for_fa3 = max(0, seq_thresh_fa3 - min_context_len)
+        len_query_for_hip = max(0, max_context_len - (seq_thresh_fa3 - mixing_len))
         
         # print(max_context_len, min_context_len, seq_thresh_fa3, len_query_for_fa3, len_query_for_hip)
 
@@ -942,25 +941,38 @@ def _forward_partial_fa3(
         k = v = None
     
     if context_fa3 is not None:
-        if (query.shape[1] - context_fa3.shape[1]) > 0:
+        if len_query_for_hip > 0:
             args_sparse = args.clone()
             args_sparse.position_ids = args_sparse.position_ids[
-                :, context_fa3.shape[1] :
+                :, -len_query_for_hip :
             ]
             if args_sparse.q_mask is not None:
-                args_sparse.q_mask = args_sparse.q_mask[:, context_fa3.shape[1] :]
+                args_sparse.q_mask = args_sparse.q_mask[:, -len_query_for_hip :]
             if args_sparse.query_for_landmark is not None:
                 args_sparse.query_for_landmark = args_sparse.query_for_landmark[
-                    :, context_fa3.shape[1] :
+                    :, -len_query_for_hip :
                 ]
             context_sparse, metadata = inner_function(
-                q=(query[:, context_fa3.shape[1] :] * sm_scale).to(query.dtype),
+                q=(query[:, -len_query_for_hip :] * sm_scale).to(query.dtype),
                 k=k,
                 v=v,
                 args=args_sparse,
                 cached_metadata=cached_metadata,
             )
-            context = torch.cat([context_fa3, context_sparse], dim=1)
+            
+            len_for_mix = (len_query_for_hip + len_query_for_fa3) - query.shape[1]
+            
+            if len_for_mix > 0:
+                context_fa3_mix = context_fa3[:, -len_for_mix:]
+                context_sparse_mix = context_sparse[:, :len_for_mix]
+                
+                scale = torch.arange(0, len_for_mix, device=query.device, dtype=torch.float32) / len_for_mix
+                scale = scale[None, :, None, None]
+                context_mix = (context_sparse_mix * scale + context_fa3_mix * (1.0 - scale)).to(context_fa3_mix.dtype)
+                
+                context = torch.cat([context_fa3[:, :-len_for_mix], context_mix, context_sparse[:, len_for_mix:]], dim=1)
+            else:
+                context = torch.cat([context_fa3, context_sparse], dim=1)
         else:
             context = context_fa3
     else:
@@ -1229,6 +1241,10 @@ def _forward_paged_hip(
         )
         seq_thresh_fa3 = args.model_context_length
 
+    mixing_len = int(os.getenv("HIP_DEBUG_FA3_MIXING_LEN", '4096'))
+    if seq_thresh_fa3 == 0:
+        mixing_len = 0
+
     if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
         if layer_id in hip_config.dense_layers:
             seq_thresh_fa3 = query.shape[1]
@@ -1357,6 +1373,7 @@ def _forward_paged_hip(
             cached_metadata=cached_metadata,
             is_decode=is_decode,
             seq_thresh_fa3=seq_thresh_fa3,
+            mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
             inner_function=__forward_sliding_window_wrapper
@@ -2517,6 +2534,7 @@ def _forward_paged_hip(
             cached_metadata=cached_metadata,
             is_decode=is_decode,
             seq_thresh_fa3=seq_thresh_fa3,
+            mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
             inner_function=dual_stage_quadratic_hip_attention
