@@ -2110,9 +2110,7 @@ def decode_block_sparse_attention(
         # NOTE: when MLA
         max_block_size = min(
             max_block_size,
-            int(
-                os.getenv("SA_DECODE_MLA_BLOCK_SIZE", "32")
-            ),
+            int(os.getenv("SA_DECODE_MLA_BLOCK_SIZE", "32")),
         )
 
     BLOCK_BK = max_block_size // args.block_size_k

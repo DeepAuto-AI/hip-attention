@@ -1256,7 +1256,10 @@ def dual_stage_quadratic_hip_attention(
             )
             debug = cv2.line(
                 debug,
-                (0,0,),
+                (
+                    0,
+                    0,
+                ),
                 (debug.shape[1], debug.shape[0]),
                 thickness=5,
                 color=(0, 255, 0),
