@@ -138,6 +138,7 @@ def forward_paged_hip(
     rope_is_neox_style: Optional[bool] = None,
     extend_seq_lens: Optional[torch.Tensor] = None,
     extend_seq_lens_cpu: Optional[List[int]] = None,
+    extend_prefix_lens_cpu: Optional[List[int]] = None,
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
     k: Optional[torch.Tensor] = None,
     v: Optional[torch.Tensor] = None,
@@ -208,6 +209,7 @@ def forward_paged_hip(
                     # if v is not None:
                     #     v = v.repeat_interleave(n_repeat, 0)
                     extend_seq_lens_cpu = extend_seq_lens_cpu[::n_repeat]
+                    extend_prefix_lens_cpu = extend_prefix_lens_cpu[::n_repeat]
             BSZ_TDST = query.shape[0] * query.shape[1]
             HEAD = query.shape[2]
         elif query.ndim == 3:
@@ -237,7 +239,12 @@ def forward_paged_hip(
         start_len = 0
         decoding_reqs = []
         decoding_reqs_positions = []
-        for idx_batch, seq_len in enumerate(extend_seq_lens_cpu):
+        
+        # NOTE this is required for prefix
+        assert extend_prefix_lens_cpu is not None
+        assert len(extend_seq_lens_cpu) == len(extend_prefix_lens_cpu)
+        
+        for idx_batch, (seq_len, prefix_len) in enumerate(zip(extend_seq_lens_cpu, extend_prefix_lens_cpu)):
             if query.ndim == 4:
                 seq_len = query.shape[1]
 
@@ -307,6 +314,7 @@ def forward_paged_hip(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    max_batch_context_len=seq_len + prefix_len,
                     v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
                     is_kv_cache_offload_enabled=is_kv_cache_offload_enabled,
@@ -349,6 +357,7 @@ def forward_paged_hip(
             logit_cap=logit_cap,
             orig_context_len=orig_context_len,
             max_context_len=max_context_len,
+            max_batch_context_len=max_context_len,
             v_hidden_dim=v_hidden_dim,
             hip_config=hip_config,
             is_kv_cache_offload_enabled=is_kv_cache_offload_enabled,
@@ -386,6 +395,7 @@ def _forward_paged_hip_validate(
     logit_cap: float,
     orig_context_len: int,
     max_context_len: int,
+    max_batch_context_len: int,
     v_hidden_dim: int,
     hip_config: HiPAttentionConfig,
     is_kv_cache_offload_enabled: Optional[bool] = False,
@@ -466,6 +476,7 @@ def _forward_paged_hip_validate(
         logit_cap=logit_cap,
         orig_context_len=orig_context_len,
         max_context_len=max_context_len,
+        max_batch_context_len=max_batch_context_len,
         v_hidden_dim=v_hidden_dim,
         hip_config=hip_config,
         cached_metadata=cached_metadata,
@@ -501,6 +512,7 @@ def _forward_paged_hip_validate(
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
                 max_context_len=max_context_len,
+                max_batch_context_len=max_batch_context_len,
                 v_hidden_dim=v_hidden_dim,
                 hip_config=hip_config,
                 cached_metadata=cached_metadata,
@@ -538,6 +550,7 @@ def _forward_paged_hip_validate(
                 logit_cap=logit_cap,
                 orig_context_len=orig_context_len,
                 max_context_len=max_context_len,
+                max_batch_context_len=max_batch_context_len,
                 v_hidden_dim=v_hidden_dim,
                 hip_config=hip_config,
                 cached_metadata=cached_metadata,
@@ -615,6 +628,7 @@ def _forward_paged_hip_validate(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    max_batch_context_len=max_batch_context_len,
                     v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
                     cached_metadata=cached_metadata,
@@ -651,6 +665,7 @@ def _forward_paged_hip_validate(
                     logit_cap=logit_cap,
                     orig_context_len=orig_context_len,
                     max_context_len=max_context_len,
+                    max_batch_context_len=max_batch_context_len,
                     v_hidden_dim=v_hidden_dim,
                     hip_config=hip_config,
                     cached_metadata=cached_metadata,
@@ -698,6 +713,330 @@ def sse(a: torch.Tensor, b: torch.Tensor):
     assert a.dtype == b.dtype
     return ((a - b) ** 2).sum().item()
 
+@capture
+def _forward_fa3(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sm_scale: float,
+    position_ids: torch.Tensor,
+    using_extend: bool,
+    need_apply_rope: bool,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    rope_is_neox_style: bool,
+):
+    assert q.ndim == 4
+    assert k.ndim == 4
+    assert v.ndim == 4
+    
+    len_query_for_fa3 = q.shape[1]
+    
+    if (using_extend and need_apply_rope) and True:
+        # FIXME do better infer method
+        use_mla = triton.next_power_of_2(k.shape[-1]) != k.shape[-1]
+        if use_mla:
+            q = q.clone()
+            k = k.clone()
+
+            # FIXME assume DeepSeek
+            rope_dim = k.shape[-1] - (
+                triton.next_power_of_2(k.shape[-1]) // 2
+            )
+            assert rope_dim == rope_cos.shape[-1]
+
+            from sglang.srt.layers.rotary_embedding import (
+                _rotate_gptj,
+                _rotate_neox,
+            )
+
+            rotate_fn = _rotate_neox if rope_is_neox_style else _rotate_gptj
+
+            query_rot = q[..., -rope_dim:]
+            key_rot = k[..., -rope_dim:]
+
+            assert position_ids.shape[0] == 1
+            assert not rope_is_neox_style
+            cos_q = rope_cos[
+                None,
+                position_ids[0, :len_query_for_fa3],
+                None,
+                : rope_dim // 2,
+            ].repeat_interleave(2, -1)
+            sin_q = rope_sin[
+                None,
+                position_ids[0, :len_query_for_fa3],
+                None,
+                : rope_dim // 2,
+            ].repeat_interleave(2, -1)
+            cos_k = rope_cos[
+                None, : key_rot.shape[1], None, : rope_dim // 2
+            ].repeat_interleave(2, -1)
+            sin_k = rope_sin[
+                None, : key_rot.shape[1], None, : rope_dim // 2
+            ].repeat_interleave(2, -1)
+
+            query_rot = query_rot * cos_q + rotate_fn(query_rot) * sin_q
+            key_rot = key_rot * cos_k + rotate_fn(key_rot) * sin_k
+
+            q[..., -rope_dim:] = query_rot
+            k[..., -rope_dim:] = key_rot
+
+            # qqq = query_fa3[0, -4096:, 0]
+            # kkk = k_fa3[0, :, 0]
+            # scores = qqq @ kkk.T
+            # scores = torch.nn.functional.max_pool2d(scores[None, None, ...], kernel_size=31, stride=15, padding=15)[0,0]
+
+            # plt.clf()
+            # plt.title(f'{scores.shape=}')
+            # plt.imshow(scores.float().cpu().numpy())
+            # plt.savefig('./dummy_scores.png')
+
+            # print(rope_dim, args.rope_cos.shape, args.rope_sin.shape, args.rope_is_neox_style)
+        else:
+            q = q.clone()
+            k = k.clone()
+
+            # FIXME assume GQA/MHA
+            rope_dim = k.shape[-1]
+
+            from sglang.srt.layers.rotary_embedding import (
+                _rotate_gptj,
+                _rotate_neox,
+            )
+
+            rotate_fn = _rotate_neox if rope_is_neox_style else _rotate_gptj
+
+            query_rot = q
+            key_rot = k
+
+            if rope_is_neox_style:
+                cos_q = rope_cos[None, position_ids[0, :len_query_for_fa3], None, :]
+                sin_q = rope_sin[None, position_ids[0, :len_query_for_fa3], None, :]
+                cos_k = rope_cos[None, :key_rot.shape[1], None, :]
+                sin_k = rope_sin[None, :key_rot.shape[1], None, :]
+            else:
+                assert position_ids.shape[0] == 1
+                cos_q = rope_cos[
+                    None,
+                    position_ids[0, :len_query_for_fa3],
+                    None,
+                    : rope_dim // 2,
+                ].repeat_interleave(2, -1)
+                sin_q = rope_sin[
+                    None,
+                    position_ids[0, :len_query_for_fa3],
+                    None,
+                    : rope_dim // 2,
+                ].repeat_interleave(2, -1)
+                cos_k = rope_cos[
+                    None, : key_rot.shape[1], None, : rope_dim // 2
+                ].repeat_interleave(2, -1)
+                sin_k = rope_sin[
+                    None, : key_rot.shape[1], None, : rope_dim // 2
+                ].repeat_interleave(2, -1)
+            
+            q = (query_rot * cos_q + rotate_fn(query_rot) * sin_q).to(query_rot.dtype)
+            k = (key_rot * cos_k + rotate_fn(key_rot) * sin_k).to(key_rot.dtype)
+
+    tp_q_head, tp_q_dim = q.shape[2:]
+    tp_k_head, tp_k_dim = k.shape[2:]
+    tp_v_head, tp_v_dim = v.shape[2:]
+
+    # cu_seqlens_q = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
+    # max_seqlen_q = q_len
+
+    # # Construct metadata for the Key/Value
+    # # For a single sequence of length kv_len, cu_seqlens is just [0, kv_len]
+    # cu_seqlens_k = torch.tensor([0, kv_len], dtype=torch.int32, device=k.device)
+    # max_seqlen_k = kv_len
+
+    cu_seqlens_q = torch.tensor(
+        [0, q.shape[1]], dtype=torch.int32, device=q.device
+    )
+    max_seqlen_q = q.shape[1]
+    cu_seqlens_k = torch.zeros((2,), dtype=torch.int32, device=k.device)
+    cu_seqlens_k[1] = position_ids[0, len_query_for_fa3 - 1] + 1
+    max_seqlen_k = k.shape[1]
+
+    # print(query_fa3.shape, k_fa3.shape, v_fa3.shape, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, sm_scale)
+
+    context_fa3 = flash_attn_varlen_func(
+        q=q.view(-1, tp_q_head, tp_q_dim).contiguous(),
+        k=k.view(-1, tp_k_head, tp_k_dim).contiguous(),
+        v=v.view(-1, tp_v_head, tp_v_dim).contiguous(),
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=sm_scale,
+        causal=True,
+        return_softmax_lse=False,
+    )
+    
+    context_fa3 = context_fa3.view(q.shape[:-1] + (v.shape[-1],))
+    
+    return context_fa3
+
+@capture
+def _forward_partial_fa3(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sm_scale: float,
+    rope_is_neox_style: bool,
+    cached_metadata: HiPAttentionOutputMetadata,
+    is_decode: bool,
+    seq_thresh_fa3: int,
+    args: HiPAttentionArgs,
+    max_context_len: int,
+    inner_function,
+):
+    query = q
+    
+    context_fa3 = None
+    metadata = None
+
+    if (not is_decode) and (seq_thresh_fa3 > 0):
+        if args.using_paged_cache:
+            pass
+        else:
+            max_context_len = min(max_context_len, k.shape[1])
+        min_context_len = max(0, max_context_len - query.shape[1])
+
+        len_query_for_fa3 = seq_thresh_fa3 - min_context_len
+        len_query_for_hip = query.shape[1] - len_query_for_fa3
+        if len_query_for_hip < 1024:
+            len_query_for_fa3 += len_query_for_hip
+            len_query_for_hip -= len_query_for_hip
+        
+        # print(max_context_len, min_context_len, seq_thresh_fa3, len_query_for_fa3, len_query_for_hip)
+
+        if len_query_for_fa3 > 0:
+            assert not is_decode
+            # assert not args.using_extend, "todo"
+            
+            if args.using_paged_cache:
+                k = args.gather_k_from_paged_cache(seq_len=args.model_context_length)
+                v = args.gather_v_from_paged_cache(seq_len=args.model_context_length)
+
+            query_fa3 = query[:, :len_query_for_fa3].contiguous()
+            len_kv = k.shape[1] - len_query_for_hip
+            k_fa3 = k[:, :len_kv].contiguous()
+            v_fa3 = v[:, :len_kv].contiguous()
+
+            context_fa3 = _forward_fa3(
+                q=query_fa3,
+                k=k_fa3,
+                v=v_fa3,
+                sm_scale=sm_scale,
+                position_ids=args.position_ids,
+                using_extend=args.using_extend,
+                need_apply_rope=args.need_apply_rope,
+                rope_cos=args.rope_cos,
+                rope_sin=args.rope_sin,
+                rope_is_neox_style=rope_is_neox_style,
+            )
+    
+    if args.using_paged_cache:
+        k = v = None
+    
+    if context_fa3 is not None:
+        if (query.shape[1] - context_fa3.shape[1]) > 0:
+            args_sparse = args.clone()
+            args_sparse.position_ids = args_sparse.position_ids[
+                :, context_fa3.shape[1] :
+            ]
+            if args_sparse.q_mask is not None:
+                args_sparse.q_mask = args_sparse.q_mask[:, context_fa3.shape[1] :]
+            if args_sparse.query_for_landmark is not None:
+                args_sparse.query_for_landmark = args_sparse.query_for_landmark[
+                    :, context_fa3.shape[1] :
+                ]
+            context_sparse, metadata = inner_function(
+                q=(query[:, context_fa3.shape[1] :] * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                args=args_sparse,
+                cached_metadata=cached_metadata,
+            )
+            context = torch.cat([context_fa3, context_sparse], dim=1)
+        else:
+            context = context_fa3
+    else:
+        # no fa3
+        context, metadata = inner_function(
+            q=(query * sm_scale).to(query.dtype),
+            k=k,
+            v=v,
+            args=args,
+            cached_metadata=cached_metadata,
+        )
+    
+    context = context.to(query.dtype)
+    
+    return context, metadata
+
+@capture
+def _forward_sliding_window(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    args: HiPAttentionArgs,
+    sliding_window_size: int,
+    sliding_window_sink: int,
+):
+    query = q
+    bsa_fn = get_block_sparse_backend(args, query)
+
+    # dist.barrier()
+    # if get_tensor_model_parallel_rank() == 0:
+    #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+    BSZ, TDST, HEAD, HID = query.shape
+
+    args = args.clone()
+    if args.rope_range is None:
+        args.rope_range = (0, HID)
+    args.block_size_q = args.block_sparse_block_size_q
+    args.block_size_k = args.stages[-1].stage_chunk_size
+    args.second_stage_k = 0
+    args.sink_token_size = sliding_window_sink
+    args.sliding_window_size = (
+        sliding_window_size if sliding_window_size is not None else 1024
+    )
+    args.sliding_window_indices = None
+
+    BDST = triton.cdiv(TDST, args.block_size_q)
+    BH = BSZ * HEAD
+
+    indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+    ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+    ks_count = ks.unsqueeze(-1)
+    ks_start_end = torch.zeros(
+        (BH, BDST, 2), dtype=torch.int64, device=query.device
+    )
+
+    context = bsa_fn(
+        q=query,
+        k=k,
+        v=v,
+        seq_lens=args.position_ids + 1,
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        access_counter=None,
+        cache_miss_counter=None,
+        EXTEND_BACKEND=args.sa_extend_backend,
+        model_context_length=args.model_context_length,
+        extend_context_length=args.extend_context_length,
+        offload_update_cache=False,
+        args=args,
+    )
+    context = context.to(query.dtype)
+    
+    return context, None
 
 def _forward_paged_hip(
     query: torch.Tensor,
@@ -717,6 +1056,7 @@ def _forward_paged_hip(
     logit_cap: float,
     orig_context_len: int,
     max_context_len: int,
+    max_batch_context_len: int,
     v_hidden_dim: int,
     hip_config: HiPAttentionConfig,
     rope_range: Optional[tuple[int, int]] = None,
@@ -880,10 +1220,14 @@ def _forward_paged_hip(
     # TODO use flash attention under 64K
     # TODO use sparse setting under 128K
 
-    seq_thresh_fa3 = min(
-        args.model_context_length,
-        int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", 0 * 1024)),
-    )
+    seq_thresh_fa3 = int(os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", '0'))
+    if seq_thresh_fa3 > args.model_context_length:
+        warnings.warn(
+            f'Requested FA3 replacement ({seq_thresh_fa3}) is larger than model context length ({args.model_context_length}). '
+            'Consider increase YaRN or using other model. '
+            'OR You can decrease HIP_DEBUG_SEQ_THRESH_FA3 up to context length, but it will degrade throughput.'
+        )
+        seq_thresh_fa3 = args.model_context_length
 
     if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
         if layer_id in hip_config.dense_layers:
@@ -989,55 +1333,34 @@ def _forward_paged_hip(
         sliding_window_sink = args.sink_token_size
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
-        bsa_fn = get_block_sparse_backend(args, query)
-
-        # dist.barrier()
-        # if get_tensor_model_parallel_rank() == 0:
-        #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
-
-        BSZ, TDST, HEAD, HID = query.shape
-
-        args = args.clone()
-        if args.rope_range is None:
-            args.rope_range = (0, HID)
-        args.block_size_q = args.block_sparse_block_size_q
-        args.block_size_k = args.stages[-1].stage_chunk_size
-        args.second_stage_k = 0
-        args.sink_token_size = sliding_window_sink
-        args.sliding_window_size = (
-            sliding_window_size if sliding_window_size is not None else 1024
-        )
-        args.sliding_window_indices = None
-
-        BDST = triton.cdiv(TDST, args.block_size_q)
-        BH = BSZ * HEAD
-
-        indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
-        ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
-        ks_count = ks.unsqueeze(-1)
-        ks_start_end = torch.zeros(
-            (BH, BDST, 2), dtype=torch.int64, device=query.device
-        )
-
-        context = bsa_fn(
-            q=(query * sm_scale).to(query.dtype),
+        def __forward_sliding_window_wrapper(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            args: HiPAttentionArgs,
+            cached_metadata: HiPAttentionOutputMetadata,
+        ):
+            return _forward_sliding_window(
+                q=(q * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                args=args,
+                sliding_window_size=sliding_window_size,
+                sliding_window_sink=sliding_window_sink,
+            )
+        context, metadata = _forward_partial_fa3(
+            q=query,
             k=k,
             v=v,
-            seq_lens=args.position_ids + 1,
-            indices=indices,
-            ks=ks,
-            ks_count=ks_count,
-            ks_start_end=ks_start_end,
-            access_counter=None,
-            cache_miss_counter=None,
-            EXTEND_BACKEND=args.sa_extend_backend,
-            model_context_length=args.model_context_length,
-            extend_context_length=args.extend_context_length,
-            offload_update_cache=False,
+            sm_scale=sm_scale,
+            rope_is_neox_style=rope_is_neox_style,
+            cached_metadata=cached_metadata,
+            is_decode=is_decode,
+            seq_thresh_fa3=seq_thresh_fa3,
             args=args,
+            max_context_len=max_batch_context_len,
+            inner_function=__forward_sliding_window_wrapper
         )
-        context = context.to(query.dtype)
-        metadata = None
     elif using_delta_attention and (
         (not is_decode) or (is_decode and delta_attention_args_dense_decode)
     ):
@@ -2185,185 +2508,19 @@ def _forward_paged_hip(
 
             metadata = None
     elif is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
-        # dist.barrier()
-        # if get_tensor_model_parallel_rank() == 0: print('hip')
-
-        # if not torch.cuda.is_current_stream_capturing():
-        #     args_new = args.clone()
-        #     k_flat = args.gather_k_from_paged_cache()
-        #     v_flat = args.gather_v_from_paged_cache()
-        #     seq_len = args.position_ids.amax().item() + 1
-        #     k_flat = k_flat[:, :seq_len].contiguous()
-        #     v_flat = v_flat[:, :seq_len].contiguous()
-        #     args_new.k_cache = None
-        #     args_new.v_cache = None
-        #     args_new.block_table = None
-        #     args_new.using_paged_cache = False
-        #     cached_metadata.state = None
-
-        #     context, metadata = dual_stage_quadratic_hip_attention(
-        #         q=(query * sm_scale).to(query.dtype),
-        #         k=k_flat,
-        #         v=v_flat,
-        #         args=args_new,
-        #         cached_metadata=cached_metadata,
-        #     )
-        # else:
-
-        context_fa3 = None
-        metadata = None
-
-        if (seq_thresh_fa3 > 0) and (not args.using_paged_cache) and (k is not None):
-            max_context_len = min(max_context_len, k.shape[1])
-            min_context_len = max(0, max_context_len - query.shape[1])
-
-            len_query_for_fa3 = seq_thresh_fa3 - min_context_len
-            len_query_for_hip = query.shape[1] - len_query_for_fa3
-            if len_query_for_hip < 1024:
-                len_query_for_fa3 += len_query_for_hip
-                len_query_for_hip -= len_query_for_hip
-
-            if len_query_for_fa3 > 0:
-                assert not is_decode
-                # assert not args.using_extend, "todo"
-
-                query_fa3 = query[:, :len_query_for_fa3].contiguous()
-                len_kv = k.shape[1] - len_query_for_hip
-                k_fa3 = k[:, :len_kv].contiguous()
-                v_fa3 = v[:, :len_kv].contiguous()
-
-                if (args.using_extend and args.need_apply_rope) and True:
-                    # FIXME do better infer method
-                    use_mla = triton.next_power_of_2(k_fa3.shape[-1]) != k_fa3.shape[-1]
-                    if use_mla:
-                        query_fa3 = query_fa3.clone()
-                        k_fa3 = k_fa3.clone()
-
-                        # FIXME assume DeepSeek
-                        rope_dim = k_fa3.shape[-1] - (
-                            triton.next_power_of_2(k_fa3.shape[-1]) // 2
-                        )
-                        assert rope_dim == args.rope_cos.shape[-1]
-
-                        from sglang.srt.layers.rotary_embedding import (
-                            _rotate_gptj,
-                            _rotate_neox,
-                        )
-
-                        rotate_fn = _rotate_neox if rope_is_neox_style else _rotate_gptj
-
-                        query_rot = query_fa3[..., -rope_dim:]
-                        key_rot = k_fa3[..., -rope_dim:]
-
-                        assert args.position_ids.shape[0] == 1
-                        cos_q = args.rope_cos[
-                            None,
-                            args.position_ids[0, :len_query_for_fa3],
-                            None,
-                            : rope_dim // 2,
-                        ].repeat_interleave(2, -1)
-                        sin_q = args.rope_sin[
-                            None,
-                            args.position_ids[0, :len_query_for_fa3],
-                            None,
-                            : rope_dim // 2,
-                        ].repeat_interleave(2, -1)
-                        cos_k = args.rope_cos[
-                            None, : key_rot.shape[1], None, : rope_dim // 2
-                        ].repeat_interleave(2, -1)
-                        sin_k = args.rope_sin[
-                            None, : key_rot.shape[1], None, : rope_dim // 2
-                        ].repeat_interleave(2, -1)
-
-                        query_rot = query_rot * cos_q + rotate_fn(query_rot) * sin_q
-                        key_rot = key_rot * cos_k + rotate_fn(key_rot) * sin_k
-
-                        query_fa3[..., -rope_dim:] = query_rot
-                        k_fa3[..., -rope_dim:] = key_rot
-
-                        # qqq = query_fa3[0, -4096:, 0]
-                        # kkk = k_fa3[0, :, 0]
-                        # scores = qqq @ kkk.T
-                        # scores = torch.nn.functional.max_pool2d(scores[None, None, ...], kernel_size=31, stride=15, padding=15)[0,0]
-
-                        # plt.clf()
-                        # plt.title(f'{scores.shape=}')
-                        # plt.imshow(scores.float().cpu().numpy())
-                        # plt.savefig('./dummy_scores.png')
-
-                        # print(rope_dim, args.rope_cos.shape, args.rope_sin.shape, args.rope_is_neox_style)
-                    else:
-                        raise Exception()
-
-                tp_q_head, tp_q_dim = query_fa3.shape[2:]
-                tp_k_head, tp_k_dim = k_fa3.shape[2:]
-                tp_v_head, tp_v_dim = v_fa3.shape[2:]
-
-                # cu_seqlens_q = torch.tensor([0, q_len], dtype=torch.int32, device=q.device)
-                # max_seqlen_q = q_len
-
-                # # Construct metadata for the Key/Value
-                # # For a single sequence of length kv_len, cu_seqlens is just [0, kv_len]
-                # cu_seqlens_k = torch.tensor([0, kv_len], dtype=torch.int32, device=k.device)
-                # max_seqlen_k = kv_len
-
-                cu_seqlens_q = torch.tensor(
-                    [0, query_fa3.shape[1]], dtype=torch.int32, device=query_fa3.device
-                )
-                max_seqlen_q = query_fa3.shape[1]
-                cu_seqlens_k = torch.tensor(
-                    [0, k_fa3.shape[1]], dtype=torch.int32, device=k.device
-                )
-                max_seqlen_k = k_fa3.shape[1]
-
-                # print(query_fa3.shape, k_fa3.shape, v_fa3.shape, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, sm_scale)
-
-                context_fa3 = flash_attn_varlen_func(
-                    q=query_fa3.view(-1, tp_q_head, tp_q_dim).contiguous(),
-                    k=k_fa3.view(-1, tp_k_head, tp_k_dim).contiguous(),
-                    v=v_fa3.view(-1, tp_v_head, tp_v_dim).contiguous(),
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=sm_scale,
-                    causal=True,
-                    return_softmax_lse=False,
-                )
-                context_fa3 = context_fa3.view(query_fa3.shape[:-1] + (v.shape[-1],))
-
-        if context_fa3 is not None:
-            if (query.shape[1] - context_fa3.shape[1]) > 0:
-                args_sparse = args.clone()
-                args_sparse.position_ids = args_sparse.position_ids[
-                    :, context_fa3.shape[1] :
-                ]
-                if args_sparse.q_mask is not None:
-                    args_sparse.q_mask = args_sparse.q_mask[:, context_fa3.shape[1] :]
-                if args_sparse.query_for_landmark is not None:
-                    args_sparse.query_for_landmark = args_sparse.query_for_landmark[
-                        :, context_fa3.shape[1] :
-                    ]
-                context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                    q=(query[:, context_fa3.shape[1] :] * sm_scale).to(query.dtype),
-                    k=k,
-                    v=v,
-                    args=args_sparse,
-                    cached_metadata=cached_metadata,
-                )
-                context = torch.cat([context_fa3, context_sparse], dim=1)
-            else:
-                context = context_fa3
-        else:
-            # no fa3
-            context, metadata = dual_stage_quadratic_hip_attention(
-                q=(query * sm_scale).to(query.dtype),
-                k=k,
-                v=v,
-                args=args,
-                cached_metadata=cached_metadata,
-            )
-        context = context.to(query.dtype)
+        context, metadata = _forward_partial_fa3(
+            q=query,
+            k=k,
+            v=v,
+            sm_scale=sm_scale,
+            rope_is_neox_style=rope_is_neox_style,
+            cached_metadata=cached_metadata,
+            is_decode=is_decode,
+            seq_thresh_fa3=seq_thresh_fa3,
+            args=args,
+            max_context_len=max_batch_context_len,
+            inner_function=dual_stage_quadratic_hip_attention
+        )
         # context = context[:, -query.shape[1] :, :, :].contiguous()
     else:
         assert not is_decode

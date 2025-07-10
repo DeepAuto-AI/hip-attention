@@ -1254,6 +1254,13 @@ def dual_stage_quadratic_hip_attention(
                 (0, 255, 0),
                 2,
             )
+            debug = cv2.line(
+                debug,
+                (0,0,),
+                (debug.shape[1], debug.shape[0]),
+                thickness=5,
+                color=(0, 255, 0),
+            )
 
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)

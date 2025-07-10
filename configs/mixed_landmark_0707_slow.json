@@ -3,17 +3,11 @@
     "__last_dense": -1,
     "__using_landmark": false,
     "using_extend": true,
-    "dense_layers": [
-        0,
-        1,
-        2,
-        3,
-        4
-    ],
+    "dense_layers": [0],
     "mask_refresh_interval": [96, 24, 12],
     "layers": [
         {
-            "sliding_window_size": 12288,
+            "sliding_window_size": 4096,
             "second_stage_k": 0,
             "sa_extend_backend": "streaming"
         },
@@ -49,7 +43,7 @@
     ],
     "prefill_layers": [
         {
-            "sliding_window_size": 12288,
+            "sliding_window_size": 4096,
             "second_stage_k": 0,
             "sa_extend_backend": "streaming"
         },

@@ -231,9 +231,9 @@ def landmark_sample(
         assert position_ids_for_landmark.shape[0] == BSZ
         assert position_ids_for_landmark.shape[1] == TDST
 
-        assert ((not args.using_paged_cache) and (k is not None)) or (
-            args.using_paged_cache and (k is None)
-        ), "todo"
+        _using_k = ((not args.using_paged_cache) and (k is not None))
+        _using_paged_k = (args.using_paged_cache and (k is None))
+        assert _using_k or _using_paged_k, f"todo {_using_k} or {_using_paged_k}"
         assert not landmark_derope, "todo"
 
         TDST_PADDED = (

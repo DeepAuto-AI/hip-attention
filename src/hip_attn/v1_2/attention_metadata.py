@@ -2,6 +2,7 @@ import copy
 import os
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
+import warnings
 
 import torch
 from torch import Tensor
@@ -508,19 +509,29 @@ class HiPAttentionArgs:
         return k
 
     def gather_k_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q: torch.Tensor = None
+        self, 
+        chunk_size: int = 1, 
+        disable_gqa=False, 
+        gqa_q: torch.Tensor = None,
+        seq_len: int = None,
     ):
         if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
             raise Exception(
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
+        else:
+            warnings.warn('Gathering paged cache will occure overhead.')
 
         k_cache = self.get_k_cache()
         assert self.block_table is not None
+        
+        if seq_len is None:
+            seq_len = self.block_table.shape[1]
+        
         k = k_cache[:, 0, :, :][
             self.block_table[
                 :,
-                : self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size),
+                : seq_len - (seq_len % chunk_size),
             ]
         ]
         if disable_gqa:
@@ -528,23 +539,34 @@ class HiPAttentionArgs:
         return k
 
     def gather_v_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
+        self, 
+        chunk_size: int = 1, 
+        disable_gqa: bool = False, 
+        gqa_q: torch.Tensor = None,
+        seq_len: int = None,
     ):
         if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
             raise Exception(
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
+        else:
+            warnings.warn('Gathering paged cache will occure overhead.')
 
         if self.v_cache is not None:
             assert self.v_cache is not None
             v_cache = self.v_cache
         else:
             v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+        
         assert self.block_table is not None
+        
+        if seq_len is None:
+            seq_len = self.block_table.shape[1]
+        
         v = v_cache[:, 0, :, :][
             self.block_table[
                 :,
-                : self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size),
+                : seq_len - (seq_len % chunk_size),
             ]
         ]
         if disable_gqa:
