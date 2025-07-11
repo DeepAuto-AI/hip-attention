@@ -951,6 +951,16 @@ def _forward_partial_fa3(
                 args=args_sparse,
                 cached_metadata=cached_metadata,
             )
+            
+            # w = 512
+            # wt = 16
+            # t = context_sparse.shape[1]
+            # if t > w:
+            #     t_context = context_sparse[:, t % w:]
+            #     t_context_mean = t_context.view(-1, t // w, w, t_context.shape[-2], t_context.shape[-1]).mean(2, keepdim=True)
+            #     delta = (torch.repeat_interleave(t_context_mean, w//wt, 1) - t_context.view(-1, t // wt, wt, t_context.shape[-2], t_context.shape[-1])).mean(2)
+            #     delta = torch.repeat_interleave(delta, wt, 1)
+            #     t_context.add_(delta)
 
             len_for_mix = (len_query_for_hip + len_query_for_fa3) - query.shape[1]
 
@@ -960,7 +970,7 @@ def _forward_partial_fa3(
 
                 scale = (
                     torch.arange(
-                        0, len_for_mix, device=query.device, dtype=torch.float32
+                        0, min(context_sparse_mix.shape[1], len_for_mix), device=query.device, dtype=torch.float32
                     )
                     / len_for_mix
                 )
@@ -1230,6 +1240,33 @@ def _forward_paged_hip(
 
     if last_dense > 0:
         last_dense += dst_seq_len % args.block_sparse_block_size_q
+    
+    sliding_window_size_for_masking_step = (
+        layer_config.sliding_window_size_for_masking_step
+    )
+    if (
+        isinstance(sliding_window_size_for_masking_step, list)
+        and (cached_metadata is not None)
+        and (cached_metadata.indices is None)
+    ):
+        larger_sw_size = sliding_window_size_for_masking_step[
+            (
+                max(0, len(cached_metadata.stage_caches) - 1)
+                if cached_metadata.stage_caches is not None
+                else 0
+            )
+        ]
+        args.bsa_sliding_window_size = larger_sw_size
+    
+    sliding_window_size = os.getenv("HIP_DEBUG_SLLM_WINDOW", sliding_window_size)
+    if isinstance(sliding_window_size, str):
+        sliding_window_size = int(sliding_window_size)
+    sliding_window_sink = int(
+        os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
+    )
+    if args.second_stage_k == 0:
+        sliding_window_size = args.sliding_window_size
+        sliding_window_sink = args.sink_token_size
 
     # Plan 1
     # TODO use flash attention under 100K
@@ -1247,30 +1284,22 @@ def _forward_paged_hip(
         )
         seq_thresh_fa3 = args.model_context_length
 
-    mixing_len = int(os.getenv("HIP_DEBUG_FA3_MIXING_LEN", "4096"))
-    if seq_thresh_fa3 == 0:
+    mixing_len = os.getenv("HIP_DEBUG_FA3_MIXING_LEN", "1024")
+    if mixing_len.lower() == "sw":
+        mixing_len = (
+            sliding_window_size * 2
+            if isinstance(sliding_window_size, int) and (sliding_window_size > 0) else 
+            args.sliding_window_size * 2
+        )
+    else:
+        mixing_len = int(mixing_len)
+    
+    if (seq_thresh_fa3 == 0):
         mixing_len = 0
 
     if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3_INF_DENSE", "0") == "1":
         if layer_id in hip_config.dense_layers:
             seq_thresh_fa3 = query.shape[1]
-
-    sliding_window_size_for_masking_step = (
-        layer_config.sliding_window_size_for_masking_step
-    )
-    if (
-        isinstance(sliding_window_size_for_masking_step, list)
-        and (cached_metadata is not None)
-        and (cached_metadata.indices is None)
-    ):
-        larger_sw_size = sliding_window_size_for_masking_step[
-            (
-                max(0, len(cached_metadata.stage_caches) - 1)
-                if cached_metadata.stage_caches is not None
-                else 0
-            )
-        ]
-        args.bsa_sliding_window_size = larger_sw_size
 
     # TODO: if delta norm is too high, then just recompute that whole block.
     # TODO: use partial densely decode. delta attention for decode
@@ -1343,16 +1372,6 @@ def _forward_paged_hip(
             warnings.warn(info_msg)
 
         # args.sa_extend_backend = "clamp"
-
-    sliding_window_size = os.getenv("HIP_DEBUG_SLLM_WINDOW", sliding_window_size)
-    if isinstance(sliding_window_size, str):
-        sliding_window_size = int(sliding_window_size)
-    sliding_window_sink = int(
-        os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
-    )
-    if args.second_stage_k == 0:
-        sliding_window_size = args.sliding_window_size
-        sliding_window_sink = args.sink_token_size
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
 
