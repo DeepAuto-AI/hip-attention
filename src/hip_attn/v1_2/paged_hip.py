@@ -901,7 +901,7 @@ def _forward_partial_fa3(
         min_context_len = max(0, max_context_len - query.shape[1])
 
         len_query_for_fa3 = max(0, seq_thresh_fa3 - min_context_len)
-        len_query_for_hip = max(0, max_context_len - (seq_thresh_fa3 - mixing_len))
+        len_query_for_hip = max(0, max_context_len - max(min_context_len, seq_thresh_fa3 - mixing_len))
 
         # print(max_context_len, min_context_len, seq_thresh_fa3, len_query_for_fa3, len_query_for_hip)
 
