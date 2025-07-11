@@ -1254,14 +1254,15 @@ def dual_stage_quadratic_hip_attention(
                 (0, 255, 0),
                 2,
             )
+            tdst_start = position_ids[0, 0].item() // BLOCK_SIZE_Q
             debug = cv2.line(
                 debug,
                 (
-                    0,
+                    tdst_start,
                     0,
                 ),
-                (debug.shape[1], debug.shape[0]),
-                thickness=5,
+                (tdst_start + debug.shape[0], debug.shape[0]),
+                thickness=1,
                 color=(0, 255, 0),
             )
 
