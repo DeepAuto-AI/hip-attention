@@ -900,7 +900,7 @@ def _forward_partial_fa3(
             max_context_len = min(max_context_len, k.shape[1])
         min_context_len = max(0, max_context_len - query.shape[1])
 
-        len_query_for_fa3 = max(0, seq_thresh_fa3 - min_context_len)
+        len_query_for_fa3 = max(0, min(seq_thresh_fa3, max_context_len) - min_context_len)
         len_query_for_hip = max(0, max_context_len - max(min_context_len, seq_thresh_fa3 - mixing_len))
 
         # print(max_context_len, min_context_len, seq_thresh_fa3, len_query_for_fa3, len_query_for_hip)
@@ -944,6 +944,14 @@ def _forward_partial_fa3(
                 args_sparse.query_for_landmark = args_sparse.query_for_landmark[
                     :, -len_query_for_hip:
                 ]
+            
+            yarn_scale = float(os.getenv('HIP_DEBUG_YARN_SCALE_HINT', '1'))
+            if yarn_scale > 1:
+                assert int(yarn_scale) == yarn_scale
+                yarn_scale = int(yarn_scale)
+                args_sparse.rope_cos = args_sparse.rope_cos[::yarn_scale]
+                args_sparse.rope_sin = args_sparse.rope_sin[::yarn_scale]
+            
             context_sparse, metadata = inner_function(
                 q=(query[:, -len_query_for_hip:] * sm_scale).to(query.dtype),
                 k=k,
@@ -968,12 +976,31 @@ def _forward_partial_fa3(
                 context_fa3_mix = context_fa3[:, -len_for_mix:]
                 context_sparse_mix = context_sparse[:, :len_for_mix]
 
-                scale = (
+                chunk_len = min(context_sparse_mix.shape[1], len_for_mix)
+                offset = min_context_len - (seq_thresh_fa3 - mixing_len)
+                scale_global = (
                     torch.arange(
-                        0, min(context_sparse_mix.shape[1], len_for_mix), device=query.device, dtype=torch.float32
+                        offset, offset + chunk_len, device=query.device, dtype=torch.float32
                     )
-                    / len_for_mix
+                    / mixing_len
                 )
+                
+                len_for_spike = min(chunk_len, 32)
+                scale = torch.clamp_min(
+                    (torch.arange(0, chunk_len, device=query.device, dtype=torch.float32) - (chunk_len - len_for_spike))
+                    / len_for_spike, 0
+                ) # * (1 - (offset / mixing_len)) + (offset / mixing_len)
+                
+                # scale_spike = (
+                #     (torch.arange(
+                #         offset, offset + chunk_len, device=query.device, dtype=torch.float32
+                #     ) % len_for_spike)
+                #     / len_for_spike
+                # )
+                # scale = torch.maximum(scale, scale_spike)
+                
+                scale = torch.maximum(scale, scale_global)
+                
                 scale = scale[None, :, None, None]
                 context_mix = (
                     context_sparse_mix * scale + context_fa3_mix * (1.0 - scale)
@@ -1284,12 +1311,12 @@ def _forward_paged_hip(
         )
         seq_thresh_fa3 = args.model_context_length
 
-    mixing_len = os.getenv("HIP_DEBUG_FA3_MIXING_LEN", "1024")
+    mixing_len = os.getenv("HIP_DEBUG_FA3_MIXING_LEN", "sw" if seq_thresh_fa3 > 0 else "0")
     if mixing_len.lower() == "sw":
-        mixing_len = (
-            sliding_window_size * 2
+        mixing_len = int(
+            sliding_window_size * 1.5
             if isinstance(sliding_window_size, int) and (sliding_window_size > 0) else 
-            args.sliding_window_size * 2
+            args.sliding_window_size * 1.5
         )
     else:
         mixing_len = int(mixing_len)
