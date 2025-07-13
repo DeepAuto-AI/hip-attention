@@ -8,6 +8,7 @@
     "layers": [
         {
             "sliding_window_size": 4096,
+            "sink_token_size": 256,
             "second_stage_k": 0,
             "sa_extend_backend": "streaming"
         },
@@ -44,6 +45,7 @@
     "prefill_layers": [
         {
             "sliding_window_size": 4096,
+            "sink_token_size": 256,
             "second_stage_k": 0,
             "sa_extend_backend": "streaming"
         },
@@ -56,7 +58,7 @@
             "scan_extend_backend": "none",
             "stages": [
                 {
-                    "stage_block_size_q":128,
+                    "stage_block_size_q":64,
                     "stage_block_stride_q":4,
                     "stage_chunk_size":128,
                     "stage_k":null,
