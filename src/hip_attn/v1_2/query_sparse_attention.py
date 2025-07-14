@@ -423,10 +423,6 @@ else:
         for BN in [32, 64]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
-        # for BM in [128,]
-        # for BN in [64,]
-        # for s in [3, ]
-        # for w in [4, ]
     ]
 
 
@@ -462,6 +458,7 @@ def _attn_fwd(
     BLOCK_SUMS,
     Out,
     MaskIdx,
+    
     stride_qz,
     stride_qh,
     stride_qm,
@@ -478,35 +475,33 @@ def _attn_fwd(
     stride_bih,
     stride_bim,
     stride_bik,
+    
     stride_oz,
     stride_oh,
     stride_om,
     stride_on,
     stride_mz,
     stride_mm,
+    
     USING_PAGED_CACHE: tl.constexpr,
     HEAD_REPEAT: tl.constexpr,
+    
     K_CACHE,
     stride_k_cache_t,
     stride_k_cache_page,
     stride_k_cache_head_kv,
     stride_k_cache_hid,
+    
     V_CACHE,
     stride_v_cache_t,
     stride_v_cache_page,
     stride_v_cache_head_kv,
     stride_v_cache_hid,
+    
     BLOCK_TABLE,
     stride_block_table_bsz,
     stride_block_table_tsrc,
-    RETURN_POOLED_SCORES: tl.constexpr,
-    SCORE_POOLING_BQ: tl.constexpr,
-    SCORE_POOLING_BK: tl.constexpr,
-    SCORES,
-    stride_scores_bsz,
-    stride_scores_head,
-    stride_scores_bdst,
-    stride_scores_bsrc,
+    
     ACC,
     stride_acc_bsz,
     stride_acc_head,
@@ -529,6 +524,16 @@ def _attn_fwd(
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    
+    RETURN_POOLED_SCORES: tl.constexpr,
+    SCORE_POOLING_BQ: tl.constexpr,
+    SCORE_POOLING_BK: tl.constexpr,
+    SCORES,
+    stride_scores_bsz,
+    stride_scores_head,
+    stride_scores_bdst,
+    stride_scores_bsrc,
+    
     Z,
     H,
     N_CTX,
@@ -1175,6 +1180,9 @@ class _attention(torch.autograd.Function):
         rope_sin: Optional[torch.Tensor],
         model_context_length: int,
         self_extend_scale: int,
+        bsa_top_block_k: int,
+        bsa_block_size_q: int,
+        bsa_block_size_k: int,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1215,7 +1223,6 @@ class _attention(torch.autograd.Function):
         # )
         NC = MX = M = None
         if return_running_statistics:
-            assert not return_running_statistics
             assert not return_bsa_indices
             MX = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
@@ -1227,21 +1234,19 @@ class _attention(torch.autograd.Function):
                 device=q.device,
                 dtype=torch.float32,
             )
-
-        BSA_IDX = BLOCK_SUMS = None
+        
+        bsa_indices = bsa_block_sums = None
         if return_bsa_indices:
             assert not return_running_statistics
             assert not return_pooled_scores
-            BSA_K = 16
-            warnings.warn(f"BSA_K hardcoded for testing")
-            BSA_IDX = torch.full(
-                (q.shape[0], q.shape[1], q.shape[2], BSA_K),
+            bsa_indices = torch.full(
+                (q.shape[0], q.shape[1], q.shape[2], bsa_top_block_k),
                 -1,
                 device=q.device,
                 dtype=torch.long,
             )
-            BLOCK_SUMS = torch.full(
-                (q.shape[0], q.shape[1], q.shape[2], BSA_K),
+            bsa_block_sums = torch.full(
+                (q.shape[0], q.shape[1], q.shape[2], bsa_top_block_k),
                 torch.finfo(torch.float32).min,
                 device=q.device,
                 dtype=torch.float32,
@@ -1303,10 +1308,14 @@ class _attention(torch.autograd.Function):
                 warnings.warn("N_SPLIT is ignored. this should be fixed")
             N_SPLIT = 1
 
-        if return_bsa_indices:
-            warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
+        if return_bsa_indices and (N_SPLIT > 1):
+            # BUG FIXME this warning should be activated later
+            # warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
             N_SPLIT = 1
 
+        assert safe_stride(k, 4)[:2] == safe_stride(v, 4)[:2]
+        assert safe_stride(q, 4)[:2] == safe_stride(o, 4)[:2]
+        
         if (N_SPLIT > 1) and (not ignore_n_split):
             # N_SPLIT = 1
 
@@ -1336,14 +1345,14 @@ class _attention(torch.autograd.Function):
                 M,
                 MX,
                 NC,
-                BSA_IDX,
-                BLOCK_SUMS,
+                bsa_indices,
+                bsa_block_sums,
                 o,
                 mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
-                *safe_stride(BSA_IDX, 4),
+                *safe_stride(bsa_indices, 4),
                 *safe_stride(o, 4),
                 *safe_stride(mask, 2),
                 k_cache is not None,
@@ -1387,7 +1396,7 @@ class _attention(torch.autograd.Function):
                 EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
-                BSA_K=BSA_K,
+                BSA_K=bsa_top_block_k,
                 **extra_kern_args,
             )
 
@@ -1414,50 +1423,53 @@ class _attention(torch.autograd.Function):
                 BLOCK_TDST=BLOCK_M,
             )
 
-            # def sanity_check(t: torch.Tensor):
-            #     assert t.isnan().nonzero().shape[0] == 0
-            #     assert t.isinf().nonzero().shape[0] == 0
-            #     return t
+            """
+            # NOTE sanity check code for merge. do not delete for later debugging.
+            def sanity_check(t: torch.Tensor):
+                assert t.isnan().nonzero().shape[0] == 0
+                assert t.isinf().nonzero().shape[0] == 0
+                return t
 
-            # l_i = sanity_check(l_i)
-            # m_i = sanity_check(m_i)
-            # acc = sanity_check(acc)
+            l_i = sanity_check(l_i)
+            m_i = sanity_check(m_i)
+            acc = sanity_check(acc)
 
-            # # l_i = torch.where(l_i <= (1.0 + 1e-4), l_i + 1e-4, l_i)
+            # l_i = torch.where(l_i <= (1.0 + 1e-4), l_i + 1e-4, l_i)
 
-            # logits = acc / l_i[:, :, :, :, None]
-            # logits = sanity_check(logits)
-            # stats = m_i + torch.log2(l_i)
-            # stats = sanity_check(stats)
+            logits = acc / l_i[:, :, :, :, None]
+            logits = sanity_check(logits)
+            stats = m_i + torch.log2(l_i)
+            stats = sanity_check(stats)
 
-            # e_sum = torch.zeros_like(l_i[:, :, 0, :].contiguous())
-            # e_max = torch.full_like(m_i[:, :, 0, :].contiguous(), fill_value=float('-inf'))
-            # acc = torch.zeros_like(o, dtype=torch.float32)
+            e_sum = torch.zeros_like(l_i[:, :, 0, :].contiguous())
+            e_max = torch.full_like(m_i[:, :, 0, :].contiguous(), fill_value=float('-inf'))
+            acc = torch.zeros_like(o, dtype=torch.float32)
 
-            # for i_split in range(N_SPLIT):
-            #     tv = logits[:, :, i_split, :, :]
-            #     tv = sanity_check(tv)
-            #     tlogic = stats[:, :, i_split, :]
-            #     tlogic = sanity_check(tlogic)
-            #     n_e_max = torch.maximum(tlogic, e_max)
-            #     n_e_max = sanity_check(n_e_max)
+            for i_split in range(N_SPLIT):
+                tv = logits[:, :, i_split, :, :]
+                tv = sanity_check(tv)
+                tlogic = stats[:, :, i_split, :]
+                tlogic = sanity_check(tlogic)
+                n_e_max = torch.maximum(tlogic, e_max)
+                n_e_max = sanity_check(n_e_max)
 
-            #     old_scale = torch.exp2(e_max - n_e_max)
-            #     old_scale = sanity_check(old_scale)
-            #     exp_logic = torch.exp2(tlogic - n_e_max)
-            #     exp_logic = sanity_check(exp_logic)
-            #     acc = acc * old_scale[:, :, :, None] + exp_logic[:, :, :, None] * tv
-            #     acc = sanity_check(acc)
+                old_scale = torch.exp2(e_max - n_e_max)
+                old_scale = sanity_check(old_scale)
+                exp_logic = torch.exp2(tlogic - n_e_max)
+                exp_logic = sanity_check(exp_logic)
+                acc = acc * old_scale[:, :, :, None] + exp_logic[:, :, :, None] * tv
+                acc = sanity_check(acc)
 
-            #     e_sum = e_sum * old_scale + exp_logic
-            #     e_sum = sanity_check(e_sum)
-            #     e_max = n_e_max
-            #     e_max = sanity_check(e_max)
+                e_sum = e_sum * old_scale + exp_logic
+                e_sum = sanity_check(e_sum)
+                e_max = n_e_max
+                e_max = sanity_check(e_max)
 
-            # acc = acc / e_sum[:, :, :, None]
-            # acc = sanity_check(acc)
+            acc = acc / e_sum[:, :, :, None]
+            acc = sanity_check(acc)
 
-            # o = acc.to(o.dtype)
+            o = acc.to(o.dtype)
+            """
         else:
             grid = lambda args: (
                 triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
@@ -1474,14 +1486,14 @@ class _attention(torch.autograd.Function):
                 M,
                 MX,
                 NC,
-                BSA_IDX,
-                BLOCK_SUMS,
+                bsa_indices,
+                bsa_block_sums,
                 o,
                 mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
-                *safe_stride(BSA_IDX, 4),
+                *safe_stride(bsa_indices, 4),
                 *safe_stride(o, 4),
                 *safe_stride(mask, 2),
                 k_cache is not None,
@@ -1533,14 +1545,14 @@ class _attention(torch.autograd.Function):
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
-                BSA_K=BSA_K,
+                BSA_K=bsa_top_block_k,
                 **extra_kern_args,
             )
 
         if return_running_statistics:
             return o, (MX, NC)
         elif return_bsa_indices:
-            return o, (BSA_IDX, BLOCK_SUMS)
+            return o, (bsa_indices, bsa_block_sums)
         else:
             return o
 
@@ -1573,6 +1585,9 @@ def query_sparse_attention(
     rope_sin: Optional[torch.Tensor] = None,
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
+    bsa_top_block_k: int = 128,
+    bsa_block_size_q: int = 64,
+    bsa_block_size_k: int = 2,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -1597,27 +1612,7 @@ def query_sparse_attention(
         rope_sin,
         model_context_length,
         self_extend_scale,
+        bsa_top_block_k,
+        bsa_block_size_q,
+        bsa_block_size_k,
     )
-
-if __name__ == "__main__":
-    B, H, S, D = 1, 1, 8192, 128
-    import math
-    scale = math.sqrt(1 / D)
-    q, k, v = torch.randn(B, H, S, D).cuda(), torch.randn(B, H, S, D).cuda(), torch.randn(B, H, S, D).cuda()
-    mask = torch.arange(S).view(1, -1).repeat(B, 1).cuda()
-
-    out, (bsa_idx, block_sums) = query_sparse_attention(
-            q, k, v, mask, scale, None, None, None, return_bsa_indices=True
-    )
-    print(f"return True ok!")
-
-    out = query_sparse_attention(
-            q, k, v, mask, scale, None, None, None, return_bsa_indices=True
-    )
-    print(f"return False ok!")
-
-    # torch.set_printoptions(threshold=10000)
-    # print(f"{bsa_idx=}")
-    # print(f"{block_sums=}")
-
-    # print(f"{(bsa_idx == -1).nonzero()}")
