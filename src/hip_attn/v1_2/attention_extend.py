@@ -893,6 +893,8 @@ def dual_stage_quadratic_hip_attention(
                         and get_world_size() > 1
                         and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
+                        warnings.warn("TP all gather is used for head reduce, this may degrade throughput.")
+                        
                         out_scores_tp = out_scores
                         out_scores = (
                             tensor_model_parallel_all_gather(
