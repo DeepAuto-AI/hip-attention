@@ -523,7 +523,8 @@ class HiPAttentionArgs:
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
         else:
-            warnings.warn("For developers: gathering paged cache will occure overhead.")
+            # warnings.warn("For developers: gathering paged cache will occure overhead.")
+            pass
 
         k_cache = self.get_k_cache()
         assert self.block_table is not None
@@ -556,7 +557,8 @@ class HiPAttentionArgs:
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
         else:
-            warnings.warn("For developers: gathering paged cache will occure overhead.")
+            # warnings.warn("For developers: gathering paged cache will occure overhead.")
+            pass
 
         if self.v_cache is not None:
             assert self.v_cache is not None

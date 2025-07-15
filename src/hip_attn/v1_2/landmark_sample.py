@@ -50,7 +50,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["HID", "T"])
+@triton.autotune(list(filter(keep, configs)), key=["HID", "USING_PAGED_CACHE"])
 @triton.jit
 def _sw_score_sample(
     Q,

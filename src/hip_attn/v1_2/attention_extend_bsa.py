@@ -747,7 +747,7 @@ def get_block_sparse_attention_configs():
         "BLOCK_SIZE_K",
         "BLOCK_SIZE_Q",
         "HID",
-        "TDST_NEXT_POWER_OF_2",
+        # "TDST_NEXT_POWER_OF_2",
     ],
     # prune_configs_by={
     #     'perf_model': perf_model_block_sparse_attention,

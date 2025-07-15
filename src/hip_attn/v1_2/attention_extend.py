@@ -1498,6 +1498,8 @@ def dual_stage_quadratic_hip_attention(
         extend_context_length=args.extend_context_length,
         offload_update_cache=(cached_metadata is None) and args.online_update_cache,
         return_running_statistics=args.bsa_return_running_statistics,
+        k_descale=args.k_descale,
+        v_descale=args.v_descale,
         # offload_update_cache=args.online_update_cache,
         # offload_update_cache=False,
     )

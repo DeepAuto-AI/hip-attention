@@ -560,6 +560,7 @@ def get_scan_stage_configs():
     key=[
         "BLOCK_SIZE_Q",
         "HID_DIM",
+        "USING_PAGES",
     ],
 )
 @triton.jit

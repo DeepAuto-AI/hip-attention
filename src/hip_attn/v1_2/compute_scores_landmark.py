@@ -92,7 +92,10 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["T"])
+@triton.autotune(
+    list(filter(keep, configs)), 
+    key=["HID"]
+)
 @triton.jit
 def _compute_scores_landmark_cuda(
     Q,
