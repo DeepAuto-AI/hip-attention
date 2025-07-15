@@ -87,6 +87,7 @@ def _attn_fwd_inner(
     N_CTX,
     N_KV,
     fp8_v: tl.constexpr,
+    
     USING_PAGED_CACHE: tl.constexpr,
     K_CACHE,
     stride_k_cache_t,
@@ -107,6 +108,16 @@ def _attn_fwd_inner(
     K_ROT,
     stride_k_rot_tsrc,
     stride_k_rot_hid,
+    
+    RETURN_BSA_MASK: tl.constexpr,
+    BSA_K: tl.constexpr,
+    BSA_BLOCK_SIZE_Q: tl.constexpr,
+    BSA_BLOCK_SIZE_K: tl.constexpr,
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    stride_bim,
+    stride_bik,
+    
     lo,
     hi,
     MASKING: tl.constexpr,
@@ -114,18 +125,24 @@ def _attn_fwd_inner(
     MODEL_CONTEXT_LENGTH,
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
-    BSA_K: tl.constexpr,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
 
-    if BLOCK_IDX is not None and BLOCK_SUMS is not None:
-        b_idx = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]) * stride_bim \
-                + tl.arange(0, BSA_K)[None, :] * stride_bik
+    if RETURN_BSA_MASK:
+        tl.static_assert(BLOCK_M >= BSA_BLOCK_SIZE_Q)
+        
+        b_idx = (
+            (
+                start_m * (BLOCK_M // BSA_BLOCK_SIZE_Q) 
+                + tl.arange(0, (BLOCK_M // BSA_BLOCK_SIZE_Q))[:, None]
+            ) * stride_bim
+            + tl.arange(0, BSA_K)[None, :] * stride_bik
+        )
 
-        block_idx = tl.load(BLOCK_IDX + b_idx)
-        block_sums = tl.load(BLOCK_SUMS + b_idx)
+        block_idx = tl.load(BSA_INDICES + b_idx)
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -313,12 +330,12 @@ def _attn_fwd_inner(
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
         # -- update block sums and indices for block sparse attention
-        if BLOCK_IDX is not None and BLOCK_SUMS is not None:
-            block_sums *= alpha[:, None] # adjust previous sums for new normalization constant
+        if RETURN_BSA_MASK:
+            block_sums *= tl.sum(tl.reshape(alpha, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)[:, None] # adjust previous sums for new normalization constant
 
             # block_sums_min = tl.min(block_sums, axis=-1) # (M, K) --> (M,)
             block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
-            block_sums_max = tl.maximum(block_sums_min, l_ij) # (M,)
+            block_sums_max = tl.maximum(block_sums_min, tl.sum(tl.reshape(l_ij, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)) # (M,)
 
             # print(f"block sums: ", block_sums)
             # print(f"block sums min idx: ", block_sums_min_idx)
@@ -389,10 +406,10 @@ def _attn_fwd_inner(
             # mask_tsrc = idx_tsrc < hi
             pass
 
-    if BLOCK_IDX is not None and BLOCK_SUMS is not None:
+    if RETURN_BSA_MASK:
         # print(f"storing indices: ", block_idx)
-        tl.store(BLOCK_IDX + b_idx, value=block_idx)
-        tl.store(BLOCK_SUMS + b_idx, value=block_sums)
+        tl.store(BSA_INDICES + b_idx, value=block_idx)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
 
     return acc, l_i, m_i
 
@@ -454,8 +471,6 @@ def _attn_fwd(
     M,
     MX,
     NC,
-    BSA_IDX,
-    BLOCK_SUMS,
     Out,
     MaskIdx,
     
@@ -471,10 +486,6 @@ def _attn_fwd(
     stride_vh,
     stride_vk,
     stride_vn,
-    stride_biz,
-    stride_bih,
-    stride_bim,
-    stride_bik,
     
     stride_oz,
     stride_oh,
@@ -534,6 +545,17 @@ def _attn_fwd(
     stride_scores_bdst,
     stride_scores_bsrc,
     
+    RETURN_BSA_MASK: tl.constexpr,
+    BSA_K: tl.constexpr,
+    BSA_BLOCK_SIZE_Q: tl.constexpr,
+    BSA_BLOCK_SIZE_K: tl.constexpr,
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    stride_biz,
+    stride_bih,
+    stride_bim,
+    stride_bik,
+    
     Z,
     H,
     N_CTX,
@@ -549,7 +571,6 @@ def _attn_fwd(
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
     SELF_EXTEND_WINDOW=1024,
-    BSA_K: tl.constexpr,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -598,10 +619,10 @@ def _attn_fwd(
             order=(1, 0),
         )
 
-    if BSA_IDX is not None and BLOCK_SUMS is not None:
+    if RETURN_BSA_MASK:
         bs_offset = off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
-        BLOCK_SUMS += bs_offset
-        BSA_IDX += bs_offset
+        BSA_INDICES += bs_offset
+        BSA_BLOCK_SUMS += bs_offset
 
     if not USING_PAGED_CACHE:
         v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
@@ -805,6 +826,14 @@ def _attn_fwd(
                 stride_v_cache_hid=stride_v_cache_hid,
                 BLOCK_TABLE=BLOCK_TABLE,
                 stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -820,7 +849,6 @@ def _attn_fwd(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-                BSA_K=BSA_K,
             )
         # (start_k, end_k) (mid, hi)
         if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -862,6 +890,14 @@ def _attn_fwd(
                 stride_v_cache_hid=stride_v_cache_hid,
                 BLOCK_TABLE=BLOCK_TABLE,
                 stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -877,7 +913,6 @@ def _attn_fwd(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-                BSA_K=BSA_K,
             )
     else:
         acc, l_i, m_i = _attn_fwd_inner(
@@ -979,6 +1014,14 @@ def _attn_fwd(
             stride_v_cache_hid=stride_v_cache_hid,
             BLOCK_TABLE=BLOCK_TABLE,
             stride_block_table_tsrc=stride_block_table_tsrc,
+            RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_K=BSA_K,
+            BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
+            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+            BSA_INDICES=BSA_INDICES,
+            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+            stride_bim=stride_bim,
+            stride_bik=stride_bik,
             COS=COS,
             stride_cos_t=stride_cos_t,
             stride_cos_hid=stride_cos_hid,
@@ -995,7 +1038,6 @@ def _attn_fwd(
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
-                BSA_K=BSA_K,
         )
 
     # epilogue
@@ -1239,15 +1281,17 @@ class _attention(torch.autograd.Function):
         if return_bsa_indices:
             assert not return_running_statistics
             assert not return_pooled_scores
+            BSZ, HEAD, TDST = q.shape[:3]
+            BDST = triton.cdiv(TDST, bsa_block_size_q)
             bsa_indices = torch.full(
-                (q.shape[0], q.shape[1], q.shape[2], bsa_top_block_k),
+                (BSZ, HEAD, BDST, bsa_top_block_k),
                 -1,
                 device=q.device,
-                dtype=torch.long,
+                dtype=torch.int64,
             )
             bsa_block_sums = torch.full(
-                (q.shape[0], q.shape[1], q.shape[2], bsa_top_block_k),
-                torch.finfo(torch.float32).min,
+                (BSZ, HEAD, BDST, bsa_top_block_k),
+                fill_value=-32000.0,
                 device=q.device,
                 dtype=torch.float32,
             )
@@ -1312,11 +1356,18 @@ class _attention(torch.autograd.Function):
             # BUG FIXME this warning should be activated later
             # warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
             N_SPLIT = 1
+        else:
+            warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
+            N_SPLIT = 1
 
         assert safe_stride(k, 4)[:2] == safe_stride(v, 4)[:2]
         assert safe_stride(q, 4)[:2] == safe_stride(o, 4)[:2]
+        if bsa_indices is not None:
+            assert bsa_block_sums is not None
+            assert bsa_indices.stride() == bsa_block_sums.stride()
         
         if (N_SPLIT > 1) and (not ignore_n_split):
+            raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")
             # N_SPLIT = 1
 
             grid = lambda args: (
@@ -1486,14 +1537,11 @@ class _attention(torch.autograd.Function):
                 M,
                 MX,
                 NC,
-                bsa_indices,
-                bsa_block_sums,
                 o,
                 mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
-                *safe_stride(bsa_indices, 4),
                 *safe_stride(o, 4),
                 *safe_stride(mask, 2),
                 k_cache is not None,
@@ -1524,6 +1572,15 @@ class _attention(torch.autograd.Function):
                 *safe_stride(rope_cos, 2),
                 rope_sin,
                 *safe_stride(rope_sin, 2),
+                
+                (bsa_indices is not None) and (bsa_block_sums is not None),
+                bsa_top_block_k,
+                bsa_block_size_q,
+                bsa_block_size_k,
+                bsa_indices,
+                bsa_block_sums,
+                *safe_stride(bsa_indices, 4),
+                
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
@@ -1545,7 +1602,6 @@ class _attention(torch.autograd.Function):
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
-                BSA_K=bsa_top_block_k,
                 **extra_kern_args,
             )
 
@@ -1586,7 +1642,7 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     bsa_top_block_k: int = 128,
-    bsa_block_size_q: int = 64,
+    bsa_block_size_q: int = 64 // 16,
     bsa_block_size_k: int = 2,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
