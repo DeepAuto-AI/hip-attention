@@ -8,6 +8,9 @@ from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
 def main():
     B, H, H_KV, S, D = 1, 32, 8, 32768, 128
     delta_w = 16
+    bsa_block_size_q = 64 // delta_w
+    bsa_block_size_k = 64
+    bsa_top_block_k = 1024 // bsa_block_size_k
     import math
     scale = math.sqrt(1 / D)
     device = "cuda"
@@ -71,10 +74,12 @@ def main():
                 v_cache=None, 
                 block_table=None, 
                 return_bsa_indices=True,
-                bsa_top_block_k=256,
-                bsa_block_size_q=64,
-                bsa_block_size_k=2,
+                bsa_top_block_k=bsa_top_block_k,
+                bsa_block_size_q=bsa_block_size_q,
+                bsa_block_size_k=bsa_block_size_k,
             )
+            if debug:
+                print(bsa_idx)
         else:
             out = query_sparse_attention(
                 q=q, 
@@ -103,7 +108,8 @@ def main():
             fn()
             end.record()
             end.synchronize()
-            elapsed.append(start.elapsed_time(end))
+            if i > 3:
+                elapsed.append(start.elapsed_time(end))
         return sum(elapsed) / len(elapsed)
     
     latency_return_mask = latency(lambda: fwd(return_bsa_indices=True))
