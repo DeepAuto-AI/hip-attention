@@ -278,6 +278,9 @@ class HiPAttentionArgs:
 
     bsa_return_running_statistics: bool = False
     bsa_sliding_window_size: int = -1
+    
+    k_descale: Optional[Tensor] = None
+    v_descale: Optional[Tensor] = None
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -528,12 +531,15 @@ class HiPAttentionArgs:
         if seq_len is None:
             seq_len = self.block_table.shape[1]
 
-        k = k_cache[:, 0, :, :][
+        is_fp8 = k_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+        index_dtype = torch.uint8 if is_fp8 else k_cache.dtype
+        
+        k = k_cache.view(index_dtype)[:, 0, :, :][
             self.block_table[
                 :,
                 : seq_len - (seq_len % chunk_size),
             ]
-        ]
+        ].view(k_cache.dtype)
         if disable_gqa:
             k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
         return k
@@ -562,13 +568,16 @@ class HiPAttentionArgs:
 
         if seq_len is None:
             seq_len = self.block_table.shape[1]
+        
+        is_fp8 = v_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+        index_dtype = torch.uint8 if is_fp8 else v_cache.dtype
 
-        v = v_cache[:, 0, :, :][
+        v = v_cache.view(index_dtype)[:, 0, :, :][
             self.block_table[
                 :,
                 : seq_len - (seq_len % chunk_size),
             ]
-        ]
+        ].view(v_cache.dtype)
         if disable_gqa:
             v = v.repeat_interleave(gqa_q.shape[2] // v.shape[2], dim=2)
         return v

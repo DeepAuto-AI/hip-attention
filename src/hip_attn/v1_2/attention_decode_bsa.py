@@ -158,6 +158,8 @@ def _fwd_kernel_stage1(
     stride_v_tsrc,
     stride_v_head,
     stride_v_hid,
+    K_DESCALE,
+    V_DESCALE,
     B_Seqlen,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -348,6 +350,21 @@ def _fwd_kernel_stage1(
         B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + idx_tdst * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
+    
+    if K_DESCALE is not None:
+        k_descale = tl.load(
+            K_DESCALE +
+            cur_batch.to(tl.int64) * (q_head_num // kv_group_num) +
+            (cur_head // kv_group_num).to(tl.int64),
+        )
+        v_descale = tl.load(
+            V_DESCALE +
+            cur_batch.to(tl.int64) * (q_head_num // kv_group_num) +
+            (cur_head // kv_group_num).to(tl.int64),
+        )
+    else:
+        k_descale = None
+        v_descale = None
 
     q_0 = load_queries(
         cur_batch,
@@ -415,6 +432,11 @@ def _fwd_kernel_stage1(
         )
     else:
         q_1 = None
+    
+    if q_0.dtype == tl.float8e5:
+        q_0 = q_0.to(tl.float16)
+        if q_1 is not None:
+            q_1 = q_1.to(tl.float16)
 
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
@@ -761,6 +783,13 @@ def _fwd_kernel_stage1(
                     keys_rot_0 = None
                     keys_rot_1 = None
 
+                if k_descale is not None:
+                    keys_0 *= k_descale
+                    keys_rot_0 *= k_descale
+                    if keys_1 is not None:
+                        keys_1 *= k_descale
+                        keys_rot_1 *= k_descale
+                
                 values = load_tokens(
                     V,
                     stride_v_bsz,
@@ -825,6 +854,9 @@ def _fwd_kernel_stage1(
                     stride_v_cache_hid=stride_k_cache_hid,
                 )
 
+                if v_descale is not None:
+                    values *= v_descale
+                
                 acc, e_sum, e_max = block_sparse_attention_cuda_step(
                     q_0,  # FIXME: q is [BLOCK_H, BLOCK_DMODEL]: the first axis is head, not time
                     q_1,
@@ -1168,6 +1200,13 @@ def _fwd_kernel_stage1(
                 keys_rot_0 = None
                 keys_rot_1 = None
 
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
+            
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1232,6 +1271,9 @@ def _fwd_kernel_stage1(
                 stride_v_cache_hid=stride_k_cache_hid,
             )
 
+            if v_descale is not None:
+                values *= v_descale
+            
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
                 q_0,
                 q_1,
@@ -1574,6 +1616,13 @@ def _fwd_kernel_stage1(
                 keys_rot_0 = None
                 keys_rot_1 = None
 
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
+
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1638,6 +1687,9 @@ def _fwd_kernel_stage1(
                 stride_v_cache_hid=stride_k_cache_hid,
             )
 
+            if v_descale is not None:
+                values *= v_descale
+            
             # idx_bk = (
             #     tl.arange(0, BLOCK_BK)
             #     + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
@@ -1731,6 +1783,8 @@ def decode_block_sparse_attention_stage1(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    k_descale: Optional[Tensor],
+    v_descale: Optional[Tensor],
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
@@ -1800,6 +1854,12 @@ def decode_block_sparse_attention_stage1(
         dtype=torch.float32,
         device=q.device,
     )
+    
+    if k_descale is not None:
+        assert k_descale.contiguous()
+        assert v_descale.contiguous()
+        assert k_descale.shape == (batch, head_num // kv_group_num)
+        assert v_descale.shape == (batch, head_num // kv_group_num)
 
     grid = (
         batch
@@ -1824,6 +1884,8 @@ def decode_block_sparse_attention_stage1(
         *safe_stride(k, 4),
         v,
         *safe_stride(v, 4),
+        k_descale,
+        v_descale,
         seq_lens,
         *safe_stride(seq_lens, 2),
         indices,
@@ -1988,6 +2050,8 @@ def decode_block_sparse_attention_impl(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    k_descale: Optional[Tensor],
+    v_descale: Optional[Tensor],
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
@@ -2020,6 +2084,8 @@ def decode_block_sparse_attention_impl(
         q,
         k,
         v,
+        k_descale=k_descale,
+        v_descale=v_descale,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
@@ -2076,6 +2142,8 @@ def decode_block_sparse_attention(
     extend_context_length: int = 131072,  # 196608
     offload_update_cache: bool = False,
     return_running_statistics: bool = False,
+    k_descale: Tensor = None,
+    v_descale: Tensor = None,
 ):
     assert not return_running_statistics
 
@@ -2143,6 +2211,12 @@ def decode_block_sparse_attention(
     else:
         raise Exception()
     assert seq_lens.ndim == 2
+    
+    if k_descale is not None:
+        k_descale = k_descale.contiguous()
+        v_descale = v_descale.contiguous()
+        assert k_descale.shape == v_descale.shape
+        assert k_descale.shape == (BSZ, KV_HEAD)
 
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
@@ -2151,6 +2225,8 @@ def decode_block_sparse_attention(
         q,
         k,
         v,
+        k_descale=k_descale,
+        v_descale=v_descale,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,

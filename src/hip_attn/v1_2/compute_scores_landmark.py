@@ -251,7 +251,7 @@ def _compute_scores_landmark_cuda(
                     + idx_tsrc[None, :] * stride_k_tsrc
                     + idx_hid[:, None] * stride_k_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 )  # .to(tl.float8e5)
             else:
                 block_index = tl.load(
@@ -264,8 +264,11 @@ def _compute_scores_landmark_cuda(
                     + block_index[None, :] * stride_k_cache_t
                     + idx_hid[:, None] * stride_k_cache_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 )
+            
+            if keys.dtype == tl.float8e5:
+                keys = keys.to(tl.float16)
 
             if DEROPE:
                 keys = tl.trans(
@@ -285,7 +288,7 @@ def _compute_scores_landmark_cuda(
                 )
 
             scores = tl.dot(
-                queries,
+                queries.to(keys.dtype),
                 keys,
             )
 

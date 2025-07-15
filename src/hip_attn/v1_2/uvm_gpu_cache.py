@@ -1048,10 +1048,12 @@ def load_tokens(
             #     mask=mask_slot_cache_hit,
             #     value=0,
             # )
+        
+        idx_page_load = idx_page
 
         keys = tl.load(
             K_CACHE
-            + idx_page.to(tl.int64) * stride_k_cache_page
+            + idx_page_load.to(tl.int64) * stride_k_cache_page
             + offset_page.to(tl.int64) * stride_k_cache_offset
             + idx_kv_head.to(tl.int64) * stride_k_cache_kv_head
             + idx_hid.to(tl.int64) * stride_k_cache_hid,

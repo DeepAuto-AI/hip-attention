@@ -124,7 +124,7 @@ def _sw_score_sample(
             + idx_head_kv * stride_k_cache_head_kv
             + idx_hid[:, None] * stride_k_cache_hid,
             mask=mask_tsrc[None, :],
-            other=0,
+            other=0.0,
         )
     else:
         keys = tl.load(
@@ -134,8 +134,11 @@ def _sw_score_sample(
             + idx_head_kv * stride_k_head_kv
             + idx_hid[:, None] * stride_k_hid,
             mask=mask_tsrc[None, :],
-            other=0,
+            other=0.0,
         )
+
+    dot_dtype = torch.float16 if Q.dtype.element_ty == tl.float8e5 else Q.dtype.element_ty
+    keys = keys.to(dot_dtype)
 
     acc = tl.zeros((BLOCK_TSRC,), dtype=tl.float32) + 42
 
@@ -156,8 +159,8 @@ def _sw_score_sample(
             + idx_hid[None, :] * stride_q_hid,
             mask=mask_tdst[:, None],
             other=0,
-        )
-
+        ).to(dot_dtype)
+        
         scores = tl.dot(queries, keys)
 
         mask = pos_tdst[:, None] >= pos_tsrc[None, :]
@@ -177,7 +180,7 @@ def _sw_score_sample(
             + idx_hid[None, :] * stride_q_hid,
             mask=mask_tdst[:, None],
             other=0,
-        )
+        ).to(dot_dtype)
 
         scores = tl.dot(queries, keys)
 

@@ -151,6 +151,8 @@ def forward_paged_hip(
     sliding_window_size: Optional[int] = -1,
     sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_prefill is not None:
@@ -329,6 +331,8 @@ def forward_paged_hip(
                     sliding_window_size=sliding_window_size,
                     sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
                 )
                 metadata_new.append(metadata_req)
 
@@ -374,6 +378,8 @@ def forward_paged_hip(
             sliding_window_size=sliding_window_size,
             sliding_window_sink=sliding_window_sink,
             using_chunked_sliding_window=using_chunked_sliding_window,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     return o, metadata_new
@@ -414,6 +420,8 @@ def _forward_paged_hip_validate(
     sliding_window_size: Optional[int] = -1,
     sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -491,6 +499,8 @@ def _forward_paged_hip_validate(
         sliding_window_size=sliding_window_size,
         sliding_window_sink=sliding_window_sink,
         using_chunked_sliding_window=using_chunked_sliding_window,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
     if require_validation:
@@ -527,6 +537,8 @@ def _forward_paged_hip_validate(
                 sliding_window_size=sliding_window_size,
                 sliding_window_sink=sliding_window_sink,
                 using_chunked_sliding_window=using_chunked_sliding_window,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -565,6 +577,8 @@ def _forward_paged_hip_validate(
                 sliding_window_size=sliding_window_size,
                 sliding_window_sink=sliding_window_sink,
                 using_chunked_sliding_window=using_chunked_sliding_window,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
             err_thresh = 1e-7
@@ -643,6 +657,8 @@ def _forward_paged_hip_validate(
                     sliding_window_size=sliding_window_size,
                     sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -680,6 +696,8 @@ def _forward_paged_hip_validate(
                     sliding_window_size=sliding_window_size,
                     sliding_window_sink=sliding_window_sink,
                     using_chunked_sliding_window=using_chunked_sliding_window,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -728,6 +746,8 @@ def _forward_fa3(
     rope_cos: torch.Tensor,
     rope_sin: torch.Tensor,
     rope_is_neox_style: bool,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor
 ):
     assert q.ndim == 4
     assert k.ndim == 4
@@ -865,6 +885,8 @@ def _forward_fa3(
         softmax_scale=sm_scale,
         causal=True,
         return_softmax_lse=False,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
     context_fa3 = context_fa3.view(q.shape[:-1] + (v.shape[-1],))
@@ -885,6 +907,8 @@ def _forward_partial_fa3(
     mixing_len: int,
     args: HiPAttentionArgs,
     max_context_len: int,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
     inner_function,
 ):
     query = q
@@ -910,13 +934,19 @@ def _forward_partial_fa3(
             # assert not args.using_extend, "todo"
 
             if args.using_paged_cache:
-                k = args.gather_k_from_paged_cache(seq_len=args.model_context_length)
-                v = args.gather_v_from_paged_cache(seq_len=args.model_context_length)
+                k = args.gather_k_from_paged_cache(seq_len=min(max_context_len, args.model_context_length))
+                v = args.gather_v_from_paged_cache(seq_len=min(max_context_len, args.model_context_length))
 
             query_fa3 = query[:, :len_query_for_fa3].contiguous()
-            len_kv = k.shape[1] - len_query_for_hip
+            len_kv = k.shape[1] # - len_query_for_hip # BUG: this should be bug, because this will lose keys for len_for_mix
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
+            
+            is_fp8 = k.dtype in (torch.float8_e5m2, )
+            if is_fp8:
+                query_fa3 = query_fa3.to(torch.float16)
+                k_fa3 = k_fa3.to(torch.float16)
+                v_fa3 = v_fa3.to(torch.float16)
 
             context_fa3 = _forward_fa3(
                 q=query_fa3,
@@ -929,6 +959,8 @@ def _forward_partial_fa3(
                 rope_cos=args.rope_cos,
                 rope_sin=args.rope_sin,
                 rope_is_neox_style=rope_is_neox_style,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
     if args.using_paged_cache:
@@ -1126,6 +1158,8 @@ def _forward_paged_hip(
     sliding_window_size: Optional[int] = -1,
     sliding_window_sink: Optional[int] = -1,
     using_chunked_sliding_window: bool = False,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -1171,6 +1205,10 @@ def _forward_paged_hip(
 
     BLOCK_TABLE_BSZ, MODEL_SEQ_LEN = block_table.shape
     assert batch_size == BLOCK_TABLE_BSZ
+    
+    if k_descale is not None:
+        assert k_descale.shape == (batch_size, num_heads_kv)
+        assert v_descale.shape == (batch_size, num_heads_kv)
 
     # NOTE(heejun): the whole point to need to find gemma is large size of hidden size
     if k_cache is not None:
@@ -1196,16 +1234,18 @@ def _forward_paged_hip(
         assert is_decode
 
     args = HiPAttentionArgs(
-        k_cache=(
-            k_cache.view(torch.uint8)
-            if isinstance(k_cache, torch.Tensor) and k_cache.dtype == torch.float8_e5m2
-            else k_cache
-        ),
-        v_cache=(
-            v_cache.view(torch.uint8)
-            if isinstance(k_cache, torch.Tensor) and v_cache.dtype == torch.float8_e5m2
-            else v_cache
-        ),
+        # k_cache=(
+        #     k_cache.view(torch.uint8)
+        #     if isinstance(k_cache, torch.Tensor) and k_cache.dtype == torch.float8_e5m2
+        #     else k_cache
+        # ),
+        k_cache=k_cache,
+        # v_cache=(
+        #     v_cache.view(torch.uint8)
+        #     if isinstance(k_cache, torch.Tensor) and v_cache.dtype == torch.float8_e5m2
+        #     else v_cache
+        # ),
+        v_cache=v_cache,
         offload_cache=offload_cache,
         block_table=block_table,
         cache_seq_lens=seq_lens,
@@ -1253,6 +1293,8 @@ def _forward_paged_hip(
         using_chunked_sliding_window=using_chunked_sliding_window,
         is_decode=is_decode,
         landmark_stage_k=layer_config.landmark_stage_k,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
 
     using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
@@ -1430,6 +1472,8 @@ def _forward_paged_hip(
             mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
+            k_descale=k_descale,
+            v_descale=v_descale,
             inner_function=__forward_sliding_window_wrapper,
         )
     elif using_delta_attention and (
@@ -2591,6 +2635,8 @@ def _forward_paged_hip(
             mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
+            k_descale=k_descale,
+            v_descale=v_descale,
             inner_function=dual_stage_quadratic_hip_attention,
         )
         # context = context[:, -query.shape[1] :, :, :].contiguous()

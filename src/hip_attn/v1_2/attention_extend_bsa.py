@@ -771,6 +771,8 @@ def block_sparse_attention_cuda(
     stride_v_tsrc,
     stride_v_head,
     stride_v_hid,
+    K_DESCALE,
+    V_DESCALE,
     POS,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -960,6 +962,21 @@ def block_sparse_attention_cuda(
         acc = tl.zeros((BLOCK_SIZE_Q, HID_BLOCK_V), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
+        
+    if K_DESCALE is not None:
+        k_descale = tl.load(
+            K_DESCALE +
+            idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT) +
+            (idx_head // KV_HEAD_REPEAT).to(tl.int64),
+        )
+        v_descale = tl.load(
+            V_DESCALE +
+            idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT) +
+            (idx_head // KV_HEAD_REPEAT).to(tl.int64),
+        )
+    else:
+        k_descale = None
+        v_descale = None
 
     range_start = tl.load(
         KS_START_END
@@ -1341,11 +1358,17 @@ def block_sparse_attention_cuda(
                     )
                 else:
                     keys_rot_1 = None
-
             else:
                 keys_rot_0 = None
                 keys_rot_1 = None
 
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
+        
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1409,6 +1432,9 @@ def block_sparse_attention_cuda(
                 stride_v_cache_kv_head=stride_k_cache_kv_head,
                 stride_v_cache_hid=stride_k_cache_hid,
             )
+            
+            if v_descale is not None:
+                value *= v_descale
 
             acc, l_i, m_i = block_sparse_attention_cuda_step(
                 queries_0,
@@ -1749,10 +1775,16 @@ def block_sparse_attention_cuda(
                     )
                 else:
                     keys_rot_1 = None
-
             else:
                 keys_rot_0 = None
                 keys_rot_1 = None
+
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
 
             values = load_tokens(
                 V,
@@ -1817,6 +1849,9 @@ def block_sparse_attention_cuda(
                 stride_v_cache_kv_head=stride_k_cache_kv_head,
                 stride_v_cache_hid=stride_k_cache_hid,
             )
+
+            if v_descale is not None:
+                value *= v_descale
 
             acc, l_i, m_i = block_sparse_attention_cuda_step(
                 queries_0,
@@ -2182,10 +2217,16 @@ def block_sparse_attention_cuda(
                         )
                     else:
                         keys_rot_1 = None
-
                 else:
                     keys_rot_0 = None
                     keys_rot_1 = None
+
+                if k_descale is not None:
+                    keys_0 *= k_descale
+                    keys_rot_0 *= k_descale
+                    if keys_1 is not None:
+                        keys_1 *= k_descale
+                        keys_rot_1 *= k_descale
 
                 values = load_tokens(
                     V,
@@ -2250,6 +2291,9 @@ def block_sparse_attention_cuda(
                     stride_v_cache_kv_head=stride_k_cache_kv_head,
                     stride_v_cache_hid=stride_k_cache_hid,
                 )
+
+                if v_descale is not None:
+                    value *= v_descale
 
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
                     queries_0,
@@ -2353,6 +2397,8 @@ def block_sparse_attention(
     extend_context_length: int = 131072,
     offload_update_cache: bool = False,
     return_running_statistics: bool = False,
+    k_descale: Tensor = None,
+    v_descale: Tensor = None,
 ):
     BSZ, TDST, HEAD, HID = q.shape
     if k is not None:
@@ -2442,6 +2488,12 @@ def block_sparse_attention(
 
     HID_BLOCK_V = triton.next_power_of_2(min(HID_V, 256))
     NUM_HID_V_BLOCKS = triton.cdiv(HID_V, HID_BLOCK_V)
+    
+    if k_descale is not None:
+        k_descale = k_descale.contiguous()
+        v_descale = v_descale.contiguous()
+        assert k_descale.shape == (BSZ, HEAD // KV_HEAD_REPEAT)
+        assert k_descale.shape == v_descale.dtype
 
     grid = (HEAD * NUM_HID_V_BLOCKS, BDST, BSZ)
     pre_device = torch.get_default_device()
@@ -2484,6 +2536,8 @@ def block_sparse_attention(
         *safe_stride(k, 4),
         v,
         *safe_stride(v, 4),
+        k_descale,
+        v_descale,
         seq_lens,
         *safe_stride(seq_lens, 2),
         indices,
