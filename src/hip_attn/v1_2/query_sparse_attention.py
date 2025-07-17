@@ -45,17 +45,19 @@ def _attn_fwd_inner(
     acc,
     l_i,
     m_i,
-    q,  #
+    q,
     K_block_ptr,
-    V_block_ptr,  #
+    V_block_ptr,
     mask_idx,
     start_m,
-    qk_scale,  #
+    qk_scale,
+    k_descale,
+    v_descale,
     BLOCK_M: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    BLOCK_N: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,
     offs_m: tl.constexpr,
-    offs_n: tl.constexpr,  #
+    offs_n: tl.constexpr,
     N_CTX: tl.constexpr,
     N_KV: tl.constexpr,
     fp8_v: tl.constexpr,
@@ -87,11 +89,15 @@ def _attn_fwd_inner(
         # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
-    for start_n in range(lo, hi, BLOCK_N):
+    for start_n in tl.range(lo, hi, BLOCK_N, num_stages=1):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         if not USING_PAGED_CACHE:
-            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+            k = tl.load(
+                K_block_ptr, 
+                boundary_check=(1,), 
+                padding_option="zero"
+            )
         else:
             idx_tsrc = tl.arange(0, BLOCK_N) + start_n
             mask_tsrc = idx_tsrc < hi
@@ -106,8 +112,11 @@ def _attn_fwd_inner(
                 + 0 * stride_k_cache_page
                 + idx_hid[:, None] * stride_k_cache_hid,
                 mask=mask_tsrc[None, :],
-                other=0,
+                other=0.0,
             )
+        
+        if k_descale is not None:
+            k *= k_descale
 
         # qk = tl.dot(q, k)
 
@@ -153,8 +162,12 @@ def _attn_fwd_inner(
                 + 0 * stride_v_cache_page
                 + idx_hid[None, :] * stride_v_cache_hid,
                 mask=mask_tsrc[:, None],
-                other=0,
+                other=0.0,
             )
+        
+        if v_descale is not None:
+            v *= v_descale
+        
         if fp8_v:
             p = p.to(tl.float8e5)
         else:
@@ -219,12 +232,19 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["N_CTX", "N_KV", "HEAD_DIM"])
+@triton.autotune(list(filter(keep, configs)), key=[
+    # "N_CTX", 
+    # "N_KV", 
+    "HEAD_DIM",
+    "USING_PAGED_CACHE",
+])
 @triton.jit
 def _attn_fwd(
     Q,
     K,
     V,
+    K_DESCALE,
+    V_DESCALE,
     sm_scale,
     M,
     MX,
@@ -235,18 +255,22 @@ def _attn_fwd(
     stride_qh,
     stride_qm,
     stride_qk,  #
+    
     stride_kz,
     stride_kh,
     stride_kn,
     stride_kk,  #
+    
     stride_vz,
     stride_vh,
     stride_vk,
     stride_vn,  #
+    
     stride_oz,
     stride_oh,
     stride_om,
     stride_on,  #
+    
     stride_mz,
     stride_mm,
     USING_PAGED_CACHE: tl.constexpr,
@@ -290,12 +314,12 @@ def _attn_fwd(
     stride_li_tdst,
     Z,
     H,
-    N_CTX,  #
+    N_CTX,
     N_KV,
-    HEAD_DIM: tl.constexpr,  #
+    HEAD_DIM: tl.constexpr,
     N_SPLIT,
-    BLOCK_M: tl.constexpr,  #
-    BLOCK_N: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
     V_FP8: tl.constexpr,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
@@ -356,7 +380,7 @@ def _attn_fwd(
     mask_idx = tl.load(
         MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
         mask=mask_m,
-        other=0,
+        other=0.0,
     )
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float("-inf"))
@@ -365,6 +389,18 @@ def _attn_fwd(
     # load scales
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
+    
+    if K_DESCALE is not None:
+        k_descale = tl.load(
+            K_DESCALE + off_z * H + off_h
+        )
+        v_descale = tl.load(
+            V_DESCALE + off_z * H + off_h
+        )
+    else:
+        k_descale = None
+        v_descale = None
+    
     # load q: it will stay in SRAM throughout
     q = tl.load(
         Q_block_ptr,
@@ -379,18 +415,20 @@ def _attn_fwd(
             m_i,
             q,
             K_block_ptr,
-            V_block_ptr,  #
+            V_block_ptr,
             mask_idx,
             start_m,
-            qk_scale,  #
+            qk_scale,
+            k_descale,
+            v_descale,
             BLOCK_M,
             HEAD_DIM,
-            BLOCK_N,  #
+            BLOCK_N,
             offs_m,
             offs_n,
             N_CTX,
             N_KV,
-            V_FP8,  #
+            V_FP8,
         )
     else:
         lo = 0
@@ -414,6 +452,8 @@ def _attn_fwd(
                     mask_idx,
                     start_m,
                     qk_scale,
+                    k_descale,
+                    v_descale,
                     BLOCK_M,
                     HEAD_DIM,
                     BLOCK_N,
@@ -449,6 +489,8 @@ def _attn_fwd(
                     mask_idx,
                     start_m,
                     qk_scale,
+                    k_descale,
+                    v_descale,
                     BLOCK_M,
                     HEAD_DIM,
                     BLOCK_N,
@@ -483,6 +525,8 @@ def _attn_fwd(
                 mask_idx,
                 start_m,
                 qk_scale,
+                k_descale,
+                v_descale,
                 BLOCK_M,
                 HEAD_DIM,
                 BLOCK_N,
@@ -517,6 +561,8 @@ def _attn_fwd(
                 mask_idx,
                 start_m,
                 qk_scale,
+                k_descale,
+                v_descale,
                 BLOCK_M,
                 HEAD_DIM,
                 BLOCK_N,
@@ -545,35 +591,35 @@ def _attn_fwd(
     if N_SPLIT > 1:
         # checkout acc, l_i, m_i
         tl.store(
-            ACC
-            + off_z * stride_acc_bsz
-            + off_h * stride_acc_head
-            + idx_split * stride_acc_split
-            + offs_m[:, None] * stride_acc_tdst
-            + tl.arange(0, HEAD_DIM)[None, :] * stride_acc_hid,
+            ACC 
+            + off_z.to(tl.int64) * stride_acc_bsz
+            + off_h.to(tl.int64) * stride_acc_head
+            + idx_split.to(tl.int64) * stride_acc_split
+            + offs_m.to(tl.int64)[:, None] * stride_acc_tdst
+            + tl.arange(0, HEAD_DIM).to(tl.int64)[None, :] * stride_acc_hid,
             mask=mask_m[:, None],
             value=acc,
         )
         tl.store(
             MI
-            + off_z * stride_mi_bsz
-            + off_h * stride_mi_head
-            + idx_split * stride_mi_split
-            + offs_m * strdie_mi_tdst,
+            + off_z.to(tl.int64) * stride_mi_bsz
+            + off_h.to(tl.int64) * stride_mi_head
+            + idx_split.to(tl.int64) * stride_mi_split
+            + offs_m.to(tl.int64) * strdie_mi_tdst,
             mask=mask_m,
             value=m_i,
         )
         tl.store(
             LI
-            + off_z * stride_li_bsz
-            + off_h * stride_li_head
-            + idx_split * stride_li_split
-            + offs_m * stride_li_tdst,
+            + off_z.to(tl.int64) * stride_li_bsz
+            + off_h.to(tl.int64) * stride_li_head
+            + idx_split.to(tl.int64) * stride_li_split
+            + offs_m.to(tl.int64) * stride_li_tdst,
             mask=mask_m,
             value=l_i,
         )
+    
     if N_SPLIT <= 1:
-
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
             tl.store(m_ptrs, m_i, mask=mask_m)
@@ -700,6 +746,8 @@ class _attention(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        k_descale: torch.Tensor,
+        v_descale: torch.Tensor,
         mask: torch.Tensor,
         sm_scale: float,
         k_cache: torch.Tensor,
@@ -826,11 +874,13 @@ class _attention(torch.autograd.Function):
                 q,
                 k,
                 v,
+                k_descale,
+                v_descale,
                 sm_scale,
                 M,
                 MX,
                 NC,
-                o,  #
+                o,
                 mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
@@ -849,26 +899,26 @@ class _attention(torch.autograd.Function):
                 *safe_stride(v_cache, 4),
                 block_table,
                 *safe_stride(block_table, 2),
+                return_pooled_scores,
+                score_pooling_block_size_q,
+                score_pooling_block_size_k,
+                scores,
+                *safe_stride(scores, 4),
                 acc,
                 *safe_stride(acc, 5),
                 m_i,
                 *safe_stride(m_i, 4),
                 l_i,
                 *safe_stride(l_i, 4),
-                return_pooled_scores,
-                score_pooling_block_size_q,
-                score_pooling_block_size_k,
-                scores,
-                *safe_stride(scores, 4),
                 q.shape[0],
-                q.shape[1],  #
-                N_CTX=N_CTX,  #
+                q.shape[1],
+                N_CTX=N_CTX,
                 N_KV=(
                     k.shape[2]
                     if not USING_PAGED_CACHE
                     else k_cache.shape[0] * k_cache.shape[1]
                 ),
-                HEAD_DIM=HEAD_DIM_K,  #
+                HEAD_DIM=HEAD_DIM_K,
                 N_SPLIT=N_SPLIT,
                 V_FP8=V_FP8,
                 **extra_kern_args,
@@ -952,6 +1002,8 @@ class _attention(torch.autograd.Function):
                 q,
                 k,
                 v,
+                k_descale,
+                v_descale,
                 sm_scale,
                 M,
                 MX,
@@ -1026,11 +1078,15 @@ def query_sparse_attention(
     score_pooling_block_size_q: int = 64,
     score_pooling_block_size_k: int = 64,
     score_pooling_max_seq_len: int = None,
+    k_descale: torch.Tensor = None,
+    v_descale: torch.Tensor = None,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
         k,
         v,
+        k_descale,
+        v_descale,
         mask,
         sm_scale,
         k_cache,

@@ -37,9 +37,11 @@ def stage_prologue(
     if stage_info.require_reset_score:
         out_scores.fill_(-32000.0)
 
-    indices_left, t_indices = indices_left.sort(dim=-1)
-    indices_right = indices_right.gather(dim=-1, index=t_indices)
-    out_scores = out_scores.gather(dim=-1, index=t_indices)
+    require_sort = BDST > 1
+    if require_sort:
+        indices_left, t_indices = indices_left.sort(dim=-1)
+        indices_right = indices_right.gather(dim=-1, index=t_indices)
+        out_scores = out_scores.gather(dim=-1, index=t_indices)
 
     if BLOCK_SIZE_Q != stage_info.stage_block_size_q:
         assert stage_info.stage_block_size_q > 0

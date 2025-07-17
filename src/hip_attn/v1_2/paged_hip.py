@@ -735,6 +735,985 @@ def sse(a: torch.Tensor, b: torch.Tensor):
 
 
 @capture
+def _forward_delta_attn(
+    query: torch.Tensor,
+    sm_scale: float,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    args: HiPAttentionArgs,
+    cached_metadata: HiPAttentionOutputMetadata,
+    is_decode: bool,
+    delta_attention_args_smooth = False,
+    delta_attention_args_just_return = False,
+    delta_attention_args_window = 0,
+    delta_attention_args_diff = 1,
+    delta_attention_args_dense_decode = False,
+    delta_attention_args_w = 16,
+    delta_attention_args_exp = False,
+    delta_attention_args_exp_w = 2,
+    delta_attention_args_exp_window = 1024,
+    delta_attention_args_exp_sink = 128,
+    delta_attention_args_iter_corr = False,
+    delta_attention_args_adjust_norm_const = False,
+    k_descale: torch.Tensor = None,
+    v_descale: torch.Tensor = None,
+):
+    using_dense_prefill = False
+    
+    # if (
+    #     (is_decode and delta_attention_args_dense_decode)
+    #     or (using_dense_prefill and (not is_decode))
+    #     or ((query.shape[1] < 256) and (not is_decode))
+    # ):
+    #     # for dense decode, BUG this is so slow why?
+    #     if args.need_apply_rope and args.using_extend:
+    #         k_unpack = args.gather_k_from_paged_cache()
+    #         v_unpack = args.gather_v_from_paged_cache()
+
+    #         seq_len = args.position_ids.amax().item() + 1
+
+    #         k_unpack = k_unpack[:, :seq_len]
+    #         v_unpack = v_unpack[:, :seq_len]
+
+    #         cos = args.rope_cos
+    #         sin = args.rope_sin
+    #         assert cos.ndim == 2, cos.shape
+    #         assert sin.shape == cos.shape, sin.shape
+
+    #         cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+    #         sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+
+    #         idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
+    #         idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+    #         k_unpack = (
+    #             (k_unpack * cos[:, idx_tsrc, :, :])
+    #             + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
+    #         ).to(k_unpack.dtype)
+
+    #         query = (
+    #             (query * cos[:, args.position_ids.view(-1), :, :])
+    #             + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
+    #         ).to(query.dtype)
+
+    #         k_unpack = k_unpack[:, :seq_len]
+    #         v_unpack = v_unpack[:, :seq_len]
+
+    #         context = flash_attn_func(
+    #             query,
+    #             k_unpack,
+    #             v_unpack,
+    #             causal=True,
+    #             softmax_scale=sm_scale,
+    #         )
+    #     else:
+    #         assert args.using_paged_cache
+
+    #         k_cache = args.get_k_cache()
+    #         v_cache = args.get_v_cache()
+
+    #         q_reshaped = query\
+    #             .contiguous()\
+    #             .view(-1, query.shape[2], query.shape[3])\
+    #             .to(k_cache.dtype)
+
+    #         # print(k_cache.shape, v_cache.shape)
+
+    #         cu_seqlens_q = (
+    #             torch.arange(
+    #                 0, query.shape[0] + 1, device=query.device, dtype=torch.int32
+    #             )
+    #             * query.shape[1]
+    #         )
+    #         cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
+    #         cu_seqlens_k_new = torch.zeros(
+    #             (args.position_ids.shape[0] + 1,),
+    #             dtype=torch.int32,
+    #             device=q_reshaped.device,
+    #         )
+    #         cu_seqlens_k_new[1:] = cache_seqlens
+
+    #         block_table = args.block_table
+
+    #         context = flash_attn_with_kvcache(
+    #             q=q_reshaped,
+    #             k_cache=k_cache,
+    #             v_cache=v_cache,
+    #             page_table=block_table,
+    #             cache_seqlens=cache_seqlens,
+    #             cu_seqlens_q=cu_seqlens_q,
+    #             cu_seqlens_k_new=cu_seqlens_k_new,
+    #             # max_seqlen_q=cu_seqlens_q.amax().item(),
+    #             max_seqlen_q=args.model_context_length,
+    #             causal=True,
+    #             softmax_scale=sm_scale,
+    #         )
+
+    #     metadata = None
+    # else:
+    
+    # On prefill
+    assert not is_decode
+    assert not torch.cuda.is_current_stream_capturing()
+
+    assert isinstance(delta_attention_args_window, int)
+    if delta_attention_args_window == 0:
+        assert delta_attention_args_window == 0
+
+        # args_new = args.clone()
+        # k_flat = args.gather_k_from_paged_cache()
+        # v_flat = args.gather_v_from_paged_cache()
+        # seq_len = args.position_ids.amax().item() + 1
+        # k_flat = k_flat[:, :seq_len].contiguous()
+        # v_flat = v_flat[:, :seq_len].contiguous()
+        # args_new.k_cache = None
+        # args_new.v_cache = None
+        # args_new.block_table = None
+        # args_new.using_paged_cache = False
+        # cached_metadata.state = None
+
+        # context_sparse, metadata = dual_stage_quadratic_hip_attention(
+        #     q=(query * sm_scale).to(query.dtype),
+        #     k=k_flat,
+        #     v=v_flat,
+        #     args=args_new,
+        #     cached_metadata=cached_metadata,
+        # )
+
+        delta_exp = delta_attention_args_exp
+
+        if delta_exp:
+            delta_exp_w = delta_attention_args_exp_w
+            delta_exp_bk = 16
+            delta_exp_k = 0
+            delta_exp_window = delta_attention_args_exp_window
+            delta_exp_sink = delta_attention_args_exp_sink
+            delta_merge_strategy = "delta"  # replace / delta
+            if delta_exp_k == 0:
+                delta_exp_bk = 64
+
+            bsa_fn = get_block_sparse_backend(args, query)
+
+            BSZ, TDST, HEAD, HID = query.shape
+
+            args_sw = args.clone()
+            if args_sw.rope_range is None:
+                args_sw.rope_range = (0, HID)
+            args_sw.block_size_q = args_sw.block_sparse_block_size_q
+            args_sw.block_size_k = delta_exp_bk
+            args_sw.second_stage_k = delta_exp_k
+            args_sw.sink_token_size = delta_exp_sink
+            args_sw.sliding_window_size = delta_exp_window
+            args_sw.sliding_window_indices = None
+
+            BDST = triton.cdiv(TDST, args_sw.block_size_q)
+            BH = BSZ * HEAD
+
+            if delta_exp_k == 0:
+                indices = torch.zeros(
+                    (BH, BDST, delta_exp_k // delta_exp_bk),
+                    dtype=torch.int64,
+                    device=query.device,
+                )
+                ks = torch.zeros(
+                    (BH, BDST), dtype=torch.int64, device=query.device
+                )
+                ks_count = ks.unsqueeze(-1)
+                ks_start_end = torch.zeros(
+                    (BH, BDST, 2), dtype=torch.int64, device=query.device
+                )
+                ks_start_end[:, :, 1:] = ks[:, :, None]
+            else:
+                indices = torch.rand(
+                    (BH, BDST, delta_exp_k // delta_exp_bk), device=query.device
+                )
+                indices = (
+                    indices
+                    * args_sw.position_ids[
+                        :, :: args_sw.block_size_q
+                    ].repeat_interleave(HEAD, dim=0)[:, :, None]
+                )
+                indices = indices.to(torch.int64) // delta_exp_bk * delta_exp_bk
+
+                indices, _ = indices.sort(dim=-1)
+                indices = indices // args_sw.block_size_k * args_sw.block_size_k
+
+                unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+                indices = torch.where(
+                    unique_mask, indices, torch.iinfo(indices.dtype).max
+                )
+                indices, _ = indices.sort(dim=-1)
+                active_mask = indices < (
+                    args_sw.position_ids[
+                        :, :: args_sw.block_size_q, None
+                    ].repeat_interleave(HEAD, 0)
+                    + args_sw.block_size_q
+                )
+                ks = active_mask.int().sum(-1)
+                ks_count = ks.unsqueeze(-1)
+                ks_start_end = torch.zeros(
+                    (ks.shape[0], ks.shape[1], 2),
+                    dtype=torch.int32,
+                    device=query.device,
+                )
+                ks_start_end[:, :, -1] = ks
+
+            context_sw = bsa_fn(
+                q=(query * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                seq_lens=args_sw.position_ids + 1,
+                indices=indices,
+                ks=ks,
+                ks_count=ks_count,
+                ks_start_end=ks_start_end,
+                access_counter=None,
+                cache_miss_counter=None,
+                EXTEND_BACKEND=args_sw.sa_extend_backend,
+                model_context_length=args_sw.model_context_length,
+                extend_context_length=args_sw.extend_context_length,
+                offload_update_cache=False,
+                args=args_sw,
+            )
+            context_sw = context_sw.to(query.dtype)
+
+            args_sparse = args.clone()
+            query_sparse = query[:, ::delta_exp_w].contiguous()
+            args_sparse.position_ids = args.position_ids[
+                :, ::delta_exp_w
+            ].contiguous()
+            args_sparse.query_for_landmark = query
+            args_sparse.position_ids_for_landmark = args.position_ids
+
+            # args_new = args_sparse.clone()
+            # k_flat = args_sparse.gather_k_from_paged_cache()
+            # v_flat = args_sparse.gather_v_from_paged_cache()
+            # seq_len = args_sparse.position_ids.amax().item() + 1
+            # k_flat = k_flat[:, :seq_len].contiguous()
+            # v_flat = v_flat[:, :seq_len].contiguous()
+            # args_new.k_cache = None
+            # args_new.v_cache = None
+            # args_new.block_table = None
+            # args_new.using_paged_cache = False
+            # cached_metadata.state = None
+
+            # context_sparse, metadata = dual_stage_quadratic_hip_attention(
+            #     q=(query_sparse * sm_scale).to(query.dtype),
+            #     k=k_flat,
+            #     v=v_flat,
+            #     args=args_new,
+            #     cached_metadata=cached_metadata,
+            # )
+
+            context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                q=(query_sparse * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                args=args_sparse,
+                cached_metadata=cached_metadata,
+            )
+            context_sparse = context_sparse.to(query.dtype)
+
+            if delta_merge_strategy == "delta":
+                context_sw_for_sparse = context_sw[:, ::delta_exp_w]
+                delta_sparse = context_sparse - context_sw_for_sparse
+
+                delta_sparse = delta_sparse.repeat_interleave(
+                    delta_exp_w, dim=1
+                )
+
+                if delta_attention_args_smooth:
+                    # (exp) linear interpolate diff
+                    delta_sparse_shift = torch.roll(
+                        delta_sparse, -delta_exp_w, 1
+                    )
+                    delta_sparse_shift[:, -delta_exp_w:] = delta_sparse[:, -1:]
+
+                    idx = torch.arange(
+                        0, delta_sparse.shape[1], device=delta_sparse.device
+                    )
+                    idx = (idx % delta_exp_w).float() / delta_exp_w
+                    delta_sparse = (
+                        delta_sparse
+                        + (delta_sparse_shift - delta_sparse)
+                        * idx[None, :, None, None]
+                    )
+
+                context_sparse = (
+                    context_sw + delta_sparse[:, : context_sw.shape[1]]
+                )
+            elif delta_merge_strategy == "replace":
+                context_sw[:, ::delta_exp_w] = context_sparse
+                context_sparse = context_sw
+            else:
+                raise Exception()
+        else:
+            # args_new = args.clone()
+            # k_flat = args.gather_k_from_paged_cache()
+            # v_flat = args.gather_v_from_paged_cache()
+            # seq_len = args.position_ids.amax().item() + 1
+            # k_flat = k_flat[:, :seq_len].contiguous()
+            # v_flat = v_flat[:, :seq_len].contiguous()
+            # args_new.k_cache = None
+            # args_new.v_cache = None
+            # args_new.block_table = None
+            # args_new.using_paged_cache = False
+            # cached_metadata.state = None
+
+            # context_sparse, metadata = dual_stage_quadratic_hip_attention(
+            #     q=(query * sm_scale).to(query.dtype),
+            #     k=k_flat,
+            #     v=v_flat,
+            #     args=args_new,
+            #     cached_metadata=cached_metadata,
+            # )
+
+            args.bsa_return_running_statistics = (
+                delta_attention_args_adjust_norm_const
+            )
+
+            context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                q=(query * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                args=args,
+                cached_metadata=cached_metadata,
+            )
+
+            if delta_attention_args_adjust_norm_const:
+                context_sparse, (sparse_mx, sparse_nc) = context_sparse
+
+            context_sparse = context_sparse.to(query.dtype)
+            context_sparse = context_sparse[
+                :, -query.shape[1] :, :, :
+            ].contiguous()
+
+            if delta_attention_args_adjust_norm_const:
+                sparse_mx = sparse_mx[:, -query.shape[1] :].contiguous()
+                sparse_nc = sparse_nc[:, -query.shape[1] :].contiguous()
+    else:
+        assert delta_attention_args_window > 0
+        bsa_fn = get_block_sparse_backend(args, query)
+
+        # dist.barrier()
+        # if get_tensor_model_parallel_rank() == 0:
+        #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+        BSZ, TDST, HEAD, HID = query.shape
+
+        args_sw = args.clone()
+        if args_sw.rope_range is None:
+            args_sw.rope_range = (0, HID)
+        args_sw.block_size_q = args_sw.block_sparse_block_size_q
+        args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
+        args_sw.second_stage_k = 0
+        # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
+        args_sw.sliding_window_size = delta_attention_args_window
+        args_sw.sliding_window_indices = None
+
+        BDST = triton.cdiv(TDST, args_sw.block_size_q)
+        BH = BSZ * HEAD
+
+        indices = torch.zeros(
+            (BH, BDST, 0), dtype=torch.int64, device=query.device
+        )
+        ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end = torch.zeros(
+            (BH, BDST, 2), dtype=torch.int64, device=query.device
+        )
+
+        context_sparse = bsa_fn(
+            q=(query * sm_scale).to(query.dtype),
+            k=k,
+            v=v,
+            seq_lens=args_sw.position_ids + 1,
+            indices=indices,
+            ks=ks,
+            ks_count=ks_count,
+            ks_start_end=ks_start_end,
+            access_counter=None,
+            cache_miss_counter=None,
+            EXTEND_BACKEND=args_sw.sa_extend_backend,
+            model_context_length=args_sw.model_context_length,
+            extend_context_length=args_sw.extend_context_length,
+            offload_update_cache=False,
+            return_running_statistics=delta_attention_args_adjust_norm_const,
+            args=args_sw,
+        )
+        if delta_attention_args_adjust_norm_const:
+            context_sparse, (sparse_mx, sparse_nc) = context_sparse
+
+        context_sparse = context_sparse.to(query.dtype)
+        context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+        if delta_attention_args_adjust_norm_const:
+            sparse_mx = sparse_mx[:, -query.shape[1] :].contiguous()
+            sparse_nc = sparse_nc[:, -query.shape[1] :].contiguous()
+        metadata = None
+
+    # until here, we have only calculated sparse attention
+    if delta_attention_args_just_return:
+        context = context_sparse
+    elif delta_attention_args_iter_corr:
+        w_size = delta_attention_args_w * 2
+
+        num_queries = query.shape[1]
+        num_dense_first = max(128, w_size)
+        num_dense_last = num_queries % w_size + max(128, w_size)
+        num_sparse = num_queries - num_dense_first - num_dense_last
+
+        # iteratively correction errors
+
+        def perform_correction(
+            context_sparse: torch.Tensor,
+            context_sparse_raw: torch.Tensor,
+            block_start_indices: torch.Tensor,
+            block_size: int,
+        ):
+            assert block_start_indices.ndim == 1
+            assert context_sparse.ndim == 4
+            assert context_sparse_raw.shape == context_sparse.shape
+            assert not (args.need_apply_rope and args.using_extend)
+
+            assert args.using_paged_cache
+
+            if False:
+                context_sparse_raw = context_sparse
+
+            query_for_recomp = query[:, block_start_indices, :, :]
+            k_cache = args.get_k_cache()
+            v_cache = args.get_v_cache()
+
+            assert args.position_ids.shape[0] == 1
+            if get_local_rank() == 0:
+                # import matplotlib.pyplot as plt
+                # plt.clf()
+                # plt.hist(block_start_indices.cpu().numpy(), bins=50)
+                # plt.xlim(0, args.position_ids.amax().item() + 1)
+                # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
+
+                print(
+                    "recomp_attn shapes",
+                    query_for_recomp.shape,
+                    block_start_indices.shape,
+                )
+            context_dense = (
+                query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    None,
+                    None,
+                    args.position_ids[:, block_start_indices],
+                    sm_scale,
+                    k_cache,
+                    v_cache,
+                    args.block_table,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+                .permute(0, 2, 1, 3)
+                .contiguous()
+            )  # type: torch.Tensor
+            assert context_dense.shape[-2:] == query.shape[-2:]
+
+            if block_size > 1:
+                assert not delta_attention_args_smooth
+                block_diff = diff = (
+                    context_dense - context_sparse_raw[:, block_start_indices]
+                )
+                diff = diff.repeat_interleave(block_size, 1)
+
+                token_indices = (
+                    block_start_indices[:, None]
+                    + torch.arange(0, block_size, device=context_sparse.device)[
+                        None, :
+                    ]
+                )
+                token_indices = token_indices.view(-1)
+
+                context_sparse_new = diff + context_sparse_raw[:, token_indices]
+                context_sparse.index_copy_(
+                    dim=1, index=token_indices, source=context_sparse_new
+                )
+            else:
+                context_sparse.index_copy_(
+                    dim=1, index=block_start_indices, source=context_dense
+                )
+                block_diff = None
+
+            return context_sparse, block_diff
+
+        block_start_indices = torch.arange(
+            num_dense_first,
+            num_dense_first + num_sparse,
+            step=w_size,
+            device=query.device,
+        )
+        assert (num_dense_first % w_size) == 0
+        assert ((num_dense_first + num_sparse) % w_size) == 0
+
+        split = 2
+
+        def block_diff_to_score(block_diff: torch.Tensor):
+            return (
+                block_diff.squeeze(0)
+                .norm(dim=-1, keepdim=False)
+                .sum(dim=-1, keepdim=False)
+            )
+            # return block_diff\
+            #     .squeeze(0)\
+            #     .abs().sum(dim=-1, keepdim=False)\
+            #     .sum(dim=-1, keepdim=False)
+
+        context_sparse_raw = context_sparse.clone()
+
+        context_sparse, block_diff = perform_correction(
+            context_sparse,
+            context_sparse_raw,
+            block_start_indices,
+            w_size,
+        )
+        # [T,]
+        block_diff_scores_parent, block_diff_indices = block_diff_to_score(
+            block_diff
+        ).topk(k=block_diff.shape[1] // split, dim=0, sorted=False)
+        block_start_indices_parent = block_start_indices[block_diff_indices]
+        block_start_indices_parent, tind = block_start_indices_parent.sort()
+        block_diff_scores_parent = block_diff_scores_parent[tind]
+
+        depth = 0
+        max_iter = 4
+        while (w_size // split) > 0 and (depth < max_iter):
+            depth += 1
+            block_start_indices_child = (
+                block_start_indices_parent + w_size // split
+            )
+            w_size = w_size // split
+
+            # if get_local_rank() == 0:
+            #     print(block_diff_scores_parent)
+
+            context_sparse, block_diff = perform_correction(
+                context_sparse,
+                context_sparse_raw,
+                block_start_indices_child,
+                w_size,
+            )
+            if (w_size // split) > 0:
+                block_diff_scores_child = block_diff_to_score(block_diff)
+                block_diff_scores_parent, next_blocks_location = torch.cat(
+                    [block_diff_scores_parent, block_diff_scores_child]
+                ).topk(k=block_diff_scores_parent.shape[0] // 2, sorted=False)
+                block_start_indices_parent = torch.cat(
+                    [block_start_indices_parent, block_start_indices_child]
+                )[next_blocks_location]
+                block_start_indices_parent, tind = (
+                    block_start_indices_parent.sort()
+                )
+                block_diff_scores_parent = block_diff_scores_parent[tind]
+
+        # fill dense for first and last part
+        dense_indices = torch.cat(
+            [
+                torch.arange(0, num_dense_first, device=query.device),
+                torch.arange(
+                    num_dense_first + num_sparse,
+                    num_queries,
+                    device=query.device,
+                ),
+            ]
+        )
+        context_sparse, _ = perform_correction(
+            context_sparse,
+            context_sparse_raw,
+            dense_indices,
+            1,
+        )
+
+        context = context_sparse
+    else:
+        num_queries = query.shape[1]
+        num_last_dense = num_queries % delta_attention_args_w + max(
+            128, delta_attention_args_w
+        )
+        num_last_dense = min(num_queries, num_last_dense)
+        num_sparse = num_queries - num_last_dense
+
+        context_sparse = context_sparse[:, :num_sparse]
+        if delta_attention_args_adjust_norm_const:
+            sparse_mx = sparse_mx[:, :num_sparse]
+            sparse_nc = sparse_nc[:, :num_sparse]
+
+        if num_last_dense > 0:
+            idx = torch.arange(
+                0,
+                # delta_attention_args_w - 1,
+                num_sparse,
+                step=delta_attention_args_w,
+                device=query.device,
+            )
+            rolling_idx = False
+            if rolling_idx:
+                idx = (
+                    idx + (args.layer_id % delta_attention_args_w)
+                ).clamp_max(num_sparse - 1)
+            # take mean
+            # context_sparse_for_diff = context_sparse[:, :num_sparse]
+            # context_sparse_for_diff = context_sparse_for_diff.view(
+            #     context_sparse_for_diff.shape[0],
+            #     num_sparse // delta_attention_args_w,
+            #     delta_attention_args_w,
+            #     context_sparse_for_diff.shape[2],
+            #     context_sparse_for_diff.shape[3],
+            # )
+            # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
+
+            # take first
+            if delta_attention_args_adjust_norm_const:
+                context_sparse_for_diff = context_sparse[:, idx]
+                sparse_mx_for_diff = sparse_mx[:, idx]
+                sparse_nc_for_diff = sparse_nc[:, idx]
+
+            idx = torch.cat(
+                (
+                    idx,
+                    torch.arange(num_sparse, num_queries, device=query.device),
+                )
+            )
+            query_for_dense = query[:, idx]
+
+        if args.need_apply_rope and args.using_extend:
+            # TODO: using paged attention
+            repeated_k = args.gather_k_from_paged_cache(
+                disable_gqa=True, gqa_q=query
+            )
+            repeated_v = args.gather_v_from_paged_cache(
+                disable_gqa=True, gqa_q=query
+            )  # B, T, H, D
+            # assert repeated_k.shape[2] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64), repeated_k.shape
+            assert repeated_k.shape[2] < 128
+
+            seq_len = args.position_ids.amax().item() + 1
+            repeated_k = repeated_k[:, :seq_len]
+            repeated_v = repeated_v[:, :seq_len]
+
+            query_for_recomp = query_for_dense
+
+            cos = args.rope_cos
+            sin = args.rope_sin
+            assert cos.ndim == 2, cos.shape
+            assert sin.shape == cos.shape, sin.shape
+
+            cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
+            sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
+
+            idx_tsrc = torch.arange(0, repeated_k.shape[1], device=cos.device)
+            idx_tsrc.clamp_min_(seq_len - args.model_context_length)
+
+            repeated_k = (
+                (repeated_k * cos[:, idx_tsrc, :, :])
+                + (rotate_half(repeated_k) * sin[:, idx_tsrc, :, :])
+            ).to(repeated_k.dtype)
+
+            query_for_recomp = (
+                (
+                    query_for_recomp
+                    * cos[:, args.position_ids.view(-1)[idx], :, :]
+                )
+                + (
+                    rotate_half(query_for_recomp)
+                    * sin[:, args.position_ids.view(-1)[idx], :, :]
+                )
+            ).to(query_for_recomp.dtype)
+
+            assert args.position_ids.shape[0] == 1
+            context_dense = (
+                query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    repeated_k.permute(0, 2, 1, 3).contiguous(),
+                    repeated_v.permute(0, 2, 1, 3).contiguous(),
+                    # idx.unsqueeze(0),
+                    args.position_ids[:, idx],
+                    sm_scale,
+                    None,
+                    None,
+                    None,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+                .permute(0, 2, 1, 3)
+                .contiguous()
+            )
+        else:
+            if args.using_paged_cache:
+                assert args.using_paged_cache
+
+                query_for_recomp = query_for_dense
+                k_cache = args.get_k_cache()
+                v_cache = args.get_v_cache()
+
+                assert args.position_ids.shape[0] == 1
+                context_dense = query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    None,
+                    None,
+                    args.position_ids[:, idx],
+                    sm_scale,
+                    k_cache,
+                    v_cache,
+                    args.block_table,
+                    return_running_statistics=delta_attention_args_adjust_norm_const,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+            else:
+                assert k is not None
+                assert v is not None
+                context_dense = query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    k.permute(0, 2, 1, 3).contiguous(),
+                    v.permute(0, 2, 1, 3).contiguous(),
+                    args.position_ids[:, idx],
+                    sm_scale,
+                    None,
+                    None,
+                    None,
+                    return_running_statistics=delta_attention_args_adjust_norm_const,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+            
+            if delta_attention_args_adjust_norm_const:
+                context_dense, (dense_mx, dense_nc) = context_dense
+            else:
+                dense_mx = dense_nc = None
+
+            if dense_mx is not None:
+                dense_mx = dense_mx.permute(0, 2, 1)
+                dense_nc = dense_nc.permute(0, 2, 1)
+            context_dense = context_dense.permute(0, 2, 1, 3).contiguous()
+
+        if delta_attention_args_diff == 0:
+            context = torch.zeros_like(query)
+            context[:, :num_sparse] = context_sparse
+            context[:, idx] = context_dense
+        elif delta_attention_args_adjust_norm_const:
+            idx_dense, idx_last = (idx[:-num_last_dense], idx[-num_last_dense:])
+            context_dense, last_context_dense = (
+                context_dense[:, :-num_last_dense],
+                context_dense[:, -num_last_dense:],
+            )
+
+            dense_mx = dense_mx[:, :-num_last_dense]
+            dense_nc = dense_nc[:, :-num_last_dense]
+
+            # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
+            # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
+            # scale = context_dense_norm / context_sparse_for_diff_norm
+
+            using_jeff = False
+            if using_jeff or (not delta_attention_args_adjust_norm_const):
+                # redo the normalization constant for the sparse outputs so we calculate the exact delta region
+                # ------------------------------
+                if delta_attention_args_adjust_norm_const:
+                    # denorm, make alpha, scale, renorm so that the difference in the following block is the exact difference
+                    # with the correct normalization constant.
+                    context_sparse_for_diff = (
+                        context_sparse_for_diff
+                        * sparse_nc_for_diff[:, :, :, None]
+                    )
+                    mx = torch.stack(
+                        (dense_mx, sparse_mx_for_diff), dim=0
+                    ).amax(dim=0)
+                    alpha = torch.exp2(sparse_mx_for_diff - mx)
+                    context_sparse_for_diff = (
+                        context_sparse_for_diff * alpha[:, :, :, None]
+                    )
+                    sparse_nc_for_diff = sparse_nc_for_diff * alpha
+                    context_sparse_for_diff = (
+                        context_sparse_for_diff
+                        / sparse_nc_for_diff[:, :, :, None]
+                    )
+                # ------------------------------
+
+                # take difference
+                context_diff = (
+                    context_dense - context_sparse_for_diff
+                )  # * scale
+
+                context_diff = context_diff.repeat_interleave(
+                    delta_attention_args_w, dim=1
+                )
+
+                if delta_attention_args_smooth:
+                    # (exp) linear interpolate diff
+                    context_diff_shift = torch.roll(
+                        context_diff, -delta_attention_args_w, 1
+                    )
+                    context_diff_shift[:, -delta_attention_args_w:] = (
+                        context_diff[:, -1:]
+                    )
+
+                    offset = torch.arange(
+                        0, context_diff.shape[1], device=context_diff.device
+                    )
+                    offset = (
+                        offset % delta_attention_args_w
+                    ).float() / delta_attention_args_w
+                    context_diff = (
+                        context_diff
+                        + (context_diff_shift - context_diff)
+                        * offset[None, :, None, None]
+                    )
+
+                # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
+                # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
+
+                # ---------------------------------------------------
+                # rescale context sparse to include the normalization constant from the delta region H = (T + H) - T
+                if delta_attention_args_adjust_norm_const:
+                    # get the 'head' normalization constant which is the normalization constant of the non-sparse indices.
+                    h_nc = (
+                        dense_nc - sparse_nc_for_diff
+                    )  # sparse_nc already applied alpha
+                    h_nc = h_nc.repeat_interleave(delta_attention_args_w, dim=1)
+
+                    mx_repeat = mx.repeat_interleave(
+                        delta_attention_args_w, dim=1
+                    )
+
+                    context_sparse = context_sparse * sparse_nc[:, :, :, None]
+                    # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+
+                    alpha_for_sparse = torch.exp2(sparse_mx - mx_repeat)
+                    context_sparse = (
+                        context_sparse * alpha_for_sparse[:, :, :, None]
+                    )
+                    sparse_nc = sparse_nc * alpha_for_sparse
+
+                    # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
+                    # alpha_for_dense = torch.exp2(dense_mx_repeat - mx)
+                    # h_nc = h_nc * alpha_for_dense
+
+                    nc = h_nc + sparse_nc
+                    context_sparse = context_sparse / nc[:, :, :, None]
+                # ---------------------------------------------------
+
+                # context = context_sparse * scale + context_diff
+                context = context_sparse + context_diff
+            else:
+                scale = 1.0
+                numerator = context_dense * dense_nc[:, :, :, None]
+                denominator = dense_nc[:, :, :, None]
+
+                # if get_local_rank() == 0:
+                #     print('-')
+                #     print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
+                #     print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
+                #     print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
+                #     print('avg sparse mx', sparse_mx_for_diff.mean())
+
+                t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
+
+                alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[
+                    :, :, :, None
+                ]
+
+                alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
+                # alpha_dense = 1
+
+                # this is the delta with denormalized numerator,
+                # denominator is equal to H
+                delta = numerator * alpha_dense - alpha_sparse * (
+                    context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None]
+                )
+                h_nc = (
+                    denominator * alpha_dense
+                    - alpha_sparse * sparse_nc_for_diff[:, :, :, None]
+                )
+
+                # if get_local_rank() == 0:
+                #     print(denominator[0, :, 0])
+
+                # context_diff = context_dense - context_sparse_for_diff
+                # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
+                # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
+                # scale *= context_diff_scale
+                # delta *= scale
+                # h_nc *= scale
+
+                def _repeat_interleave(t: torch.Tensor):
+                    t = t.repeat_interleave(delta_attention_args_w, dim=1)
+
+                    if delta_attention_args_smooth:
+                        # (exp) linear interpolate diff
+                        t_shift = torch.roll(t, -delta_attention_args_w, 1)
+                        t_shift[:, -delta_attention_args_w:] = t[:, -1:]
+
+                        offset = torch.arange(0, t.shape[1], device=t.device)
+                        offset = (
+                            offset % delta_attention_args_w
+                        ).float() / delta_attention_args_w
+                        if t.ndim == 4:
+                            t = t + (t_shift - t) * offset[None, :, None, None]
+                        else:
+                            t = t + (t_shift - t) * offset[None, :, None]
+                    return t
+
+                delta = _repeat_interleave(delta)
+                h_nc = _repeat_interleave(h_nc)
+                dense_mx = _repeat_interleave(
+                    torch.maximum(sparse_mx_for_diff, dense_mx)
+                )
+                # sparse_mx = _repeat_interleave(sparse_mx_for_diff)
+                # sparse_nc = _repeat_interleave(sparse_nc_for_diff)
+
+                t_mx = torch.maximum(dense_mx, sparse_mx)
+                alpha_sparse = torch.exp2(sparse_mx - t_mx)[:, :, :, None]
+
+                alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
+
+                # alpha_dense_mask = torch.zeros(dense_mx.size(1), device=dense_mx.device, dtype=torch.bool)
+                # alpha_dense_mask = alpha_dense_mask.view(-1, delta_attention_args_w)
+                # alpha_dense_mask[:, 0] = 1
+                # alpha_dense_mask = alpha_dense_mask.view(-1)[None, :, None, None]
+                # alpha_dense = alpha_dense_mask * 1 + ~alpha_dense_mask * alpha_dense_mask
+
+                numerator = alpha_dense * delta + alpha_sparse * (
+                    context_sparse * sparse_nc[:, :, :, None]
+                )
+                denominator = (
+                    alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None]
+                )
+
+                context = numerator / denominator
+
+            context = context.to(query.dtype)
+            context.index_copy_(dim=1, index=idx_dense, source=context_dense)
+            context = torch.cat([context, last_context_dense], dim=1)
+
+            # if get_local_rank() == 0:
+            #     print(
+            #         'hit', layer_id,
+            #         context_diff.shape,
+            #         context_sparse.shape,
+            #         context_diff.abs().mean().item(),
+            #         context_sparse.abs().mean().item()
+            #     )
+        else:
+            from .delta.apply_delta import apply_delta
+
+            context = apply_delta(
+                context_dense,
+                context_sparse,
+                idx,
+                num_last_dense,
+                delta_attention_args_w,
+                delta_attention_args_smooth,
+            )
+
+    return context, metadata
+
+@capture
 def _forward_fa3(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -909,6 +1888,7 @@ def _forward_partial_fa3(
     max_context_len: int,
     k_descale: torch.Tensor,
     v_descale: torch.Tensor,
+    inner_function_do_scale: bool,
     inner_function,
 ):
     query = q
@@ -938,7 +1918,7 @@ def _forward_partial_fa3(
                 v = args.gather_v_from_paged_cache(seq_len=min(max_context_len, args.model_context_length))
 
             query_fa3 = query[:, :len_query_for_fa3].contiguous()
-            len_kv = k.shape[1] # - len_query_for_hip # BUG: this should be bug, because this will lose keys for len_for_mix
+            len_kv = k.shape[1] - (len_query_for_hip - (query.shape[1] - len_query_for_fa3)) # BUG: this should be bug, because this will lose keys for len_for_mix
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
             
@@ -953,7 +1933,7 @@ def _forward_partial_fa3(
                 k=k_fa3,
                 v=v_fa3,
                 sm_scale=sm_scale,
-                position_ids=args.position_ids,
+                position_ids=args.position_ids[:, :len_query_for_fa3],
                 using_extend=args.using_extend,
                 need_apply_rope=args.need_apply_rope,
                 rope_cos=args.rope_cos,
@@ -985,12 +1965,15 @@ def _forward_partial_fa3(
                 args_sparse.rope_sin = args_sparse.rope_sin[::yarn_scale]
             
             context_sparse, metadata = inner_function(
-                q=(query[:, -len_query_for_hip:] * sm_scale).to(query.dtype),
+                q=(query[:, -len_query_for_hip:] * (sm_scale if inner_function_do_scale else 1)).to(query.dtype),
                 k=k,
                 v=v,
                 args=args_sparse,
                 cached_metadata=cached_metadata,
             )
+            if context_sparse.ndim == 3:
+                context_sparse = context_sparse.unsqueeze(0)
+                assert context_fa3.shape[0] == 1
             
             # w = 512
             # wt = 16
@@ -1053,7 +2036,7 @@ def _forward_partial_fa3(
     else:
         # no fa3
         context, metadata = inner_function(
-            q=(query * sm_scale).to(query.dtype),
+            q=(query * (sm_scale if inner_function_do_scale else 1)).to(query.dtype),
             k=k,
             v=v,
             args=args,
@@ -1426,6 +2409,8 @@ def _forward_paged_hip(
 
         # if layer_id in [0,1,2,3,4,5,8,11,14,17,20,23,26,29,30,33,36,39,41,42,43,44,45,46,47]:
         #     delta_attention_args_adjust_norm_const = False
+        
+        assert not delta_attention_args_dense_decode, "todo, did not handled in _forward_delta_attn"
 
         if get_local_rank() == 0:
             info_msg = (
@@ -1452,7 +2437,7 @@ def _forward_paged_hip(
             cached_metadata: HiPAttentionOutputMetadata,
         ):
             return _forward_sliding_window(
-                q=(q * sm_scale).to(query.dtype),
+                q=q,
                 k=k,
                 v=v,
                 args=args,
@@ -1474,942 +2459,60 @@ def _forward_paged_hip(
             max_context_len=max_batch_context_len,
             k_descale=k_descale,
             v_descale=v_descale,
+            inner_function_do_scale=True,
             inner_function=__forward_sliding_window_wrapper,
         )
     elif using_delta_attention and (
-        (not is_decode) or (is_decode and delta_attention_args_dense_decode)
+        (not is_decode) # or (is_decode and delta_attention_args_dense_decode)
     ):
-        if (
-            (is_decode and delta_attention_args_dense_decode)
-            or (using_dense_prefill and (not is_decode))
-            or ((query.shape[1] < 256) and (not is_decode))
+        def __forward_delta_attn_wrapper(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            args: HiPAttentionArgs,
+            cached_metadata: HiPAttentionOutputMetadata,
         ):
-            # for dense decode, BUG this is so slow why?
-            if args.need_apply_rope and args.using_extend:
-                k_unpack = args.gather_k_from_paged_cache()
-                v_unpack = args.gather_v_from_paged_cache()
-
-                seq_len = args.position_ids.amax().item() + 1
-
-                k_unpack = k_unpack[:, :seq_len]
-                v_unpack = v_unpack[:, :seq_len]
-
-                cos = args.rope_cos
-                sin = args.rope_sin
-                assert cos.ndim == 2, cos.shape
-                assert sin.shape == cos.shape, sin.shape
-
-                cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-                sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-
-                idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
-                idx_tsrc.clamp_min_(seq_len - args.model_context_length)
-
-                k_unpack = (
-                    (k_unpack * cos[:, idx_tsrc, :, :])
-                    + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
-                ).to(k_unpack.dtype)
-
-                query = (
-                    (query * cos[:, args.position_ids.view(-1), :, :])
-                    + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
-                ).to(query.dtype)
-
-                k_unpack = k_unpack[:, :seq_len]
-                v_unpack = v_unpack[:, :seq_len]
-
-                context = flash_attn_func(
-                    query,
-                    k_unpack,
-                    v_unpack,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                )
-            else:
-                assert args.using_paged_cache
-
-                k_cache = args.get_k_cache()
-                v_cache = args.get_v_cache()
-
-                q_reshaped = query.contiguous().view(-1, query.shape[2], query.shape[3])
-
-                # print(k_cache.shape, v_cache.shape)
-
-                cu_seqlens_q = (
-                    torch.arange(
-                        0, query.shape[0] + 1, device=query.device, dtype=torch.int32
-                    )
-                    * query.shape[1]
-                )
-                cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
-                cu_seqlens_k_new = torch.zeros(
-                    (args.position_ids.shape[0] + 1,),
-                    dtype=torch.int32,
-                    device=q_reshaped.device,
-                )
-                cu_seqlens_k_new[1:] = cache_seqlens
-
-                block_table = args.block_table
-
-                context = flash_attn_with_kvcache(
-                    q=q_reshaped,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    page_table=block_table,
-                    cache_seqlens=cache_seqlens,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k_new=cu_seqlens_k_new,
-                    # max_seqlen_q=cu_seqlens_q.amax().item(),
-                    max_seqlen_q=args.model_context_length,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                )
-
-            metadata = None
-        else:
-            # On prefill
-            assert not is_decode
-            assert not torch.cuda.is_current_stream_capturing()
-
-            assert isinstance(delta_attention_args_window, int)
-            if delta_attention_args_window == 0:
-                assert delta_attention_args_window == 0
-
-                # args_new = args.clone()
-                # k_flat = args.gather_k_from_paged_cache()
-                # v_flat = args.gather_v_from_paged_cache()
-                # seq_len = args.position_ids.amax().item() + 1
-                # k_flat = k_flat[:, :seq_len].contiguous()
-                # v_flat = v_flat[:, :seq_len].contiguous()
-                # args_new.k_cache = None
-                # args_new.v_cache = None
-                # args_new.block_table = None
-                # args_new.using_paged_cache = False
-                # cached_metadata.state = None
-
-                # context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                #     q=(query * sm_scale).to(query.dtype),
-                #     k=k_flat,
-                #     v=v_flat,
-                #     args=args_new,
-                #     cached_metadata=cached_metadata,
-                # )
-
-                delta_exp = delta_attention_args_exp
-
-                if delta_exp:
-                    delta_exp_w = delta_attention_args_exp_w
-                    delta_exp_bk = 16
-                    delta_exp_k = 0
-                    delta_exp_window = delta_attention_args_exp_window
-                    delta_exp_sink = delta_attention_args_exp_sink
-                    delta_merge_strategy = "delta"  # replace / delta
-                    if delta_exp_k == 0:
-                        delta_exp_bk = 64
-
-                    bsa_fn = get_block_sparse_backend(args, query)
-
-                    BSZ, TDST, HEAD, HID = query.shape
-
-                    args_sw = args.clone()
-                    if args_sw.rope_range is None:
-                        args_sw.rope_range = (0, HID)
-                    args_sw.block_size_q = args_sw.block_sparse_block_size_q
-                    args_sw.block_size_k = delta_exp_bk
-                    args_sw.second_stage_k = delta_exp_k
-                    args_sw.sink_token_size = delta_exp_sink
-                    args_sw.sliding_window_size = delta_exp_window
-                    args_sw.sliding_window_indices = None
-
-                    BDST = triton.cdiv(TDST, args_sw.block_size_q)
-                    BH = BSZ * HEAD
-
-                    if delta_exp_k == 0:
-                        indices = torch.zeros(
-                            (BH, BDST, delta_exp_k // delta_exp_bk),
-                            dtype=torch.int64,
-                            device=query.device,
-                        )
-                        ks = torch.zeros(
-                            (BH, BDST), dtype=torch.int64, device=query.device
-                        )
-                        ks_count = ks.unsqueeze(-1)
-                        ks_start_end = torch.zeros(
-                            (BH, BDST, 2), dtype=torch.int64, device=query.device
-                        )
-                        ks_start_end[:, :, 1:] = ks[:, :, None]
-                    else:
-                        indices = torch.rand(
-                            (BH, BDST, delta_exp_k // delta_exp_bk), device=query.device
-                        )
-                        indices = (
-                            indices
-                            * args_sw.position_ids[
-                                :, :: args_sw.block_size_q
-                            ].repeat_interleave(HEAD, dim=0)[:, :, None]
-                        )
-                        indices = indices.to(torch.int64) // delta_exp_bk * delta_exp_bk
-
-                        indices, _ = indices.sort(dim=-1)
-                        indices = indices // args_sw.block_size_k * args_sw.block_size_k
-
-                        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-                        indices = torch.where(
-                            unique_mask, indices, torch.iinfo(indices.dtype).max
-                        )
-                        indices, _ = indices.sort(dim=-1)
-                        active_mask = indices < (
-                            args_sw.position_ids[
-                                :, :: args_sw.block_size_q, None
-                            ].repeat_interleave(HEAD, 0)
-                            + args_sw.block_size_q
-                        )
-                        ks = active_mask.int().sum(-1)
-                        ks_count = ks.unsqueeze(-1)
-                        ks_start_end = torch.zeros(
-                            (ks.shape[0], ks.shape[1], 2),
-                            dtype=torch.int32,
-                            device=query.device,
-                        )
-                        ks_start_end[:, :, -1] = ks
-
-                    context_sw = bsa_fn(
-                        q=(query * sm_scale).to(query.dtype),
-                        k=k,
-                        v=v,
-                        seq_lens=args_sw.position_ids + 1,
-                        indices=indices,
-                        ks=ks,
-                        ks_count=ks_count,
-                        ks_start_end=ks_start_end,
-                        access_counter=None,
-                        cache_miss_counter=None,
-                        EXTEND_BACKEND=args_sw.sa_extend_backend,
-                        model_context_length=args_sw.model_context_length,
-                        extend_context_length=args_sw.extend_context_length,
-                        offload_update_cache=False,
-                        args=args_sw,
-                    )
-                    context_sw = context_sw.to(query.dtype)
-
-                    args_sparse = args.clone()
-                    query_sparse = query[:, ::delta_exp_w].contiguous()
-                    args_sparse.position_ids = args.position_ids[
-                        :, ::delta_exp_w
-                    ].contiguous()
-                    args_sparse.query_for_landmark = query
-                    args_sparse.position_ids_for_landmark = args.position_ids
-
-                    # args_new = args_sparse.clone()
-                    # k_flat = args_sparse.gather_k_from_paged_cache()
-                    # v_flat = args_sparse.gather_v_from_paged_cache()
-                    # seq_len = args_sparse.position_ids.amax().item() + 1
-                    # k_flat = k_flat[:, :seq_len].contiguous()
-                    # v_flat = v_flat[:, :seq_len].contiguous()
-                    # args_new.k_cache = None
-                    # args_new.v_cache = None
-                    # args_new.block_table = None
-                    # args_new.using_paged_cache = False
-                    # cached_metadata.state = None
-
-                    # context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                    #     q=(query_sparse * sm_scale).to(query.dtype),
-                    #     k=k_flat,
-                    #     v=v_flat,
-                    #     args=args_new,
-                    #     cached_metadata=cached_metadata,
-                    # )
-
-                    context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                        q=(query_sparse * sm_scale).to(query.dtype),
-                        k=k,
-                        v=v,
-                        args=args_sparse,
-                        cached_metadata=cached_metadata,
-                    )
-                    context_sparse = context_sparse.to(query.dtype)
-
-                    if delta_merge_strategy == "delta":
-                        context_sw_for_sparse = context_sw[:, ::delta_exp_w]
-                        delta_sparse = context_sparse - context_sw_for_sparse
-
-                        delta_sparse = delta_sparse.repeat_interleave(
-                            delta_exp_w, dim=1
-                        )
-
-                        if delta_attention_args_smooth:
-                            # (exp) linear interpolate diff
-                            delta_sparse_shift = torch.roll(
-                                delta_sparse, -delta_exp_w, 1
-                            )
-                            delta_sparse_shift[:, -delta_exp_w:] = delta_sparse[:, -1:]
-
-                            idx = torch.arange(
-                                0, delta_sparse.shape[1], device=delta_sparse.device
-                            )
-                            idx = (idx % delta_exp_w).float() / delta_exp_w
-                            delta_sparse = (
-                                delta_sparse
-                                + (delta_sparse_shift - delta_sparse)
-                                * idx[None, :, None, None]
-                            )
-
-                        context_sparse = (
-                            context_sw + delta_sparse[:, : context_sw.shape[1]]
-                        )
-                    elif delta_merge_strategy == "replace":
-                        context_sw[:, ::delta_exp_w] = context_sparse
-                        context_sparse = context_sw
-                    else:
-                        raise Exception()
-                else:
-                    # args_new = args.clone()
-                    # k_flat = args.gather_k_from_paged_cache()
-                    # v_flat = args.gather_v_from_paged_cache()
-                    # seq_len = args.position_ids.amax().item() + 1
-                    # k_flat = k_flat[:, :seq_len].contiguous()
-                    # v_flat = v_flat[:, :seq_len].contiguous()
-                    # args_new.k_cache = None
-                    # args_new.v_cache = None
-                    # args_new.block_table = None
-                    # args_new.using_paged_cache = False
-                    # cached_metadata.state = None
-
-                    # context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                    #     q=(query * sm_scale).to(query.dtype),
-                    #     k=k_flat,
-                    #     v=v_flat,
-                    #     args=args_new,
-                    #     cached_metadata=cached_metadata,
-                    # )
-
-                    args.bsa_return_running_statistics = (
-                        delta_attention_args_adjust_norm_const
-                    )
-
-                    context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                        q=(query * sm_scale).to(query.dtype),
-                        k=k,
-                        v=v,
-                        args=args,
-                        cached_metadata=cached_metadata,
-                    )
-
-                    if delta_attention_args_adjust_norm_const:
-                        context_sparse, (sparse_mx, sparse_nc) = context_sparse
-
-                    context_sparse = context_sparse.to(query.dtype)
-                    context_sparse = context_sparse[
-                        :, -query.shape[1] :, :, :
-                    ].contiguous()
-
-                    if delta_attention_args_adjust_norm_const:
-                        sparse_mx = sparse_mx[:, -query.shape[1] :].contiguous()
-                        sparse_nc = sparse_nc[:, -query.shape[1] :].contiguous()
-            else:
-                assert delta_attention_args_window > 0
-                bsa_fn = get_block_sparse_backend(args, query)
-
-                # dist.barrier()
-                # if get_tensor_model_parallel_rank() == 0:
-                #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
-
-                BSZ, TDST, HEAD, HID = query.shape
-
-                args_sw = args.clone()
-                if args_sw.rope_range is None:
-                    args_sw.rope_range = (0, HID)
-                args_sw.block_size_q = args_sw.block_sparse_block_size_q
-                args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
-                args_sw.second_stage_k = 0
-                # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
-                args_sw.sliding_window_size = delta_attention_args_window
-                args_sw.sliding_window_indices = None
-
-                BDST = triton.cdiv(TDST, args_sw.block_size_q)
-                BH = BSZ * HEAD
-
-                indices = torch.zeros(
-                    (BH, BDST, 0), dtype=torch.int64, device=query.device
-                )
-                ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
-                ks_count = ks.unsqueeze(-1)
-                ks_start_end = torch.zeros(
-                    (BH, BDST, 2), dtype=torch.int64, device=query.device
-                )
-
-                context_sparse = bsa_fn(
-                    q=(query * sm_scale).to(query.dtype),
-                    k=k,
-                    v=v,
-                    seq_lens=args_sw.position_ids + 1,
-                    indices=indices,
-                    ks=ks,
-                    ks_count=ks_count,
-                    ks_start_end=ks_start_end,
-                    access_counter=None,
-                    cache_miss_counter=None,
-                    EXTEND_BACKEND=args_sw.sa_extend_backend,
-                    model_context_length=args_sw.model_context_length,
-                    extend_context_length=args_sw.extend_context_length,
-                    offload_update_cache=False,
-                    return_running_statistics=delta_attention_args_adjust_norm_const,
-                    args=args_sw,
-                )
-                if delta_attention_args_adjust_norm_const:
-                    context_sparse, (sparse_mx, sparse_nc) = context_sparse
-
-                context_sparse = context_sparse.to(query.dtype)
-                context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
-                if delta_attention_args_adjust_norm_const:
-                    sparse_mx = sparse_mx[:, -query.shape[1] :].contiguous()
-                    sparse_nc = sparse_nc[:, -query.shape[1] :].contiguous()
-                metadata = None
-
-            # until here, we have only calculated sparse attention
-            if delta_attention_args_just_return:
-                context = context_sparse
-            elif delta_attention_args_iter_corr:
-                w_size = delta_attention_args_w * 2
-
-                num_queries = query.shape[1]
-                num_dense_first = max(128, w_size)
-                num_dense_last = num_queries % w_size + max(128, w_size)
-                num_sparse = num_queries - num_dense_first - num_dense_last
-
-                # iteratively correction errors
-
-                def perform_correction(
-                    context_sparse: torch.Tensor,
-                    context_sparse_raw: torch.Tensor,
-                    block_start_indices: torch.Tensor,
-                    block_size: int,
-                ):
-                    assert block_start_indices.ndim == 1
-                    assert context_sparse.ndim == 4
-                    assert context_sparse_raw.shape == context_sparse.shape
-                    assert not (args.need_apply_rope and args.using_extend)
-
-                    assert args.using_paged_cache
-
-                    if False:
-                        context_sparse_raw = context_sparse
-
-                    query_for_recomp = query[:, block_start_indices, :, :]
-                    k_cache = args.get_k_cache()
-                    v_cache = args.get_v_cache()
-
-                    assert args.position_ids.shape[0] == 1
-                    if get_local_rank() == 0:
-                        # import matplotlib.pyplot as plt
-                        # plt.clf()
-                        # plt.hist(block_start_indices.cpu().numpy(), bins=50)
-                        # plt.xlim(0, args.position_ids.amax().item() + 1)
-                        # plt.savefig(f'./dummy_indices_hist_{len(block_start_indices)}.png')
-
-                        print(
-                            "recomp_attn shapes",
-                            query_for_recomp.shape,
-                            block_start_indices.shape,
-                        )
-                    context_dense = (
-                        query_sparse_attention(
-                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                            None,
-                            None,
-                            args.position_ids[:, block_start_indices],
-                            sm_scale,
-                            k_cache,
-                            v_cache,
-                            args.block_table,
-                        )
-                        .permute(0, 2, 1, 3)
-                        .contiguous()
-                    )  # type: torch.Tensor
-                    assert context_dense.shape[-2:] == query.shape[-2:]
-
-                    if block_size > 1:
-                        assert not delta_attention_args_smooth
-                        block_diff = diff = (
-                            context_dense - context_sparse_raw[:, block_start_indices]
-                        )
-                        diff = diff.repeat_interleave(block_size, 1)
-
-                        token_indices = (
-                            block_start_indices[:, None]
-                            + torch.arange(0, block_size, device=context_sparse.device)[
-                                None, :
-                            ]
-                        )
-                        token_indices = token_indices.view(-1)
-
-                        context_sparse_new = diff + context_sparse_raw[:, token_indices]
-                        context_sparse.index_copy_(
-                            dim=1, index=token_indices, source=context_sparse_new
-                        )
-                    else:
-                        context_sparse.index_copy_(
-                            dim=1, index=block_start_indices, source=context_dense
-                        )
-                        block_diff = None
-
-                    return context_sparse, block_diff
-
-                block_start_indices = torch.arange(
-                    num_dense_first,
-                    num_dense_first + num_sparse,
-                    step=w_size,
-                    device=query.device,
-                )
-                assert (num_dense_first % w_size) == 0
-                assert ((num_dense_first + num_sparse) % w_size) == 0
-
-                split = 2
-
-                def block_diff_to_score(block_diff: torch.Tensor):
-                    return (
-                        block_diff.squeeze(0)
-                        .norm(dim=-1, keepdim=False)
-                        .sum(dim=-1, keepdim=False)
-                    )
-                    # return block_diff\
-                    #     .squeeze(0)\
-                    #     .abs().sum(dim=-1, keepdim=False)\
-                    #     .sum(dim=-1, keepdim=False)
-
-                context_sparse_raw = context_sparse.clone()
-
-                context_sparse, block_diff = perform_correction(
-                    context_sparse,
-                    context_sparse_raw,
-                    block_start_indices,
-                    w_size,
-                )
-                # [T,]
-                block_diff_scores_parent, block_diff_indices = block_diff_to_score(
-                    block_diff
-                ).topk(k=block_diff.shape[1] // split, dim=0, sorted=False)
-                block_start_indices_parent = block_start_indices[block_diff_indices]
-                block_start_indices_parent, tind = block_start_indices_parent.sort()
-                block_diff_scores_parent = block_diff_scores_parent[tind]
-
-                depth = 0
-                max_iter = 4
-                while (w_size // split) > 0 and (depth < max_iter):
-                    depth += 1
-                    block_start_indices_child = (
-                        block_start_indices_parent + w_size // split
-                    )
-                    w_size = w_size // split
-
-                    # if get_local_rank() == 0:
-                    #     print(block_diff_scores_parent)
-
-                    context_sparse, block_diff = perform_correction(
-                        context_sparse,
-                        context_sparse_raw,
-                        block_start_indices_child,
-                        w_size,
-                    )
-                    if (w_size // split) > 0:
-                        block_diff_scores_child = block_diff_to_score(block_diff)
-                        block_diff_scores_parent, next_blocks_location = torch.cat(
-                            [block_diff_scores_parent, block_diff_scores_child]
-                        ).topk(k=block_diff_scores_parent.shape[0] // 2, sorted=False)
-                        block_start_indices_parent = torch.cat(
-                            [block_start_indices_parent, block_start_indices_child]
-                        )[next_blocks_location]
-                        block_start_indices_parent, tind = (
-                            block_start_indices_parent.sort()
-                        )
-                        block_diff_scores_parent = block_diff_scores_parent[tind]
-
-                # fill dense for first and last part
-                dense_indices = torch.cat(
-                    [
-                        torch.arange(0, num_dense_first, device=query.device),
-                        torch.arange(
-                            num_dense_first + num_sparse,
-                            num_queries,
-                            device=query.device,
-                        ),
-                    ]
-                )
-                context_sparse, _ = perform_correction(
-                    context_sparse,
-                    context_sparse_raw,
-                    dense_indices,
-                    1,
-                )
-
-                context = context_sparse
-            else:
-                num_queries = query.shape[1]
-                num_last_dense = num_queries % delta_attention_args_w + max(
-                    128, delta_attention_args_w
-                )
-                num_sparse = num_queries - num_last_dense
-
-                context_sparse = context_sparse[:, :num_sparse]
-                if delta_attention_args_adjust_norm_const:
-                    sparse_mx = sparse_mx[:, :num_sparse]
-                    sparse_nc = sparse_nc[:, :num_sparse]
-
-                if num_last_dense > 0:
-                    idx = torch.arange(
-                        0,
-                        # delta_attention_args_w - 1,
-                        num_sparse,
-                        step=delta_attention_args_w,
-                        device=query.device,
-                    )
-                    rolling_idx = False
-                    if rolling_idx:
-                        idx = (
-                            idx + (args.layer_id % delta_attention_args_w)
-                        ).clamp_max(num_sparse - 1)
-                    # take mean
-                    # context_sparse_for_diff = context_sparse[:, :num_sparse]
-                    # context_sparse_for_diff = context_sparse_for_diff.view(
-                    #     context_sparse_for_diff.shape[0],
-                    #     num_sparse // delta_attention_args_w,
-                    #     delta_attention_args_w,
-                    #     context_sparse_for_diff.shape[2],
-                    #     context_sparse_for_diff.shape[3],
-                    # )
-                    # context_sparse_for_diff = context_sparse_for_diff.mean(dim=2)
-
-                    # take first
-                    if delta_attention_args_adjust_norm_const:
-                        context_sparse_for_diff = context_sparse[:, idx]
-                        sparse_mx_for_diff = sparse_mx[:, idx]
-                        sparse_nc_for_diff = sparse_nc[:, idx]
-
-                    idx = torch.cat(
-                        (
-                            idx,
-                            torch.arange(num_sparse, num_queries, device=query.device),
-                        )
-                    )
-                    query_for_dense = query[:, idx]
-
-                if args.need_apply_rope and args.using_extend:
-                    # TODO: using paged attention
-                    repeated_k = args.gather_k_from_paged_cache(
-                        disable_gqa=True, gqa_q=query
-                    )
-                    repeated_v = args.gather_v_from_paged_cache(
-                        disable_gqa=True, gqa_q=query
-                    )  # B, T, H, D
-                    # assert repeated_k.shape[2] in (1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64), repeated_k.shape
-                    assert repeated_k.shape[2] < 128
-
-                    seq_len = args.position_ids.amax().item() + 1
-                    repeated_k = repeated_k[:, :seq_len]
-                    repeated_v = repeated_v[:, :seq_len]
-
-                    query_for_recomp = query_for_dense
-
-                    cos = args.rope_cos
-                    sin = args.rope_sin
-                    assert cos.ndim == 2, cos.shape
-                    assert sin.shape == cos.shape, sin.shape
-
-                    cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-                    sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-
-                    idx_tsrc = torch.arange(0, repeated_k.shape[1], device=cos.device)
-                    idx_tsrc.clamp_min_(seq_len - args.model_context_length)
-
-                    repeated_k = (
-                        (repeated_k * cos[:, idx_tsrc, :, :])
-                        + (rotate_half(repeated_k) * sin[:, idx_tsrc, :, :])
-                    ).to(repeated_k.dtype)
-
-                    query_for_recomp = (
-                        (
-                            query_for_recomp
-                            * cos[:, args.position_ids.view(-1)[idx], :, :]
-                        )
-                        + (
-                            rotate_half(query_for_recomp)
-                            * sin[:, args.position_ids.view(-1)[idx], :, :]
-                        )
-                    ).to(query_for_recomp.dtype)
-
-                    assert args.position_ids.shape[0] == 1
-                    context_dense = (
-                        query_sparse_attention(
-                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                            repeated_k.permute(0, 2, 1, 3).contiguous(),
-                            repeated_v.permute(0, 2, 1, 3).contiguous(),
-                            # idx.unsqueeze(0),
-                            args.position_ids[:, idx],
-                            sm_scale,
-                            None,
-                            None,
-                            None,
-                        )
-                        .permute(0, 2, 1, 3)
-                        .contiguous()
-                    )
-                else:
-                    if args.using_paged_cache:
-                        assert args.using_paged_cache
-
-                        query_for_recomp = query_for_dense
-                        k_cache = args.get_k_cache()
-                        v_cache = args.get_v_cache()
-
-                        assert args.position_ids.shape[0] == 1
-                        context_dense, (dense_mx, dense_nc) = query_sparse_attention(
-                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                            None,
-                            None,
-                            args.position_ids[:, idx],
-                            sm_scale,
-                            k_cache,
-                            v_cache,
-                            args.block_table,
-                            return_running_statistics=True,
-                        )
-                    else:
-                        assert k is not None
-                        assert v is not None
-                        context_dense, (dense_mx, dense_nc) = query_sparse_attention(
-                            query_for_recomp.permute(0, 2, 1, 3).contiguous(),
-                            k.permute(0, 2, 1, 3).contiguous(),
-                            v.permute(0, 2, 1, 3).contiguous(),
-                            args.position_ids[:, idx],
-                            sm_scale,
-                            None,
-                            None,
-                            None,
-                            return_running_statistics=True,
-                        )
-
-                    dense_mx = dense_mx.permute(0, 2, 1)
-                    dense_nc = dense_nc.permute(0, 2, 1)
-                    context_dense = context_dense.permute(0, 2, 1, 3).contiguous()
-
-                if delta_attention_args_diff == 0:
-                    context = torch.zeros_like(query)
-                    context[:, :num_sparse] = context_sparse
-                    context[:, idx] = context_dense
-                elif delta_attention_args_adjust_norm_const:
-                    idx_dense, idx_last = (idx[:-num_last_dense], idx[-num_last_dense:])
-                    context_dense, last_context_dense = (
-                        context_dense[:, :-num_last_dense],
-                        context_dense[:, -num_last_dense:],
-                    )
-
-                    dense_mx = dense_mx[:, :-num_last_dense]
-                    dense_nc = dense_nc[:, :-num_last_dense]
-
-                    # context_sparse_for_diff_norm = context_sparse_for_diff.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # context_dense_norm = context_dense.float().square().sum(dim=-1, keepdim=True).sqrt()
-                    # scale = context_dense_norm / context_sparse_for_diff_norm
-
-                    using_jeff = False
-                    if using_jeff or (not delta_attention_args_adjust_norm_const):
-                        # redo the normalization constant for the sparse outputs so we calculate the exact delta region
-                        # ------------------------------
-                        if delta_attention_args_adjust_norm_const:
-                            # denorm, make alpha, scale, renorm so that the difference in the following block is the exact difference
-                            # with the correct normalization constant.
-                            context_sparse_for_diff = (
-                                context_sparse_for_diff
-                                * sparse_nc_for_diff[:, :, :, None]
-                            )
-                            mx = torch.stack(
-                                (dense_mx, sparse_mx_for_diff), dim=0
-                            ).amax(dim=0)
-                            alpha = torch.exp2(sparse_mx_for_diff - mx)
-                            context_sparse_for_diff = (
-                                context_sparse_for_diff * alpha[:, :, :, None]
-                            )
-                            sparse_nc_for_diff = sparse_nc_for_diff * alpha
-                            context_sparse_for_diff = (
-                                context_sparse_for_diff
-                                / sparse_nc_for_diff[:, :, :, None]
-                            )
-                        # ------------------------------
-
-                        # take difference
-                        context_diff = (
-                            context_dense - context_sparse_for_diff
-                        )  # * scale
-
-                        context_diff = context_diff.repeat_interleave(
-                            delta_attention_args_w, dim=1
-                        )
-
-                        if delta_attention_args_smooth:
-                            # (exp) linear interpolate diff
-                            context_diff_shift = torch.roll(
-                                context_diff, -delta_attention_args_w, 1
-                            )
-                            context_diff_shift[:, -delta_attention_args_w:] = (
-                                context_diff[:, -1:]
-                            )
-
-                            offset = torch.arange(
-                                0, context_diff.shape[1], device=context_diff.device
-                            )
-                            offset = (
-                                offset % delta_attention_args_w
-                            ).float() / delta_attention_args_w
-                            context_diff = (
-                                context_diff
-                                + (context_diff_shift - context_diff)
-                                * offset[None, :, None, None]
-                            )
-
-                        # context_sparse_norm = context_sparse.float().square().sum(dim=-1, keepdim=True).sqrt()
-                        # scale = context_dense_norm.repeat_interleave(delta_attention_args_w, dim=1) / context_sparse_norm
-
-                        # ---------------------------------------------------
-                        # rescale context sparse to include the normalization constant from the delta region H = (T + H) - T
-                        if delta_attention_args_adjust_norm_const:
-                            # get the 'head' normalization constant which is the normalization constant of the non-sparse indices.
-                            h_nc = (
-                                dense_nc - sparse_nc_for_diff
-                            )  # sparse_nc already applied alpha
-                            h_nc = h_nc.repeat_interleave(delta_attention_args_w, dim=1)
-
-                            mx_repeat = mx.repeat_interleave(
-                                delta_attention_args_w, dim=1
-                            )
-
-                            context_sparse = context_sparse * sparse_nc[:, :, :, None]
-                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
-
-                            alpha_for_sparse = torch.exp2(sparse_mx - mx_repeat)
-                            context_sparse = (
-                                context_sparse * alpha_for_sparse[:, :, :, None]
-                            )
-                            sparse_nc = sparse_nc * alpha_for_sparse
-
-                            # mx = torch.stack((dense_mx_repeat, sparse_mx)).amax(dim=0)
-                            # alpha_for_dense = torch.exp2(dense_mx_repeat - mx)
-                            # h_nc = h_nc * alpha_for_dense
-
-                            nc = h_nc + sparse_nc
-                            context_sparse = context_sparse / nc[:, :, :, None]
-                        # ---------------------------------------------------
-
-                        # context = context_sparse * scale + context_diff
-                        context = context_sparse + context_diff
-                    else:
-                        scale = 1.0
-                        numerator = context_dense * dense_nc[:, :, :, None]
-                        denominator = dense_nc[:, :, :, None]
-
-                        # if get_local_rank() == 0:
-                        #     print('-')
-                        #     print('wrong mx (%)', (sparse_mx_for_diff > dense_mx).float().mean())
-                        #     print('avg error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).mean())
-                        #     print('max error', ((sparse_mx_for_diff - dense_mx) * (sparse_mx_for_diff > dense_mx)).amax())
-                        #     print('avg sparse mx', sparse_mx_for_diff.mean())
-
-                        t_mx = torch.maximum(sparse_mx_for_diff, dense_mx)
-
-                        alpha_sparse = torch.exp2(sparse_mx_for_diff - t_mx)[
-                            :, :, :, None
-                        ]
-
-                        alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
-                        # alpha_dense = 1
-
-                        # this is the delta with denormalized numerator,
-                        # denominator is equal to H
-                        delta = numerator * alpha_dense - alpha_sparse * (
-                            context_sparse_for_diff * sparse_nc_for_diff[:, :, :, None]
-                        )
-                        h_nc = (
-                            denominator * alpha_dense
-                            - alpha_sparse * sparse_nc_for_diff[:, :, :, None]
-                        )
-
-                        # if get_local_rank() == 0:
-                        #     print(denominator[0, :, 0])
-
-                        # context_diff = context_dense - context_sparse_for_diff
-                        # context_diff_norm = torch.norm(context_diff, dim=-1, keepdim=True)
-                        # context_diff_scale = context_diff_norm / context_diff_norm.amax(dim=1, keepdim=True)
-                        # scale *= context_diff_scale
-                        # delta *= scale
-                        # h_nc *= scale
-
-                        def _repeat_interleave(t: torch.Tensor):
-                            t = t.repeat_interleave(delta_attention_args_w, dim=1)
-
-                            if delta_attention_args_smooth:
-                                # (exp) linear interpolate diff
-                                t_shift = torch.roll(t, -delta_attention_args_w, 1)
-                                t_shift[:, -delta_attention_args_w:] = t[:, -1:]
-
-                                offset = torch.arange(0, t.shape[1], device=t.device)
-                                offset = (
-                                    offset % delta_attention_args_w
-                                ).float() / delta_attention_args_w
-                                if t.ndim == 4:
-                                    t = t + (t_shift - t) * offset[None, :, None, None]
-                                else:
-                                    t = t + (t_shift - t) * offset[None, :, None]
-                            return t
-
-                        delta = _repeat_interleave(delta)
-                        h_nc = _repeat_interleave(h_nc)
-                        dense_mx = _repeat_interleave(
-                            torch.maximum(sparse_mx_for_diff, dense_mx)
-                        )
-                        # sparse_mx = _repeat_interleave(sparse_mx_for_diff)
-                        # sparse_nc = _repeat_interleave(sparse_nc_for_diff)
-
-                        t_mx = torch.maximum(dense_mx, sparse_mx)
-                        alpha_sparse = torch.exp2(sparse_mx - t_mx)[:, :, :, None]
-
-                        alpha_dense = torch.exp2(dense_mx - t_mx)[:, :, :, None]
-
-                        # alpha_dense_mask = torch.zeros(dense_mx.size(1), device=dense_mx.device, dtype=torch.bool)
-                        # alpha_dense_mask = alpha_dense_mask.view(-1, delta_attention_args_w)
-                        # alpha_dense_mask[:, 0] = 1
-                        # alpha_dense_mask = alpha_dense_mask.view(-1)[None, :, None, None]
-                        # alpha_dense = alpha_dense_mask * 1 + ~alpha_dense_mask * alpha_dense_mask
-
-                        numerator = alpha_dense * delta + alpha_sparse * (
-                            context_sparse * sparse_nc[:, :, :, None]
-                        )
-                        denominator = (
-                            alpha_dense * h_nc + alpha_sparse * sparse_nc[:, :, :, None]
-                        )
-
-                        context = numerator / denominator
-
-                    context = context.to(query.dtype)
-                    context.index_copy_(dim=1, index=idx_dense, source=context_dense)
-                    context = torch.cat([context, last_context_dense], dim=1)
-
-                    # if get_local_rank() == 0:
-                    #     print(
-                    #         'hit', layer_id,
-                    #         context_diff.shape,
-                    #         context_sparse.shape,
-                    #         context_diff.abs().mean().item(),
-                    #         context_sparse.abs().mean().item()
-                    #     )
-                else:
-                    from .delta.apply_delta import apply_delta
-
-                    context = apply_delta(
-                        context_dense,
-                        context_sparse,
-                        idx,
-                        num_last_dense,
-                        delta_attention_args_w,
-                        delta_attention_args_smooth,
-                    )
+            return _forward_delta_attn(
+                q,
+                sm_scale,
+                k,
+                v,
+                args=args,
+                cached_metadata=cached_metadata,
+                is_decode=is_decode,
+                delta_attention_args_smooth=delta_attention_args_smooth,
+                delta_attention_args_just_return=delta_attention_args_just_return,
+                delta_attention_args_window=delta_attention_args_window,
+                delta_attention_args_diff=delta_attention_args_diff,
+                delta_attention_args_dense_decode=delta_attention_args_dense_decode,
+                delta_attention_args_w=delta_attention_args_w,
+                delta_attention_args_exp=delta_attention_args_exp,
+                delta_attention_args_exp_w=delta_attention_args_exp_w,
+                delta_attention_args_exp_window=delta_attention_args_exp_window,
+                delta_attention_args_exp_sink=delta_attention_args_exp_sink,
+                delta_attention_args_iter_corr=delta_attention_args_iter_corr,
+                delta_attention_args_adjust_norm_const=delta_attention_args_adjust_norm_const,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+        
+        context, metadata = _forward_partial_fa3(
+            q=query,
+            k=k,
+            v=v,
+            sm_scale=sm_scale,
+            rope_is_neox_style=rope_is_neox_style,
+            cached_metadata=cached_metadata,
+            is_decode=is_decode,
+            seq_thresh_fa3=seq_thresh_fa3,
+            mixing_len=mixing_len,
+            args=args,
+            max_context_len=max_batch_context_len,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            inner_function_do_scale=False,
+            inner_function=__forward_delta_attn_wrapper,
+        )
     elif (force_dense_decode and is_decode) or (
         using_dense_prefill and (not is_decode)
     ):
@@ -2637,6 +2740,7 @@ def _forward_paged_hip(
             max_context_len=max_batch_context_len,
             k_descale=k_descale,
             v_descale=v_descale,
+            inner_function_do_scale=True,
             inner_function=dual_stage_quadratic_hip_attention,
         )
         # context = context[:, -query.shape[1] :, :, :].contiguous()

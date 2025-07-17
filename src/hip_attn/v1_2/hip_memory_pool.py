@@ -35,9 +35,9 @@ class CachedBuffer:
                 f'Try lowering --cuda-graph-max-bs or raising --hip-attention-config {{"metadata_cache_max_batch_size"}}.'
             )
         if self.batch_format == "BH":
-            return self.buffer[: batch_size * head_size].to(self.dtype, copy=True)
+            return self.buffer[: batch_size * head_size].to(self.dtype, copy=False)
         elif self.batch_format == "B,1,H":
-            return self.buffer[:batch_size, :, :head_size].to(self.dtype, copy=True)
+            return self.buffer[:batch_size, :, :head_size].to(self.dtype, copy=False)
         else:
             raise Exception()
 
@@ -319,29 +319,26 @@ class HiPMetadataCachePool:
         batch_size: int,
         metadata: HiPAttentionOutputMetadata,
         block_size_q: int = 64,
+        cached_stages: Optional[int] = None,
     ):
         assert triton.cdiv(tdst // batch_size, block_size_q) == 1
 
-        self.set_buffer(layer_id, "indices", metadata.indices)
-        self.set_buffer(layer_id, "ks", metadata.ks)
-        self.set_buffer(layer_id, "ks_count", metadata.ks_count)
-        self.set_buffer(layer_id, "ks_start_end", metadata.ks_start_end)
-
         def update_cache_stats(stats: HiPAttentionCacheAccessStatistics, prefix: str):
             if stats is None:
-                access_count = torch.zeros((1,), dtype=torch.int64, device=self.device)
-                unique_access_count = torch.zeros(
-                    (1,), dtype=torch.int64, device=self.device
-                )
-                cache_miss_count = torch.zeros(
-                    (1,), dtype=torch.int64, device=self.device
-                )
+                # access_count = torch.zeros((1,), dtype=torch.int64, device=self.device)
+                # unique_access_count = torch.zeros(
+                #     (1,), dtype=torch.int64, device=self.device
+                # )
+                # cache_miss_count = torch.zeros(
+                #     (1,), dtype=torch.int64, device=self.device
+                # )
+                access_count = None
             else:
                 computed_statistics = stats.compute_statistics()
                 access_count = computed_statistics["access_count"]
                 unique_access_count = computed_statistics["unique_access_count"]
                 cache_miss_count = computed_statistics["cache_miss_count"]
-
+            
             if access_count is not None:
                 self.set_buffer(
                     layer_id,
@@ -361,6 +358,14 @@ class HiPMetadataCachePool:
 
         update_cache_stats(metadata.sa_cache_statistics, "sa")
         update_cache_stats(metadata.mask_cache_statistics, "mask")
+        
+        if (cached_stages is None) or (cached_stages == len(self.layer_configs[layer_id].stages)):
+            return
+        
+        self.set_buffer(layer_id, "indices", metadata.indices)
+        self.set_buffer(layer_id, "ks", metadata.ks)
+        self.set_buffer(layer_id, "ks_count", metadata.ks_count)
+        self.set_buffer(layer_id, "ks_start_end", metadata.ks_start_end)
 
         if metadata.stage_caches is not None:
             for i_stage, cache in enumerate(metadata.stage_caches):

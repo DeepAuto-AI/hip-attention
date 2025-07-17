@@ -562,6 +562,10 @@ def get_scan_stage_configs():
         "HID_DIM",
         "USING_PAGES",
     ],
+    restore_value=[
+        "INDICES_LEFT",
+        "INDICES_RIGHT",
+    ]
 )
 @triton.jit
 def chunk_controllable_sampling_mask_cuda(

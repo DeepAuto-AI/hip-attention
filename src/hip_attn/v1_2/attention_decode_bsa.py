@@ -1807,12 +1807,12 @@ def decode_block_sparse_attention_stage1(
     num_query = q.shape[1]
     assert q.ndim == 4
     BLOCK_H = max(16, q.shape[2])
-    NUM_SM = 144 + 16  # GH100 + Slack
+    NUM_SM = int(os.getenv("SA_DECODE_NUM_SM", 144 + 16))  # H100 + Slack
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
     MAX_PROGRAM = int(
         os.getenv(
-            "SA_DECODE_MAX_PROGRAM", min(16, triton.cdiv(NUM_SM, batch * num_query))
+            "SA_DECODE_MAX_PROGRAM", min(64, triton.cdiv(NUM_SM, batch * num_query))
         )
     )
     token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
@@ -1849,15 +1849,15 @@ def decode_block_sparse_attention_stage1(
     )
     # print('asdf', batch, num_query, NUM_TOTAL_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SPARSE_KV_SPLITS, NUM_SLIDING_KV_SPLITS)
 
-    temp_attn_logits = torch.zeros(
+    temp_attn_logits = torch.empty(
         (batch, num_query, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
         dtype=torch.float32,
         device=q.device,
     )
     
     if k_descale is not None:
-        assert k_descale.contiguous()
-        assert v_descale.contiguous()
+        assert k_descale.is_contiguous()
+        assert v_descale.is_contiguous()
         assert k_descale.shape == (batch, head_num // kv_group_num)
         assert v_descale.shape == (batch, head_num // kv_group_num)
 

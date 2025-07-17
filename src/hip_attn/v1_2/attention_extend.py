@@ -1053,17 +1053,22 @@ def dual_stage_quadratic_hip_attention(
                         args.stages[i_stage + 1].stage_k
                         // args.stages[i_stage].stage_chunk_size
                     )
-                    next_stage_k = min(next_stage_k, indices_left.shape[-1])
-                    _, t_indices = out_scores[..., : indices_left.shape[-1]].topk(
-                        k=next_stage_k,
-                        dim=-1,
-                        sorted=False,
-                        largest=True,
-                    )
                 else:
-                    _, t_indices = out_scores[..., : indices_left.shape[-1]].sort(
-                        dim=-1, descending=True, stable=False
+                    next_stage_k = (
+                        args.second_stage_k
+                        // args.stages[i_stage].stage_chunk_size
                     )
+                next_stage_k = min(next_stage_k, indices_left.shape[-1])
+                _, t_indices = out_scores[..., : indices_left.shape[-1]].topk(
+                    k=next_stage_k,
+                    dim=-1,
+                    sorted=False,
+                    largest=True,
+                )
+                # else:
+                #     _, t_indices = out_scores[..., : indices_left.shape[-1]].sort(
+                #         dim=-1, descending=True, stable=False
+                #     )
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
@@ -1292,12 +1297,15 @@ def dual_stage_quadratic_hip_attention(
         # NOTE: convert format and taking unique in indices
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
 
-        indices, t_sort_1 = indices.sort(dim=-1)
-        indices = indices // args.block_size_k * args.block_size_k
+        require_post_unique = BDST > 1
+        if require_post_unique:
+            indices, t_sort_1 = indices.sort(dim=-1)
+            indices = indices // args.block_size_k * args.block_size_k
 
-        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-        indices, t_sort_2 = indices.sort(dim=-1)
+            unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+            indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+            indices, t_sort_2 = indices.sort(dim=-1)
+        
         active_mask = indices < (
             position_ids[:, :: args.block_size_q, None].repeat_interleave(HEAD, 0)
             + args.block_size_q
@@ -1479,6 +1487,7 @@ def dual_stage_quadratic_hip_attention(
     # block_sparse_attention_backend = tilelang_bsa
 
     if args.bsa_sliding_window_size > 0:
+        args = args.clone()
         args.sliding_window_size = args.bsa_sliding_window_size
 
     context = block_sparse_attention_backend(
