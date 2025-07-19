@@ -89,8 +89,8 @@ def main():
                 print(f"{q.size()=} {k.size()=} {v.size()=}")
                 print(f"{bsa_idx.size()=}")
                 torch.set_printoptions(threshold=bsa_idx.size(2) * bsa_idx.size(3) + 1000)
-                print(f"bsa index: ", bsa_idx[0, 0, :])
-                print(f"bsa sums: ", block_sums[0, 0, :])
+                print(f"bsa index:  {bsa_idx[0, 0, :10]=} {bsa_idx[0, 0, -10:]}")
+                print(f"bsa sums:  {block_sums[0, 0, :10]=} {block_sums[0, 0, -10:]}")
         else:
             out = query_sparse_attention(
                 q=q, 
