@@ -1211,6 +1211,10 @@ class _attention(torch.autograd.Function):
         bsa_block_size_q: int,
         bsa_block_size_k: int,
     ):
+
+        if bsa_block_size_q > 1:
+            raise NotImplementedError(f"{bsa_block_size_q=}. bsa block size q is not imeplentened for block size greater than 1")
+
         q = (q * sm_scale).to(q.dtype)
 
         USING_PAGED_CACHE = k_cache is not None
@@ -1629,7 +1633,7 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     bsa_top_block_k: int = 128,
-    bsa_block_size_q: int = 64 // 16,
+    bsa_block_size_q: int = 1,
     bsa_block_size_k: int = 2,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
