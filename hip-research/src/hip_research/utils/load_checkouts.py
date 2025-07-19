@@ -1,5 +1,7 @@
 import torch
+import warnings
 
+import os
 
 def load_checkouts(
     idx=24,
@@ -19,7 +21,11 @@ def load_checkouts(
         k_name = "k_derope"
 
     data_source = "llama"
-    if data_source == "llama":
+    path_exists = os.path.exists(checkout_path)
+    if not path_exists:
+        warnings.warn("WARNING: forcing rand because checkout path does not exist.")
+
+    if data_source == "llama" and path_exists:
         state = torch.load(checkout_path, map_location="cpu", weights_only=False)
         if sm_scale is None:
             sm_scale = 1 / (state[q_name].shape[-1] ** 0.5)
@@ -40,10 +46,12 @@ def load_checkouts(
         cos = cos.view(-1, HID)[:seq_len, :].contiguous()
         sin = sin.view(-1, HID)[:seq_len, :].contiguous()
     else:
-        q = torch.randn((1, 64, 4))
-        k = torch.randn((1, 64, 4))
+        q = torch.randn((1, 32768 * 4, 64))
+        k = torch.randn((1, 32768 * 4, 64))
         v = k.clone()
         out = q.clone()
+        cos = torch.randn(q.size(1), q.size(-1))
+        sin = torch.randn(q.size(1), q.size(-1))
 
     q = q.to(device, dtype=dtype)
     k = k.to(device, dtype=dtype)
