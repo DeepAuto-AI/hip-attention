@@ -101,7 +101,6 @@ def _attn_fwd_inner(
             ) * stride_bim
             + tl.arange(0, BSA_K)[None, :] * stride_bik
         )
-
         block_idx = tl.load(BSA_INDICES + b_idx)
         block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
 
@@ -169,33 +168,20 @@ def _attn_fwd_inner(
         if RETURN_BSA_MASK:
             block_sums *= tl.sum(tl.reshape(alpha, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)[:, None] # adjust previous sums for new normalization constant
 
-            # block_sums_min = tl.min(block_sums, axis=-1) # (M, K) --> (M,)
             block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
             block_sums_max = tl.maximum(block_sums_min, tl.sum(tl.reshape(l_ij, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)) # (M,)
-
-            # print(f"block sums: ", block_sums)
-            # print(f"block sums min idx: ", block_sums_min_idx)
-            # print(f"block sums min: ", block_sums_min)
-            # print(f"block sums max: ", block_sums_max)
 
             # if these two are equal, it means that the maximum is equal 
             # to the old value (i.e no change necessary)
             block_update = block_sums_min != block_sums_max # (M,)
-            block_update = tl.where(block_update, 1, 0).to(tl.int1)
-            # print(f"block update: ", block_update)
 
             col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
 
             # make a mask of the minimum indices
             bsa_mask = (col_idx == block_sums_min_idx[:, None]).to(tl.int1) # (M, K)
-            # print(f"bsa mask: ", bsa_mask)
             bsa_mask = tl.where(block_update[:, None], bsa_mask, 0).to(tl.int1) # (M, K)
-            
-            # block_sums = (1 - bsa_mask) * block_sums + bsa_mask * block_sums_max[:, None]
+
             block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-            # print(f"block_sums after setting: ", block_sums)
-            # block_idx = (1 - bsa_mask).to(tl.int64) * block_idx.to(tl.int64) \
-            #     + bsa_mask.to(tl.int64) * block_sums_min_idx[:, None].to(tl.int64)
             block_idx = tl.where(bsa_mask, start_n // BLOCK_N, block_idx)
         
         # -- update output accumulator --
@@ -238,7 +224,6 @@ def _attn_fwd_inner(
             pass
 
     if RETURN_BSA_MASK:
-        # print(f"storing indices: ", block_idx)
         tl.store(BSA_INDICES + b_idx, value=block_idx)
         tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
 
@@ -282,7 +267,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["N_CTX", "N_KV", "HEAD_DIM"])
+# @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "N_KV", "HEAD_DIM"])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -1003,10 +988,11 @@ class _attention(torch.autograd.Function):
             )
             bsa_block_sums = torch.full(
                 (BSZ, HEAD, BDST, bsa_top_block_k),
-                fill_value=-32000.0,
+                fill_value=-1,
                 device=q.device,
                 dtype=torch.float32,
             )
+            assert bsa_indices.stride() == bsa_block_sums.stride()
 
         if return_pooled_scores:
             assert not return_running_statistics
@@ -1217,7 +1203,6 @@ class _attention(torch.autograd.Function):
                 N_BATCH * N_HEAD,
                 1,
             )
-
             _attn_fwd[grid](
                 q,
                 k,
@@ -1276,6 +1261,8 @@ class _attention(torch.autograd.Function):
                 ),
                 HEAD_DIM=HEAD_DIM_K,
                 N_SPLIT=1,
+                BLOCK_M=64,
+                BLOCK_N=32,
                 V_FP8=V_FP8,
                 **extra_kern_args,
             )

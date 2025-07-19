@@ -2,20 +2,23 @@ import torch
 import os
 
 from hip_research.utils.load_checkouts import load_checkouts
+import math
 
 from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
 
 def main():
-    B, H, H_KV, S, D = 1, 32, 8, 32768, 128
+    # B, H, H_KV, S, D = 1, 32, 8, 32768, 128
+    B, H, H_KV, S, D = 1, 1, 1, 4096, 128
     delta_w = 16
-    bsa_block_size_q = 64 // delta_w
+    # bsa_block_size_q = 64 // delta_w
+    bsa_block_size_q = 1
     bsa_block_size_k = 64
     bsa_top_block_k = 1024 // bsa_block_size_k
-    import math
     scale = math.sqrt(1 / D)
     device = "cuda"
     dtype = torch.bfloat16
-    source = "checkout"
+    # source = "checkout"
+    source = "rand"
     
     if source == "checkout":
         seq_len = int(os.getenv("SEQ_LEN", "131072"))
@@ -60,7 +63,9 @@ def main():
             torch.randn(B, H_KV, S, D, device=device, dtype=dtype), 
             torch.randn(B, H_KV, S, D, device=device, dtype=dtype)
         )
-    mask = torch.arange(0, S, delta_w, device=device)[None, :].repeat(B, 1)
+        cos, sin = torch.randn(S, D), torch.randn(S, D)
+
+    mask = torch.arange(0, S, device=device)[None, :].repeat(B, 1)
     
     def fwd(return_bsa_indices: bool, debug: bool = False):
         if return_bsa_indices:
@@ -79,7 +84,13 @@ def main():
                 bsa_block_size_k=bsa_block_size_k,
             )
             if debug:
-                print(bsa_idx)
+                print(f"debugging outputs for query sparse atttntion kernel")
+
+                print(f"{q.size()=} {k.size()=} {v.size()=}")
+                print(f"{bsa_idx.size()=}")
+                torch.set_printoptions(threshold=bsa_idx.size(2) * bsa_idx.size(3) + 1000)
+                print(f"bsa index: ", bsa_idx[0, 0, :])
+                print(f"bsa sums: ", block_sums[0, 0, :])
         else:
             out = query_sparse_attention(
                 q=q, 
