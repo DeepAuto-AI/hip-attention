@@ -78,7 +78,7 @@ configs = [
         num_warps=w,
     )
     for BLOCK_CHUNK in [64, 128, 256]
-    for s in [3, 4, 7]
+    for s in [3,]
     for w in [4, 8]
     # for BM in [128,]
     # for BN in [64,]

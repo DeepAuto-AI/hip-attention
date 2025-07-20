@@ -510,22 +510,20 @@ def block_sparse_attention_cuda_step(
     # if qk_mask == True, then dropped
     if IS_CAUSAL:
         if len(pos_tdst.shape) > 0:
-            seq_len = tl.max(pos_tdst)
+            seq_len = tl.max(tl.where(mask_tdst, pos_tdst, 0))
         else:
             seq_len = pos_tdst
 
         if EXCLUDE_SLIDING_WINDOW:
-            assert not CHUNKED_SW
-            # qk_mask = (
-            #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-            #     | ((pos_tdst - 1)[:, None] < (idx_tsrc + sliding_window_size)[None, :])
-            #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-            # )
-
-            qk_mask = ~(mask_tsrc & (idx_tsrc < (seq_len - sliding_window_size)))[
-                None, :
-            ]
+            # NOTE: called from sink and sparse part
+            
+            assert not CHUNKED_SW, "sink and sparse part should not be in chunked sliding window attention"
+            qk_mask = ~(
+                mask_tsrc &
+                (idx_tsrc < (seq_len - sliding_window_size))
+            )[None, :]
         else:
+            # NOTE: called from sliding window part
             # TODO(ainl): we should reduce scanning loop range if CHUNKED_SW is true.
             if not CHUNKED_SW:
                 # qk_mask = (

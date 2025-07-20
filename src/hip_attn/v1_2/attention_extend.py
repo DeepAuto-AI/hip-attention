@@ -70,10 +70,9 @@ def get_world_size() -> int:
         return 1
 
 
-_NUM_STREAMING_MULTIPROCESSOR = None
-
 DEFAULT_VALUE_HIP_HEAD_REDUCE = "1"
 
+_NUM_STREAMING_MULTIPROCESSOR = None
 
 def num_streaming_multiprocessor():
     global _NUM_STREAMING_MULTIPROCESSOR
@@ -85,7 +84,8 @@ def num_streaming_multiprocessor():
 
 
 def get_block_sparse_backend(
-    args: HiPAttentionArgs, q: torch.Tensor
+    q: torch.Tensor,
+    disable_flashdecode: HiPAttentionArgs,
 ) -> type(block_sparse_attention):
     # return block_sparse_attention_tilelang
 
@@ -96,7 +96,7 @@ def get_block_sparse_backend(
     if (
         (q.shape[1] < int(os.getenv("HIP_FLASHDECODE_THRESH", "32")))
         and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
-        and (not args.disable_flashdecode)
+        and (not disable_flashdecode)
     ):
         block_sparse_attention_backend = decode_block_sparse_attention
 
@@ -1296,9 +1296,17 @@ def dual_stage_quadratic_hip_attention(
 
         # NOTE: convert format and taking unique in indices
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
+        
+        require_expand_future = False
+        expand_future_window = 16
+        if require_expand_future and (BDST == 1):
+            dups = []
+            for i in range(0, expand_future_window, args.block_size_k):
+                dups.append(indices + i)
+            indices = torch.cat(dups, dim=-1)
 
-        require_post_unique = BDST > 1
-        if require_post_unique:
+        require_post_unique = True # BDST > 1
+        if require_post_unique or require_expand_future:
             indices, t_sort_1 = indices.sort(dim=-1)
             indices = indices // args.block_size_k * args.block_size_k
 
@@ -1482,7 +1490,7 @@ def dual_stage_quadratic_hip_attention(
         k = None
         v = None
 
-    block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
+    block_sparse_attention_backend = get_block_sparse_backend(q_bsa, args.disable_flashdecode)
     # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
     # block_sparse_attention_backend = tilelang_bsa
 

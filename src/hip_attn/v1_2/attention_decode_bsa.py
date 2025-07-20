@@ -2152,6 +2152,7 @@ def decode_block_sparse_attention(
     assert TDST < args.block_sparse_block_size_q, "TDST must be 1 for flashdecode"
 
     if k is not None:
+        assert False, "decode should not accept k, only support the paged cache"
         _, TSRC, KV_HEAD, _ = k.shape
         MAX_TSRC = TSRC
         HID_V = v.shape[-1]

@@ -106,6 +106,9 @@ class HiPMetadataCachePool:
                 additional_tokens += layer_config.second_stage_k * (
                     64 // layer_config.stages[-1].stage_chunk_size
                 )
+            
+            # if not require_dense:
+            #     additional_tokens = layer_config.second_stage_k * 7
 
             actual_tokens = layer_config.second_stage_k + additional_tokens
             if actual_tokens != layer_config.second_stage_k:

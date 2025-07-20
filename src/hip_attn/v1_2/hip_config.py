@@ -148,7 +148,12 @@ class HiPAttentionPerLayerConfig:
                 self.scan_extend_backend = parsed_json["scan_extend_backend"]
                 parsed_json.pop("scan_extend_backend")
             if "stages" in parsed_json:
-                self.stages = [ScanStage(**stage) for stage in parsed_json["stages"]]
+                self.stages = [
+                    ScanStage(**stage) 
+                    if len(stage.keys()) > 0 else 
+                    ScanStage(64, 1, 32, 32768, 1) 
+                    for stage in parsed_json["stages"]
+                ]
                 parsed_json.pop("stages")
             if "landmark_stage_k" in parsed_json:
                 self.landmark_stage_k = parsed_json["landmark_stage_k"]
@@ -502,6 +507,16 @@ class HiPAttentionConfig:
                 assert int(str(given_args)) == given_args
                 os.environ["HIP_DEBUG_LAST_DENSE"] = str(given_args)
                 parsed_json.pop("__last_dense")
+            if "__seq_thresh_fa3" in parsed_json:
+                given_args = parsed_json["__seq_thresh_fa3"]
+                if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", given_args) != given_args:
+                    warnings.warn(
+                        "envvar HIP_HEAD_REDUCE is overrided by hip attention args"
+                    )
+                assert int(str(given_args)) == given_args
+                os.environ["HIP_DEBUG_SEQ_THRESH_FA3"] = str(given_args)
+                os.environ["HIP_DEBUG_ALLOW_GATHER_KV_CACHE"] = "1"
+                parsed_json.pop("__seq_thresh_fa3")
 
             if parsed_json:
                 raise ValueError(f"Unknown keys in json: {parsed_json.keys()}")
@@ -532,3 +547,20 @@ class HiPAttentionConfig:
             self.block_sparse_block_size_q
             <= self.prefill_layers[-1].stages[-1].stage_block_size_q
         )
+
+    def get_layer_config(self, layer_id: int, is_decode: bool):
+        is_dense = layer_id in self.dense_layers
+        
+        if not is_decode:
+            if len(self.prefill_layers) == 2:
+                layer_config = self.prefill_layers[0 if is_dense else 1]
+            else:
+                layer_config = self.prefill_layers[layer_id]
+        else:
+            # assert dst_seq_len == 1
+            if len(self.layers) == 2:
+                layer_config = self.layers[0 if is_dense else 1]
+            else:
+                layer_config = self.layers[layer_id]
+
+        return layer_config

@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 from sgl_kernel.flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
 from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
+from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
 
 
@@ -153,7 +154,7 @@ def forward_paged_hip(
     using_chunked_sliding_window: bool = False,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
+) -> tuple[torch.Tensor, HiPAttentionOutputMetadata, HiPAttentionArgs]:
 
     if is_prefill is not None:
         warnings.warn(
@@ -226,6 +227,7 @@ def forward_paged_hip(
             device=query.device,
         )
         metadata_new = []
+        args_new = []
 
         if cached_metadata is not None:
             states = cached_metadata.state
@@ -292,7 +294,7 @@ def forward_paged_hip(
                     if isinstance(states, list):
                         cached_metadata.state = states[idx_batch]
 
-                o_req, metadata_req = _forward_paged_hip_validate(
+                o_req, metadata_req, args_req = _forward_paged_hip_validate(
                     query=(
                         query[start_len : start_len + seq_len]
                         if query.ndim == 3
@@ -335,6 +337,7 @@ def forward_paged_hip(
                     v_descale=v_descale,
                 )
                 metadata_new.append(metadata_req)
+                args_new.append(args_new)
 
                 o[start_len : start_len + seq_len] = o_req
 
@@ -343,7 +346,7 @@ def forward_paged_hip(
         assert len(decoding_reqs) == 0
 
     else:
-        o, metadata_new = _forward_paged_hip_validate(
+        o, metadata_new, args_new = _forward_paged_hip_validate(
             query=query,
             sm_scale=sm_scale,
             batch_size=batch_size,
@@ -382,7 +385,7 @@ def forward_paged_hip(
             v_descale=v_descale,
         )
 
-    return o, metadata_new
+    return o, metadata_new, args_new
 
 
 def _forward_paged_hip_validate(
@@ -466,7 +469,7 @@ def _forward_paged_hip_validate(
             err_k = sse(offload_cache.k_uvm.bank_gpu, k_cache_valid)
             err_v = sse(offload_cache.v_uvm.bank_gpu, v_cache_valid)
 
-    o, metadata_new = _forward_paged_hip(
+    o, metadata_new, args_new = _forward_paged_hip(
         query=query,
         sm_scale=sm_scale,
         batch_size=batch_size,
@@ -505,7 +508,7 @@ def _forward_paged_hip_validate(
 
     if require_validation:
         if not is_decode:
-            o_req_valid, _ = _forward_paged_hip(
+            o_req_valid, _, _ = _forward_paged_hip(
                 query=query,
                 sm_scale=sm_scale,
                 batch_size=batch_size,
@@ -545,7 +548,7 @@ def _forward_paged_hip_validate(
             assert o_err < 1e-6, o_err
 
         else:
-            o_valid, metadata_valid = _forward_paged_hip(
+            o_valid, metadata_valid, _ = _forward_paged_hip(
                 query=query,
                 sm_scale=sm_scale,
                 batch_size=batch_size,
@@ -625,7 +628,7 @@ def _forward_paged_hip_validate(
                         stage2_left_err
                     ) = stage2_right_err = stage2_score_err = None
 
-                o_uvm, metadata_uvm = _forward_paged_hip(
+                o_uvm, metadata_uvm, _ = _forward_paged_hip(
                     query=query,
                     sm_scale=sm_scale,
                     batch_size=batch_size,
@@ -664,7 +667,7 @@ def _forward_paged_hip_validate(
                 offload_cache.sa_kv_cache.flush()
                 offload_cache.mask_k_cache.flush()
 
-                o_retry, metadata_retry = _forward_paged_hip(
+                o_retry, metadata_retry, _ = _forward_paged_hip(
                     query=query,
                     sm_scale=sm_scale,
                     batch_size=batch_size,
@@ -726,7 +729,7 @@ def _forward_paged_hip_validate(
                     f"online_update={online_update_cache}\n"
                 )
 
-    return o, metadata_new
+    return o, metadata_new, args_new
 
 
 def sse(a: torch.Tensor, b: torch.Tensor):
@@ -755,10 +758,15 @@ def _forward_delta_attn(
     delta_attention_args_exp_sink = 128,
     delta_attention_args_iter_corr = False,
     delta_attention_args_adjust_norm_const = False,
+    delta_attention_args_extend = "none",
     k_descale: torch.Tensor = None,
     v_descale: torch.Tensor = None,
+    rope_cos: torch.Tensor = None,
+    rope_sin: torch.Tensor = None,
 ):
-    using_dense_prefill = False
+    assert not delta_attention_args_dense_decode
+    
+    # using_dense_prefill = False
     
     # if (
     #     (is_decode and delta_attention_args_dense_decode)
@@ -892,7 +900,7 @@ def _forward_delta_attn(
             if delta_exp_k == 0:
                 delta_exp_bk = 64
 
-            bsa_fn = get_block_sparse_backend(args, query)
+            bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
 
             BSZ, TDST, HEAD, HID = query.shape
 
@@ -1093,7 +1101,7 @@ def _forward_delta_attn(
                 sparse_nc = sparse_nc[:, -query.shape[1] :].contiguous()
     else:
         assert delta_attention_args_window > 0
-        bsa_fn = get_block_sparse_backend(args, query)
+        bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
 
         # dist.barrier()
         # if get_tensor_model_parallel_rank() == 0:
@@ -1381,7 +1389,11 @@ def _forward_delta_attn(
             )
             query_for_dense = query[:, idx]
 
-        if args.need_apply_rope and args.using_extend:
+        if (
+            (args.need_apply_rope and args.using_extend) and 
+            (delta_attention_args_extend == "none")
+        ):
+            assert delta_attention_args_extend == "none"
             # TODO: using paged attention
             repeated_k = args.gather_k_from_paged_cache(
                 disable_gqa=True, gqa_q=query
@@ -1444,6 +1456,9 @@ def _forward_delta_attn(
                 .contiguous()
             )
         else:
+            if args.need_apply_rope and args.using_extend:
+                assert delta_attention_args_extend in ("self_extend",)
+            
             if args.using_paged_cache:
                 assert args.using_paged_cache
 
@@ -1464,6 +1479,9 @@ def _forward_delta_attn(
                     return_running_statistics=delta_attention_args_adjust_norm_const,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    extend_backend=delta_attention_args_extend,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
                 )
             else:
                 assert k is not None
@@ -1480,6 +1498,9 @@ def _forward_delta_attn(
                     return_running_statistics=delta_attention_args_adjust_norm_const,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    extend_backend=delta_attention_args_extend,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
                 )
             
             if delta_attention_args_adjust_norm_const:
@@ -1701,7 +1722,7 @@ def _forward_delta_attn(
             #     )
         else:
             from .delta.apply_delta import apply_delta
-
+            
             context = apply_delta(
                 context_dense,
                 context_sparse,
@@ -2058,7 +2079,7 @@ def _forward_sliding_window(
     sliding_window_sink: int,
 ):
     query = q
-    bsa_fn = get_block_sparse_backend(args, query)
+    bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
 
     # dist.barrier()
     # if get_tensor_model_parallel_rank() == 0:
@@ -2373,6 +2394,7 @@ def _forward_paged_hip(
         delta_attention_args_exp_sink = 128
         delta_attention_args_iter_corr = False
         delta_attention_args_adjust_norm_const = False
+        delta_attention_args_extend = "none"
 
         for word in delta_attention_args.split("-"):
             word = word.strip()
@@ -2392,6 +2414,12 @@ def _forward_paged_hip(
                 delta_attention_args_iter_corr = True
             elif word == "adjust_norm_const":
                 delta_attention_args_adjust_norm_const = True
+            elif word.startswith("extend"):
+                extend_mode = word.split("_")[1]
+                if extend_mode == "self":
+                    delta_attention_args_extend = "self_extend"
+                else:
+                    raise Exception(extend_mode)
             elif word.startswith("window_"):
                 delta_attention_args_window = int(word.split("_")[1])
             elif word.startswith("diff_"):
@@ -2412,7 +2440,7 @@ def _forward_paged_hip(
         
         assert not delta_attention_args_dense_decode, "todo, did not handled in _forward_delta_attn"
 
-        if get_local_rank() == 0:
+        if (get_local_rank() == 0) and (not is_decode):
             info_msg = (
                 f"Delta Attention is activated {delta_attention_args_window=} "
                 f"{delta_attention_args_diff=} {delta_attention_args_w=} "
@@ -2422,6 +2450,7 @@ def _forward_paged_hip(
                 f"{delta_attention_args_exp=} "
                 f"{delta_attention_args_exp_w=} "
                 f"{delta_attention_args_adjust_norm_const=} "
+                f"{delta_attention_args_extend=} "
             )
             warnings.warn(info_msg)
 
@@ -2492,8 +2521,11 @@ def _forward_paged_hip(
                 delta_attention_args_exp_sink=delta_attention_args_exp_sink,
                 delta_attention_args_iter_corr=delta_attention_args_iter_corr,
                 delta_attention_args_adjust_norm_const=delta_attention_args_adjust_norm_const,
+                delta_attention_args_extend=delta_attention_args_extend,
                 k_descale=k_descale,
                 v_descale=v_descale,
+                rope_cos=args.rope_cos,
+                rope_sin=args.rope_sin,
             )
         
         context, metadata = _forward_partial_fa3(
@@ -2528,7 +2560,7 @@ def _forward_paged_hip(
                     cached_metadata=cached_metadata,
                 )
             else:
-                bsa_fn = get_block_sparse_backend(args, query)
+                bsa_fn = get_block_sparse_backend(query, disable_flashdecode)
 
                 BSZ, TDST, HEAD, HID = query.shape
 
@@ -2837,13 +2869,33 @@ def _forward_paged_hip(
             print(f"saved {filename}")
 
     assert context.dtype == query.dtype
-    return context.view(N, num_heads, context.shape[-1]), metadata
+    return context.view(N, num_heads, context.shape[-1]), metadata, args
 
 
 class PagedHiPStateful:
-    def __init__(self):
-        # print('stateful init')
+    def __init__(
+        self,
+        max_batch_size: int,
+        num_layers: int,
+        num_heads: int,
+        head_dim: int,
+        device: torch.device,
+    ):
         self.states = dict()
+        
+        self.max_batch_size = max_batch_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.device = device
+        
+        self.using_delta_decode = False
+        
+        self.delta_buffer = torch.zeros(
+            num_layers, max_batch_size, 1, num_heads, head_dim,
+            dtype=torch.float32,
+            device=device,
+        )
 
     def __call__(
         self,
@@ -2851,6 +2903,9 @@ class PagedHiPStateful:
     ):
         layer_id = kwargs.get("layer_id", None)
         is_decode = kwargs.get("is_decode", False)
+        hip_config = kwargs.get("hip_config", None) # type: HiPAttentionConfig
+        
+        # NOTE: init landmark states
         state = self.states.get(layer_id, None)
 
         cached_metadata = kwargs.pop("cached_metadata", None)
@@ -2869,11 +2924,13 @@ class PagedHiPStateful:
         assert isinstance(cached_metadata, HiPAttentionOutputMetadata)
         cached_metadata.state = state
 
-        o, metadata = forward_paged_hip(
+        # NOTE: forward paged-hip attention function (state-less)
+        o, metadata, hip_args = forward_paged_hip(
             **kwargs,
             cached_metadata=cached_metadata,
         )
 
+        # NOTE: handle landmark states
         if not is_decode:
             states = None
             if metadata is not None:
@@ -2887,5 +2944,86 @@ class PagedHiPStateful:
                         states = metadata.state
             if states is not None:
                 self.states[layer_id] = states
+        
+        # NOTE: handle delta decode
+        if is_decode and self.using_delta_decode:
+            assert hip_config is not None
+            assert o.shape[0] < self.delta_buffer.shape[1]
+            assert o.shape[1:] == (self.num_heads, self.head_dim), f'{o.shape} == {(self.num_heads, self.head_dim)}'
+            assert layer_id >= 0 and layer_id < self.delta_buffer.shape[0]
+            
+            query = kwargs['query']
+            batch_size = kwargs['batch_size']
+            sm_scale = kwargs['sm_scale']
+            
+            assert o.shape[0] == batch_size
+            
+            layer_config = hip_config.get_layer_config(layer_id, is_decode)
+            delta_buffer = self.delta_buffer[layer_id, :o.shape[0]]
+            
+            # NOTE: if current step is mask refreshing, update delta
+            # you have to set larger sliding window size for masking step, for delta
+            require_update = (
+                isinstance(layer_config.sliding_window_size_for_masking_step, list) and
+                (cached_metadata is not None) and 
+                (cached_metadata.indices is None) and
+                (metadata is not None) and
+                (metadata.indices is not None)
+            )
+            if require_update:
+                # k = kwargs.get('k', None)
+                # v = kwargs.get('v', None)
+                
+                query = query.view(batch_size, 1, self.num_heads, self.head_dim)
+                args = hip_args.clone()
+                if args.rope_range is None:
+                    args.rope_range = (0, query.shape[-1])
+                bsa_fn = get_block_sparse_backend(query, False)
+                args.block_size_k = layer_config.stages[-1].stage_chunk_size
+                args.block_size_q = min(args.block_sparse_block_size_q, layer_config.stages[-1].stage_block_size_q)
+                
+                # print(
+                #     'hi', 
+                #     args.sliding_window_size, 
+                #     args.sink_token_size, 
+                #     layer_config.sliding_window_size_for_masking_step,
+                #     args.block_size_q,
+                #     args.block_size_k,
+                #     metadata.indices.shape,
+                #     args.position_ids.shape,
+                #     query.shape,
+                # )
+                
+                assert query.ndim == 4
+                o_sparse = bsa_fn(
+                    q=(query * sm_scale).to(query.dtype),
+                    k=None,
+                    v=None,
+                    seq_lens=args.position_ids[:, -query.shape[1] :] + 1,
+                    indices=metadata.indices,
+                    ks=metadata.ks,
+                    ks_count=metadata.ks_count,
+                    ks_start_end=metadata.ks_start_end,
+                    access_counter=None,
+                    cache_miss_counter=None,
+                    EXTEND_BACKEND=args.sa_extend_backend,
+                    model_context_length=args.model_context_length,
+                    extend_context_length=args.extend_context_length,
+                    offload_update_cache=False,
+                    args=args,
+                )
+                
+                o_sparse = o_sparse.view(-1, self.num_heads, self.head_dim)
+                assert o.ndim == 3
+                
+                delta = o.float() - o_sparse.float()
+                delta = delta.view(batch_size, 1, self.num_heads, self.head_dim)
+                self.delta_buffer.zero_()
+                delta_buffer.copy_(delta)
+                # NOTE: in require_update step, o is already dense output
+            else:
+                # NOTE: apply delta to output
+                assert delta_buffer.shape[1] == 1
+                o = (o + delta_buffer[:, 0, :, :]).to(o.dtype)
 
         return o, metadata
