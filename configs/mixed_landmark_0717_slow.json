@@ -1,4 +1,5 @@
 {
+    "__delta_attention_args": "window_0-diff_1-w_16-sparse_decode-smooth-extend_self",
     "__head_reduce": 3,
     "__last_dense": -1,
     "__using_landmark": false,
