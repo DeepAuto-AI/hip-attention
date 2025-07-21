@@ -772,7 +772,12 @@ def chunk_controllable_sampling_mask_cuda(
                 tl.sum(mask_tdst.to(tl.int32)) > 0, real_pos_tdst_min, -1
             )
 
-            if Q.dtype.element_ty != tl.float8e5:
+            if (
+                (Q.dtype.element_ty != tl.float8e5)
+                & (Q.dtype.element_ty != tl.float8e4nv)
+                & (Q.dtype.element_ty != tl.float8e4b8)
+                & (Q.dtype.element_ty != tl.float8e4b15)
+            ):
                 q_dtype = Q.dtype.element_ty
             else:
                 q_dtype = tl.float16

@@ -59,9 +59,16 @@ def load_queries(
         + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
+        Q + offs_q, 
+        mask=(mask_h[:, None]) & (mask_d[None, :]), 
+        other=0.0,
     )  # [BLOCK_H, BLOCK_DMODEL]
-    if q.dtype == tl.float8e5:
+    if (
+        (q.dtype == tl.float8e5) 
+        | (q.dtype == tl.float8e4b8) 
+        | (q.dtype == tl.float8e4b15) 
+        | (q.dtype == tl.float8e4nv)
+    ):
         q = q.to(tl.float16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
@@ -96,6 +103,9 @@ def load_queries(
             activate_len = sink_token_size + sliding_window_size + sparse_token_size
             rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
             rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
+        elif EXTEND_BACKEND == "self_extend":
+            rope_tdst = cur_batch_seq_len - 1
+            rope_tdst = rope_tdst.to(tl.int64) - (cur_batch_seq_len - 1) + model_context_length - 1
         else:
             rope_tdst = cur_batch_seq_len - 1
 
@@ -108,7 +118,12 @@ def load_queries(
             mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
             other=0.0,
         )  # [BLOCK_H, BLOCK_DMODEL]
-        if queries_rot.dtype == tl.float8e5:
+        if (
+            (queries_rot.dtype == tl.float8e5)
+            | (queries_rot.dtype == tl.float8e4b8)
+            | (queries_rot.dtype == tl.float8e4b15)
+            | (queries_rot.dtype == tl.float8e4nv)
+        ):
             queries_rot = queries_rot.to(tl.float16)
 
         cos_new = tl.load(
@@ -433,11 +448,29 @@ def _fwd_kernel_stage1(
     else:
         q_1 = None
     
-    if q_0.dtype == tl.float8e5:
+    if (
+        (q_0.dtype == tl.float8e5)
+        | (q_0.dtype == tl.float8e4nv)
+        | (q_0.dtype == tl.float8e4b8)
+        | (q_0.dtype == tl.float8e4b15)
+    ):
         q_0 = q_0.to(tl.float16)
         if q_1 is not None:
             q_1 = q_1.to(tl.float16)
-
+    
+    _K = K_CACHE if USING_PAGES else K
+    if (
+        (_K.dtype.element_ty == tl.float8e5) 
+        | (_K.dtype.element_ty == tl.float8e4nv) 
+        | (_K.dtype.element_ty == tl.float8e4b8)
+        | (_K.dtype.element_ty == tl.float8e4b15)
+        | (_K.dtype.element_ty == tl.uint8)
+        | (_K.dtype.element_ty == tl.int8)
+    ):
+        q_0 = q_0.to(tl.float16)
+        if q_1 is not None:
+            q_1 = q_1.to(tl.float16)
+    
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
         KS_START_END

@@ -54,10 +54,9 @@ def apply_rope_to_keys(
 ):
     tl.static_assert(USING_EXTEND)
 
-    if EXTEND_BACKEND == "self_extend":
-        raise Exception()
-    elif (
+    if (
         (EXTEND_BACKEND == "streaming")
+        | (EXTEND_BACKEND == "self_extend")
         | (EXTEND_BACKEND == "dynamic_extend")
         | (EXTEND_BACKEND == "infllm")
         | (EXTEND_BACKEND == "clamp")
@@ -219,16 +218,20 @@ def apply_rope_to_keys(
                     )
                     if num_sparse_tokens > model_context_length:
                         new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
-                    # new_tsrc = tl.maximum(
-                    #     0,
-                    #     new_tsrc
-                    #     + pos_tdst_min
-                    #     - sliding_window_size
-                    #     - sink_token_size
-                    #     - mask_k
-                    #     + 1,
-                    # )
                     new_tsrc = tl.maximum(0, new_tsrc)
+                elif EXTEND_BACKEND == "self_extend":
+                    SELF_EXTEND_WINDOW: tl.constexpr = 4096
+                    SELF_EXTEND_SCALE: tl.constexpr = 12
+                    
+                    max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
+                    
+                    offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
+                    new_tsrc = tl.where(
+                        offset > (-SELF_EXTEND_WINDOW),
+                        offset + model_context_length - 1,
+                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
+                        + model_context_length - 1 - SELF_EXTEND_WINDOW
+                    )
                 elif EXTEND_BACKEND == "dynamic_extend":
                     # dynamic extend
                     window = model_context_length // 4
@@ -275,11 +278,21 @@ def apply_rope_to_keys(
                     if num_sparse_tokens > model_context_length:
                         new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
                     new_tsrc = tl.maximum(0, new_tsrc)
+                elif EXTEND_BACKEND == "self_extend":
+                    SELF_EXTEND_WINDOW: tl.constexpr = 4096
+                    SELF_EXTEND_SCALE: tl.constexpr = 12
+                    
+                    max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
+                    
+                    offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
+                    new_tsrc = tl.where(
+                        offset > (-SELF_EXTEND_WINDOW),
+                        offset + model_context_length - 1,
+                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
+                        + model_context_length - 1 - SELF_EXTEND_WINDOW
+                    )
                 else:
                     new_tsrc = idx_tsrc
-
-            keys = keys.to(queries.dtype)
-            keys_rot = keys_rot.to(queries.dtype)
 
             cos_new = tl.load(
                 COS
@@ -287,14 +300,14 @@ def apply_rope_to_keys(
                 + cos_sin_idx[:, None].to(tl.int64) * stride_cos_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
-            ).to(keys.dtype)
+            ).to(tl.float32)
             sin_new = tl.load(
                 SIN
                 + new_tsrc[None, :].to(tl.int64) * stride_sin_t
                 + cos_sin_idx[:, None].to(tl.int64) * stride_sin_hid,
                 mask=mask_tsrc[None, :] & rope_mask[:, None],
                 other=0.0,
-            ).to(keys.dtype)
+            ).to(tl.float32)
 
             if EXCLUDE_SLIDING_WINDOW:
                 if EXTEND_BACKEND == "dynamic_extend":
@@ -336,8 +349,11 @@ def apply_rope_to_keys(
 
             keys_adjusted = tl.where(
                 rope_mask[:, None],
-                (keys * cos_new + keys_rot * sin_new).to(keys.dtype),
-                keys,
+                (
+                    keys.to(tl.float32) * cos_new.to(tl.float32) 
+                    + keys_rot.to(tl.float32) * sin_new.to(tl.float32)
+                ).to(queries.dtype),
+                keys.to(queries.dtype),
             )
 
             queries_adjusted = queries
@@ -1018,6 +1034,20 @@ def block_sparse_attention_cuda(
             queries_1 = queries_1.to(tl.float16)
     else:
         queries_1 = None
+    
+    _K = K_CACHE if USING_PAGES else K
+    if (
+        (_K.dtype.element_ty == tl.float8e5) 
+        | (_K.dtype.element_ty == tl.float8e4nv) 
+        | (_K.dtype.element_ty == tl.float8e4b8)
+        | (_K.dtype.element_ty == tl.float8e4b15)
+        | (_K.dtype.element_ty == tl.float8e5b16)
+        | (_K.dtype.element_ty == tl.uint8)
+        | (_K.dtype.element_ty == tl.int8)
+    ):
+        queries_0 = queries_0.to(tl.float16)
+        if queries_1 is not None:
+            queries_1 = queries_1.to(tl.float16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
         if EXTEND_BACKEND == "streaming":
@@ -1026,6 +1056,10 @@ def block_sparse_attention_cuda(
             max_seq_len = tl.max(pos_tdst * mask_tdst)
             rope_tdst = rope_tdst - max_seq_len + activate_len
             rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
+        elif EXTEND_BACKEND == "self_extend":
+            rope_tdst = pos_tdst - 1
+            max_pos_tdst = tl.max(tl.where(mask_tdst, pos_tdst, 0) - 1)
+            rope_tdst = rope_tdst.to(tl.int64) - max_pos_tdst + model_context_length - 1
         else:
             rope_tdst = pos_tdst - 1
 

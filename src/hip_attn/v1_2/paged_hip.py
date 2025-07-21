@@ -1346,6 +1346,7 @@ def _forward_delta_attn(
         num_last_dense = min(num_queries, num_last_dense)
         num_sparse = num_queries - num_last_dense
 
+        context_sparse_raw = context_sparse
         context_sparse = context_sparse[:, :num_sparse]
         if delta_attention_args_adjust_norm_const:
             sparse_mx = sparse_mx[:, :num_sparse]
@@ -1422,8 +1423,8 @@ def _forward_delta_attn(
             idx_tsrc.clamp_min_(seq_len - args.model_context_length)
 
             repeated_k = (
-                (repeated_k * cos[:, idx_tsrc, :, :])
-                + (rotate_half(repeated_k) * sin[:, idx_tsrc, :, :])
+                (repeated_k.to(cos.dtype) * cos[:, idx_tsrc, :, :])
+                + (rotate_half(repeated_k.to(sin.dtype)) * sin[:, idx_tsrc, :, :])
             ).to(repeated_k.dtype)
 
             query_for_recomp = (
@@ -1482,6 +1483,7 @@ def _forward_delta_attn(
                     extend_backend=delta_attention_args_extend,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    model_context_length=args.model_context_length,
                 )
             else:
                 assert k is not None
@@ -1501,6 +1503,7 @@ def _forward_delta_attn(
                     extend_backend=delta_attention_args_extend,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
+                    model_context_length=args.model_context_length,
                 )
             
             if delta_attention_args_adjust_norm_const:
@@ -1723,6 +1726,10 @@ def _forward_delta_attn(
         else:
             from .delta.apply_delta import apply_delta
             
+            if delta_attention_args_extend == "self_extend":
+                # FIXME this is surely bug...
+                last_context_sparse = context_sparse_raw[:, -2048:].clone()
+            
             context = apply_delta(
                 context_dense,
                 context_sparse,
@@ -1731,6 +1738,10 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
+            
+            if delta_attention_args_extend == "self_extend":
+                # FIXME this is surely bug...
+                context[:, -2048:] = last_context_sparse
 
     return context, metadata
 
@@ -1943,7 +1954,7 @@ def _forward_partial_fa3(
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
             
-            is_fp8 = k.dtype in (torch.float8_e5m2, )
+            is_fp8 = k.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
             if is_fp8:
                 query_fa3 = query_fa3.to(torch.float16)
                 k_fa3 = k_fa3.to(torch.float16)

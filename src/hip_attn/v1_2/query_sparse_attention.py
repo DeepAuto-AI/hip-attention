@@ -104,7 +104,7 @@ def _attn_fwd_inner(
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=1):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        idx_tsrc = tl.arange(0, BLOCK_N) + start_n
+        idx_tsrc = offs_n + start_n
         mask_tsrc = idx_tsrc < hi
 
         if not USING_PAGED_CACHE:
@@ -129,33 +129,36 @@ def _attn_fwd_inner(
             )
             if k.dtype == tl.uint8:
                 k = k.to(tl.float8e5, bitcast=True)
-            if k.dtype == tl.float8e5:
+            if (
+                (k.dtype == tl.float8e5)
+                | (k.dtype == tl.float8e4b8)
+                | (k.dtype == tl.float8e4b15)
+                | (k.dtype == tl.float8e4nv)
+            ):
                 k = k.to(tl.float16)
         
-        if k_descale is not None:
-            k *= k_descale
-
         if EXTEND_BACKEND == "none":
             pass
         elif EXTEND_BACKEND == "self_extend":
             idx_hid = tl.arange(0, HEAD_DIM)
             idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
             idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
-            rope_mult = (((idx_hid + HEAD_DIM // 2) < HEAD_DIM) * (-2) + 1)\
-                .to(tl.float32).to(k.dtype)
+            rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
 
-            SELF_EXTEND_WINDOW = 2048
-            SELF_EXTEND_SCALE = 8
+            SELF_EXTEND_WINDOW = 4096
+            SELF_EXTEND_SCALE = 12
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
             
-            offset = idx_tsrc - max_pos_tsrc
+            offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
+            offset = tl.minimum(offset, 0)
             idx_rope = tl.where(
                 offset > (-SELF_EXTEND_WINDOW),
                 offset + MODEL_CONTEXT_LENGTH - 1,
                 (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
                 + MODEL_CONTEXT_LENGTH - 1 - SELF_EXTEND_WINDOW
             )
+            # idx_rope = idx_tsrc
 
             if not USING_PAGED_CACHE:
                 k_rot = tl.load(
@@ -179,25 +182,42 @@ def _attn_fwd_inner(
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 )
-                if k_rot.dtype == tl.uint8:
-                    k_rot = k_rot.to(tl.float8e5, bitcast=True)
-                if k_rot.dtype == tl.float8e5:
-                    k_rot = k_rot.to(tl.float16)
+            
+            if k_rot.dtype == tl.uint8:
+                k_rot = k_rot.to(tl.float8e5, bitcast=True)
+            if (
+                (k_rot.dtype == tl.float8e5) |
+                (k_rot.dtype == tl.float8e4nv) |
+                (k_rot.dtype == tl.float8e4b8) |
+                (k_rot.dtype == tl.float8e5b16) |
+                (k_rot.dtype == tl.float8e4b15)
+            ):
+                k_rot = k_rot.to(tl.float16)
 
             cos = tl.load(
                 COS
                 + idx_rope[None, :] * stride_cos_t
                 + idx_hid_cos_sin[:, None] * stride_cos_hid,
+                mask=mask_tsrc[None, :],
+                other=0.0,
             )
             sin = tl.load(
                 SIN
                 + idx_rope[None, :] * stride_sin_t
                 + idx_hid_cos_sin[:, None] * stride_sin_hid,
+                mask=mask_tsrc[None, :],
+                other=0.0,
             )
 
-            k = (k * cos.to(k.dtype) + k_rot * rope_mult.to(k.dtype)[:, None] * sin.to(k.dtype)).to(k.dtype)
+            k = (
+                k.to(tl.float32) * cos.to(tl.float32) 
+                + k_rot.to(tl.float32) * rope_mult.to(tl.float32)[:, None] * sin.to(tl.float32)
+            ).to(k.dtype)
         else:
             raise Exception(EXTEND_BACKEND)
+        
+        if k_descale is not None:
+            k *= k_descale
         
         # qk = tl.dot(q, k)
 
@@ -408,7 +428,7 @@ def _attn_fwd(
     BLOCK_N: tl.constexpr,
     V_FP8: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
-    MODEL_CONTEXT_LENGTH=131072,
+    MODEL_CONTEXT_LENGTH=32768,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -470,7 +490,7 @@ def _attn_fwd(
     mask_idx = tl.load(
         MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
         mask=mask_m,
-        other=0.0,
+        other=0,
     )
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float("-inf"))
@@ -498,17 +518,28 @@ def _attn_fwd(
         padding_option="zero",
     )
     
+    _K = K_CACHE if USING_PAGED_CACHE else K
+    if (
+        (_K.dtype.element_ty == tl.float8e5) 
+        | (_K.dtype.element_ty == tl.float8e4nv) 
+        | (_K.dtype.element_ty == tl.float8e4b8)
+        | (_K.dtype.element_ty == tl.float8e4b15)
+        | (_K.dtype.element_ty == tl.uint8)
+        | (_K.dtype.element_ty == tl.int8)
+    ):
+        q = q.to(tl.float16)
+    
     if EXTEND_BACKEND == "none":
         q_rot = None
     elif EXTEND_BACKEND == "self_extend":
         idx_hid = tl.arange(0, HEAD_DIM)
         idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
         idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
-        rope_mult = (((idx_hid + HEAD_DIM // 2) < HEAD_DIM) * (-2) + 1)\
-            .to(tl.float32).to(q.dtype)
+        rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
         # idx_rope = tl.full((BLOCK_M,), value=MODEL_CONTEXT_LENGTH - 1, dtype=tl.int64)
         max_mask_idx = tl.max(tl.where(mask_m, mask_idx, 0))
         idx_rope = mask_idx.to(tl.int64) - max_mask_idx + MODEL_CONTEXT_LENGTH - 1
+        # idx_rope = mask_idx
 
         q_rot = tl.load(
             Q
@@ -524,14 +555,21 @@ def _attn_fwd(
             COS
             + idx_rope[:, None] * stride_cos_t
             + idx_hid_cos_sin[None, :] * stride_cos_hid,
+            mask=mask_m[:, None],
+            other=0.0,
         )
         sin = tl.load(
             SIN
             + idx_rope[:, None] * stride_sin_t
             + idx_hid_cos_sin[None, :] * stride_sin_hid,
+            mask=mask_m[:, None],
+            other=0.0,
         )
 
-        q = (q * cos.to(q.dtype) + q_rot * rope_mult.to(q.dtype)[None, :] * sin.to(q.dtype)).to(q.dtype)
+        q = (
+            q.to(tl.float32) * cos.to(tl.float32) 
+            + q_rot.to(tl.float32) * rope_mult.to(tl.float32)[None, :] * sin.to(tl.float32)
+        ).to(q.dtype)
     else:
         raise Exception()
 
@@ -560,7 +598,8 @@ def _attn_fwd(
     else:
         lo = 0
         mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(tl.int32)
-        hi = (tl.max(mask_idx) + 1).to(tl.int32)
+        tl.multiple_of(mid, BLOCK_N)
+        hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
 
         if N_SPLIT > 1:
             k_chunk_size = tl.cdiv(hi, N_SPLIT)
@@ -936,6 +975,7 @@ class _attention(torch.autograd.Function):
         extend_backend: Literal["self_extend", "none"],
         rope_cos: Optional[torch.Tensor],
         rope_sin: Optional[torch.Tensor],
+        model_context_length: int,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -964,9 +1004,9 @@ class _attention(torch.autograd.Function):
         N_HEAD = q.shape[1]
         N_BATCH = q.shape[0]
         V_FP8 = (
-            v.dtype == torch.float8_e5m2
-            if not USING_PAGED_CACHE
-            else v_cache.dtype == torch.float8_e5m2
+            (v if not USING_PAGED_CACHE else v_cache).dtype in (
+                torch.float8_e5m2, torch.float8_e4m3fn
+            )
         )
 
         # NOTE: this is for backward
@@ -1111,6 +1151,7 @@ class _attention(torch.autograd.Function):
                 N_SPLIT=N_SPLIT,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
+                MODEL_CONTEXT_LENGTH=model_context_length,
                 **extra_kern_args,
             )
 
@@ -1245,6 +1286,7 @@ class _attention(torch.autograd.Function):
                 N_SPLIT=1,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
+                MODEL_CONTEXT_LENGTH=model_context_length,
                 **extra_kern_args,
             )
 
@@ -1278,6 +1320,7 @@ def query_sparse_attention(
     extend_backend: Literal["self_extend", "none"] = "none",
     rope_cos: Optional[torch.Tensor] = None,
     rope_sin: Optional[torch.Tensor] = None,
+    model_context_length: int = 131072,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -1298,4 +1341,5 @@ def query_sparse_attention(
         extend_backend,
         rope_cos,
         rope_sin,
+        model_context_length,
     )
