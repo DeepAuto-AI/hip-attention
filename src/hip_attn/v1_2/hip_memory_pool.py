@@ -143,7 +143,9 @@ class HiPMetadataCachePool:
                 layer_idx, "mask_cache_miss_count", [num_q_blocks], torch.int64
             )
 
-            self.init_buffer(layer_idx, "sa_access_count", [num_q_blocks], torch.int64)
+            self.init_buffer(
+                layer_idx, "sa_access_count", [num_q_blocks], torch.int64
+            )
             self.init_buffer(
                 layer_idx, "sa_unique_access_count", [num_q_blocks], torch.int64
             )
@@ -161,6 +163,7 @@ class HiPMetadataCachePool:
                     chunk_count = (
                         min(stage.stage_k, max_context_length) // stage.stage_chunk_size
                     )
+                    assert chunk_count >= 0, f"min({stage.stage_k}, {max_context_length}={context_length}-{layer_config.sliding_window_size}-{layer_config.sink_token_size}) // {stage.stage_chunk_size}"
                     self.init_buffer(
                         layer_idx,
                         f"stage_{i_stage}_indices_left",
