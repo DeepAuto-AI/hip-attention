@@ -278,7 +278,7 @@ class HiPAttentionArgs:
 
     bsa_return_running_statistics: bool = False
     bsa_sliding_window_size: int = -1
-    
+
     k_descale: Optional[Tensor] = None
     v_descale: Optional[Tensor] = None
 
@@ -534,7 +534,7 @@ class HiPAttentionArgs:
 
         is_fp8 = k_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
         index_dtype = torch.uint8 if is_fp8 else k_cache.dtype
-        
+
         k = k_cache.view(index_dtype)[:, 0, :, :][
             self.block_table[
                 :,
@@ -570,7 +570,7 @@ class HiPAttentionArgs:
 
         if seq_len is None:
             seq_len = self.block_table.shape[1]
-        
+
         is_fp8 = v_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
         index_dtype = torch.uint8 if is_fp8 else v_cache.dtype
 

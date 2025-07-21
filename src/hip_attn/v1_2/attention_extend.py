@@ -74,6 +74,7 @@ DEFAULT_VALUE_HIP_HEAD_REDUCE = "1"
 
 _NUM_STREAMING_MULTIPROCESSOR = None
 
+
 def num_streaming_multiprocessor():
     global _NUM_STREAMING_MULTIPROCESSOR
     if _NUM_STREAMING_MULTIPROCESSOR is None:
@@ -893,8 +894,10 @@ def dual_stage_quadratic_hip_attention(
                         and get_world_size() > 1
                         and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
-                        warnings.warn("TP all gather is used for head reduce, this may degrade throughput.")
-                        
+                        warnings.warn(
+                            "TP all gather is used for head reduce, this may degrade throughput."
+                        )
+
                         out_scores_tp = out_scores
                         out_scores = (
                             tensor_model_parallel_all_gather(
@@ -1055,8 +1058,7 @@ def dual_stage_quadratic_hip_attention(
                     )
                 else:
                     next_stage_k = (
-                        args.second_stage_k
-                        // args.stages[i_stage].stage_chunk_size
+                        args.second_stage_k // args.stages[i_stage].stage_chunk_size
                     )
                 next_stage_k = min(next_stage_k, indices_left.shape[-1])
                 _, t_indices = out_scores[..., : indices_left.shape[-1]].topk(
@@ -1296,7 +1298,7 @@ def dual_stage_quadratic_hip_attention(
 
         # NOTE: convert format and taking unique in indices
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
-        
+
         require_expand_future = False
         expand_future_window = 16
         if require_expand_future and (BDST == 1):
@@ -1305,7 +1307,7 @@ def dual_stage_quadratic_hip_attention(
                 dups.append(indices + i)
             indices = torch.cat(dups, dim=-1)
 
-        require_post_unique = True # BDST > 1
+        require_post_unique = True  # BDST > 1
         if require_post_unique or require_expand_future:
             indices, t_sort_1 = indices.sort(dim=-1)
             indices = indices // args.block_size_k * args.block_size_k
@@ -1313,7 +1315,7 @@ def dual_stage_quadratic_hip_attention(
             unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
             indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
             indices, t_sort_2 = indices.sort(dim=-1)
-        
+
         active_mask = indices < (
             position_ids[:, :: args.block_size_q, None].repeat_interleave(HEAD, 0)
             + args.block_size_q
@@ -1490,7 +1492,9 @@ def dual_stage_quadratic_hip_attention(
         k = None
         v = None
 
-    block_sparse_attention_backend = get_block_sparse_backend(q_bsa, args.disable_flashdecode)
+    block_sparse_attention_backend = get_block_sparse_backend(
+        q_bsa, args.disable_flashdecode
+    )
     # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
     # block_sparse_attention_backend = tilelang_bsa
 

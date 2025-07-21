@@ -109,11 +109,7 @@ def _attn_fwd_inner(
 
         if not USING_PAGED_CACHE:
             tl.static_assert(EXTEND_BACKEND == "none")
-            k = tl.load(
-                K_block_ptr, 
-                boundary_check=(1,), 
-                padding_option="zero"
-            )
+            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
         else:
             idx_t = tl.load(
                 BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -136,7 +132,7 @@ def _attn_fwd_inner(
                 | (k.dtype == tl.float8e4nv)
             ):
                 k = k.to(tl.float16)
-        
+
         if EXTEND_BACKEND == "none":
             pass
         elif EXTEND_BACKEND == "self_extend":
@@ -149,14 +145,16 @@ def _attn_fwd_inner(
             SELF_EXTEND_SCALE = 12
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
-            
+
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
             offset = tl.minimum(offset, 0)
             idx_rope = tl.where(
                 offset > (-SELF_EXTEND_WINDOW),
                 offset + MODEL_CONTEXT_LENGTH - 1,
-                (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
-                + MODEL_CONTEXT_LENGTH - 1 - SELF_EXTEND_WINDOW
+                (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
+                + MODEL_CONTEXT_LENGTH
+                - 1
+                - SELF_EXTEND_WINDOW,
             )
             # idx_rope = idx_tsrc
 
@@ -166,12 +164,11 @@ def _attn_fwd_inner(
                     + idx_tsrc[None, :] * stride_k_rot_tsrc
                     + idx_hid_rot[:, None] * stride_k_rot_hid,
                     mask=mask_tsrc,
-                    other=0.0
+                    other=0.0,
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE 
-                    + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
                 k_rot = tl.load(
@@ -182,15 +179,15 @@ def _attn_fwd_inner(
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 )
-            
+
             if k_rot.dtype == tl.uint8:
                 k_rot = k_rot.to(tl.float8e5, bitcast=True)
             if (
-                (k_rot.dtype == tl.float8e5) |
-                (k_rot.dtype == tl.float8e4nv) |
-                (k_rot.dtype == tl.float8e4b8) |
-                (k_rot.dtype == tl.float8e5b16) |
-                (k_rot.dtype == tl.float8e4b15)
+                (k_rot.dtype == tl.float8e5)
+                | (k_rot.dtype == tl.float8e4nv)
+                | (k_rot.dtype == tl.float8e4b8)
+                | (k_rot.dtype == tl.float8e5b16)
+                | (k_rot.dtype == tl.float8e4b15)
             ):
                 k_rot = k_rot.to(tl.float16)
 
@@ -210,15 +207,17 @@ def _attn_fwd_inner(
             )
 
             k = (
-                k.to(tl.float32) * cos.to(tl.float32) 
-                + k_rot.to(tl.float32) * rope_mult.to(tl.float32)[:, None] * sin.to(tl.float32)
+                k.to(tl.float32) * cos.to(tl.float32)
+                + k_rot.to(tl.float32)
+                * rope_mult.to(tl.float32)[:, None]
+                * sin.to(tl.float32)
             ).to(k.dtype)
         else:
             raise Exception(EXTEND_BACKEND)
-        
+
         if k_descale is not None:
             k *= k_descale
-        
+
         # qk = tl.dot(q, k)
 
         q_dtype = q.dtype
@@ -226,10 +225,9 @@ def _attn_fwd_inner(
         cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
         ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
-        qk = tl.dot(
-            (q * cq).to(q_dtype),
-            (k.to(q_dtype) * ck).to(q_dtype)
-        ).to(tl.float32)
+        qk = tl.dot((q * cq).to(q_dtype), (k.to(q_dtype) * ck).to(q_dtype)).to(
+            tl.float32
+        )
 
         qk = qk * 1.44269504
 
@@ -263,10 +261,10 @@ def _attn_fwd_inner(
                 mask=mask_tsrc[:, None],
                 other=0.0,
             )
-        
+
         if v_descale is not None:
             v *= v_descale
-        
+
         # NOTE FIXME why this conversion needed?
         # if fp8_v:
         #     p = p.to(tl.float8e5)
@@ -332,12 +330,15 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=[
-    # "N_CTX", 
-    # "N_KV", 
-    "HEAD_DIM",
-    "USING_PAGED_CACHE",
-])
+@triton.autotune(
+    list(filter(keep, configs)),
+    key=[
+        # "N_CTX",
+        # "N_KV",
+        "HEAD_DIM",
+        "USING_PAGED_CACHE",
+    ],
+)
 @triton.jit
 def _attn_fwd(
     Q,
@@ -355,22 +356,18 @@ def _attn_fwd(
     stride_qh,
     stride_qm,
     stride_qk,
-    
     stride_kz,
     stride_kh,
     stride_kn,
     stride_kk,
-    
     stride_vz,
     stride_vh,
     stride_vk,
     stride_vn,
-    
     stride_oz,
     stride_oh,
     stride_om,
     stride_on,
-    
     stride_mz,
     stride_mm,
     USING_PAGED_CACHE: tl.constexpr,
@@ -499,36 +496,32 @@ def _attn_fwd(
     # load scales
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
-    
+
     if K_DESCALE is not None:
-        k_descale = tl.load(
-            K_DESCALE + off_z * H + off_h
-        )
-        v_descale = tl.load(
-            V_DESCALE + off_z * H + off_h
-        )
+        k_descale = tl.load(K_DESCALE + off_z * H + off_h)
+        v_descale = tl.load(V_DESCALE + off_z * H + off_h)
     else:
         k_descale = None
         v_descale = None
-    
+
     # load q: it will stay in SRAM throughout
     q = tl.load(
         Q_block_ptr,
         boundary_check=(0,),
         padding_option="zero",
     )
-    
+
     _K = K_CACHE if USING_PAGED_CACHE else K
     if (
-        (_K.dtype.element_ty == tl.float8e5) 
-        | (_K.dtype.element_ty == tl.float8e4nv) 
+        (_K.dtype.element_ty == tl.float8e5)
+        | (_K.dtype.element_ty == tl.float8e4nv)
         | (_K.dtype.element_ty == tl.float8e4b8)
         | (_K.dtype.element_ty == tl.float8e4b15)
         | (_K.dtype.element_ty == tl.uint8)
         | (_K.dtype.element_ty == tl.int8)
     ):
         q = q.to(tl.float16)
-    
+
     if EXTEND_BACKEND == "none":
         q_rot = None
     elif EXTEND_BACKEND == "self_extend":
@@ -543,14 +536,14 @@ def _attn_fwd(
 
         q_rot = tl.load(
             Q
-            + off_z.to(tl.int64) * stride_qz 
+            + off_z.to(tl.int64) * stride_qz
             + off_h.to(tl.int64) * stride_qh
             + offs_m.to(tl.int64) * stride_qm
             + idx_hid_rot.to(tl.int64) * stride_qk,
             mask=mask_m,
             other=0.0,
         )
-    
+
         cos = tl.load(
             COS
             + idx_rope[:, None] * stride_cos_t
@@ -567,8 +560,10 @@ def _attn_fwd(
         )
 
         q = (
-            q.to(tl.float32) * cos.to(tl.float32) 
-            + q_rot.to(tl.float32) * rope_mult.to(tl.float32)[None, :] * sin.to(tl.float32)
+            q.to(tl.float32) * cos.to(tl.float32)
+            + q_rot.to(tl.float32)
+            * rope_mult.to(tl.float32)[None, :]
+            * sin.to(tl.float32)
         ).to(q.dtype)
     else:
         raise Exception()
@@ -597,7 +592,9 @@ def _attn_fwd(
         )
     else:
         lo = 0
-        mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(tl.int32)
+        mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(
+            tl.int32
+        )
         tl.multiple_of(mid, BLOCK_N)
         hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
 
@@ -805,7 +802,7 @@ def _attn_fwd(
     if N_SPLIT > 1:
         # checkout acc, l_i, m_i
         tl.store(
-            ACC 
+            ACC
             + off_z.to(tl.int64) * stride_acc_bsz
             + off_h.to(tl.int64) * stride_acc_head
             + idx_split.to(tl.int64) * stride_acc_split
@@ -832,7 +829,7 @@ def _attn_fwd(
             mask=mask_m,
             value=l_i,
         )
-    
+
     if N_SPLIT <= 1:
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
@@ -1003,10 +1000,9 @@ class _attention(torch.autograd.Function):
         N_CTX = q.shape[2]
         N_HEAD = q.shape[1]
         N_BATCH = q.shape[0]
-        V_FP8 = (
-            (v if not USING_PAGED_CACHE else v_cache).dtype in (
-                torch.float8_e5m2, torch.float8_e4m3fn
-            )
+        V_FP8 = (v if not USING_PAGED_CACHE else v_cache).dtype in (
+            torch.float8_e5m2,
+            torch.float8_e4m3fn,
         )
 
         # NOTE: this is for backward
@@ -1057,7 +1053,7 @@ class _attention(torch.autograd.Function):
             q.shape[1] <= 128
         )  # N HEAD should be smaller than 128. this could be adjusted.
         assert len(mask.size()) == 2, "expecting mask to be 2D"
-        
+
         if extend_backend != "none":
             assert isinstance(rope_sin, torch.Tensor)
             assert isinstance(rope_cos, torch.Tensor)

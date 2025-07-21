@@ -7,8 +7,9 @@ import triton.language as tl
 
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_metadata import safe_stride
-from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 from hip_attn.v1_2.utils import capture
+from hip_attn.v1_2.uvm_gpu_cache import load_tokens
+
 
 @triton.jit
 def load_keys_with_rope(
@@ -588,6 +589,7 @@ def get_decode_scan_stage_configs():
             )
     return configs
 
+
 @triton.autotune(
     configs=get_decode_scan_stage_configs(),
     key=[
@@ -598,7 +600,7 @@ def get_decode_scan_stage_configs():
     restore_value=[
         "INDICES_LEFT",
         "INDICES_RIGHT",
-    ]
+    ],
 )
 @triton.jit
 def chunk_controllable_sampling_mask_cuda(
@@ -1519,6 +1521,7 @@ def chunk_controllable_sampling_mask_cuda(
                         mask=mask_chunk,
                     )
 
+
 @triton.autotune(
     configs=get_decode_scan_stage_configs(),
     key=[
@@ -1529,7 +1532,7 @@ def chunk_controllable_sampling_mask_cuda(
     restore_value=[
         "INDICES_LEFT",
         "INDICES_RIGHT",
-    ]
+    ],
 )
 @triton.jit
 def decode_chunk_controllable_sampling_mask_cuda(
@@ -1645,12 +1648,12 @@ def decode_chunk_controllable_sampling_mask_cuda(
 
     # NOTE (BHEAD, TDST, BCHUNK, BSZ)
     pid = tl.program_id(0).to(tl.int64)
-    
+
     idx_bhead = pid % BHEAD
     idx_head = idx_bhead * BLOCK_HEAD + tl.arange(0, BLOCK_HEAD_PADDED)
     mask_head = (idx_head < HEAD) & (idx_head < (idx_bhead * BLOCK_HEAD + BLOCK_HEAD))
     pid = pid // BHEAD
-    
+
     idx_tdst = pid % TDST
     idx_bdst = idx_tdst // BLOCK_SIZE_Q
     pid = pid // TDST
@@ -1670,11 +1673,7 @@ def decode_chunk_controllable_sampling_mask_cuda(
         idx_hid_q1 = None
         mask_hid_q1 = None
 
-    pos_tdst = tl.load(
-        POS 
-        + idx_bsz * stride_pos_bsz 
-        + idx_tdst * stride_pos_tdst
-    )
+    pos_tdst = tl.load(POS + idx_bsz * stride_pos_bsz + idx_tdst * stride_pos_tdst)
 
     if Q.dtype.element_ty != tl.float8e5:
         q_dtype = Q.dtype.element_ty
@@ -1685,7 +1684,7 @@ def decode_chunk_controllable_sampling_mask_cuda(
 
     if pos_tdst < 0:
         return
-    
+
     pos_tdst_min = (pos_tdst - sliding_window_size).to(tl.int32)
     pos_tdst_min = tl.maximum(pos_tdst_min, 0)
 
@@ -1713,9 +1712,7 @@ def decode_chunk_controllable_sampling_mask_cuda(
     ).to(tl.int32)
 
     if (pos_tdst + BLOCK_SIZE_Q * SCAN_STRIDE) >= tl.min(idx_tsrc_left):
-        max_chunk_size = tl.max(idx_tsrc_right - idx_tsrc_left).to(
-            tl.float32
-        )
+        max_chunk_size = tl.max(idx_tsrc_right - idx_tsrc_left).to(tl.float32)
 
         scores = tl.zeros((BLOCK_CHUNK,), dtype=tl.float32) - 32000.0
 
@@ -1986,27 +1983,19 @@ def decode_chunk_controllable_sampling_mask_cuda(
                     ).to(scores.dtype)
 
             if REDUCE == "max":
-                scores_left = tl.where(
-                    mask_head[:, None], scores_left, float("-inf")
-                )
-                scores_left = tl.max(scores_left, axis=0).to(
-                    scores_left.dtype
-                )
+                scores_left = tl.where(mask_head[:, None], scores_left, float("-inf"))
+                scores_left = tl.max(scores_left, axis=0).to(scores_left.dtype)
             elif REDUCE == "mean":
-                scores_left = tl.where(
-                    mask_head[:, None], scores_left, float("0")
-                )
-                scores_left = tl.sum(scores_left, axis=0).to(
+                scores_left = tl.where(mask_head[:, None], scores_left, float("0"))
+                scores_left = tl.sum(scores_left, axis=0).to(scores_left.dtype)
+                scores_left = (scores_left / tl.sum(mask_head.to(tl.float32))).to(
                     scores_left.dtype
                 )
-                scores_left = (
-                    scores_left / tl.sum(mask_head.to(tl.float32))
-                ).to(scores_left.dtype)
             else:
                 raise Exception()
-            scores_left = tl.where(
-                mask_tsrc_active, scores_left, float("-inf")
-            ).to(scores_left.dtype)
+            scores_left = tl.where(mask_tsrc_active, scores_left, float("-inf")).to(
+                scores_left.dtype
+            )
 
             idx_tsrc = (idx_tsrc_center + idx_tsrc_right) // 2
 
@@ -2180,27 +2169,19 @@ def decode_chunk_controllable_sampling_mask_cuda(
                     ).to(scores.dtype)
 
             if REDUCE == "max":
-                scores_right = tl.where(
-                    mask_head[:, None], scores_right, float("-inf")
-                )
-                scores_right = tl.max(scores_right, axis=0).to(
-                    scores_right.dtype
-                )
+                scores_right = tl.where(mask_head[:, None], scores_right, float("-inf"))
+                scores_right = tl.max(scores_right, axis=0).to(scores_right.dtype)
             elif REDUCE == "mean":
-                scores_right = tl.where(
-                    mask_head[:, None], scores_right, float("0")
-                )
-                scores_right = tl.sum(scores_right, axis=0).to(
+                scores_right = tl.where(mask_head[:, None], scores_right, float("0"))
+                scores_right = tl.sum(scores_right, axis=0).to(scores_right.dtype)
+                scores_right = (scores_right / tl.sum(mask_head.to(tl.float32))).to(
                     scores_right.dtype
                 )
-                scores_right = (
-                    scores_right / tl.sum(mask_head.to(tl.float32))
-                ).to(scores_right.dtype)
             else:
                 raise Exception()
-            scores_right = tl.where(
-                mask_tsrc_active, scores_right, float("-inf")
-            ).to(scores_right.dtype)
+            scores_right = tl.where(mask_tsrc_active, scores_right, float("-inf")).to(
+                scores_right.dtype
+            )
 
             mask_left_win = scores_left > scores_right
             idx_tsrc_left = tl.where(
@@ -2270,16 +2251,20 @@ def decode_chunk_controllable_sampling_mask_cuda(
             mask=mask_chunk[None, :] & mask_head[:, None],
         )
 
+
 _NUM_STREAMING_MULTIPROCESSOR = None
+
 
 def num_streaming_multiprocessor():
     import numba.cuda
+
     global _NUM_STREAMING_MULTIPROCESSOR
     if _NUM_STREAMING_MULTIPROCESSOR is None:
         _NUM_STREAMING_MULTIPROCESSOR = (
             numba.cuda.get_current_device().MULTIPROCESSOR_COUNT
         )
     return _NUM_STREAMING_MULTIPROCESSOR
+
 
 @capture
 def chunk_controllable_sampling_mask(
@@ -2306,17 +2291,19 @@ def chunk_controllable_sampling_mask(
     HEAD_KV,
     extend_backend,
 ):
-    using_online_cache_update = (args.online_update_cache and (args.offload_cache is not None))
-    
+    using_online_cache_update = args.online_update_cache and (
+        args.offload_cache is not None
+    )
+
     assert q.ndim == 4
     if (q.shape[1] == 1) and not using_online_cache_update:
         HEAD_REPEAT = HEAD // HEAD_KV
         BLOCK_HEAD = HEAD_REPEAT
         assert triton.next_power_of_2(BLOCK_HEAD) == BLOCK_HEAD
         BLOCK_HEAD_PADDED = max(BLOCK_HEAD, 16)
-        
+
         assert TDST == q.shape[1]
-        
+
         grid = (
             triton.cdiv(HEAD, BLOCK_HEAD)
             * TDST
@@ -2394,7 +2381,7 @@ def chunk_controllable_sampling_mask(
             sm_count = num_streaming_multiprocessor()
             group_jobs = triton.cdiv(njobs, sm_count)
             grid = (min(sm_count, njobs),)
-        
+
         chunk_controllable_sampling_mask_cuda[grid](
             q,
             *q.stride(),

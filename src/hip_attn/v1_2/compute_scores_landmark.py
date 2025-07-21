@@ -78,7 +78,9 @@ configs = [
         num_warps=w,
     )
     for BLOCK_CHUNK in [64, 128, 256]
-    for s in [3,]
+    for s in [
+        3,
+    ]
     for w in [4, 8]
     # for BM in [128,]
     # for BN in [64,]
@@ -92,10 +94,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(
-    list(filter(keep, configs)), 
-    key=["HID"]
-)
+@triton.autotune(list(filter(keep, configs)), key=["HID"])
 @triton.jit
 def _compute_scores_landmark_cuda(
     Q,
@@ -269,7 +268,7 @@ def _compute_scores_landmark_cuda(
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 )
-            
+
             if keys.dtype == tl.float8e5:
                 keys = keys.to(tl.float16)
 

@@ -149,9 +149,11 @@ class HiPAttentionPerLayerConfig:
                 parsed_json.pop("scan_extend_backend")
             if "stages" in parsed_json:
                 self.stages = [
-                    ScanStage(**stage) 
-                    if len(stage.keys()) > 0 else 
-                    ScanStage(64, 1, 32, 32768, 1) 
+                    (
+                        ScanStage(**stage)
+                        if len(stage.keys()) > 0
+                        else ScanStage(64, 1, 32, 32768, 1)
+                    )
                     for stage in parsed_json["stages"]
                 ]
                 parsed_json.pop("stages")
@@ -550,7 +552,7 @@ class HiPAttentionConfig:
 
     def get_layer_config(self, layer_id: int, is_decode: bool):
         is_dense = layer_id in self.dense_layers
-        
+
         if not is_decode:
             if len(self.prefill_layers) == 2:
                 layer_config = self.prefill_layers[0 if is_dense else 1]

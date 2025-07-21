@@ -59,14 +59,14 @@ def load_queries(
         + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, 
-        mask=(mask_h[:, None]) & (mask_d[None, :]), 
+        Q + offs_q,
+        mask=(mask_h[:, None]) & (mask_d[None, :]),
         other=0.0,
     )  # [BLOCK_H, BLOCK_DMODEL]
     if (
-        (q.dtype == tl.float8e5) 
-        | (q.dtype == tl.float8e4b8) 
-        | (q.dtype == tl.float8e4b15) 
+        (q.dtype == tl.float8e5)
+        | (q.dtype == tl.float8e4b8)
+        | (q.dtype == tl.float8e4b15)
         | (q.dtype == tl.float8e4nv)
     ):
         q = q.to(tl.float16)
@@ -105,7 +105,12 @@ def load_queries(
             rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
         elif EXTEND_BACKEND == "self_extend":
             rope_tdst = cur_batch_seq_len - 1
-            rope_tdst = rope_tdst.to(tl.int64) - (cur_batch_seq_len - 1) + model_context_length - 1
+            rope_tdst = (
+                rope_tdst.to(tl.int64)
+                - (cur_batch_seq_len - 1)
+                + model_context_length
+                - 1
+            )
         else:
             rope_tdst = cur_batch_seq_len - 1
 
@@ -365,17 +370,17 @@ def _fwd_kernel_stage1(
         B_Seqlen + cur_batch.to(tl.int64) * stride_pos_bsz + idx_tdst * stride_pos_tdst
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
-    
+
     if K_DESCALE is not None:
         k_descale = tl.load(
-            K_DESCALE +
-            cur_batch.to(tl.int64) * (q_head_num // kv_group_num) +
-            (cur_head // kv_group_num).to(tl.int64),
+            K_DESCALE
+            + cur_batch.to(tl.int64) * (q_head_num // kv_group_num)
+            + (cur_head // kv_group_num).to(tl.int64),
         )
         v_descale = tl.load(
-            V_DESCALE +
-            cur_batch.to(tl.int64) * (q_head_num // kv_group_num) +
-            (cur_head // kv_group_num).to(tl.int64),
+            V_DESCALE
+            + cur_batch.to(tl.int64) * (q_head_num // kv_group_num)
+            + (cur_head // kv_group_num).to(tl.int64),
         )
     else:
         k_descale = None
@@ -447,7 +452,7 @@ def _fwd_kernel_stage1(
         )
     else:
         q_1 = None
-    
+
     if (
         (q_0.dtype == tl.float8e5)
         | (q_0.dtype == tl.float8e4nv)
@@ -457,11 +462,11 @@ def _fwd_kernel_stage1(
         q_0 = q_0.to(tl.float16)
         if q_1 is not None:
             q_1 = q_1.to(tl.float16)
-    
+
     _K = K_CACHE if USING_PAGES else K
     if (
-        (_K.dtype.element_ty == tl.float8e5) 
-        | (_K.dtype.element_ty == tl.float8e4nv) 
+        (_K.dtype.element_ty == tl.float8e5)
+        | (_K.dtype.element_ty == tl.float8e4nv)
         | (_K.dtype.element_ty == tl.float8e4b8)
         | (_K.dtype.element_ty == tl.float8e4b15)
         | (_K.dtype.element_ty == tl.uint8)
@@ -470,7 +475,7 @@ def _fwd_kernel_stage1(
         q_0 = q_0.to(tl.float16)
         if q_1 is not None:
             q_1 = q_1.to(tl.float16)
-    
+
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
         KS_START_END
@@ -822,7 +827,7 @@ def _fwd_kernel_stage1(
                     if keys_1 is not None:
                         keys_1 *= k_descale
                         keys_rot_1 *= k_descale
-                
+
                 values = load_tokens(
                     V,
                     stride_v_bsz,
@@ -889,7 +894,7 @@ def _fwd_kernel_stage1(
 
                 if v_descale is not None:
                     values *= v_descale
-                
+
                 acc, e_sum, e_max = block_sparse_attention_cuda_step(
                     q_0,  # FIXME: q is [BLOCK_H, BLOCK_DMODEL]: the first axis is head, not time
                     q_1,
@@ -1239,7 +1244,7 @@ def _fwd_kernel_stage1(
                 if keys_1 is not None:
                     keys_1 *= k_descale
                     keys_rot_1 *= k_descale
-            
+
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1306,7 +1311,7 @@ def _fwd_kernel_stage1(
 
             if v_descale is not None:
                 values *= v_descale
-            
+
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
                 q_0,
                 q_1,
@@ -1722,7 +1727,7 @@ def _fwd_kernel_stage1(
 
             if v_descale is not None:
                 values *= v_descale
-            
+
             # idx_bk = (
             #     tl.arange(0, BLOCK_BK)
             #     + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
@@ -1887,7 +1892,7 @@ def decode_block_sparse_attention_stage1(
         dtype=torch.float32,
         device=q.device,
     )
-    
+
     if k_descale is not None:
         assert k_descale.is_contiguous()
         assert v_descale.is_contiguous()
@@ -2245,7 +2250,7 @@ def decode_block_sparse_attention(
     else:
         raise Exception()
     assert seq_lens.ndim == 2
-    
+
     if k_descale is not None:
         k_descale = k_descale.contiguous()
         v_descale = v_descale.contiguous()

@@ -137,7 +137,9 @@ def _sw_score_sample(
             other=0.0,
         )
 
-    dot_dtype = torch.float16 if Q.dtype.element_ty == tl.float8e5 else Q.dtype.element_ty
+    dot_dtype = (
+        torch.float16 if Q.dtype.element_ty == tl.float8e5 else Q.dtype.element_ty
+    )
     keys = keys.to(dot_dtype)
 
     acc = tl.zeros((BLOCK_TSRC,), dtype=tl.float32) + 42
@@ -160,7 +162,7 @@ def _sw_score_sample(
             mask=mask_tdst[:, None],
             other=0,
         ).to(dot_dtype)
-        
+
         scores = tl.dot(queries, keys)
 
         mask = pos_tdst[:, None] >= pos_tsrc[None, :]

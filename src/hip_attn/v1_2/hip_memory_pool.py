@@ -106,7 +106,7 @@ class HiPMetadataCachePool:
                 additional_tokens += layer_config.second_stage_k * (
                     64 // layer_config.stages[-1].stage_chunk_size
                 )
-            
+
             # if not require_dense:
             #     additional_tokens = layer_config.second_stage_k * 7
 
@@ -143,9 +143,7 @@ class HiPMetadataCachePool:
                 layer_idx, "mask_cache_miss_count", [num_q_blocks], torch.int64
             )
 
-            self.init_buffer(
-                layer_idx, "sa_access_count", [num_q_blocks], torch.int64
-            )
+            self.init_buffer(layer_idx, "sa_access_count", [num_q_blocks], torch.int64)
             self.init_buffer(
                 layer_idx, "sa_unique_access_count", [num_q_blocks], torch.int64
             )
@@ -163,7 +161,9 @@ class HiPMetadataCachePool:
                     chunk_count = (
                         min(stage.stage_k, max_context_length) // stage.stage_chunk_size
                     )
-                    assert chunk_count >= 0, f"min({stage.stage_k}, {max_context_length}={context_length}-{layer_config.sliding_window_size}-{layer_config.sink_token_size}) // {stage.stage_chunk_size}"
+                    assert (
+                        chunk_count >= 0
+                    ), f"min({stage.stage_k}, {max_context_length}={context_length}-{layer_config.sliding_window_size}-{layer_config.sink_token_size}) // {stage.stage_chunk_size}"
                     self.init_buffer(
                         layer_idx,
                         f"stage_{i_stage}_indices_left",
@@ -344,7 +344,7 @@ class HiPMetadataCachePool:
                 access_count = computed_statistics["access_count"]
                 unique_access_count = computed_statistics["unique_access_count"]
                 cache_miss_count = computed_statistics["cache_miss_count"]
-            
+
             if access_count is not None:
                 self.set_buffer(
                     layer_id,
@@ -364,10 +364,12 @@ class HiPMetadataCachePool:
 
         update_cache_stats(metadata.sa_cache_statistics, "sa")
         update_cache_stats(metadata.mask_cache_statistics, "mask")
-        
-        if (cached_stages is None) or (cached_stages == len(self.layer_configs[layer_id].stages)):
+
+        if (cached_stages is None) or (
+            cached_stages == len(self.layer_configs[layer_id].stages)
+        ):
             return
-        
+
         self.set_buffer(layer_id, "indices", metadata.indices)
         self.set_buffer(layer_id, "ks", metadata.ks)
         self.set_buffer(layer_id, "ks_count", metadata.ks_count)

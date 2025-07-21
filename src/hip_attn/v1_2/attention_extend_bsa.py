@@ -222,15 +222,17 @@ def apply_rope_to_keys(
                 elif EXTEND_BACKEND == "self_extend":
                     SELF_EXTEND_WINDOW: tl.constexpr = 4096
                     SELF_EXTEND_SCALE: tl.constexpr = 12
-                    
+
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
-                    
+
                     offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
                     new_tsrc = tl.where(
                         offset > (-SELF_EXTEND_WINDOW),
                         offset + model_context_length - 1,
-                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
-                        + model_context_length - 1 - SELF_EXTEND_WINDOW
+                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
+                        + model_context_length
+                        - 1
+                        - SELF_EXTEND_WINDOW,
                     )
                 elif EXTEND_BACKEND == "dynamic_extend":
                     # dynamic extend
@@ -281,15 +283,17 @@ def apply_rope_to_keys(
                 elif EXTEND_BACKEND == "self_extend":
                     SELF_EXTEND_WINDOW: tl.constexpr = 4096
                     SELF_EXTEND_SCALE: tl.constexpr = 12
-                    
+
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
-                    
+
                     offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
                     new_tsrc = tl.where(
                         offset > (-SELF_EXTEND_WINDOW),
                         offset + model_context_length - 1,
-                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE 
-                        + model_context_length - 1 - SELF_EXTEND_WINDOW
+                        (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
+                        + model_context_length
+                        - 1
+                        - SELF_EXTEND_WINDOW,
                     )
                 else:
                     new_tsrc = idx_tsrc
@@ -350,7 +354,7 @@ def apply_rope_to_keys(
             keys_adjusted = tl.where(
                 rope_mask[:, None],
                 (
-                    keys.to(tl.float32) * cos_new.to(tl.float32) 
+                    keys.to(tl.float32) * cos_new.to(tl.float32)
                     + keys_rot.to(tl.float32) * sin_new.to(tl.float32)
                 ).to(queries.dtype),
                 keys.to(queries.dtype),
@@ -532,12 +536,13 @@ def block_sparse_attention_cuda_step(
 
         if EXCLUDE_SLIDING_WINDOW:
             # NOTE: called from sink and sparse part
-            
-            assert not CHUNKED_SW, "sink and sparse part should not be in chunked sliding window attention"
-            qk_mask = ~(
-                mask_tsrc &
-                (idx_tsrc < (seq_len - sliding_window_size))
-            )[None, :]
+
+            assert (
+                not CHUNKED_SW
+            ), "sink and sparse part should not be in chunked sliding window attention"
+            qk_mask = ~(mask_tsrc & (idx_tsrc < (seq_len - sliding_window_size)))[
+                None, :
+            ]
         else:
             # NOTE: called from sliding window part
             # TODO(ainl): we should reduce scanning loop range if CHUNKED_SW is true.
@@ -976,17 +981,17 @@ def block_sparse_attention_cuda(
         acc = tl.zeros((BLOCK_SIZE_Q, HID_BLOCK_V), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
-        
+
     if K_DESCALE is not None:
         k_descale = tl.load(
-            K_DESCALE +
-            idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT) +
-            (idx_head // KV_HEAD_REPEAT).to(tl.int64),
+            K_DESCALE
+            + idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT)
+            + (idx_head // KV_HEAD_REPEAT).to(tl.int64),
         )
         v_descale = tl.load(
-            V_DESCALE +
-            idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT) +
-            (idx_head // KV_HEAD_REPEAT).to(tl.int64),
+            V_DESCALE
+            + idx_bsz.to(tl.int64) * (HEAD // KV_HEAD_REPEAT)
+            + (idx_head // KV_HEAD_REPEAT).to(tl.int64),
         )
     else:
         k_descale = None
@@ -1034,11 +1039,11 @@ def block_sparse_attention_cuda(
             queries_1 = queries_1.to(tl.float16)
     else:
         queries_1 = None
-    
+
     _K = K_CACHE if USING_PAGES else K
     if (
-        (_K.dtype.element_ty == tl.float8e5) 
-        | (_K.dtype.element_ty == tl.float8e4nv) 
+        (_K.dtype.element_ty == tl.float8e5)
+        | (_K.dtype.element_ty == tl.float8e4nv)
         | (_K.dtype.element_ty == tl.float8e4b8)
         | (_K.dtype.element_ty == tl.float8e4b15)
         | (_K.dtype.element_ty == tl.float8e5b16)
@@ -1400,7 +1405,7 @@ def block_sparse_attention_cuda(
                 if keys_1 is not None:
                     keys_1 *= k_descale
                     keys_rot_1 *= k_descale
-        
+
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1464,7 +1469,7 @@ def block_sparse_attention_cuda(
                 stride_v_cache_kv_head=stride_k_cache_kv_head,
                 stride_v_cache_hid=stride_k_cache_hid,
             )
-            
+
             if v_descale is not None:
                 value *= v_descale
 
@@ -2520,7 +2525,7 @@ def block_sparse_attention(
 
     HID_BLOCK_V = triton.next_power_of_2(min(HID_V, 256))
     NUM_HID_V_BLOCKS = triton.cdiv(HID_V, HID_BLOCK_V)
-    
+
     if k_descale is not None:
         k_descale = k_descale.contiguous()
         v_descale = v_descale.contiguous()
