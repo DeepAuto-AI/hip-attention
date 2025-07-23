@@ -750,9 +750,9 @@ def get_block_sparse_attention_configs():
     # for block_bk in [16, 32,]:
     for num_warps in NUM_WARPS:
         for num_stages in [
-            3,
+            1,
+            2,
             4,
-            7,
         ]:
             configs.append(
                 triton.Config({}, num_warps=num_warps, num_stages=num_stages)

@@ -1,7 +1,7 @@
 import json
 import os
 import traceback
-
+import time
 import requests
 
 sys_prompt = input("Input your system prompt >>> ")
@@ -111,6 +111,10 @@ If you generate code or use a code snippet, make sure to add comments explaining
 
 chat_log = []
 
+ENDPOINT = os.getenv("ENDPOINT", "http://localhost:8888")
+API_URL = f"{ENDPOINT}/v1/chat/completions"
+API_KEY = "sk-1234"
+
 while True:
     try:
         line = input(">>> ")
@@ -131,12 +135,12 @@ while True:
             for log in chat_log:
                 print(log["role"])
             continue
+        elif line.lower().strip() == "flush":
+            url = f"{ENDPOINT}/flush_cache"
+            requests.post(url)
+            continue
         else:
             chat_log.append({"role": "user", "content": line})
-
-        ENDPOINT = os.getenv("ENDPOINT", "http://localhost:8888")
-        API_URL = f"{ENDPOINT}/v1/chat/completions"
-        API_KEY = "sk-1234"
 
         headers = {
             "Authorization": f"Bearer {API_KEY}",
@@ -147,20 +151,28 @@ while True:
             "model": "anything",
             "messages": [{"role": "system", "content": sys_prompt}] + chat_log,
             "stream": True,
-            "temperature": 0.7,
-            "top_p": 0.8,
-            "top_k": 20,
-            "min_p": 0.0,
+            "temperature": 0.0,
+            # "top_p": 0.8,
+            # "top_k": 20,
+            # "min_p": 0.0,
         }
 
         # Stream response
         try:
+            t_start = time.time()
             response = requests.post(API_URL, headers=headers, json=data, stream=True)
 
             text = ""
+            t_ttft = None
+            num_decoded = 0
 
             for line in response.iter_lines():
+                if t_ttft is None:
+                    t_ttft = time.time()
+                    
                 if line:
+                    num_decoded += 1
+                    
                     decoded_line = line.decode("utf-8")
                     if decoded_line.startswith("data: "):
                         payload = decoded_line[len("data: ") :]
@@ -178,6 +190,8 @@ while True:
                         except Exception as e:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
 
+            print(f'[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]')
+            
             if "<think>" in text:
                 end = text.index("</think>")
                 text = text[end + len("</think>") :]

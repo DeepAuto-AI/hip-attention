@@ -154,6 +154,9 @@ def forward_paged_hip(
     using_chunked_sliding_window: bool = False,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata, HiPAttentionArgs]:
 
     if is_prefill is not None:
@@ -335,6 +338,9 @@ def forward_paged_hip(
                     using_chunked_sliding_window=using_chunked_sliding_window,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
                 )
                 metadata_new.append(metadata_req)
                 args_new.append(args_new)
@@ -346,6 +352,9 @@ def forward_paged_hip(
         assert len(decoding_reqs) == 0
 
     else:
+        if block_table is None:
+            raise Exception("this should not happened")
+        
         o, metadata_new, args_new = _forward_paged_hip_validate(
             query=query,
             sm_scale=sm_scale,
@@ -383,6 +392,9 @@ def forward_paged_hip(
             using_chunked_sliding_window=using_chunked_sliding_window,
             k_descale=k_descale,
             v_descale=v_descale,
+            cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
         )
 
     return o, metadata_new, args_new
@@ -425,6 +437,9 @@ def _forward_paged_hip_validate(
     using_chunked_sliding_window: bool = False,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -504,6 +519,9 @@ def _forward_paged_hip_validate(
         using_chunked_sliding_window=using_chunked_sliding_window,
         k_descale=k_descale,
         v_descale=v_descale,
+        cache_seqlens=cache_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
     )
 
     if require_validation:
@@ -542,6 +560,9 @@ def _forward_paged_hip_validate(
                 using_chunked_sliding_window=using_chunked_sliding_window,
                 k_descale=k_descale,
                 v_descale=v_descale,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -582,6 +603,9 @@ def _forward_paged_hip_validate(
                 using_chunked_sliding_window=using_chunked_sliding_window,
                 k_descale=k_descale,
                 v_descale=v_descale,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
             )
 
             err_thresh = 1e-7
@@ -662,6 +686,9 @@ def _forward_paged_hip_validate(
                     using_chunked_sliding_window=using_chunked_sliding_window,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -701,6 +728,9 @@ def _forward_paged_hip_validate(
                     using_chunked_sliding_window=using_chunked_sliding_window,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -764,7 +794,7 @@ def _forward_delta_attn(
     rope_cos: torch.Tensor = None,
     rope_sin: torch.Tensor = None,
 ):
-    assert not delta_attention_args_dense_decode
+    assert not is_decode
 
     # using_dense_prefill = False
 
@@ -1704,6 +1734,54 @@ def _forward_delta_attn(
 
     return context, metadata
 
+def _forward_fa3_decode(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    sm_scale: float,
+    page_table: torch.Tensor,
+    position_ids: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+):
+    assert q.ndim == 4
+    
+    cache_seqlens = (position_ids[:, -1] + 1).to(torch.int32)
+    cu_seqlens_q = torch.arange(0, q.shape[0] + 1, q.shape[1], device=q.device, dtype=torch.int32)
+    cu_seqlens_k = cu_seqlens_q.clone()
+    cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
+    
+    max_seqlen_q = q.shape[1]
+    q_reshaped = q.view(-1, q.shape[-2], q.shape[-1])
+    
+    if k_cache.dtype == torch.float8_e5m2:
+        raise Exception('fa3 does not support e5m2')
+    elif k_cache.dtype == torch.float8_e4m3fn:
+        q_reshaped = q_reshaped.to(k_cache.dtype)
+    else:
+        assert q_reshaped.dtype in (torch.float16, torch.bfloat16), k_cache.dtype
+
+    # Default: single-token self-attention
+    return flash_attn_with_kvcache(
+        q=q_reshaped,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        page_table=page_table,
+        cache_seqlens=cache_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k_new=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        softmax_scale=sm_scale,
+        causal=True,
+        window_size=(-1, -1),
+        softcap=0,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        return_softmax_lse=False,
+    )
 
 @capture
 def _forward_fa3(
@@ -1924,11 +2002,14 @@ def _forward_partial_fa3(
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
 
-            is_fp8 = k.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+            is_fp8 = k.dtype in (torch.float8_e5m2, )
             if is_fp8:
                 query_fa3 = query_fa3.to(torch.float16)
                 k_fa3 = k_fa3.to(torch.float16)
                 v_fa3 = v_fa3.to(torch.float16)
+            
+            if k.dtype == torch.float8_e4m3fn:
+                query_fa3 = query_fa3.to(k.dtype)
 
             context_fa3 = _forward_fa3(
                 q=query_fa3,
@@ -2157,6 +2238,9 @@ def _forward_paged_hip(
     using_chunked_sliding_window: bool = False,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -2198,6 +2282,8 @@ def _forward_paged_hip(
 
     # FIXME: this operation is linear during decoding
     if block_table is None:
+        if is_decode:
+            raise Exception("this should not happened")
         block_table = req_to_tokens.index_select(dim=0, index=req_pool_indices)
 
     BLOCK_TABLE_BSZ, MODEL_SEQ_LEN = block_table.shape
@@ -2372,7 +2458,7 @@ def _forward_paged_hip(
     # TODO: if delta norm is too high, then just recompute that whole block.
     # TODO: use partial densely decode. delta attention for decode
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
-    # example: HIP_DELTA_ATTENTION_ARGS=window_0-diff_1-w_32-sparse_decode-smooth-exp
+    # example: HIP_DELTA_ATTENTION_ARGS=window_0-diff_1-w_32-dense_decode-smooth
     delta_attention_args = os.getenv("HIP_DELTA_ATTENTION_ARGS", None)
     using_delta_attention = delta_attention_args is not None
 
@@ -2432,10 +2518,6 @@ def _forward_paged_hip(
 
         # if layer_id in [0,1,2,3,4,5,8,11,14,17,20,23,26,29,30,33,36,39,41,42,43,44,45,46,47]:
         #     delta_attention_args_adjust_norm_const = False
-
-        assert (
-            not delta_attention_args_dense_decode
-        ), "todo, did not handled in _forward_delta_attn"
 
         if (get_local_rank() == 0) and (not is_decode):
             info_msg = (
@@ -2543,217 +2625,66 @@ def _forward_paged_hip(
             inner_function_do_scale=False,
             inner_function=__forward_delta_attn_wrapper,
         )
-    elif (force_dense_decode and is_decode) or (
+    elif ((force_dense_decode or delta_attention_args_dense_decode) and is_decode) or (
         using_dense_prefill and (not is_decode)
     ):
-        if is_decode:
-            if args.using_extend:
-                args_dense = args.clone()
-                args_dense.sliding_window_size = 777
-                context, metadata = dual_stage_quadratic_hip_attention(
-                    (query * sm_scale).to(query.dtype),
-                    k,
-                    v,
-                    args=args_dense,
-                    cached_metadata=cached_metadata,
-                )
-            else:
-                bsa_fn = get_block_sparse_backend(query, disable_flashdecode)
-
-                BSZ, TDST, HEAD, HID = query.shape
-
-                args_sw = args.clone()
-                if args_sw.rope_range is None:
-                    args_sw.rope_range = (0, HID)
-                args_sw.block_size_q = args_sw.block_sparse_block_size_q
-                args_sw.block_size_k = args_sw.stages[-1].stage_chunk_size
-                args_sw.second_stage_k = 0
-                args_sw.sliding_window_size = args_sw.model_context_length
-                args_sw.sliding_window_indices = None
-
-                BDST = triton.cdiv(TDST, args_sw.block_size_q)
-                BH = BSZ * HEAD
-
-                indices = torch.zeros(
-                    (BH, BDST, 0), dtype=torch.int64, device=query.device
-                )
-                ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
-                ks_count = ks.unsqueeze(-1)
-                ks_start_end = torch.zeros(
-                    (BH, BDST, 2), dtype=torch.int64, device=query.device
-                )
-
-                context_sparse = bsa_fn(
-                    q=(query * sm_scale).to(query.dtype),
-                    k=k,
-                    v=v,
-                    seq_lens=args_sw.position_ids + 1,
-                    indices=indices,
-                    ks=ks,
-                    ks_count=ks_count,
-                    ks_start_end=ks_start_end,
-                    access_counter=None,
-                    cache_miss_counter=None,
-                    EXTEND_BACKEND=args_sw.sa_extend_backend,
-                    model_context_length=args_sw.model_context_length,
-                    extend_context_length=args_sw.extend_context_length,
-                    offload_update_cache=False,
-                    args=args_sw,
-                )
-                context_sparse = context_sparse.to(query.dtype)
-                context = context_sparse[:, -query.shape[1] :, :, :].contiguous()
-                metadata = None
-        else:
-            # k_unpack = args.gather_k_from_paged_cache()
-            # v_unpack = args.gather_v_from_paged_cache()
-
-            # seq_len = args.position_ids.amax().item() + 1
-
-            # k_unpack = k_unpack[:, :seq_len]
-            # v_unpack = v_unpack[:, :seq_len]
-
-            # if k_unpack.dtype in [torch.uint8]:
-            #     k_unpack = k_unpack.view(torch.float8_e5m2).to(query.dtype)
-            #     v_unpack = v_unpack.view(torch.float8_e5m2).to(query.dtype)
-            # assert k_unpack.dtype == query.dtype
-
-            # # if layer_id == 0:
-            # #     print(seq_len, layer_id, is_decode, force_dense_decode, using_dense_prefill)
-
-            # if args.need_apply_rope and args.using_extend:
-            #     cos = args.rope_cos
-            #     sin = args.rope_sin
-            #     assert cos.ndim == 2, cos.shape
-            #     assert sin.shape == cos.shape, sin.shape
-
-            #     cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-            #     sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-
-            #     idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
-            #     idx_tsrc.clamp_min_(seq_len - args.model_context_length)
-
-            #     assert cos.shape[1] >= k_unpack.shape[1], f'{cos.shape=} {k_unpack.shape}'
-
-            #     k_unpack = (
-            #         (k_unpack * cos[:, idx_tsrc, :, :])
-            #         + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
-            #     ).to(k_unpack.dtype)
-
-            #     query = (
-            #         (query * cos[:, args.position_ids.view(-1), :, :])
-            #         + (rotate_half(query) * sin[:, args.position_ids.view(-1), :, :])
-            #     ).to(query.dtype)
-
-            # k_unpack = k_unpack[:, :seq_len]
-            # v_unpack = v_unpack[:, :seq_len]
-
-            # context = flash_attn_func(
-            #     query,
-            #     k_unpack,
-            #     v_unpack,
-            #     causal=True,
-            #     softmax_scale=sm_scale,
-            # )
-
+        if not is_decode:
+            assert not is_decode
+            
             if args.using_paged_cache:
-                if args.need_apply_rope and args.using_extend:
-                    k_unpack = args.gather_k_from_paged_cache()
-                    v_unpack = args.gather_v_from_paged_cache()
-
-                    seq_len = args.position_ids.amax().item() + 1
-
-                    k_unpack = k_unpack[:, :seq_len]
-                    v_unpack = v_unpack[:, :seq_len]
-
-                    cos = args.rope_cos
-                    sin = args.rope_sin
-                    assert cos.ndim == 2, cos.shape
-                    assert sin.shape == cos.shape, sin.shape
-
-                    cos = cos.view(1, cos.shape[-2], 1, cos.shape[-1])
-                    sin = sin.view(1, sin.shape[-2], 1, sin.shape[-1])
-
-                    idx_tsrc = torch.arange(0, k_unpack.shape[1], device=cos.device)
-                    idx_tsrc.clamp_min_(seq_len - args.model_context_length)
-
-                    k_unpack = (
-                        (k_unpack * cos[:, idx_tsrc, :, :])
-                        + (rotate_half(k_unpack) * sin[:, idx_tsrc, :, :])
-                    ).to(k_unpack.dtype)
-
-                    query = (
-                        (query * cos[:, args.position_ids.view(-1), :, :])
-                        + (
-                            rotate_half(query)
-                            * sin[:, args.position_ids.view(-1), :, :]
-                        )
-                    ).to(query.dtype)
-
-                    k_unpack = k_unpack[:, :seq_len]
-                    v_unpack = v_unpack[:, :seq_len]
-
-                    context = flash_attn_func(
-                        query,
-                        k_unpack,
-                        v_unpack,
-                        causal=True,
-                        softmax_scale=sm_scale,
-                    )
-                else:
-                    assert args.using_paged_cache
-
-                    k_cache = args.get_k_cache()
-                    v_cache = args.get_v_cache()
-
-                    q_reshaped = query.contiguous().view(
-                        -1, query.shape[2], query.shape[3]
-                    )
-
-                    # print(k_cache.shape, v_cache.shape)
-
-                    cu_seqlens_q = (
-                        torch.arange(
-                            0,
-                            query.shape[0] + 1,
-                            device=query.device,
-                            dtype=torch.int32,
-                        )
-                        * query.shape[1]
-                    )
-                    cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
-                    cu_seqlens_k_new = torch.zeros(
-                        (args.position_ids.shape[0] + 1,),
-                        dtype=torch.int32,
-                        device=q_reshaped.device,
-                    )
-                    cu_seqlens_k_new[1:] = cache_seqlens
-
-                    block_table = args.block_table
-
-                    context = flash_attn_with_kvcache(
-                        q=q_reshaped,
-                        k_cache=k_cache,
-                        v_cache=v_cache,
-                        page_table=block_table,
-                        cache_seqlens=cache_seqlens,
-                        cu_seqlens_q=cu_seqlens_q,
-                        cu_seqlens_k_new=cu_seqlens_k_new,
-                        # max_seqlen_q=cu_seqlens_q.amax().item(),
-                        max_seqlen_q=args.model_context_length,
-                        causal=True,
-                        softmax_scale=sm_scale,
-                    )
-            else:
-                print(query.shape, v.shape, k.shape)
-                assert batch_size
-                context = flash_attn_func(
-                    query,
-                    k,
-                    v,
-                    causal=True,
-                    softmax_scale=sm_scale,
+                k = args.gather_k_from_paged_cache(
+                    seq_len=min(max_context_len, args.model_context_length)
+                )
+                v = args.gather_v_from_paged_cache(
+                    seq_len=min(max_context_len, args.model_context_length)
                 )
 
+            query_fa3 = query.contiguous()
+            len_kv = k.shape[1]
+            k_fa3 = k[:, :len_kv].contiguous()
+            v_fa3 = v[:, :len_kv].contiguous()
+
+            is_fp8 = k.dtype in (torch.float8_e5m2, )
+            if is_fp8:
+                query_fa3 = query_fa3.to(torch.float16)
+                k_fa3 = k_fa3.to(torch.float16)
+                v_fa3 = v_fa3.to(torch.float16)
+            
+            if k.dtype == torch.float8_e4m3fn:
+                query_fa3 = query_fa3.to(k.dtype)
+
+            context = _forward_fa3(
+                q=query_fa3,
+                k=k_fa3,
+                v=v_fa3,
+                sm_scale=sm_scale,
+                position_ids=args.position_ids[:, :query_fa3.shape[1]],
+                using_extend=args.using_extend,
+                need_apply_rope=args.need_apply_rope,
+                rope_cos=args.rope_cos,
+                rope_sin=args.rope_sin,
+                rope_is_neox_style=rope_is_neox_style,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+            metadata = None
+        else:
+            assert not args.need_apply_rope
+            assert not args.using_extend
+            
+            context = _forward_fa3_decode(
+                q=query,
+                k_cache=args.get_k_cache(),
+                v_cache=args.get_v_cache(),
+                sm_scale=sm_scale,
+                page_table=args.block_table,
+                position_ids=args.position_ids[:, :query.shape[1]],
+                k_descale=k_descale,
+                v_descale=v_descale,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+            )
             metadata = None
     elif is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
         context, metadata = _forward_partial_fa3(
