@@ -280,6 +280,7 @@ def _fwd_kernel_stage1(
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
+    SELF_EXTEND_SCALE, 
 ):
     pid = tl.program_id(0).to(tl.int64)
     TOTAL_HEAD_BLOCKS = tl.cdiv(q_head_num, tl.minimum(BLOCK_H, kv_group_num))
@@ -944,6 +945,7 @@ def _fwd_kernel_stage1(
                     BLOCK_BK * BLOCK_SIZE_K,
                     BLOCK_SIZE_K,
                     EXTEND_BACKEND=EXTEND_BACKEND,
+                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
                 )
             else:
                 pass
@@ -1356,6 +1358,7 @@ def _fwd_kernel_stage1(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     # process sliding window
@@ -1785,6 +1788,7 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 CHUNKED_SW=CHUNKED_SW,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
@@ -1965,6 +1969,7 @@ def decode_block_sparse_attention_stage1(
         EXTEND_BACKEND=extend_backend,
         UPDATE_CACHE=offload_update_cache,
         CHUNKED_SW=args.using_chunked_sliding_window,
+        SELF_EXTEND_SCALE=args.self_extend_scale,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS

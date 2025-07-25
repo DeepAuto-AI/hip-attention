@@ -87,6 +87,7 @@ def _attn_fwd_inner(
     MASKING: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH,
+    SELF_EXTEND_SCALE,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
@@ -142,7 +143,6 @@ def _attn_fwd_inner(
             rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
 
             SELF_EXTEND_WINDOW = 4096
-            SELF_EXTEND_SCALE = 12
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
 
@@ -426,6 +426,7 @@ def _attn_fwd(
     V_FP8: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH=32768,
+    SELF_EXTEND_SCALE=12,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     
@@ -659,6 +660,7 @@ def _attn_fwd(
                     MASKING=False,
                     EXTEND_BACKEND=EXTEND_BACKEND,
                     MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
                 )
             # (start_k, end_k) (mid, hi)
             if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -708,6 +710,7 @@ def _attn_fwd(
                     MASKING=True,
                     EXTEND_BACKEND=EXTEND_BACKEND,
                     MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
                 )
         else:
             acc, l_i, m_i = _attn_fwd_inner(
@@ -756,6 +759,7 @@ def _attn_fwd(
                 MASKING=False,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
             acc, l_i, m_i = _attn_fwd_inner(
@@ -804,6 +808,7 @@ def _attn_fwd(
                 MASKING=True,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     # epilogue
@@ -981,6 +986,7 @@ class _attention(torch.autograd.Function):
         rope_cos: Optional[torch.Tensor],
         rope_sin: Optional[torch.Tensor],
         model_context_length: int,
+        self_extend_scale: int,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1156,6 +1162,7 @@ class _attention(torch.autograd.Function):
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
+                SELF_EXTEND_SCALE=self_extend_scale,
                 **extra_kern_args,
             )
 
@@ -1291,6 +1298,7 @@ class _attention(torch.autograd.Function):
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
+                SELF_EXTEND_SCALE=self_extend_scale,
                 **extra_kern_args,
             )
 
@@ -1325,6 +1333,7 @@ def query_sparse_attention(
     rope_cos: Optional[torch.Tensor] = None,
     rope_sin: Optional[torch.Tensor] = None,
     model_context_length: int = 131072,
+    self_extend_scale: int = 12,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -1346,4 +1355,5 @@ def query_sparse_attention(
         rope_cos,
         rope_sin,
         model_context_length,
+        self_extend_scale,
     )

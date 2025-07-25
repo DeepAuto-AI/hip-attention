@@ -377,6 +377,7 @@ class HiPAttentionConfig:
         default_factory=lambda: [64, 16, 8]
     )
     using_extend: bool = True
+    self_extend_scale: int = 12
     layers: list[HiPAttentionPerLayerConfig] = field(
         default_factory=lambda: _DEFAULT_LAEYRS_DECODE
     )
@@ -441,6 +442,9 @@ class HiPAttentionConfig:
             if "using_extend" in parsed_json:
                 self.using_extend = parsed_json["using_extend"]
                 parsed_json.pop("using_extend")
+            if "self_extend_scale" in parsed_json:
+                self.self_extend_scale = int(parsed_json["self_extend_scale"])
+                parsed_json.pop("self_extend_scale")
             if "layers" in parsed_json:
                 if parsed_json["layers"] is None:
                     self.layers = None

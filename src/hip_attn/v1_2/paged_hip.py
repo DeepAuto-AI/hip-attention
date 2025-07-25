@@ -157,6 +157,7 @@ def forward_paged_hip(
     cache_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
+    self_extend_scale: int = 12,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata, HiPAttentionArgs]:
 
     if is_prefill is not None:
@@ -341,6 +342,7 @@ def forward_paged_hip(
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
+                    self_extend_scale=self_extend_scale,
                 )
                 metadata_new.append(metadata_req)
                 args_new.append(args_new)
@@ -393,8 +395,9 @@ def forward_paged_hip(
             k_descale=k_descale,
             v_descale=v_descale,
             cache_seqlens=cache_seqlens,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            self_extend_scale=self_extend_scale,
         )
 
     return o, metadata_new, args_new
@@ -440,6 +443,7 @@ def _forward_paged_hip_validate(
     cache_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
+    self_extend_scale: int = 12,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
 
     if is_kv_cache_offload_enabled:
@@ -522,6 +526,7 @@ def _forward_paged_hip_validate(
         cache_seqlens=cache_seqlens,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
+        self_extend_scale=self_extend_scale,
     )
 
     if require_validation:
@@ -563,6 +568,7 @@ def _forward_paged_hip_validate(
                 cache_seqlens=cache_seqlens,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
+                self_extend_scale=self_extend_scale,
             )
 
             o_err = ((o - o_req_valid) ** 2).sum()
@@ -606,6 +612,7 @@ def _forward_paged_hip_validate(
                 cache_seqlens=cache_seqlens,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
+                self_extend_scale=self_extend_scale,
             )
 
             err_thresh = 1e-7
@@ -689,6 +696,7 @@ def _forward_paged_hip_validate(
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
+                    self_extend_scale=self_extend_scale,
                 )
 
                 offload_cache.sa_kv_cache.flush()
@@ -731,6 +739,7 @@ def _forward_paged_hip_validate(
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_k,
+                    self_extend_scale=self_extend_scale,
                 )
                 err_uvm = sse(o, o_uvm)
                 err_retry = sse(o_valid, o_retry)
@@ -1485,6 +1494,7 @@ def _forward_delta_attn(
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
+                    self_extend_scale=args.self_extend_scale,
                 )
             else:
                 assert k is not None
@@ -1505,6 +1515,7 @@ def _forward_delta_attn(
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
+                    self_extend_scale=args.self_extend_scale,
                 )
 
             if delta_attention_args_adjust_norm_const:
@@ -1900,8 +1911,8 @@ def _forward_fa3(
                     None, : key_rot.shape[1], None, : rope_dim // 2
                 ].repeat_interleave(2, -1)
 
-            q = (query_rot * cos_q + rotate_fn(query_rot) * sin_q).to(query_rot.dtype)
-            k = (key_rot * cos_k + rotate_fn(key_rot) * sin_k).to(key_rot.dtype)
+            q = (query_rot.to(torch.float32) * cos_q.to(torch.float32) + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)).to(query_rot.dtype)
+            k = (key_rot.to(torch.float32) * cos_k.to(torch.float32) + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)).to(key_rot.dtype)
 
     tp_q_head, tp_q_dim = q.shape[2:]
     tp_k_head, tp_k_dim = k.shape[2:]
@@ -2241,6 +2252,7 @@ def _forward_paged_hip(
     cache_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
+    self_extend_scale: int = 12,
 ) -> tuple[torch.Tensor, HiPAttentionOutputMetadata]:
     global _CHECKOUT_COUNTER
 
@@ -2378,6 +2390,7 @@ def _forward_paged_hip(
         landmark_stage_k=layer_config.landmark_stage_k,
         k_descale=k_descale,
         v_descale=v_descale,
+        self_extend_scale=self_extend_scale,
     )
 
     using_dense_prefill = os.getenv("HIP_DEBUG_USING_DENSE_PREFILL", "0") == "1"
@@ -2462,21 +2475,21 @@ def _forward_paged_hip(
     delta_attention_args = os.getenv("HIP_DELTA_ATTENTION_ARGS", None)
     using_delta_attention = delta_attention_args is not None
 
+    delta_attention_args_smooth = False
+    delta_attention_args_just_return = False
+    delta_attention_args_window = 0
+    delta_attention_args_diff = 1
+    delta_attention_args_dense_decode = False
+    delta_attention_args_w = 16
+    delta_attention_args_exp = False
+    delta_attention_args_exp_w = 2
+    delta_attention_args_exp_window = 1024
+    delta_attention_args_exp_sink = 128
+    delta_attention_args_iter_corr = False
+    delta_attention_args_adjust_norm_const = False
+    delta_attention_args_extend = "none"
+    
     if using_delta_attention:
-        delta_attention_args_smooth = False
-        delta_attention_args_just_return = False
-        delta_attention_args_window = 0
-        delta_attention_args_diff = 1
-        delta_attention_args_dense_decode = False
-        delta_attention_args_w = 16
-        delta_attention_args_exp = False
-        delta_attention_args_exp_w = 2
-        delta_attention_args_exp_window = 1024
-        delta_attention_args_exp_sink = 128
-        delta_attention_args_iter_corr = False
-        delta_attention_args_adjust_norm_const = False
-        delta_attention_args_extend = "none"
-
         for word in delta_attention_args.split("-"):
             word = word.strip()
             if word == "smooth":

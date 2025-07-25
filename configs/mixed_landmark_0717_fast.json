@@ -1,27 +1,27 @@
 {
-    "__delta_attention_args": "window_0-diff_1-w_16-sparse_decode-smooth",
+    "__delta_attention_args": "window_0-diff_1-w_32-dense_decode-smooth-extend_self",
     "__head_reduce": 3,
     "__last_dense": -1,
     "__using_landmark": false,
-    "__seq_thresh_fa3": 65536,
+    "__seq_thresh_fa3": 32768,
     "using_extend": true,
     "dense_layers": [0],
     "mask_refresh_interval": [96, 12],
     "layers": [
         {
-            "sliding_window_size": 114688,
-            "sliding_window_size_for_masking_step": [114688, 114688, 114688],
+            "sliding_window_size": 256000,
+            "sliding_window_size_for_masking_step": [256000, 256000, 256000],
             "second_stage_k": 0,
             "sink_token_size": 1024,
-            "sa_extend_backend": "streaming",
+            "sa_extend_backend": "self_extend",
             "stages": [ {}, {} ]
         },
         {
-            "sliding_window_size": 114688,
-            "sliding_window_size_for_masking_step": [114688, 114688, 114688],
+            "sliding_window_size": 256000,
+            "sliding_window_size_for_masking_step": [256000, 256000, 256000],
             "second_stage_k": 0,
             "sink_token_size": 1024,
-            "sa_extend_backend": "streaming",
+            "sa_extend_backend": "self_extend",
             "scan_extend_backend": "none",
             "stages": [
                 {
@@ -46,14 +46,14 @@
             "sliding_window_size": 32768,
             "sink_token_size": 256,
             "second_stage_k": 0,
-            "sa_extend_backend": "streaming"
+            "sa_extend_backend": "self_extend"
         },
         {
             "sliding_window_size": 512,
             "second_stage_k": 2048,
             "sink_token_size": 256,
             "landmark_stage_k": [1, 1, 1],
-            "sa_extend_backend": "streaming",
+            "sa_extend_backend": "self_extend",
             "scan_extend_backend": "none",
             "stages": [
                 {

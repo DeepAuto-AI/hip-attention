@@ -51,6 +51,7 @@ def apply_rope_to_keys(
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
+    SELF_EXTEND_SCALE,
 ):
     tl.static_assert(USING_EXTEND)
 
@@ -221,7 +222,6 @@ def apply_rope_to_keys(
                     new_tsrc = tl.maximum(0, new_tsrc)
                 elif EXTEND_BACKEND == "self_extend":
                     SELF_EXTEND_WINDOW: tl.constexpr = 4096
-                    SELF_EXTEND_SCALE: tl.constexpr = 12
 
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
 
@@ -282,7 +282,7 @@ def apply_rope_to_keys(
                     new_tsrc = tl.maximum(0, new_tsrc)
                 elif EXTEND_BACKEND == "self_extend":
                     SELF_EXTEND_WINDOW: tl.constexpr = 4096
-                    SELF_EXTEND_SCALE: tl.constexpr = 12
+                    # SELF_EXTEND_SCALE: tl.constexpr = 12
 
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
 
@@ -419,6 +419,7 @@ def block_sparse_attention_cuda_step(
     BLOCK_SIZE_K: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
     CHUNKED_SW: tl.constexpr = False,
+    SELF_EXTEND_SCALE = 12,
 ):
     HID_BLOCK_0: tl.constexpr = queries_0.shape[1]
     HID_BLOCK_1: tl.constexpr = queries_1.shape[1] if queries_1 is not None else 0
@@ -458,6 +459,7 @@ def block_sparse_attention_cuda_step(
                 EXCLUDE_SLIDING_WINDOW,
                 NEED_APPLY_ROPE,
                 EXTEND_BACKEND,
+                SELF_EXTEND_SCALE,
             )
 
         if HID_BLOCK_1 > 0:
@@ -495,6 +497,7 @@ def block_sparse_attention_cuda_step(
                 EXCLUDE_SLIDING_WINDOW,
                 NEED_APPLY_ROPE,
                 EXTEND_BACKEND,
+                SELF_EXTEND_SCALE,
             )
 
     q_dtype = queries_0.dtype
@@ -891,6 +894,7 @@ def block_sparse_attention_cuda(
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
+    SELF_EXTEND_SCALE,
 ):
     G: tl.constexpr = 1
 
@@ -1519,6 +1523,7 @@ def block_sparse_attention_cuda(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     # 29ms
@@ -1950,6 +1955,7 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 CHUNKED_SW=CHUNKED_SW,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     # 60ms
@@ -2381,6 +2387,7 @@ def block_sparse_attention_cuda(
                     BLOCK_BK * BLOCK_SIZE_K,
                     BLOCK_SIZE_K,
                     EXTEND_BACKEND=EXTEND_BACKEND,
+                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
                 )
             else:
                 pass
@@ -2615,6 +2622,7 @@ def block_sparse_attention(
         EXTEND_BACKEND=EXTEND_BACKEND,
         UPDATE_CACHE=offload_update_cache,
         CHUNKED_SW=args.using_chunked_sliding_window,
+        SELF_EXTEND_SCALE=args.self_extend_scale,
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
     )
