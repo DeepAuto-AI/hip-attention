@@ -1,7 +1,8 @@
 import json
 import os
-import traceback
 import time
+import traceback
+
 import requests
 
 sys_prompt = input("Input your system prompt >>> ")
@@ -169,10 +170,10 @@ while True:
             for line in response.iter_lines():
                 if t_ttft is None:
                     t_ttft = time.time()
-                    
+
                 if line:
                     num_decoded += 1
-                    
+
                     decoded_line = line.decode("utf-8")
                     if decoded_line.startswith("data: "):
                         payload = decoded_line[len("data: ") :]
@@ -190,8 +191,10 @@ while True:
                         except Exception as e:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
 
-            print(f'[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]')
-            
+            print(
+                f"[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]"
+            )
+
             if "<think>" in text:
                 end = text.index("</think>")
                 text = text[end + len("</think>") :]

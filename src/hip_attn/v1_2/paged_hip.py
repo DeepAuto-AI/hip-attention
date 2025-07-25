@@ -356,7 +356,7 @@ def forward_paged_hip(
     else:
         if block_table is None:
             raise Exception("this should not happened")
-        
+
         o, metadata_new, args_new = _forward_paged_hip_validate(
             query=query,
             sm_scale=sm_scale,
@@ -1745,6 +1745,7 @@ def _forward_delta_attn(
 
     return context, metadata
 
+
 def _forward_fa3_decode(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -1759,17 +1760,19 @@ def _forward_fa3_decode(
     cu_seqlens_k: torch.Tensor,
 ):
     assert q.ndim == 4
-    
+
     cache_seqlens = (position_ids[:, -1] + 1).to(torch.int32)
-    cu_seqlens_q = torch.arange(0, q.shape[0] + 1, q.shape[1], device=q.device, dtype=torch.int32)
+    cu_seqlens_q = torch.arange(
+        0, q.shape[0] + 1, q.shape[1], device=q.device, dtype=torch.int32
+    )
     cu_seqlens_k = cu_seqlens_q.clone()
     cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
-    
+
     max_seqlen_q = q.shape[1]
     q_reshaped = q.view(-1, q.shape[-2], q.shape[-1])
-    
+
     if k_cache.dtype == torch.float8_e5m2:
-        raise Exception('fa3 does not support e5m2')
+        raise Exception("fa3 does not support e5m2")
     elif k_cache.dtype == torch.float8_e4m3fn:
         q_reshaped = q_reshaped.to(k_cache.dtype)
     else:
@@ -1793,6 +1796,7 @@ def _forward_fa3_decode(
         v_descale=v_descale,
         return_softmax_lse=False,
     )
+
 
 @capture
 def _forward_fa3(
@@ -1911,8 +1915,14 @@ def _forward_fa3(
                     None, : key_rot.shape[1], None, : rope_dim // 2
                 ].repeat_interleave(2, -1)
 
-            q = (query_rot.to(torch.float32) * cos_q.to(torch.float32) + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)).to(query_rot.dtype)
-            k = (key_rot.to(torch.float32) * cos_k.to(torch.float32) + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)).to(key_rot.dtype)
+            q = (
+                query_rot.to(torch.float32) * cos_q.to(torch.float32)
+                + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)
+            ).to(query_rot.dtype)
+            k = (
+                key_rot.to(torch.float32) * cos_k.to(torch.float32)
+                + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)
+            ).to(key_rot.dtype)
 
     tp_q_head, tp_q_dim = q.shape[2:]
     tp_k_head, tp_k_dim = k.shape[2:]
@@ -2013,12 +2023,12 @@ def _forward_partial_fa3(
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
 
-            is_fp8 = k.dtype in (torch.float8_e5m2, )
+            is_fp8 = k.dtype in (torch.float8_e5m2,)
             if is_fp8:
                 query_fa3 = query_fa3.to(torch.float16)
                 k_fa3 = k_fa3.to(torch.float16)
                 v_fa3 = v_fa3.to(torch.float16)
-            
+
             if k.dtype == torch.float8_e4m3fn:
                 query_fa3 = query_fa3.to(k.dtype)
 
@@ -2488,7 +2498,7 @@ def _forward_paged_hip(
     delta_attention_args_iter_corr = False
     delta_attention_args_adjust_norm_const = False
     delta_attention_args_extend = "none"
-    
+
     if using_delta_attention:
         for word in delta_attention_args.split("-"):
             word = word.strip()
@@ -2643,7 +2653,7 @@ def _forward_paged_hip(
     ):
         if not is_decode:
             assert not is_decode
-            
+
             if args.using_paged_cache:
                 k = args.gather_k_from_paged_cache(
                     seq_len=min(max_context_len, args.model_context_length)
@@ -2657,12 +2667,12 @@ def _forward_paged_hip(
             k_fa3 = k[:, :len_kv].contiguous()
             v_fa3 = v[:, :len_kv].contiguous()
 
-            is_fp8 = k.dtype in (torch.float8_e5m2, )
+            is_fp8 = k.dtype in (torch.float8_e5m2,)
             if is_fp8:
                 query_fa3 = query_fa3.to(torch.float16)
                 k_fa3 = k_fa3.to(torch.float16)
                 v_fa3 = v_fa3.to(torch.float16)
-            
+
             if k.dtype == torch.float8_e4m3fn:
                 query_fa3 = query_fa3.to(k.dtype)
 
@@ -2671,7 +2681,7 @@ def _forward_paged_hip(
                 k=k_fa3,
                 v=v_fa3,
                 sm_scale=sm_scale,
-                position_ids=args.position_ids[:, :query_fa3.shape[1]],
+                position_ids=args.position_ids[:, : query_fa3.shape[1]],
                 using_extend=args.using_extend,
                 need_apply_rope=args.need_apply_rope,
                 rope_cos=args.rope_cos,
@@ -2684,14 +2694,14 @@ def _forward_paged_hip(
         else:
             assert not args.need_apply_rope
             assert not args.using_extend
-            
+
             context = _forward_fa3_decode(
                 q=query,
                 k_cache=args.get_k_cache(),
                 v_cache=args.get_v_cache(),
                 sm_scale=sm_scale,
                 page_table=args.block_table,
-                position_ids=args.position_ids[:, :query.shape[1]],
+                position_ids=args.position_ids[:, : query.shape[1]],
                 k_descale=k_descale,
                 v_descale=v_descale,
                 cache_seqlens=cache_seqlens,

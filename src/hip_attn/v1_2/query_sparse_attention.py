@@ -429,14 +429,14 @@ def _attn_fwd(
     SELF_EXTEND_SCALE=12,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
-    
+
     pid = tl.program_id(0)
-    
+
     pid_bdst = pid % tl.cdiv(N_CTX, BLOCK_M)
     pid = pid // tl.cdiv(N_CTX, BLOCK_M)
     pid_n_split = pid % N_SPLIT
     pid_bsz_head = pid // N_SPLIT
-    
+
     start_m = pid_bdst
     off_hz = pid_bsz_head.to(tl.int64)
     off_z = off_hz // H
@@ -1088,9 +1088,7 @@ class _attention(torch.autograd.Function):
             # N_SPLIT = 1
 
             grid = lambda args: (
-                triton.cdiv(N_CTX, args["BLOCK_M"])
-                * N_SPLIT
-                * N_BATCH * N_HEAD,
+                triton.cdiv(N_CTX, args["BLOCK_M"]) * N_SPLIT * N_BATCH * N_HEAD,
             )
 
             acc = torch.zeros(
@@ -1235,9 +1233,7 @@ class _attention(torch.autograd.Function):
             # o = acc.to(o.dtype)
         else:
             grid = lambda args: (
-                triton.cdiv(N_CTX, args["BLOCK_M"])
-                * 1
-                * N_BATCH * N_HEAD,
+                triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
             )
 
             _attn_fwd[grid](

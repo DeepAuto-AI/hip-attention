@@ -280,7 +280,7 @@ def _fwd_kernel_stage1(
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
-    SELF_EXTEND_SCALE, 
+    SELF_EXTEND_SCALE,
 ):
     pid = tl.program_id(0).to(tl.int64)
     TOTAL_HEAD_BLOCKS = tl.cdiv(q_head_num, tl.minimum(BLOCK_H, kv_group_num))

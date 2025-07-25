@@ -419,7 +419,7 @@ def block_sparse_attention_cuda_step(
     BLOCK_SIZE_K: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
     CHUNKED_SW: tl.constexpr = False,
-    SELF_EXTEND_SCALE = 12,
+    SELF_EXTEND_SCALE=12,
 ):
     HID_BLOCK_0: tl.constexpr = queries_0.shape[1]
     HID_BLOCK_1: tl.constexpr = queries_1.shape[1] if queries_1 is not None else 0
