@@ -1079,12 +1079,13 @@ class _attention(torch.autograd.Function):
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
         N_SM = 256  # TODO make a good solution to get this without init CUDA context on GPU 0
         N_SPLIT = triton.cdiv(N_SM, N_PROGRAM)
-        if return_running_statistics:
+        ignore_n_split = os.getenv("HIP_DEBUG_RECOMPUTE_SPLIT", "0") == "0"
+        if return_running_statistics or ignore_n_split:
             if N_SPLIT > 1:
                 warnings.warn("N_SPLIT is ignored. this should be fixed")
             N_SPLIT = 1
 
-        if (N_SPLIT > 1) and (os.getenv("HIP_DEBUG_RECOMPUTE_SPLIT", "1") == "1"):
+        if (N_SPLIT > 1) and (not ignore_n_split):
             # N_SPLIT = 1
 
             grid = lambda args: (

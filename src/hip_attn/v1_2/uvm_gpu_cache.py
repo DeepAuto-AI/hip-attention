@@ -993,36 +993,36 @@ def load_tokens(
                     & mask_slot_cache_hit
                 )
 
-            if mask_slot_cache_hit.shape[0] == 1:
-                keys_cached_hash = tl.sum(
-                    keys_cached.to(tl.uint16, bitcast=True), axis=0, keep_dims=True
-                ).to(tl.uint64)
-            elif mask_slot_cache_hit.shape[1] == 1:
-                keys_cached_hash = tl.sum(
-                    keys_cached.to(tl.uint16, bitcast=True), axis=1, keep_dims=True
-                ).to(tl.uint64)
-            else:
-                raise Exception()
-            tl.debug_barrier()
+                if mask_slot_cache_hit.shape[0] == 1:
+                    keys_cached_hash = tl.sum(
+                        keys_cached.to(tl.uint16, bitcast=True), axis=0, keep_dims=True
+                    ).to(tl.uint64)
+                elif mask_slot_cache_hit.shape[1] == 1:
+                    keys_cached_hash = tl.sum(
+                        keys_cached.to(tl.uint16, bitcast=True), axis=1, keep_dims=True
+                    ).to(tl.uint64)
+                else:
+                    raise Exception()
+                tl.debug_barrier()
 
-            tl.inline_asm_elementwise(
-                "MEMBAR.SC.GPU;", "=r", [], dtype=tl.int32, is_pure=True, pack=1
-            )
-
-            truth_hash = tl.load(
-                OFFLOAD_CACHE_GPU_METADATA
-                + idx_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token
-                + 6 * stride_offload_cache_gpu_metadata_k,
-                mask=mask_slot_cache_hit,
-            ).to(tl.uint64)
-            hash_mask = tl.full((1,), value=1, dtype=tl.uint64)
-            hash_mask = (hash_mask << 32) - 1
-            if OFFLOAD_CACHE_LOAD_VALUE:
-                truth_hash = (truth_hash >> 32) & hash_mask
-            else:
-                truth_hash = truth_hash & hash_mask
-            tl.debug_barrier()
-            if UPDATE_CACHE:
+                tl.inline_asm_elementwise(
+                    "MEMBAR.SC.GPU;", "=r", [], dtype=tl.int32, is_pure=True, pack=1
+                )
+                
+                truth_hash = tl.load(
+                    OFFLOAD_CACHE_GPU_METADATA
+                    + idx_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token
+                    + 6 * stride_offload_cache_gpu_metadata_k,
+                    mask=mask_slot_cache_hit,
+                ).to(tl.uint64)
+                hash_mask = tl.full((1,), value=1, dtype=tl.uint64)
+                hash_mask = (hash_mask << 32) - 1
+                if OFFLOAD_CACHE_LOAD_VALUE:
+                    truth_hash = (truth_hash >> 32) & hash_mask
+                else:
+                    truth_hash = truth_hash & hash_mask
+                tl.debug_barrier()
+                
                 mask_slot_cache_hit = (
                     truth_hash == (keys_cached_hash & hash_mask)
                 ) & mask_slot_cache_hit

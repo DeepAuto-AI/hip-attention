@@ -71,6 +71,8 @@ def tensor_from_pointer(
         elem_size = 32
     elif dtype in [torch.uint8, torch.float8_e5m2]:
         elem_size = 8
+    elif dtype in [torch.float8_e4m3fn]:
+        elem_size = 8
     else:
         raise NotImplementedError()
     tensor = torch.ops.hip_attn.tensor_from_pointer(
