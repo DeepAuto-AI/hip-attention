@@ -2483,7 +2483,9 @@ def _forward_paged_hip(
     # postfix_recompute_dense-window_[size:int]-diff_[1/0]-w_[size:int]
     # example: HIP_DELTA_ATTENTION_ARGS=window_0-diff_1-w_32-dense_decode-smooth
     delta_attention_args = os.getenv("HIP_DELTA_ATTENTION_ARGS", None)
-    using_delta_attention = (delta_attention_args is not None) and (delta_attention_args != "")
+    using_delta_attention = (delta_attention_args is not None) and (
+        delta_attention_args != ""
+    )
 
     delta_attention_args_smooth = False
     delta_attention_args_just_return = False

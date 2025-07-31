@@ -1008,7 +1008,7 @@ def load_tokens(
                 tl.inline_asm_elementwise(
                     "MEMBAR.SC.GPU;", "=r", [], dtype=tl.int32, is_pure=True, pack=1
                 )
-                
+
                 truth_hash = tl.load(
                     OFFLOAD_CACHE_GPU_METADATA
                     + idx_slots.to(tl.int64) * stride_offload_cache_gpu_metadata_token
@@ -1022,7 +1022,7 @@ def load_tokens(
                 else:
                     truth_hash = truth_hash & hash_mask
                 tl.debug_barrier()
-                
+
                 mask_slot_cache_hit = (
                     truth_hash == (keys_cached_hash & hash_mask)
                 ) & mask_slot_cache_hit

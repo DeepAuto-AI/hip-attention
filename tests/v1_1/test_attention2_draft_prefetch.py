@@ -168,6 +168,7 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
         if sample > 0:
             print(f"latency: {elapsed / sample:.6f} ms")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     tc = TestAttention2DraftPrefetch()
     tc.test_attention()

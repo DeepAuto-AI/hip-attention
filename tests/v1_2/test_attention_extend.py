@@ -260,10 +260,14 @@ def main_debug():
             using_fa3 = True
             if using_fa3:
                 from hip_attn.v1_2.paged_hip import _forward_fa3
+
                 _forward_fa3(
-                    q,k,v,
+                    q,
+                    k,
+                    v,
                     sm_scale=1.0,
-                    position_ids=torch.arange(0, q.shape[1])[None, :] + (k.shape[1] - q.shape[1]),
+                    position_ids=torch.arange(0, q.shape[1])[None, :]
+                    + (k.shape[1] - q.shape[1]),
                     using_extend=False,
                     need_apply_rope=False,
                     rope_cos=None,
