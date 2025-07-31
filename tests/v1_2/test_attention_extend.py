@@ -95,10 +95,11 @@ def main_debug():
         "mid": [
             ScanStage(
                 stage_block_size_q=64,
-                stage_block_stride_q=2,
-                stage_chunk_size=32,
+                stage_block_stride_q=4,
+                stage_chunk_size=128,
                 stage_k=None,
                 stage_stride=1,
+                using_landmark=False,
             ),
             ScanStage(
                 stage_block_size_q=64,
@@ -256,12 +257,28 @@ def main_debug():
 
         start.record()
         if q.shape[1] == 1:
-            flash_attn_with_kvcache(
-                q,
-                k,
-                v,
-                causal=True,
-            )
+            using_fa3 = True
+            if using_fa3:
+                from hip_attn.v1_2.paged_hip import _forward_fa3
+                _forward_fa3(
+                    q,k,v,
+                    sm_scale=1.0,
+                    position_ids=torch.arange(0, q.shape[1])[None, :] + (k.shape[1] - q.shape[1]),
+                    using_extend=False,
+                    need_apply_rope=False,
+                    rope_cos=None,
+                    rope_sin=None,
+                    rope_is_neox_style=False,
+                    k_descale=None,
+                    v_descale=None,
+                )
+            else:
+                flash_attn_with_kvcache(
+                    q,
+                    k,
+                    v,
+                    causal=True,
+                )
         else:
             flash_attn_func(q, k, v, causal=True)
         end.record()
