@@ -180,8 +180,7 @@ def _attn_fwd_inner(
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE
-                    + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
                 k_rot = tl.load(

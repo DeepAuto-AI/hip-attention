@@ -1393,15 +1393,13 @@ def load_tokens(
                     )
 
     if keys.dtype == tl.uint8:
-        keys = keys\
-            .to(tl.float8e5, bitcast=True)\
-            .to(tl.bfloat16)
+        keys = keys.to(tl.float8e5, bitcast=True).to(tl.bfloat16)
     if (
-        (keys.dtype == tl.float8e5) |
-        (keys.dtype == tl.float8e4b15) |
-        (keys.dtype == tl.float8e4b8) |
-        (keys.dtype == tl.float8e4nv) |
-        (keys.dtype == tl.float8e5b16)
+        (keys.dtype == tl.float8e5)
+        | (keys.dtype == tl.float8e4b15)
+        | (keys.dtype == tl.float8e4b8)
+        | (keys.dtype == tl.float8e4nv)
+        | (keys.dtype == tl.float8e5b16)
     ):
         keys = keys.to(tl.bfloat16)
 
