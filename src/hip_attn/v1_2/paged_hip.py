@@ -1761,12 +1761,16 @@ def _forward_fa3_decode(
 ):
     assert q.ndim == 4
 
-    cache_seqlens = (position_ids[:, -1] + 1).to(torch.int32)
-    cu_seqlens_q = torch.arange(
-        0, q.shape[0] + 1, q.shape[1], device=q.device, dtype=torch.int32
-    )
-    cu_seqlens_k = cu_seqlens_q.clone()
-    cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
+    # _cache_seqlens = (position_ids[:, -1] + 1).to(torch.int32)
+    # _cu_seqlens_q = torch.arange(
+    #     0, q.shape[0] + 1, q.shape[1], device=q.device, dtype=torch.int32
+    # )
+    # _cu_seqlens_k = _cu_seqlens_q.clone()
+    # _cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
+    
+    # assert torch.all(_cache_seqlens == cache_seqlens)
+    # assert torch.all(_cu_seqlens_q == cu_seqlens_q)
+    # assert torch.all(_cu_seqlens_k == cu_seqlens_k)
 
     max_seqlen_q = q.shape[1]
     q_reshaped = q.view(-1, q.shape[-2], q.shape[-1])
