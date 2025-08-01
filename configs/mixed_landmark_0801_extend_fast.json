@@ -3,24 +3,23 @@
     "__last_dense": -1,
     "__using_landmark": false,
     "__seq_thresh_fa3": 131072,
-    "__delta_attention_args": "window_0-diff_1-w_32-dense_decode-smooth",
-    "using_extend": false,
+    "__delta_attention_args": "window_0-diff_1-w_16-sparse_decode-smooth-extend_self",
+    "using_extend": true,
     "dense_layers": [0],
     "mask_refresh_interval": [96],
+    "self_extend_scale": 16,
     "layers": [
         {
-            "sliding_window_size": 1024,
-            "sliding_window_size_for_masking_step": [1024, 1024, 1024],
-            "second_stage_k": 1024,
-            "sink_token_size": 1024,
+            "sliding_window_size": 4096000,
+            "second_stage_k": 0,
+            "sink_token_size": 0,
             "sa_extend_backend": "self_extend",
             "stages": [ { } ]
         },
         {
-            "sliding_window_size": 1024,
-            "sliding_window_size_for_masking_step": [1024, 1024, 1024],
-            "second_stage_k": 1024,
-            "sink_token_size": 1024,
+            "sliding_window_size": 4096000,
+            "second_stage_k": 0,
+            "sink_token_size": 0,
             "sa_extend_backend": "self_extend",
             "scan_extend_backend": "none",
             "stages": [ { } ]
@@ -35,7 +34,7 @@
         },
         {
             "sliding_window_size": 512,
-            "second_stage_k": 1024,
+            "second_stage_k": 2048,
             "sink_token_size": 256,
             "landmark_stage_k": [1, 1, 1],
             "sa_extend_backend": "self_extend",

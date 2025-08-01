@@ -1142,6 +1142,9 @@ def _forward_delta_attn(
         # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
         args_sw.sliding_window_size = delta_attention_args_window
         args_sw.sliding_window_indices = None
+        
+        if os.getenv('HIP_DEBUG_FORCE_CHUNKED_SW', '0') == '1':
+            args_sw.using_chunked_sliding_window = True
 
         BDST = triton.cdiv(TDST, args_sw.block_size_q)
         BH = BSZ * HEAD
@@ -2565,7 +2568,10 @@ def _forward_paged_hip(
         # args.sa_extend_backend = "clamp"
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
-
+        
+        if os.getenv('HIP_DEBUG_FORCE_CHUNKED_SW', '0') == '1':
+            args.using_chunked_sliding_window = True
+        
         def __forward_sliding_window_wrapper(
             q: torch.Tensor,
             k: torch.Tensor,

@@ -2,7 +2,7 @@
     "using_extend": false,
     "self_extend_scale": 36,
     "dense_layers": [0],
-    "__delta_attention_args": "window_2048-diff_1-w_16-dense_decode",
+    "__delta_attention_args": "window_2048-diff_1-w_64-dense_decode",
     "mask_refresh_interval": [36, 18, 6],
     "layers": [
         {
