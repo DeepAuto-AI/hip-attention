@@ -69,7 +69,7 @@ def load_queries(
         | (q.dtype == tl.float8e4b15)
         | (q.dtype == tl.float8e4nv)
     ):
-        q = q.to(tl.float16)
+        q = q.to(tl.bfloat16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
         ROPE_DIM = rope_range_end - rope_range_begin
@@ -129,7 +129,7 @@ def load_queries(
             | (queries_rot.dtype == tl.float8e4b15)
             | (queries_rot.dtype == tl.float8e4nv)
         ):
-            queries_rot = queries_rot.to(tl.float16)
+            queries_rot = queries_rot.to(tl.bfloat16)
 
         cos_new = tl.load(
             COS
@@ -460,9 +460,9 @@ def _fwd_kernel_stage1(
         | (q_0.dtype == tl.float8e4b8)
         | (q_0.dtype == tl.float8e4b15)
     ):
-        q_0 = q_0.to(tl.float16)
+        q_0 = q_0.to(tl.bfloat16)
         if q_1 is not None:
-            q_1 = q_1.to(tl.float16)
+            q_1 = q_1.to(tl.bfloat16)
 
     _K = K_CACHE if USING_PAGES else K
     if (
@@ -473,9 +473,9 @@ def _fwd_kernel_stage1(
         | (_K.dtype.element_ty == tl.uint8)
         | (_K.dtype.element_ty == tl.int8)
     ):
-        q_0 = q_0.to(tl.float16)
+        q_0 = q_0.to(tl.bfloat16)
         if q_1 is not None:
-            q_1 = q_1.to(tl.float16)
+            q_1 = q_1.to(tl.bfloat16)
 
     # Start and end indices to the `indices` tensor
     range_start = tl.load(

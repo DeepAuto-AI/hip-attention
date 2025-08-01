@@ -144,10 +144,23 @@ def _attn_fwd_inner(
 
             SELF_EXTEND_WINDOW = 4096
 
+            # max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
+
+            # offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
+            # offset = tl.minimum(offset, 0)
+            # idx_rope = tl.where(
+            #     offset > (-SELF_EXTEND_WINDOW),
+            #     offset + MODEL_CONTEXT_LENGTH - 1,
+            #     (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
+            #     + MODEL_CONTEXT_LENGTH
+            #     - 1
+            #     - SELF_EXTEND_WINDOW,
+            # )
+            # # idx_rope = idx_tsrc
+            
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
 
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
-            offset = tl.minimum(offset, 0)
             idx_rope = tl.where(
                 offset > (-SELF_EXTEND_WINDOW),
                 offset + MODEL_CONTEXT_LENGTH - 1,
@@ -156,7 +169,6 @@ def _attn_fwd_inner(
                 - 1
                 - SELF_EXTEND_WINDOW,
             )
-            # idx_rope = idx_tsrc
 
             if not USING_PAGED_CACHE:
                 k_rot = tl.load(

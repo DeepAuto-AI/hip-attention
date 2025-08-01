@@ -270,7 +270,7 @@ def _compute_scores_landmark_cuda(
                 )
 
             if keys.dtype == tl.float8e5:
-                keys = keys.to(tl.float16)
+                keys = keys.to(tl.bfloat16)
 
             if DEROPE:
                 keys = tl.trans(

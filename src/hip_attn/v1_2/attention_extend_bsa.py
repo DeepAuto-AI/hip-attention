@@ -699,7 +699,7 @@ def apply_rope_to_queries(
         other=0.0,
     )
     if queries_rot.dtype == tl.float8e5:
-        queries_rot = queries_rot.to(tl.float16)
+        queries_rot = queries_rot.to(tl.bfloat16)
 
     cos_new = tl.load(
         COS
@@ -1027,7 +1027,7 @@ def block_sparse_attention_cuda(
         other=0.0,
     )
     if queries_0.dtype == tl.float8e5:
-        queries_0 = queries_0.to(tl.float16)
+        queries_0 = queries_0.to(tl.bfloat16)
 
     if HID_BLOCK_1 > 0:
         queries_1 = tl.load(
@@ -1040,7 +1040,7 @@ def block_sparse_attention_cuda(
             other=0.0,
         )
         if queries_1.dtype == tl.float8e5:
-            queries_1 = queries_1.to(tl.float16)
+            queries_1 = queries_1.to(tl.bfloat16)
     else:
         queries_1 = None
 
@@ -1054,9 +1054,9 @@ def block_sparse_attention_cuda(
         | (_K.dtype.element_ty == tl.uint8)
         | (_K.dtype.element_ty == tl.int8)
     ):
-        queries_0 = queries_0.to(tl.float16)
+        queries_0 = queries_0.to(tl.bfloat16)
         if queries_1 is not None:
-            queries_1 = queries_1.to(tl.float16)
+            queries_1 = queries_1.to(tl.bfloat16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
         if EXTEND_BACKEND == "streaming":

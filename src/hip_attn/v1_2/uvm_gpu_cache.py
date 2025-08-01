@@ -1391,10 +1391,19 @@ def load_tokens(
                         mask=mask_keys_cache_miss,
                         value=1,
                     )
+    
     if keys.dtype == tl.uint8:
-        keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
-    if keys.dtype == tl.float8e5:
-        keys = keys.to(tl.float16)
+        keys = keys\
+            .to(tl.float8e5, bitcast=True)\
+            .to(tl.bfloat16)
+    if (
+        (keys.dtype == tl.float8e5) | 
+        (keys.dtype == tl.float8e4b15) |
+        (keys.dtype == tl.float8e4b8) |
+        (keys.dtype == tl.float8e4nv) |
+        (keys.dtype == tl.float8e5b16)
+    ):
+        keys = keys.to(tl.bfloat16)
 
     return keys
 

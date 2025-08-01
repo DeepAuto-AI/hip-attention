@@ -419,7 +419,7 @@ def pool_queries(
             other=0.0,
         )
         if queries_iter.dtype == tl.float8e5:
-            queries_iter = queries_iter.to(tl.float16)
+            queries_iter = queries_iter.to(tl.bfloat16)
 
         if USING_EXTEND:
             if NEED_APPLY_ROPE or (real_pos_tdst_min >= model_context_length):
@@ -451,7 +451,7 @@ def pool_queries(
                         other=0.0,
                     )
                     if queries_rot.dtype == tl.float8e5:
-                        queries_rot = queries_rot.to(tl.float16)
+                        queries_rot = queries_rot.to(tl.bfloat16)
 
                     cos_new = tl.load(
                         COS
@@ -514,7 +514,7 @@ def pool_queries(
     if Q.dtype.element_ty != tl.float8e5:
         queries = queries.to(Q.dtype.element_ty)
     else:
-        queries = queries.to(tl.float16)
+        queries = queries.to(tl.bfloat16)
 
     return queries
 
@@ -782,7 +782,7 @@ def chunk_controllable_sampling_mask_cuda(
             ):
                 q_dtype = Q.dtype.element_ty
             else:
-                q_dtype = tl.float16
+                q_dtype = tl.bfloat16
             cq = (tl.sqrt(HID_DIM * 1.0) / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
             ck = (1.0 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
 
@@ -1678,7 +1678,7 @@ def decode_chunk_controllable_sampling_mask_cuda(
     if Q.dtype.element_ty != tl.float8e5:
         q_dtype = Q.dtype.element_ty
     else:
-        q_dtype = tl.float16
+        q_dtype = tl.bfloat16
     cq = (tl.sqrt(HID_DIM * 1.0) / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
     ck = (1.0 / tl.sqrt(tl.sqrt(HID_DIM * 1.0))).to(q_dtype)
 
