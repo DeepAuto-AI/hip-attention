@@ -9,6 +9,7 @@ from hip_research.utils.load_checkouts import load_checkouts
 import hip_attn.v1_2.attention_extend
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
+from hip_attn.v1_2.utils import capture
 
 
 class TestAttentionExtend(unittest.TestCase):
@@ -16,7 +17,12 @@ class TestAttentionExtend(unittest.TestCase):
         main_debug()
 
 
+@torch.inference_mode(True)
 def main_debug():
+    IS_DEBUG = os.getenv("DEBUG", "0") == "1"
+    if os.getenv("HIP_DEBUG_BENCH", "0") == "0":
+        os.environ["HIP_DEBUG_BENCH"] = "1" if IS_DEBUG else "0"
+
     seq_len = int(os.getenv("SEQ_LEN", "131072"))
     query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
     seq_dups = int(os.getenv("DUPS", "1"))
@@ -93,41 +99,19 @@ def main_debug():
                 stage_chunk_size=128,
                 stage_k=None,
                 stage_stride=1,
+                using_landmark=False,
             ),
             ScanStage(
                 stage_block_size_q=64,
-                stage_block_stride_q=4,
-                stage_chunk_size=32,
-                stage_k=32768,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=1,
+                stage_block_stride_q=2,
                 stage_chunk_size=8,
-                stage_k=8192,
-                stage_stride=1,
-            ),
-        ],
-        "high": [
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=2,
-                stage_chunk_size=64,
-                stage_k=None,
-                stage_stride=1,
-            ),
-            ScanStage(
-                stage_block_size_q=64,
-                stage_block_stride_q=2,
-                stage_chunk_size=16,
                 stage_k=32768,
                 stage_stride=1,
             ),
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
-                stage_chunk_size=4,
+                stage_chunk_size=2,
                 stage_k=8192,
                 stage_stride=1,
             ),
@@ -157,15 +141,11 @@ def main_debug():
         ],
     }[preset]
     config_second_k = {
-        "high": 2048,
         "mid": 2048,
-        "low": 2048,
         "debug": 128,
     }[preset]
     config_sa_extend_backend = {
-        "high": "streaming",
         "mid": "streaming",
-        "low": "streaming",
         "debug": "streaming",
     }[preset]
 
@@ -209,7 +189,7 @@ def main_debug():
 
         start.record()
         if i == 0:
-            hip_attn.v1_2.attention_extend.DEBUG = os.getenv("DEBUG", "0") == "1"
+            hip_attn.v1_2.attention_extend.DEBUG = IS_DEBUG
 
         _, metadata = dual_stage_quadratic_hip_attention(
             **dual_stage_kwargs, cached_metadata=metadata
@@ -226,6 +206,7 @@ def main_debug():
         latency = start.elapsed_time(end)
         if i > 3:
             ls_hip_extend.append(latency)
+        capture.report()
         print(latency)
 
     print("-" * 20)
@@ -262,6 +243,7 @@ def main_debug():
         latency = start.elapsed_time(end)
         if i > 3:
             ls_hip.append(latency)
+        capture.report()
         print(latency)
 
     print("-" * 20)
@@ -275,12 +257,32 @@ def main_debug():
 
         start.record()
         if q.shape[1] == 1:
-            flash_attn_with_kvcache(
-                q,
-                k,
-                v,
-                causal=True,
-            )
+            using_fa3 = True
+            if using_fa3:
+                from hip_attn.v1_2.paged_hip import _forward_fa3
+
+                _forward_fa3(
+                    q,
+                    k,
+                    v,
+                    sm_scale=1.0,
+                    position_ids=torch.arange(0, q.shape[1])[None, :]
+                    + (k.shape[1] - q.shape[1]),
+                    using_extend=False,
+                    need_apply_rope=False,
+                    rope_cos=None,
+                    rope_sin=None,
+                    rope_is_neox_style=False,
+                    k_descale=None,
+                    v_descale=None,
+                )
+            else:
+                flash_attn_with_kvcache(
+                    q,
+                    k,
+                    v,
+                    causal=True,
+                )
         else:
             flash_attn_func(q, k, v, causal=True)
         end.record()

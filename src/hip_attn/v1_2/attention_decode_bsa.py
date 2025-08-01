@@ -44,6 +44,7 @@ def load_queries(
     sink_token_size,
     sliding_window_size,
     sparse_token_size,
+    model_context_length,
     rope_range_begin: tl.constexpr,
     rope_range_end: tl.constexpr,
     rope_is_neox_style: tl.constexpr,
@@ -58,10 +59,17 @@ def load_queries(
         + offs_d[None, :].to(tl.int64) * stride_q_hid
     )
     q = tl.load(
-        Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0
+        Q + offs_q,
+        mask=(mask_h[:, None]) & (mask_d[None, :]),
+        other=0.0,
     )  # [BLOCK_H, BLOCK_DMODEL]
-    if q.dtype == tl.float8e5:
-        q = q.to(tl.float16)
+    if (
+        (q.dtype == tl.float8e5)
+        | (q.dtype == tl.float8e4b8)
+        | (q.dtype == tl.float8e4b15)
+        | (q.dtype == tl.float8e4nv)
+    ):
+        q = q.to(tl.bfloat16)
 
     if USING_EXTEND and NEED_APPLY_ROPE:
         ROPE_DIM = rope_range_end - rope_range_begin
@@ -94,7 +102,15 @@ def load_queries(
             rope_tdst = cur_batch_seq_len - 1
             activate_len = sink_token_size + sliding_window_size + sparse_token_size
             rope_tdst = rope_tdst - cur_batch_seq_len + activate_len
-            rope_tdst = tl.maximum(0, rope_tdst)
+            rope_tdst = tl.minimum(tl.maximum(0, rope_tdst), model_context_length)
+        elif EXTEND_BACKEND == "self_extend":
+            rope_tdst = cur_batch_seq_len - 1
+            rope_tdst = (
+                rope_tdst.to(tl.int64)
+                - (cur_batch_seq_len - 1)
+                + model_context_length
+                - 1
+            )
         else:
             rope_tdst = cur_batch_seq_len - 1
 
@@ -107,8 +123,13 @@ def load_queries(
             mask=(mask_h[:, None]) & (mask_d[None, :] & rope_mask[None, :]),
             other=0.0,
         )  # [BLOCK_H, BLOCK_DMODEL]
-        if queries_rot.dtype == tl.float8e5:
-            queries_rot = queries_rot.to(tl.float16)
+        if (
+            (queries_rot.dtype == tl.float8e5)
+            | (queries_rot.dtype == tl.float8e4b8)
+            | (queries_rot.dtype == tl.float8e4b15)
+            | (queries_rot.dtype == tl.float8e4nv)
+        ):
+            queries_rot = queries_rot.to(tl.bfloat16)
 
         cos_new = tl.load(
             COS
@@ -157,6 +178,8 @@ def _fwd_kernel_stage1(
     stride_v_tsrc,
     stride_v_head,
     stride_v_hid,
+    K_DESCALE,
+    V_DESCALE,
     B_Seqlen,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -257,6 +280,7 @@ def _fwd_kernel_stage1(
     EXTEND_BACKEND: tl.constexpr,
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
+    SELF_EXTEND_SCALE,
 ):
     pid = tl.program_id(0).to(tl.int64)
     TOTAL_HEAD_BLOCKS = tl.cdiv(q_head_num, tl.minimum(BLOCK_H, kv_group_num))
@@ -348,6 +372,21 @@ def _fwd_kernel_stage1(
     )
     # cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
+    if K_DESCALE is not None:
+        k_descale = tl.load(
+            K_DESCALE
+            + cur_batch.to(tl.int64) * (q_head_num // kv_group_num)
+            + (cur_head // kv_group_num).to(tl.int64),
+        )
+        v_descale = tl.load(
+            V_DESCALE
+            + cur_batch.to(tl.int64) * (q_head_num // kv_group_num)
+            + (cur_head // kv_group_num).to(tl.int64),
+        )
+    else:
+        k_descale = None
+        v_descale = None
+
     q_0 = load_queries(
         cur_batch,
         cur_head,
@@ -371,6 +410,7 @@ def _fwd_kernel_stage1(
         sink_token_size,
         sliding_window_size,
         sparse_token_size,
+        model_context_length,
         rope_range_begin,
         rope_range_end,
         rope_is_neox_style,
@@ -403,6 +443,7 @@ def _fwd_kernel_stage1(
             sink_token_size,
             sliding_window_size,
             sparse_token_size,
+            model_context_length,
             rope_range_begin,
             rope_range_end,
             rope_is_neox_style,
@@ -412,6 +453,29 @@ def _fwd_kernel_stage1(
         )
     else:
         q_1 = None
+
+    if (
+        (q_0.dtype == tl.float8e5)
+        | (q_0.dtype == tl.float8e4nv)
+        | (q_0.dtype == tl.float8e4b8)
+        | (q_0.dtype == tl.float8e4b15)
+    ):
+        q_0 = q_0.to(tl.bfloat16)
+        if q_1 is not None:
+            q_1 = q_1.to(tl.bfloat16)
+
+    _K = K_CACHE if USING_PAGES else K
+    if (
+        (_K.dtype.element_ty == tl.float8e5)
+        | (_K.dtype.element_ty == tl.float8e4nv)
+        | (_K.dtype.element_ty == tl.float8e4b8)
+        | (_K.dtype.element_ty == tl.float8e4b15)
+        | (_K.dtype.element_ty == tl.uint8)
+        | (_K.dtype.element_ty == tl.int8)
+    ):
+        q_0 = q_0.to(tl.bfloat16)
+        if q_1 is not None:
+            q_1 = q_1.to(tl.bfloat16)
 
     # Start and end indices to the `indices` tensor
     range_start = tl.load(
@@ -758,6 +822,13 @@ def _fwd_kernel_stage1(
                     keys_rot_0 = None
                     keys_rot_1 = None
 
+                if k_descale is not None:
+                    keys_0 *= k_descale
+                    keys_rot_0 *= k_descale
+                    if keys_1 is not None:
+                        keys_1 *= k_descale
+                        keys_rot_1 *= k_descale
+
                 values = load_tokens(
                     V,
                     stride_v_bsz,
@@ -822,6 +893,9 @@ def _fwd_kernel_stage1(
                     stride_v_cache_hid=stride_k_cache_hid,
                 )
 
+                if v_descale is not None:
+                    values *= v_descale
+
                 acc, e_sum, e_max = block_sparse_attention_cuda_step(
                     q_0,  # FIXME: q is [BLOCK_H, BLOCK_DMODEL]: the first axis is head, not time
                     q_1,
@@ -839,6 +913,7 @@ def _fwd_kernel_stage1(
                     e_max,
                     sliding_window_size,
                     sink_token_size,
+                    sparse_token_size,
                     (range_end - range_start) * BLOCK_SIZE_K,  # mask_k
                     True,
                     False,
@@ -870,6 +945,7 @@ def _fwd_kernel_stage1(
                     BLOCK_BK * BLOCK_SIZE_K,
                     BLOCK_SIZE_K,
                     EXTEND_BACKEND=EXTEND_BACKEND,
+                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
                 )
             else:
                 pass
@@ -1164,6 +1240,13 @@ def _fwd_kernel_stage1(
                 keys_rot_0 = None
                 keys_rot_1 = None
 
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
+
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1228,6 +1311,9 @@ def _fwd_kernel_stage1(
                 stride_v_cache_hid=stride_k_cache_hid,
             )
 
+            if v_descale is not None:
+                values *= v_descale
+
             acc, e_sum, e_max = block_sparse_attention_cuda_step(
                 q_0,
                 q_1,
@@ -1245,6 +1331,7 @@ def _fwd_kernel_stage1(
                 e_max,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 True,
                 True,
@@ -1271,6 +1358,7 @@ def _fwd_kernel_stage1(
                 BLOCK_BK * BLOCK_SIZE_K,
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     # process sliding window
@@ -1569,6 +1657,13 @@ def _fwd_kernel_stage1(
                 keys_rot_0 = None
                 keys_rot_1 = None
 
+            if k_descale is not None:
+                keys_0 *= k_descale
+                keys_rot_0 *= k_descale
+                if keys_1 is not None:
+                    keys_1 *= k_descale
+                    keys_rot_1 *= k_descale
+
             values = load_tokens(
                 V,
                 stride_v_bsz,
@@ -1633,6 +1728,9 @@ def _fwd_kernel_stage1(
                 stride_v_cache_hid=stride_k_cache_hid,
             )
 
+            if v_descale is not None:
+                values *= v_descale
+
             # idx_bk = (
             #     tl.arange(0, BLOCK_BK)
             #     + (i_tsrc - i_tsrc_range_start) // BLOCK_SIZE_K
@@ -1662,6 +1760,7 @@ def _fwd_kernel_stage1(
                 e_max,
                 sliding_window_size,
                 sink_token_size,
+                sparse_token_size,
                 (range_end - range_start) * BLOCK_SIZE_K,
                 False,
                 False,
@@ -1689,6 +1788,7 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 CHUNKED_SW=CHUNKED_SW,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             )
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
@@ -1725,6 +1825,8 @@ def decode_block_sparse_attention_stage1(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    k_descale: Optional[Tensor],
+    v_descale: Optional[Tensor],
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
@@ -1747,12 +1849,12 @@ def decode_block_sparse_attention_stage1(
     num_query = q.shape[1]
     assert q.ndim == 4
     BLOCK_H = max(16, q.shape[2])
-    NUM_SM = 144 + 16  # GH100 + Slack
+    NUM_SM = int(os.getenv("SA_DECODE_NUM_SM", 144 + 16))  # H100 + Slack
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
     MAX_PROGRAM = int(
         os.getenv(
-            "SA_DECODE_MAX_PROGRAM", min(16, triton.cdiv(NUM_SM, batch * num_query))
+            "SA_DECODE_MAX_PROGRAM", min(64, triton.cdiv(NUM_SM, batch * num_query))
         )
     )
     token_chunk = triton.cdiv(total_tokens, MAX_PROGRAM)
@@ -1789,11 +1891,17 @@ def decode_block_sparse_attention_stage1(
     )
     # print('asdf', batch, num_query, NUM_TOTAL_KV_SPLITS, NUM_SINK_KV_SPLITS, NUM_SPARSE_KV_SPLITS, NUM_SLIDING_KV_SPLITS)
 
-    temp_attn_logits = torch.zeros(
+    temp_attn_logits = torch.empty(
         (batch, num_query, head_num, NUM_TOTAL_KV_SPLITS, HID + 1),
         dtype=torch.float32,
         device=q.device,
     )
+
+    if k_descale is not None:
+        assert k_descale.is_contiguous()
+        assert v_descale.is_contiguous()
+        assert k_descale.shape == (batch, head_num // kv_group_num)
+        assert v_descale.shape == (batch, head_num // kv_group_num)
 
     grid = (
         batch
@@ -1818,6 +1926,8 @@ def decode_block_sparse_attention_stage1(
         *safe_stride(k, 4),
         v,
         *safe_stride(v, 4),
+        k_descale,
+        v_descale,
         seq_lens,
         *safe_stride(seq_lens, 2),
         indices,
@@ -1859,6 +1969,7 @@ def decode_block_sparse_attention_stage1(
         EXTEND_BACKEND=extend_backend,
         UPDATE_CACHE=offload_update_cache,
         CHUNKED_SW=args.using_chunked_sliding_window,
+        SELF_EXTEND_SCALE=args.self_extend_scale,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS
@@ -1982,6 +2093,8 @@ def decode_block_sparse_attention_impl(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
+    k_descale: Optional[Tensor],
+    v_descale: Optional[Tensor],
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
@@ -2014,6 +2127,8 @@ def decode_block_sparse_attention_impl(
         q,
         k,
         v,
+        k_descale=k_descale,
+        v_descale=v_descale,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
@@ -2070,6 +2185,8 @@ def decode_block_sparse_attention(
     extend_context_length: int = 131072,  # 196608
     offload_update_cache: bool = False,
     return_running_statistics: bool = False,
+    k_descale: Tensor = None,
+    v_descale: Tensor = None,
 ):
     assert not return_running_statistics
 
@@ -2078,6 +2195,7 @@ def decode_block_sparse_attention(
     assert TDST < args.block_sparse_block_size_q, "TDST must be 1 for flashdecode"
 
     if k is not None:
+        assert False, "decode should not accept k, only support the paged cache"
         _, TSRC, KV_HEAD, _ = k.shape
         MAX_TSRC = TSRC
         HID_V = v.shape[-1]
@@ -2098,10 +2216,14 @@ def decode_block_sparse_attention(
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
     max_block_size = int(
-        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "32"))
+        os.getenv("SA_DECODE_BLOCK_SIZE", os.getenv("SA_BLOCK_SIZE", "64"))
     )
     if HID >= 512:
-        max_block_size = min(max_block_size, 32)
+        # NOTE: when MLA
+        max_block_size = min(
+            max_block_size,
+            int(os.getenv("SA_DECODE_MLA_BLOCK_SIZE", "32")),
+        )
 
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
@@ -2134,6 +2256,12 @@ def decode_block_sparse_attention(
         raise Exception()
     assert seq_lens.ndim == 2
 
+    if k_descale is not None:
+        k_descale = k_descale.contiguous()
+        v_descale = v_descale.contiguous()
+        assert k_descale.shape == v_descale.shape
+        assert k_descale.shape == (BSZ, KV_HEAD)
+
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
 
@@ -2141,6 +2269,8 @@ def decode_block_sparse_attention(
         q,
         k,
         v,
+        k_descale=k_descale,
+        v_descale=v_descale,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,

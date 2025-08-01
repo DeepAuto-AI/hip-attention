@@ -77,7 +77,7 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
                 k,
                 v,
                 args=HiPAttentionArgs(
-                    mask_k=2048,
+                    mask_k=1024,
                     block_size_q=64,
                     block_stride_q=2,
                     block_size_k=2,
@@ -167,3 +167,8 @@ class TestAttention2DraftPrefetch(unittest.TestCase):
 
         if sample > 0:
             print(f"latency: {elapsed / sample:.6f} ms")
+
+
+if __name__ == "__main__":
+    tc = TestAttention2DraftPrefetch()
+    tc.test_attention()

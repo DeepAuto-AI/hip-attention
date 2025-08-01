@@ -16,6 +16,7 @@ from torch import Tensor
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_decode_bsa import decode_block_sparse_attention
 from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
+from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention_tilelang
 from hip_attn.v1_2.attention_metadata import (
     EnsembleScoreStage,
     EvalScoreStage,
@@ -40,6 +41,7 @@ try:
     from sglang.srt.distributed import (
         get_tensor_model_parallel_rank,
         get_tensor_model_parallel_world_size,
+        model_parallel_is_initialized,
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
@@ -50,16 +52,27 @@ except ImportError as ex:
     SGLANG_DIST_ACTIVATED = False
 
 
-def get_local_rank() -> 0:
+def get_local_rank() -> int:
     if SGLANG_DIST_ACTIVATED:
+        if not model_parallel_is_initialized():
+            return 0
         return get_tensor_model_parallel_rank()
     else:
         return 0
 
 
-_NUM_STREAMING_MULTIPROCESSOR = None
+def get_world_size() -> int:
+    if SGLANG_DIST_ACTIVATED:
+        if not model_parallel_is_initialized():
+            return 1
+        return get_tensor_model_parallel_world_size()
+    else:
+        return 1
+
 
 DEFAULT_VALUE_HIP_HEAD_REDUCE = "1"
+
+_NUM_STREAMING_MULTIPROCESSOR = None
 
 
 def num_streaming_multiprocessor():
@@ -72,8 +85,11 @@ def num_streaming_multiprocessor():
 
 
 def get_block_sparse_backend(
-    args: HiPAttentionArgs, q: torch.Tensor
+    q: torch.Tensor,
+    disable_flashdecode: HiPAttentionArgs,
 ) -> type(block_sparse_attention):
+    # return block_sparse_attention_tilelang
+
     block_sparse_attention_backend = block_sparse_attention
 
     # Use flashdecode
@@ -81,7 +97,7 @@ def get_block_sparse_backend(
     if (
         (q.shape[1] < int(os.getenv("HIP_FLASHDECODE_THRESH", "32")))
         and (not os.environ.get("HIP_DISABLE_FLASHDECODE", "0") == "1")
-        and (not args.disable_flashdecode)
+        and (not disable_flashdecode)
     ):
         block_sparse_attention_backend = decode_block_sparse_attention
 
@@ -180,7 +196,9 @@ def dual_stage_quadratic_hip_attention(
     #     os.getenv("HIP_LANDMARK_BASED_SCAN_STAGE", "1") == "1"
     # )
 
-    require_state = args.using_landmark
+    require_state = args.using_landmark or any(
+        [s.using_landmark if isinstance(s, ScanStage) else False for s in args.stages]
+    )
 
     if require_state and (not args.is_decode):
         # if q.shape[1] > 1: print('using cached state')
@@ -247,7 +265,7 @@ def dual_stage_quadratic_hip_attention(
     BLOCK_SIZE_Q = args.stages[0].stage_block_size_q
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     BDST_SCAN = triton.cdiv(BDST, STAGE_STRIDE)
-    BLOCK_CHUNK = args.block_size_k
+    BLOCK_CHUNK = int(os.getenv("SCAN_BLOCK_CHUNK", "64"))
     chunk_size = args.stages[0].stage_chunk_size
     chunk_count = triton.cdiv(
         max(0, MAX_TSRC - args.sink_token_size - args.sliding_window_size), chunk_size
@@ -449,13 +467,22 @@ def dual_stage_quadratic_hip_attention(
                 #     else:
                 #         k_mask = k_mask_original
 
+                debug_exclude_landmark = []
+                if "HIP_DEBUG_EXCLUDE_LANDMARK" in os.environ:
+                    debug_exclude_landmark = list(
+                        map(
+                            lambda x: int(x),
+                            os.environ["HIP_DEBUG_EXCLUDE_LANDMARK"].split(","),
+                        )
+                    )
+
                 assert q.shape[1] <= BDST * BLOCK_SIZE_Q
                 if (
-                    args.using_landmark
+                    (args.using_landmark or stage_info.using_landmark)
                     and (not args.is_decode)
                     and (BDST > 1)
                     and (args.position_ids.shape[0] == 1)
-                    # and (args.layer_id > 300)
+                    and (args.layer_id not in debug_exclude_landmark)
                 ):
                     assert not torch.cuda.is_current_stream_capturing()
 
@@ -503,10 +530,10 @@ def dual_stage_quadratic_hip_attention(
 
                     assert indices_left.shape == (
                         BSZ,
-                        BDST_SCAN,
+                        BDST,
                         HEAD,
                         indices_left.shape[-1],
-                    )
+                    ), f"{indices_left.shape} == ({BSZ},{BDST},{HEAD},{indices_left.shape[-1]},)"
 
                     # k_temp = args.gather_k_from_paged_cache(
                     #     chunk_size=1,
@@ -864,9 +891,13 @@ def dual_stage_quadratic_hip_attention(
 
                     if (
                         SGLANG_DIST_ACTIVATED
-                        and get_tensor_model_parallel_world_size() > 1
+                        and get_world_size() > 1
                         and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
+                        warnings.warn(
+                            "TP all gather is used for head reduce, this may degrade throughput."
+                        )
+
                         out_scores_tp = out_scores
                         out_scores = (
                             tensor_model_parallel_all_gather(
@@ -1025,17 +1056,21 @@ def dual_stage_quadratic_hip_attention(
                         args.stages[i_stage + 1].stage_k
                         // args.stages[i_stage].stage_chunk_size
                     )
-                    next_stage_k = min(next_stage_k, indices_left.shape[-1])
-                    _, t_indices = out_scores[..., : indices_left.shape[-1]].topk(
-                        k=next_stage_k,
-                        dim=-1,
-                        sorted=False,
-                        largest=True,
-                    )
                 else:
-                    _, t_indices = out_scores[..., : indices_left.shape[-1]].sort(
-                        dim=-1, descending=True, stable=False
+                    next_stage_k = (
+                        args.second_stage_k // args.stages[i_stage].stage_chunk_size
                     )
+                next_stage_k = min(next_stage_k, indices_left.shape[-1])
+                _, t_indices = out_scores[..., : indices_left.shape[-1]].topk(
+                    k=next_stage_k,
+                    dim=-1,
+                    sorted=False,
+                    largest=True,
+                )
+                # else:
+                #     _, t_indices = out_scores[..., : indices_left.shape[-1]].sort(
+                #         dim=-1, descending=True, stable=False
+                #     )
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
 
@@ -1228,6 +1263,17 @@ def dual_stage_quadratic_hip_attention(
                 (0, 255, 0),
                 2,
             )
+            tdst_start = position_ids[0, 0].item() // BLOCK_SIZE_Q
+            debug = cv2.line(
+                debug,
+                (
+                    tdst_start,
+                    0,
+                ),
+                (tdst_start + debug.shape[0], debug.shape[0]),
+                thickness=1,
+                color=(0, 255, 0),
+            )
 
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
@@ -1253,12 +1299,23 @@ def dual_stage_quadratic_hip_attention(
         # NOTE: convert format and taking unique in indices
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
 
-        indices, t_sort_1 = indices.sort(dim=-1)
-        indices = indices // args.block_size_k * args.block_size_k
+        require_expand_future = False
+        expand_future_window = 16
+        if require_expand_future and (BDST == 1):
+            dups = []
+            for i in range(0, expand_future_window, args.block_size_k):
+                dups.append(indices + i)
+            indices = torch.cat(dups, dim=-1)
 
-        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-        indices, t_sort_2 = indices.sort(dim=-1)
+        require_post_unique = True  # BDST > 1
+        if require_post_unique or require_expand_future:
+            indices, t_sort_1 = indices.sort(dim=-1)
+            indices = indices // args.block_size_k * args.block_size_k
+
+            unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+            indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+            indices, t_sort_2 = indices.sort(dim=-1)
+
         active_mask = indices < (
             position_ids[:, :: args.block_size_q, None].repeat_interleave(HEAD, 0)
             + args.block_size_q
@@ -1435,7 +1492,15 @@ def dual_stage_quadratic_hip_attention(
         k = None
         v = None
 
-    block_sparse_attention_backend = get_block_sparse_backend(args, q_bsa)
+    block_sparse_attention_backend = get_block_sparse_backend(
+        q_bsa, args.disable_flashdecode
+    )
+    # from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention as tilelang_bsa
+    # block_sparse_attention_backend = tilelang_bsa
+
+    if args.bsa_sliding_window_size > 0:
+        args = args.clone()
+        args.sliding_window_size = args.bsa_sliding_window_size
 
     context = block_sparse_attention_backend(
         q=q_bsa,
@@ -1454,6 +1519,8 @@ def dual_stage_quadratic_hip_attention(
         extend_context_length=args.extend_context_length,
         offload_update_cache=(cached_metadata is None) and args.online_update_cache,
         return_running_statistics=args.bsa_return_running_statistics,
+        k_descale=args.k_descale,
+        v_descale=args.v_descale,
         # offload_update_cache=args.online_update_cache,
         # offload_update_cache=False,
     )

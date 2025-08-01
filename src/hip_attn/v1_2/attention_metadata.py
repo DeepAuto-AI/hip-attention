@@ -1,5 +1,6 @@
 import copy
 import os
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional
 
@@ -60,6 +61,7 @@ class EvalScoreStage(Stage):
 @dataclass
 class ScanStage(Stage):
     stage_extend_backend: Optional[str] = None
+    using_landmark: Optional[bool] = None
     require_realign_index: bool = True
     require_reset_score: bool = True
     require_post_sort: bool = True
@@ -141,6 +143,7 @@ class HiPAttentionState:
             num_tokens = k.shape[1]
 
         num_tokens = max(args.extend_context_length, num_tokens)
+        num_tokens = max(int(os.getenv("HIP_DEBUG_MAX_TOKENS", "0")), num_tokens)
 
         # padding for SGlang
         num_tokens += 1024
@@ -274,6 +277,12 @@ class HiPAttentionArgs:
     is_decode: bool = False
 
     bsa_return_running_statistics: bool = False
+    bsa_sliding_window_size: int = -1
+
+    k_descale: Optional[Tensor] = None
+    v_descale: Optional[Tensor] = None
+
+    self_extend_scale: int = 12
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -505,45 +514,74 @@ class HiPAttentionArgs:
         return k
 
     def gather_k_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q: torch.Tensor = None
+        self,
+        chunk_size: int = 1,
+        disable_gqa=False,
+        gqa_q: torch.Tensor = None,
+        seq_len: int = None,
     ):
         if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
             raise Exception(
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
+        else:
+            # warnings.warn("For developers: gathering paged cache will occure overhead.")
+            pass
 
         k_cache = self.get_k_cache()
         assert self.block_table is not None
-        k = k_cache[:, 0, :, :][
+
+        if seq_len is None:
+            seq_len = self.block_table.shape[1]
+
+        is_fp8 = k_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+        index_dtype = torch.uint8 if is_fp8 else k_cache.dtype
+
+        k = k_cache.view(index_dtype)[:, 0, :, :][
             self.block_table[
                 :,
-                : self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size),
+                : seq_len - (seq_len % chunk_size),
             ]
-        ]
+        ].view(k_cache.dtype)
         if disable_gqa:
             k = k.repeat_interleave(gqa_q.shape[2] // k.shape[2], dim=2)
         return k
 
     def gather_v_from_paged_cache(
-        self, chunk_size: int = 1, disable_gqa=False, gqa_q=None
+        self,
+        chunk_size: int = 1,
+        disable_gqa: bool = False,
+        gqa_q: torch.Tensor = None,
+        seq_len: int = None,
     ):
         if not HIP_DEBUG_ALLOW_GATHER_KV_CACHE:
             raise Exception(
                 "Please set HIP_DEBUG_ALLOW_GATHER_KV_CACHE=1 for allow this behavior"
             )
+        else:
+            # warnings.warn("For developers: gathering paged cache will occure overhead.")
+            pass
 
         if self.v_cache is not None:
             assert self.v_cache is not None
             v_cache = self.v_cache
         else:
             v_cache = self.offload_cache.v_uvm.bank_gpu.unsqueeze(1)
+
         assert self.block_table is not None
-        v = v_cache[:, 0, :, :][
+
+        if seq_len is None:
+            seq_len = self.block_table.shape[1]
+
+        is_fp8 = v_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+        index_dtype = torch.uint8 if is_fp8 else v_cache.dtype
+
+        v = v_cache.view(index_dtype)[:, 0, :, :][
             self.block_table[
                 :,
-                : self.block_table.shape[1] - (self.block_table.shape[1] % chunk_size),
+                : seq_len - (seq_len % chunk_size),
             ]
-        ]
+        ].view(v_cache.dtype)
         if disable_gqa:
             v = v.repeat_interleave(gqa_q.shape[2] // v.shape[2], dim=2)
         return v

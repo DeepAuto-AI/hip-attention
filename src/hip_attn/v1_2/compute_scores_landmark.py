@@ -78,7 +78,9 @@ configs = [
         num_warps=w,
     )
     for BLOCK_CHUNK in [64, 128, 256]
-    for s in [3, 4, 7]
+    for s in [
+        3,
+    ]
     for w in [4, 8]
     # for BM in [128,]
     # for BN in [64,]
@@ -92,7 +94,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["T"])
+@triton.autotune(list(filter(keep, configs)), key=["HID"])
 @triton.jit
 def _compute_scores_landmark_cuda(
     Q,
@@ -251,7 +253,7 @@ def _compute_scores_landmark_cuda(
                     + idx_tsrc[None, :] * stride_k_tsrc
                     + idx_hid[:, None] * stride_k_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 )  # .to(tl.float8e5)
             else:
                 block_index = tl.load(
@@ -264,8 +266,11 @@ def _compute_scores_landmark_cuda(
                     + block_index[None, :] * stride_k_cache_t
                     + idx_hid[:, None] * stride_k_cache_hid,
                     mask=mask_tsrc[None, :],
-                    other=0,
+                    other=0.0,
                 )
+
+            if keys.dtype == tl.float8e5:
+                keys = keys.to(tl.bfloat16)
 
             if DEROPE:
                 keys = tl.trans(
@@ -285,7 +290,7 @@ def _compute_scores_landmark_cuda(
                 )
 
             scores = tl.dot(
-                queries,
+                queries.to(keys.dtype),
                 keys,
             )
 

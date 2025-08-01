@@ -50,7 +50,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["HID", "T"])
+@triton.autotune(list(filter(keep, configs)), key=["HID", "USING_PAGED_CACHE"])
 @triton.jit
 def _sw_score_sample(
     Q,
@@ -124,7 +124,7 @@ def _sw_score_sample(
             + idx_head_kv * stride_k_cache_head_kv
             + idx_hid[:, None] * stride_k_cache_hid,
             mask=mask_tsrc[None, :],
-            other=0,
+            other=0.0,
         )
     else:
         keys = tl.load(
@@ -134,8 +134,13 @@ def _sw_score_sample(
             + idx_head_kv * stride_k_head_kv
             + idx_hid[:, None] * stride_k_hid,
             mask=mask_tsrc[None, :],
-            other=0,
+            other=0.0,
         )
+
+    dot_dtype = (
+        torch.float16 if Q.dtype.element_ty == tl.float8e5 else Q.dtype.element_ty
+    )
+    keys = keys.to(dot_dtype)
 
     acc = tl.zeros((BLOCK_TSRC,), dtype=tl.float32) + 42
 
@@ -156,7 +161,7 @@ def _sw_score_sample(
             + idx_hid[None, :] * stride_q_hid,
             mask=mask_tdst[:, None],
             other=0,
-        )
+        ).to(dot_dtype)
 
         scores = tl.dot(queries, keys)
 
@@ -177,7 +182,7 @@ def _sw_score_sample(
             + idx_hid[None, :] * stride_q_hid,
             mask=mask_tdst[:, None],
             other=0,
-        )
+        ).to(dot_dtype)
 
         scores = tl.dot(queries, keys)
 
@@ -231,9 +236,9 @@ def landmark_sample(
         assert position_ids_for_landmark.shape[0] == BSZ
         assert position_ids_for_landmark.shape[1] == TDST
 
-        assert ((not args.using_paged_cache) and (k is not None)) or (
-            args.using_paged_cache and (k is None)
-        ), "todo"
+        _using_k = (not args.using_paged_cache) and (k is not None)
+        _using_paged_k = args.using_paged_cache and (k is None)
+        assert _using_k or _using_paged_k, f"todo {_using_k} or {_using_paged_k}"
         assert not landmark_derope, "todo"
 
         TDST_PADDED = (
@@ -279,6 +284,37 @@ def landmark_sample(
             # BLOCK_TSRC,
         )
 
+        landmark_scores[:, :, -min(landmark_chunk, 32) :].fill_(0)
+
+        if state is not None:
+            if args.block_table is not None:
+                q_block_index = args.block_table.gather(
+                    dim=1, index=position_ids_for_landmark
+                )
+            else:
+                assert args.position_ids.shape[0] == 1
+                q_block_index = args.position_ids[0]
+            # sanity_check = q_block_index.amax().item()
+            # assert sanity_check < state.landmark_scores.shape[0], f'{sanity_check=} < {state.landmark_scores.shape=}[0]'
+            state.landmark_scores[q_block_index] = (
+                landmark_scores[:, :, : q_for_landmark.shape[1]]
+                .contiguous()
+                .permute(0, 2, 1)
+            )
+            if args.block_table is not None:
+                landmark_scores = state.landmark_scores[
+                    args.block_table[
+                        :,
+                        : args.block_table.shape[1]
+                        - (args.block_table.shape[1] % landmark_chunk),
+                    ]
+                ]
+            else:
+                assert k is not None
+                assert k.shape[0] == 1
+                landmark_scores = state.landmark_scores[None, : k.shape[1], :]
+            landmark_scores = landmark_scores.permute(0, 2, 1)
+
         # print(q_for_landmark.shape, HEAD, HEAD_KV, TDST, triton.cdiv(TDST, BLOCK_TSRC), position_ids_for_landmark.shape)
         if DEBUG:
             plt.clf()
@@ -291,26 +327,6 @@ def landmark_sample(
                 .numpy()
             )
             plt.savefig("dummy_landmark.png")
-
-        if state is not None:
-            q_block_index = args.block_table.gather(
-                dim=1, index=position_ids_for_landmark
-            )
-            # sanity_check = q_block_index.amax().item()
-            # assert sanity_check < state.landmark_scores.shape[0], f'{sanity_check=} < {state.landmark_scores.shape=}[0]'
-            state.landmark_scores[q_block_index] = (
-                landmark_scores[:, :, : q_for_landmark.shape[1]]
-                .contiguous()
-                .permute(0, 2, 1)
-            )
-            landmark_scores = state.landmark_scores[
-                args.block_table[
-                    :,
-                    : args.block_table.shape[1]
-                    - (args.block_table.shape[1] % landmark_chunk),
-                ]
-            ]
-            landmark_scores = landmark_scores.permute(0, 2, 1)
     else:
 
         def pad_seq(t: torch.Tensor):
