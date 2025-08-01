@@ -132,7 +132,7 @@ def _attn_fwd_inner(
                 | (k.dtype == tl.float8e4b15)
                 | (k.dtype == tl.float8e4nv)
             ):
-                k = k.to(tl.float16)
+                k = k.to(tl.bfloat16)
 
         if EXTEND_BACKEND == "none":
             pass
@@ -168,7 +168,8 @@ def _attn_fwd_inner(
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    BLOCK_TABLE 
+                    + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
                 k_rot = tl.load(
@@ -189,7 +190,7 @@ def _attn_fwd_inner(
                 | (k_rot.dtype == tl.float8e5b16)
                 | (k_rot.dtype == tl.float8e4b15)
             ):
-                k_rot = k_rot.to(tl.float16)
+                k_rot = k_rot.to(tl.bfloat16)
 
             cos = tl.load(
                 COS
@@ -529,7 +530,7 @@ def _attn_fwd(
         | (_K.dtype.element_ty == tl.uint8)
         | (_K.dtype.element_ty == tl.int8)
     ):
-        q = q.to(tl.float16)
+        q = q.to(tl.bfloat16)
 
     if EXTEND_BACKEND == "none":
         q_rot = None
@@ -538,18 +539,17 @@ def _attn_fwd(
         idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
         idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
         rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
-        # idx_rope = tl.full((BLOCK_M,), value=MODEL_CONTEXT_LENGTH - 1, dtype=tl.int64)
-        max_mask_idx = tl.max(tl.where(mask_m, mask_idx, 0))
-        idx_rope = mask_idx.to(tl.int64) - max_mask_idx + MODEL_CONTEXT_LENGTH - 1
-        # idx_rope = mask_idx
+        
+        max_pos_tdst = tl.max(tl.where(mask_m, mask_idx + 1, 0) - 1)
+        idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1
 
         q_rot = tl.load(
             Q
             + off_z.to(tl.int64) * stride_qz
             + off_h.to(tl.int64) * stride_qh
-            + offs_m.to(tl.int64) * stride_qm
-            + idx_hid_rot.to(tl.int64) * stride_qk,
-            mask=mask_m,
+            + offs_m[:, None].to(tl.int64) * stride_qm
+            + idx_hid_rot[None, :].to(tl.int64) * stride_qk,
+            mask=mask_m[:, None],
             other=0.0,
         )
 

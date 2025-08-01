@@ -1142,8 +1142,8 @@ def _forward_delta_attn(
         # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
         args_sw.sliding_window_size = delta_attention_args_window
         args_sw.sliding_window_indices = None
-        
-        if os.getenv('HIP_DEBUG_FORCE_CHUNKED_SW', '0') == '1':
+
+        if os.getenv("HIP_DEBUG_FORCE_CHUNKED_SW", "0") == "1":
             args_sw.using_chunked_sliding_window = True
 
         BDST = triton.cdiv(TDST, args_sw.block_size_q)
@@ -1770,7 +1770,7 @@ def _forward_fa3_decode(
     # )
     # _cu_seqlens_k = _cu_seqlens_q.clone()
     # _cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
-    
+
     # assert torch.all(_cache_seqlens == cache_seqlens)
     # assert torch.all(_cu_seqlens_q == cu_seqlens_q)
     # assert torch.all(_cu_seqlens_k == cu_seqlens_k)
@@ -2568,10 +2568,10 @@ def _forward_paged_hip(
         # args.sa_extend_backend = "clamp"
 
     if isinstance(sliding_window_size, int) and (sliding_window_size > 0):
-        
-        if os.getenv('HIP_DEBUG_FORCE_CHUNKED_SW', '0') == '1':
+
+        if os.getenv("HIP_DEBUG_FORCE_CHUNKED_SW", "0") == "1":
             args.using_chunked_sliding_window = True
-        
+
         def __forward_sliding_window_wrapper(
             q: torch.Tensor,
             k: torch.Tensor,
