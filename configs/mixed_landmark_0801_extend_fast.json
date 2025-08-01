@@ -2,7 +2,7 @@
     "__head_reduce": 0,
     "__last_dense": -1,
     "__using_landmark": false,
-    "__seq_thresh_fa3": 131072,
+    "__seq_thresh_fa3": 256000,
     "__delta_attention_args": "window_0-diff_1-w_32-sparse_decode-smooth-extend_self",
     "using_extend": true,
     "dense_layers": [0],
@@ -36,15 +36,23 @@
             "sliding_window_size": 512,
             "second_stage_k": 2048,
             "sink_token_size": 256,
-            "landmark_stage_k": [1, 1, 1],
+            "landmark_stage_k": [1, 1, 1, 1],
             "sa_extend_backend": "self_extend",
             "scan_extend_backend": "none",
             "stages": [
                 {
                     "stage_block_size_q":128,
                     "stage_block_stride_q":4,
-                    "stage_chunk_size":256,
+                    "stage_chunk_size":512,
                     "stage_k":null,
+                    "stage_stride":1,
+                    "using_landmark":false
+                },
+                {
+                    "stage_block_size_q":128,
+                    "stage_block_stride_q":4,
+                    "stage_chunk_size":128,
+                    "stage_k":262144,
                     "stage_stride":1,
                     "using_landmark":false
                 },
