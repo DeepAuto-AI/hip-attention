@@ -157,7 +157,7 @@ def _attn_fwd_inner(
             #     - SELF_EXTEND_WINDOW,
             # )
             # # idx_rope = idx_tsrc
-            
+
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
 
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
@@ -180,7 +180,7 @@ def _attn_fwd_inner(
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE 
+                    BLOCK_TABLE
                     + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
@@ -551,7 +551,7 @@ def _attn_fwd(
         idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
         idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
         rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
-        
+
         max_pos_tdst = tl.max(tl.where(mask_m, mask_idx + 1, 0) - 1)
         idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1
 

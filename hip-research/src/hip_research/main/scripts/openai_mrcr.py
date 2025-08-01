@@ -1,10 +1,11 @@
-import os
-from huggingface_hub import hf_hub_download
-import pandas as pd
-from openai import OpenAI
 import json
+import os
 from difflib import SequenceMatcher
+
+import pandas as pd
 import tiktoken
+from huggingface_hub import hf_hub_download
+from openai import OpenAI
 
 # Set accordingly
 MAX_CONTEXT_WINDOW=int(os.getenv('CONTEXT_LEN', '1000000'))
@@ -29,7 +30,7 @@ def grade(response: str, answer: str, random_string_to_prepend: str) -> float:
 
     # print("res:", response.replace('\n', '\\n')[:100])
     # print("ans:", answer.replace('\n', '\\n')[:100])
-    
+
     if not response.startswith(random_string_to_prepend):
         return 0
     response = response.removeprefix(random_string_to_prepend)
