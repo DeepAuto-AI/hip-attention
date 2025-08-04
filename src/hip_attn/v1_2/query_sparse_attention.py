@@ -124,15 +124,16 @@ def _attn_fwd_inner(
                 mask=mask_tsrc[None, :],
                 other=0.0,
             )
-            if k.dtype == tl.uint8:
-                k = k.to(tl.float8e5, bitcast=True)
-            if (
-                (k.dtype == tl.float8e5)
-                | (k.dtype == tl.float8e4b8)
-                | (k.dtype == tl.float8e4b15)
-                | (k.dtype == tl.float8e4nv)
-            ):
-                k = k.to(tl.bfloat16)
+        
+        if k.dtype == tl.uint8:
+            k = k.to(tl.float8e5, bitcast=True)
+        if (
+            (k.dtype == tl.float8e5)
+            | (k.dtype == tl.float8e4b8)
+            | (k.dtype == tl.float8e4b15)
+            | (k.dtype == tl.float8e4nv)
+        ):
+            k = k.to(tl.bfloat16)
 
         if EXTEND_BACKEND == "none":
             pass

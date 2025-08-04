@@ -1921,15 +1921,30 @@ def _forward_fa3(
                 sin_k = rope_sin[
                     None, : key_rot.shape[1], None, : rope_dim // 2
                 ].repeat_interleave(2, -1)
-
-            q = (
-                query_rot.to(torch.float32) * cos_q.to(torch.float32)
-                + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)
-            ).to(query_rot.dtype)
-            k = (
-                key_rot.to(torch.float32) * cos_k.to(torch.float32)
-                + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)
-            ).to(key_rot.dtype)
+            
+            if q.shape[-1] == cos_q.shape[-1]:
+                q = (
+                    query_rot.to(torch.float32) * cos_q.to(torch.float32)
+                    + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)
+                ).to(query_rot.dtype)
+                k = (
+                    key_rot.to(torch.float32) * cos_k.to(torch.float32)
+                    + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)
+                ).to(key_rot.dtype)
+            else:
+                assert q.shape[-1] > cos_q.shape[-1]
+                warnings.warn('Is this GLM4.5?')
+                def apply_rope(toks, cos, sin):
+                    rope_dim = cos.shape[-1]
+                    toks_rope, toks_pass = toks[..., -rope_dim:], toks[..., :-rope_dim]
+                    toks_embed = (
+                        toks_rope.to(torch.float32) * cos.to(torch.float32)
+                        + rotate_fn(toks_rope.to(torch.float32)) * sin.to(torch.float32)
+                    ).to(toks.dtype)
+                    # NOTE format is DeepSeek style. Caution in GLM4.5
+                    return torch.cat([toks_pass, toks_embed], dim=-1)
+                q = apply_rope(query_rot, cos_q, sin_q)
+                k = apply_rope(key_rot, cos_k, sin_k)
 
     tp_q_head, tp_q_dim = q.shape[2:]
     tp_k_head, tp_k_dim = k.shape[2:]

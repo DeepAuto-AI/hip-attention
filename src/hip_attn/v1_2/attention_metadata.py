@@ -291,6 +291,9 @@ class HiPAttentionArgs:
         # if self.q_quant is not None:
         #     assert self.q_quant.ndim == 4
         #     assert self.k_quant.ndim == 4
+        if self.using_extend:
+            assert self.model_context_length is not None
+            assert self.extend_context_length is not None
         self.update_flags()
 
     def update_flags(self):

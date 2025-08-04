@@ -145,7 +145,7 @@ def stream_chat_completion(
 
     return RequestStatistics(
         prefill_throughput=num_prefill / (timestamp_first_token - timestamp_start),
-        decode_throughput=(num_decode * num_concurrent)
+        decode_throughput=(num_returned * num_concurrent)
         / (timestamp_end - timestamp_first_token),
         num_returned=num_returned,
     )
