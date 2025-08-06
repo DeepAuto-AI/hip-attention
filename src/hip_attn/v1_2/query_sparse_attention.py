@@ -23,10 +23,9 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
 
 from hip_attn.v1_2.attention_metadata import safe_stride
-from hip_attn.v1_2.utils import capture
+from hip_attn.v1_2.utils import capture, triton_jit
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = "cuda:0"
@@ -343,8 +342,8 @@ def keep(conf):
     return True
 
 
-@triton.autotune(
-    list(filter(keep, configs)),
+@triton_jit(
+    configs=list(filter(keep, configs)),
     key=[
         # "N_CTX",
         # "N_KV",
@@ -352,7 +351,6 @@ def keep(conf):
         "USING_PAGED_CACHE",
     ],
 )
-@triton.jit
 def _attn_fwd(
     Q,
     K,

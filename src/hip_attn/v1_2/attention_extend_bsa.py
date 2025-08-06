@@ -11,6 +11,7 @@ from triton import cdiv as cdiv_python
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, safe_stride
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
+from hip_attn.v1_2.utils import triton_jit
 
 DEFAULT_EXTEND_BACKEND: tl.constexpr = "streaming"
 
@@ -763,7 +764,7 @@ def get_block_sparse_attention_configs():
     return configs
 
 
-@triton.autotune(
+@triton_jit(
     configs=get_block_sparse_attention_configs(),
     key=[
         "BLOCK_SIZE_K",
@@ -776,7 +777,6 @@ def get_block_sparse_attention_configs():
     #     'top_k': 24,
     # }
 )
-@triton.jit
 def block_sparse_attention_cuda(
     Q,
     stride_q_bsz,
