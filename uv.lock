@@ -4352,7 +4352,7 @@ wheels = [
 [[package]]
 name = "sglang"
 version = "0.4.6.post3"
-source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#95e52327fbf119a8cf491621faf004e70e09081d" }
+source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#ed63b7f5823a9874a187bcb462abaea2b8be975e" }
 dependencies = [
     { name = "aiohttp" },
     { name = "ipython", version = "8.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
