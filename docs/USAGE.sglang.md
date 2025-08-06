@@ -49,6 +49,14 @@
     - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading)
       - [Local](#local-12)
       - [Docker](#docker-10)
+  - [`Qwen/Qwen3-235B-A22B-Thinking-2507`](#qwenqwen3-235b-a22b-thinking-2507)
+    - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading-1)
+      - [Local](#local-13)
+      - [Docker](#docker-11)
+  - [`Qwen/Qwen3-30B-A3B-Instruct-2507`](#qwenqwen3-30b-a3b-instruct-2507)
+    - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading-2)
+      - [Local](#local-14)
+      - [Docker](#docker-12)
 
 ## Prerequisites
 
@@ -1058,5 +1066,187 @@ python \
 --attention-backend hip_attention \
 --hip-attention-config-path /sgl-workspace/configs/deepseek_v2_lite_chat.json \
 --json-model-override-args '{"max_position_embeddings": 320000}' \
+--trust-remote-code
+```
+
+## `Qwen/Qwen3-235B-A22B-Thinking-2507`
+
+### Multi GPU (without cache offloading)
+
+- 256k context length (No context extension)
+- Cache offloading disabled
+- Tested model: [`Qwen/Qwen3-235B-A22B-Thinking-2507`](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507)
+- Testwd GPU: 8x H200 141GB
+- Tested at: 2025-08-06
+- Tested version:
+  - `hip-attention`: `e6aa4506acf3689e0aba929f7ca09d7501ce9c82`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `ed63b7f5823a9874a187bcb462abaea2b8be975e`
+
+#### Local
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+HIP_DEBUG_RECOMPUTE_SPLIT=0 \
+TRITON_PRINT_AUTOTUNING=1 \
+SRT_WARMUP_ALL_SEQ_LENS=0 \
+HIP_DEBUG_FA3_MIXING_LEN=0 \
+PASSKEY_DECODE_LEN=128 \
+PASSKEY_LEN=240 \
+SA_BLOCK_SIZE=128 \
+SA_DECODE_BLOCK_SIZE=128 \
+HIP_DISABLE_AUTOTUNE=0 \
+HIP_DEBUG=0 \
+HIP_DEBUG_BENCH=0 \
+HIP_DEBUG_CAPTURE_DECORATOR=1 \
+CUDA_LAUNCH_BLOCKING=0 \
+uv run -m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8080 \
+--model-path Qwen/Qwen3-235B-A22B-Thinking-2507 \
+--kv-cache-dtype fp8_e4m3 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 \
+--context-length 262144 \
+--max-total-tokens 262144 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0722_no_extend_fast.json \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 8 \
+--trust-remote-code
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-qwen3-235b-a22b-thinking-2507-8gpu \
+-p 8080:8080 \
+--ipc=host \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
+--env "TRITON_PRINT_AUTOTUNING=1" \
+--env "SRT_WARMUP_ALL_SEQ_LENS=0" \
+--env "HIP_DEBUG_FA3_MIXING_LEN=0" \
+--env "PASSKEY_DECODE_LEN=128" \
+--env "PASSKEY_LEN=240" \
+--env "SA_BLOCK_SIZE=128" \
+--env "SA_DECODE_BLOCK_SIZE=128" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
+--env "HIP_DEBUG=0" \
+--env "HIP_DEBUG_BENCH=0" \
+--env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
+--env "CUDA_LAUNCH_BLOCKING=0" \
+deepauto/hip-attention:v1.2.7-sglang \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8080 \
+--model-path Qwen/Qwen3-235B-A22B-Thinking-2507 \
+--kv-cache-dtype fp8_e4m3 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 \
+--context-length 262144 \
+--max-total-tokens 262144 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0722_no_extend_fast.json \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 8 \
+--trust-remote-code
+```
+
+## `Qwen/Qwen3-30B-A3B-Instruct-2507`
+
+### Multi GPU (without cache offloading)
+
+- 4M context length (with context extension)
+- Cache offloading disabled
+- Tested model: [`Qwen/Qwen3-30B-A3B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)
+- Testwd GPU: 8x H200 141GB
+- Tested at: 2025-08-06
+- Tested version:
+  - `hip-attention`: `953d829014fba9c77b481ac6104cd3a671fe819d`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `ed63b7f5823a9874a187bcb462abaea2b8be975e`
+
+#### Local
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+HIP_DEBUG_RECOMPUTE_SPLIT=0 \
+TRITON_PRINT_AUTOTUNING=1 \
+SRT_WARMUP_ALL_SEQ_LENS=0 \
+HIP_DEBUG_FA3_MIXING_LEN=0 \
+PASSKEY_DECODE_LEN=128 \
+PASSKEY_LEN=1000 \
+SA_BLOCK_SIZE=256 \
+SA_DECODE_BLOCK_SIZE=64 \
+HIP_DISABLE_AUTOTUNE=0 \
+HIP_DEBUG=0 \
+HIP_DEBUG_BENCH=0 \
+HIP_DEBUG_CAPTURE_DECORATOR=1 \
+CUDA_LAUNCH_BLOCKING=0 \
+uv run -m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8000 \
+--model-path Qwen/Qwen3-30B-A3B-Instruct-2507 \
+--kv-cache-dtype fp8_e4m3 \
+--tp-size 8 \
+--chunked-prefill-size 262144 \
+--max-prefill-tokens 262144 \
+--cuda-graph-bs 1 2 4 8 \
+--context-length 4096000 \
+--max-total-tokens 4096000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0801_extend_fast.json \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 8 \
+--trust-remote-code
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-qwen3-30b-a3b-instruct-2507-8gpu \
+-p 8000:8000 \
+--ipc=host \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
+--env "TRITON_PRINT_AUTOTUNING=1" \
+--env "SRT_WARMUP_ALL_SEQ_LENS=0" \
+--env "HIP_DEBUG_FA3_MIXING_LEN=0" \
+--env "PASSKEY_DECODE_LEN=128" \
+--env "PASSKEY_LEN=1000" \
+--env "SA_BLOCK_SIZE=256" \
+--env "SA_DECODE_BLOCK_SIZE=64" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
+--env "HIP_DEBUG=0" \
+--env "HIP_DEBUG_BENCH=0" \
+--env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
+--env "CUDA_LAUNCH_BLOCKING=0" \
+deepauto/hip-attention:v1.2.7-sglang \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8000 \
+--model-path Qwen/Qwen3-30B-A3B-Instruct-2507 \
+--kv-cache-dtype fp8_e4m3 \
+--tp-size 8 \
+--chunked-prefill-size 262144 \
+--max-prefill-tokens 262144 \
+--cuda-graph-bs 1 2 4 8 \
+--context-length 4096000 \
+--max-total-tokens 4096000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0801_extend_fast.json \
+--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 8 \
 --trust-remote-code
 ```
