@@ -50,11 +50,11 @@
       - [Local](#local-12)
       - [Docker](#docker-10)
   - [`Qwen/Qwen3-235B-A22B-Thinking-2507`](#qwenqwen3-235b-a22b-thinking-2507)
-    - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading-1)
+    - [Multi GPU with original context length](#multi-gpu-with-original-context-length)
       - [Local](#local-13)
       - [Docker](#docker-11)
   - [`Qwen/Qwen3-30B-A3B-Instruct-2507`](#qwenqwen3-30b-a3b-instruct-2507)
-    - [Multi GPU (without cache offloading)](#multi-gpu-without-cache-offloading-2)
+    - [Multi GPU with extended 4M context length](#multi-gpu-with-extended-4m-context-length)
       - [Local](#local-14)
       - [Docker](#docker-12)
 
@@ -992,7 +992,7 @@ python \
 - 1M context length
 - Cache offloading disabled
 - Tested model: `deepseek-ai/DeepSeek-V3`
-- Testwd GPU: 8x H200 141GB
+- Tested GPU: 8x H200 141GB
 - Tested at: 2025-06-26
 - Tested version:
   - `hip-attention`: `953d829014fba9c77b481ac6104cd3a671fe819d`
@@ -1071,12 +1071,12 @@ python \
 
 ## `Qwen/Qwen3-235B-A22B-Thinking-2507`
 
-### Multi GPU (without cache offloading)
+### Multi GPU with original context length
 
 - 256k context length (No context extension)
 - Cache offloading disabled
 - Tested model: [`Qwen/Qwen3-235B-A22B-Thinking-2507`](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507)
-- Testwd GPU: 8x H200 141GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-08-06
 - Tested version:
   - `hip-attention`: `e6aa4506acf3689e0aba929f7ca09d7501ce9c82`
@@ -1162,12 +1162,12 @@ python \
 
 ## `Qwen/Qwen3-30B-A3B-Instruct-2507`
 
-### Multi GPU (without cache offloading)
+### Multi GPU with extended 4M context length
 
 - 4M context length (with context extension)
 - Cache offloading disabled
 - Tested model: [`Qwen/Qwen3-30B-A3B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)
-- Testwd GPU: 8x H200 141GB
+- Tested GPU: 8x H100 80GB
 - Tested at: 2025-08-06
 - Tested version:
   - `hip-attention`: `953d829014fba9c77b481ac6104cd3a671fe819d`
