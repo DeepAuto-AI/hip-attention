@@ -895,7 +895,7 @@ def dual_stage_quadratic_hip_attention(
                         and HEAD_REDUCE_MODE in ["1", "2"]
                     ):
                         warnings.warn(
-                            "TP all gather is used for head reduce, this may degrade throughput."
+                            f"TP all gather is used for head reduce, this may degrade throughput. (MODE={HEAD_REDUCE_MODE})"
                         )
 
                         out_scores_tp = out_scores

@@ -47,8 +47,9 @@ def stream_chat_completion(
     num_decode: int,
     num_concurrent: int,
     verbose: bool,
+    flush_cache: bool = True,
 ):
-    if not is_third_party(endpoint):
+    if not is_third_party(endpoint) and flush_cache:
         url = f"{endpoint}/flush_cache"
         requests.post(url)
 
@@ -159,7 +160,10 @@ def shuffle(lst):
 
 
 def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
-    header = f"{random.randint(0, 1000)} There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
+    def random_char(y):
+       return ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for x in range(y))
+   
+    header = f"This is just random seed: {random_char(6)}\n\nThere is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
     passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
     footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
     filler = (
@@ -215,6 +219,7 @@ def benchmark(
     decode_lens: List[int],
     num_concurrents: List[int],
     verbose: bool,
+    no_warmup: bool,
 ):
     data = []
 
@@ -231,7 +236,7 @@ def benchmark(
         leave=False,
     ):
         example = get_random_example(tokenizer, dataset, seq_len)
-        if not is_third_party(endpoint):
+        if (not is_third_party(endpoint)) and (not no_warmup):
             # run warmup
             stream_chat_completion(
                 endpoint,
@@ -244,7 +249,13 @@ def benchmark(
         # sample
         example = get_random_example(tokenizer, dataset, seq_len)
         result = stream_chat_completion(
-            endpoint, example, seq_len * 1024, decode_len, num_concurrent, verbose
+            endpoint, 
+            example, 
+            seq_len * 1024, 
+            decode_len, 
+            num_concurrent, 
+            verbose,
+            flush_cache=not no_warmup,
         )
         data.append(
             {
@@ -276,6 +287,7 @@ if __name__ == "__main__":
     parser.add_argument("--decode", nargs="+", type=int)
     parser.add_argument("--batch", nargs="+", type=int)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--no-warmup", action="store_true")
 
     args = parser.parse_args()
 
@@ -287,4 +299,5 @@ if __name__ == "__main__":
         args.decode,
         args.batch,
         args.verbose,
+        args.no_warmup
     )

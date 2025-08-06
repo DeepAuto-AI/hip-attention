@@ -2299,8 +2299,8 @@ def chunk_controllable_sampling_mask(
     if (q.shape[1] == 1) and not using_online_cache_update:
         HEAD_REPEAT = HEAD // HEAD_KV
         BLOCK_HEAD = HEAD_REPEAT
-        assert triton.next_power_of_2(BLOCK_HEAD) == BLOCK_HEAD
         BLOCK_HEAD_PADDED = max(BLOCK_HEAD, 16)
+        assert triton.next_power_of_2(BLOCK_HEAD_PADDED) == BLOCK_HEAD_PADDED
 
         assert TDST == q.shape[1]
 
