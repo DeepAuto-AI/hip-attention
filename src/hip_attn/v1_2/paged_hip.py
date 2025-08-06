@@ -1242,6 +1242,7 @@ def _forward_delta_attn(
                     args.block_table,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    softmax_sink=args.softmax_sink,
                 )
                 .permute(0, 2, 1, 3)
                 .contiguous()
@@ -1465,6 +1466,7 @@ def _forward_delta_attn(
                     None,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    softmax_sink=args.softmax_sink,
                 )
                 .permute(0, 2, 1, 3)
                 .contiguous()
@@ -1498,6 +1500,7 @@ def _forward_delta_attn(
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
+                    softmax_sink=args.softmax_sink,
                 )
             else:
                 assert k is not None
@@ -1519,6 +1522,7 @@ def _forward_delta_attn(
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
+                    softmax_sink=args.softmax_sink,
                 )
 
             if delta_attention_args_adjust_norm_const:
@@ -2196,6 +2200,8 @@ def _forward_sliding_window(
     args: HiPAttentionArgs,
     sliding_window_size: int,
     sliding_window_sink: int,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
 ):
     query = q
     bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
@@ -2242,6 +2248,8 @@ def _forward_sliding_window(
         extend_context_length=args.extend_context_length,
         offload_update_cache=False,
         args=args,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
     context = context.to(query.dtype)
 
@@ -2460,12 +2468,20 @@ def _forward_paged_hip(
     sliding_window_size = os.getenv("HIP_DEBUG_SLLM_WINDOW", sliding_window_size)
     if isinstance(sliding_window_size, str):
         sliding_window_size = int(sliding_window_size)
+    if isinstance(sliding_window_sink, torch.Tensor):
+        softmax_sink = sliding_window_sink
+        sliding_window_sink = 0
+        args.softmax_sink = softmax_sink
     sliding_window_sink = int(
         os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
     )
     if args.second_stage_k == 0:
-        sliding_window_size = args.sliding_window_size
-        sliding_window_sink = args.sink_token_size
+        if sliding_window_size is not None and sliding_window_size > 0:
+            sliding_window_size = min(sliding_window_size, args.sliding_window_size)
+            sliding_window_sink = min(sliding_window_sink, args.sink_token_size)
+        else:
+            sliding_window_size = args.sliding_window_size
+            sliding_window_sink = args.sink_token_size
 
     # Plan 1
     # TODO use flash attention under 100K
@@ -2603,6 +2619,8 @@ def _forward_paged_hip(
                 args=args,
                 sliding_window_size=sliding_window_size,
                 sliding_window_sink=sliding_window_sink,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
         context, metadata = _forward_partial_fa3(

@@ -283,6 +283,8 @@ class HiPAttentionArgs:
     v_descale: Optional[Tensor] = None
 
     self_extend_scale: int = 12
+    
+    softmax_sink: Optional[Tensor] = None
 
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:

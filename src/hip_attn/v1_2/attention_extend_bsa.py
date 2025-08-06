@@ -421,6 +421,7 @@ def block_sparse_attention_cuda_step(
     EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
     CHUNKED_SW: tl.constexpr = False,
     SELF_EXTEND_SCALE=12,
+    BLOCKWISE_MASKING: tl.constexpr = False,
 ):
     HID_BLOCK_0: tl.constexpr = queries_0.shape[1]
     HID_BLOCK_1: tl.constexpr = queries_1.shape[1] if queries_1 is not None else 0
@@ -540,13 +541,19 @@ def block_sparse_attention_cuda_step(
 
         if EXCLUDE_SLIDING_WINDOW:
             # NOTE: called from sink and sparse part
-
             assert (
                 not CHUNKED_SW
             ), "sink and sparse part should not be in chunked sliding window attention"
-            qk_mask = ~(mask_tsrc & (idx_tsrc < (seq_len - sliding_window_size)))[
-                None, :
-            ]
+            if BLOCKWISE_MASKING:
+                qk_mask = ~(mask_tsrc & (idx_tsrc < (seq_len - sliding_window_size)))[
+                    None, :
+                ]
+            else:
+                qk_mask = ~(
+                    mask_tsrc[None, :] 
+                    & mask_tdst[:, None] 
+                    & (idx_tsrc[None, :] < (pos_tdst[:, None] - sliding_window_size))
+                )
         else:
             # NOTE: called from sliding window part
             # TODO(ainl): we should reduce scanning loop range if CHUNKED_SW is true.
@@ -559,12 +566,19 @@ def block_sparse_attention_cuda_step(
                 #     )
                 #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                 # )
-
-                qk_mask = (
-                    ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                    | ~(idx_tsrc[None, :] >= (seq_len - sliding_window_size))
-                    | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
-                )
+                
+                if BLOCKWISE_MASKING:
+                    qk_mask = (
+                        ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                        | ~(idx_tsrc[None, :] >= (seq_len - sliding_window_size))
+                        | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
+                    )
+                else:
+                    qk_mask = (
+                        ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
+                        | ~(idx_tsrc[None, :] >= (pos_tdst[:, None] - sliding_window_size))
+                        | ~(mask_tdst[:, None] & mask_tsrc[None, :])
+                    )
             else:
                 # qk_mask = (
                 #     ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
@@ -795,6 +809,7 @@ def block_sparse_attention_cuda(
     stride_v_hid,
     K_DESCALE,
     V_DESCALE,
+    SOFTMAX_SINK,
     POS,
     stride_pos_bsz,
     stride_pos_tdst,
@@ -2403,8 +2418,13 @@ def block_sparse_attention_cuda(
         tl.store(NC + mx_nc_offsets, l_i, mask=mask_tdst[:, None])
 
     # epilogue
+    l_i = (tl.where(l_i == 0.0, 1e-20, l_i))
+    if SOFTMAX_SINK is not None:
+        curr_sink = tl.load(SOFTMAX_SINK + idx_head)
+        l_i += tl.exp(curr_sink - m_i)
+    
     m_i += tl.math.log2(l_i)
-    acc = acc / (tl.where(l_i == 0.0, 1e-20, l_i))
+    acc = acc / l_i
 
     tl.store(
         CONTEXT
@@ -2582,6 +2602,7 @@ def block_sparse_attention(
         *safe_stride(v, 4),
         k_descale,
         v_descale,
+        args.softmax_sink.contiguous() if args.softmax_sink is not None else None,
         seq_lens,
         *safe_stride(seq_lens, 2),
         indices,

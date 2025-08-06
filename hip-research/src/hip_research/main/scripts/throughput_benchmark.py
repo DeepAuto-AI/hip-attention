@@ -81,6 +81,7 @@ def stream_chat_completion(
             "min_tokens": num_decode,
             "stream": True,
             "n": num_concurrent,
+            "skip_special_tokens": False,
         }
 
     is_decode = False
@@ -165,17 +166,10 @@ def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
             random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for x in range(y)
         )
 
-    header = f"This is just random seed: {random_char(6)}\n\nThere is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
+    header = f"There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey.\n\n------\n\n"
     passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
-    footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
-    filler = (
-        " ".join(
-            shuffle(
-                "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ".split()
-            )
-        )
-        + " "
-    )
+    footer = "\n\n------\n\nIn previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
+    filler = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
     len_filler = tokenizer(filler, return_tensors="pt").input_ids.shape[-1]
     num_filler = math.ceil(seq_len * 1024 / len_filler * 1.2)
 
@@ -199,7 +193,7 @@ def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
     return [
         {
             "role": "system",
-            "content": "You are a knowledge retrieval. You have to find a given passkey from random text, and answer only passkey numbers.",
+            "content": f"You are a helpful assistant. Here is chat session handle: {random_char(6)}",
         },
         {"role": "user", "content": text},
     ]

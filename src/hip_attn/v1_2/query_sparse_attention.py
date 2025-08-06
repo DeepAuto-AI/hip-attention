@@ -357,6 +357,7 @@ def _attn_fwd(
     V,
     K_DESCALE,
     V_DESCALE,
+    SOFTMAX_SINK,
     sm_scale,
     M,
     MX,
@@ -854,6 +855,10 @@ def _attn_fwd(
         )
 
     if N_SPLIT <= 1:
+        if SOFTMAX_SINK is not None:
+            curr_sink = tl.load(SOFTMAX_SINK + off_h)
+            l_i += tl.exp(curr_sink - m_i)
+        
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
             tl.store(m_ptrs, m_i, mask=mask_m)
@@ -982,6 +987,7 @@ class _attention(torch.autograd.Function):
         v: torch.Tensor,
         k_descale: torch.Tensor,
         v_descale: torch.Tensor,
+        softmax_sink: torch.Tensor,
         mask: torch.Tensor,
         sm_scale: float,
         k_cache: torch.Tensor,
@@ -1253,6 +1259,7 @@ class _attention(torch.autograd.Function):
                 v,
                 k_descale,
                 v_descale,
+                softmax_sink.contiguous() if softmax_sink is not None else None,
                 sm_scale,
                 M,
                 MX,
@@ -1336,6 +1343,7 @@ def query_sparse_attention(
     score_pooling_max_seq_len: int = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    softmax_sink: Optional[torch.Tensor] = None,
     extend_backend: Literal["self_extend", "none"] = "none",
     rope_cos: Optional[torch.Tensor] = None,
     rope_sin: Optional[torch.Tensor] = None,
@@ -1348,6 +1356,7 @@ def query_sparse_attention(
         v,
         k_descale,
         v_descale,
+        softmax_sink,
         mask,
         sm_scale,
         k_cache,
