@@ -10,8 +10,8 @@ from triton import cdiv as cdiv_python
 
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, safe_stride
-from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 from hip_attn.v1_2.utils import triton_jit
+from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
 DEFAULT_EXTEND_BACKEND: tl.constexpr = "streaming"
 

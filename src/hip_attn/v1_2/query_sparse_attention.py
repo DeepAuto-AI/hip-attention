@@ -123,7 +123,7 @@ def _attn_fwd_inner(
                 mask=mask_tsrc[None, :],
                 other=0.0,
             )
-        
+
         if k.dtype == tl.uint8:
             k = k.to(tl.float8e5, bitcast=True)
         if (

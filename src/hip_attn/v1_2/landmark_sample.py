@@ -50,10 +50,7 @@ def keep(conf):
     return True
 
 
-@triton_jit(
-    configs=list(filter(keep, configs)), 
-    key=["HID", "USING_PAGED_CACHE"]
-)
+@triton_jit(configs=list(filter(keep, configs)), key=["HID", "USING_PAGED_CACHE"])
 def _sw_score_sample(
     Q,
     stride_q_bsz,

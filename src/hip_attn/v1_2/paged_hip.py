@@ -1921,7 +1921,7 @@ def _forward_fa3(
                 sin_k = rope_sin[
                     None, : key_rot.shape[1], None, : rope_dim // 2
                 ].repeat_interleave(2, -1)
-            
+
             if q.shape[-1] == cos_q.shape[-1]:
                 q = (
                     query_rot.to(torch.float32) * cos_q.to(torch.float32)
@@ -1933,7 +1933,8 @@ def _forward_fa3(
                 ).to(key_rot.dtype)
             else:
                 assert q.shape[-1] > cos_q.shape[-1]
-                warnings.warn('Is this GLM4.5?')
+                warnings.warn("Is this GLM4.5?")
+
                 def apply_rope(toks, cos, sin):
                     rope_dim = cos.shape[-1]
                     toks_rope, toks_pass = toks[..., -rope_dim:], toks[..., :-rope_dim]
@@ -1943,6 +1944,7 @@ def _forward_fa3(
                     ).to(toks.dtype)
                     # NOTE format is DeepSeek style. Caution in GLM4.5
                     return torch.cat([toks_pass, toks_embed], dim=-1)
+
                 q = apply_rope(query_rot, cos_q, sin_q)
                 k = apply_rope(key_rot, cos_k, sin_k)
 

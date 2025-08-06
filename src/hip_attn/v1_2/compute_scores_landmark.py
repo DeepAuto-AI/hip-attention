@@ -95,10 +95,7 @@ def keep(conf):
     return True
 
 
-@triton_jit(
-    configs=list(filter(keep, configs)), 
-    key=["HID"]
-)
+@triton_jit(configs=list(filter(keep, configs)), key=["HID"])
 def _compute_scores_landmark_cuda(
     Q,
     stride_q_bsz,
