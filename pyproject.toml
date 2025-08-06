@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hip-attn"  # Name of package when installed using pip
-version = "1.2.6"
+version = "1.2.7"
 description = "HiP Attention"
 authors = [
     { name="DeepAuto.ai", email="contact@deepauto.ai" },
