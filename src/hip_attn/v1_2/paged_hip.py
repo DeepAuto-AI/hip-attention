@@ -2472,6 +2472,8 @@ def _forward_paged_hip(
         softmax_sink = sliding_window_sink
         sliding_window_sink = 0
         args.softmax_sink = softmax_sink
+    elif sliding_window_sink is None:
+        sliding_window_sink = 0
     sliding_window_sink = int(
         os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
     )

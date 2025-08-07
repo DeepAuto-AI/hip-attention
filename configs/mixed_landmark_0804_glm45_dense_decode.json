@@ -6,17 +6,17 @@
     "using_extend": true,
     "dense_layers": [0],
     "mask_refresh_interval": [96],
-    "self_extend_scale": 16,
+    "self_extend_scale": 5,
     "layers": [
         {
-            "sliding_window_size": 4096000,
+            "sliding_window_size": 409600,
             "second_stage_k": 0,
             "sink_token_size": 0,
             "sa_extend_backend": "self_extend",
             "stages": [ { } ]
         },
         {
-            "sliding_window_size": 4096000,
+            "sliding_window_size": 409600,
             "second_stage_k": 0,
             "sink_token_size": 0,
             "sa_extend_backend": "self_extend",

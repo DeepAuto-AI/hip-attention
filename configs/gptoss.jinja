@@ -3,7 +3,7 @@
   following kwargs:
   - "builtin_tools": A list, can contain "browser" and/or "python".
   - "model_identity": A string that optionally describes the model identity.
-  - "reasoning_effort": A string that describes the reasoning effort, defaults to "medium".
+  - "reasoning_effort": A string that describes the reasoning effort, defaults to "medium (i changed to high)".
  #}
 
 {#- Tool Definition Rendering ============================================== #}
@@ -265,7 +265,7 @@
 
 " }}
     {%- if reasoning_effort is not defined %}
-        {%- set reasoning_effort = "medium" %}
+        {%- set reasoning_effort = "high" %}
     {%- endif %}
     {{- "Reasoning: " + reasoning_effort + "
 
