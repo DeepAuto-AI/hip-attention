@@ -173,6 +173,14 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 
 ## Contributing
 
+### Updating dependencies
+
+```bash
+# This will update git commit hash of sglang
+uv lock --upgrade-package sglang
+uv sync
+```
+
 ### Building and publishing
 
 - PyPI
