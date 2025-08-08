@@ -75,6 +75,7 @@ def _attn_fwd_inner(
     stride_block_table_tsrc,
     
     RETURN_BSA_MASK: tl.constexpr,
+    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
     BSA_K: tl.constexpr,
     BSA_BLOCK_SIZE_Q: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
@@ -135,8 +136,6 @@ def _attn_fwd_inner(
                 other=0,
             )
 
-        # qk = tl.dot(q, k)
-
         q_dtype = q.dtype
 
         cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
@@ -165,7 +164,8 @@ def _attn_fwd_inner(
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
         # -- update block sums and indices for block sparse attention
-        if RETURN_BSA_MASK:
+        # if RETURN_BSA_MASK:
+        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             block_sums *= tl.sum(tl.reshape(alpha, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)[:, None] # adjust previous sums for new normalization constant
 
             block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
@@ -174,7 +174,6 @@ def _attn_fwd_inner(
             # if these two are equal, it means that the maximum is equal 
             # to the old value (i.e no change necessary)
             block_update = block_sums_min != block_sums_max # (M,)
-
             col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
 
             # make a mask of the minimum indices
@@ -182,7 +181,7 @@ def _attn_fwd_inner(
             bsa_mask = tl.where(block_update[:, None], bsa_mask, 0).to(tl.int1) # (M, K)
 
             block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-            block_idx = tl.where(bsa_mask, start_n // BLOCK_N, block_idx)
+            block_idx = tl.where(bsa_mask, start_n, block_idx)
         
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
@@ -349,6 +348,7 @@ def _attn_fwd(
     stride_scores_bsrc,
     
     RETURN_BSA_MASK: tl.constexpr,
+    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
     BSA_K: tl.constexpr,
     BSA_BLOCK_SIZE_Q: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
@@ -415,6 +415,7 @@ def _attn_fwd(
         K_CACHE = K_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_k_cache_head_kv
         V_CACHE = V_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_v_cache_head_kv
         BLOCK_TABLE = BLOCK_TABLE + off_z.to(tl.int64) * stride_block_table_bsz
+
     O_block_ptr = tl.make_block_ptr(
         base=Out + q_offset,
         shape=(N_CTX, HEAD_DIM),
@@ -441,6 +442,7 @@ def _attn_fwd(
     # load scales
     qk_scale = sm_scale
     qk_scale *= 1.44269504  # 1/log(2)
+
     # load q: it will stay in SRAM throughout
     q = tl.load(
         Q_block_ptr,
@@ -488,6 +490,7 @@ def _attn_fwd(
             stride_block_table_tsrc=stride_block_table_tsrc,
             
             RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
             BSA_K=BSA_K,
             BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
             BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -535,6 +538,7 @@ def _attn_fwd(
             stride_block_table_tsrc=stride_block_table_tsrc,
             
             RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
             BSA_K=BSA_K,
             BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
             BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -593,6 +597,7 @@ def _attn_fwd(
                     stride_block_table_tsrc=stride_block_table_tsrc,
                     
                     RETURN_BSA_MASK=RETURN_BSA_MASK,
+                    BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                     BSA_K=BSA_K,
                     BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                     BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -641,6 +646,7 @@ def _attn_fwd(
                     stride_block_table_tsrc=stride_block_table_tsrc,
                     
                     RETURN_BSA_MASK=RETURN_BSA_MASK,
+                    BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                     BSA_K=BSA_K,
                     BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                     BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -688,6 +694,7 @@ def _attn_fwd(
                 stride_block_table_tsrc=stride_block_table_tsrc,
                 
                 RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                 BSA_K=BSA_K,
                 BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -735,6 +742,7 @@ def _attn_fwd(
                 stride_block_table_tsrc=stride_block_table_tsrc,
                 
                 RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                 BSA_K=BSA_K,
                 BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
@@ -914,6 +922,7 @@ class _attention(torch.autograd.Function):
         block_table: torch.Tensor,
         return_running_statistics: bool,
         return_bsa_indices: bool,
+        bsa_mask_sink_token_size: int,
         return_pooled_scores: bool,
         score_pooling_block_size_q: int,
         score_pooling_block_size_k: int,
@@ -986,13 +995,13 @@ class _attention(torch.autograd.Function):
             BDST = triton.cdiv(TDST, bsa_block_size_q)
             bsa_indices = torch.full(
                 (BSZ, HEAD, BDST, bsa_top_block_k),
-                -1,
+                987654321,
                 device=q.device,
                 dtype=torch.int64,
             )
             bsa_block_sums = torch.full(
                 (BSZ, HEAD, BDST, bsa_top_block_k),
-                fill_value=-1,
+                fill_value=1e-12,
                 device=q.device,
                 dtype=torch.float32,
             )
@@ -1207,6 +1216,7 @@ class _attention(torch.autograd.Function):
                 N_BATCH * N_HEAD,
                 1,
             )
+
             _attn_fwd[grid](
                 q,
                 k,
@@ -1248,6 +1258,7 @@ class _attention(torch.autograd.Function):
                 *safe_stride(scores, 4),
                 
                 (bsa_indices is not None) and (bsa_block_sums is not None),
+                bsa_mask_sink_token_size,
                 bsa_top_block_k,
                 bsa_block_size_q,
                 bsa_block_size_k,
@@ -1295,6 +1306,7 @@ def query_sparse_attention(
     block_table: torch.Tensor,
     return_running_statistics: bool = False,
     return_bsa_indices: bool = False,
+    bsa_mask_sink_token_size: int = 64,
     return_pooled_scores: bool = False,
     score_pooling_block_size_q: int = 64,
     score_pooling_block_size_k: int = 64,
@@ -1314,6 +1326,7 @@ def query_sparse_attention(
         block_table,
         return_running_statistics,
         return_bsa_indices,
+        bsa_mask_sink_token_size,
         return_pooled_scores,
         score_pooling_block_size_q,
         score_pooling_block_size_k,

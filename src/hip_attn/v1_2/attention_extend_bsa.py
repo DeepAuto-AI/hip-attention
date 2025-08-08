@@ -961,18 +961,19 @@ def block_sparse_attention_cuda(
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
 
-    range_start = tl.load(
-        KS_START_END
-        + idx_b.to(tl.int64) * stride_ks_start_end_b
-        + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
-        + idx_g.to(tl.int64) * stride_ks_start_end_g
-    )
-    range_end = tl.load(
-        KS_START_END
-        + idx_b.to(tl.int64) * stride_ks_start_end_b
-        + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
-        + (idx_g + 1).to(tl.int64) * stride_ks_start_end_g
-    )
+    if KS_START_END is not None:
+        range_start = tl.load(
+            KS_START_END
+            + idx_b.to(tl.int64) * stride_ks_start_end_b
+            + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
+            + idx_g.to(tl.int64) * stride_ks_start_end_g
+        )
+        range_end = tl.load(
+            KS_START_END
+            + idx_b.to(tl.int64) * stride_ks_start_end_b
+            + idx_bdst.to(tl.int64) * stride_ks_start_end_bdst
+            + (idx_g + 1).to(tl.int64) * stride_ks_start_end_g
+        )
     if BK <= 0:
         range_start = 0
         range_end = 0
@@ -1881,7 +1882,12 @@ def block_sparse_attention_cuda(
             )
 
     # 60ms
+    # BK = "number of blocks", G = 1
+    # BLOCK_BK = "?"
     if (BK > 0) and True:
+        # print(f"range start: ", range_start)
+        # print(f"range start + BK * G: ", range_start + (BK * G))
+        # print(f"BK: ", BK)
         for i_bk in tl.range(
             range_start, range_start + (BK * G), BLOCK_BK, num_stages=1
         ):
@@ -1896,6 +1902,7 @@ def block_sparse_attention_cuda(
                     + idx_bk.to(tl.int64) * stride_indices_bk,
                     mask=mask_bk,
                 )
+                # print("idx tsrc start: ", idx_tsrc_start)
                 idx_tsrc_start = tl.where(mask_bk, idx_tsrc_start, MAX_TSRC * G + 1)
                 idx_tsrc = idx_tsrc_start[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]
                 idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K))
@@ -2382,7 +2389,7 @@ def block_sparse_attention(
 
     B = N
     assert B == N
-    BK = indices.shape[-1]  # cdiv_python(args.mask_k, args.block_size_k)
+    BK = 0
 
     context = torch.empty((BSZ, TDST, HEAD, HID_V), dtype=q.dtype, device=q.device)
 
@@ -2417,6 +2424,7 @@ def block_sparse_attention(
     if ks_start_end is not None:
         assert ks_start_end.ndim == 3
     if indices is not None:
+        BK = indices.shape[-1]  # cdiv_python(args.mask_k, args.block_size_k)
         assert indices.ndim == 3
     assert q.ndim == 4
     if k is not None:

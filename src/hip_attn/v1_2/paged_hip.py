@@ -1348,6 +1348,7 @@ def _forward_paged_hip(
         delta_attention_args_exp_sink = 128
         delta_attention_args_iter_corr = False
         delta_attention_args_adjust_norm_const = False
+        delta_version = 1
 
         for word in delta_attention_args.split("-"):
             word = word.strip()
@@ -1379,6 +1380,8 @@ def _forward_paged_hip(
                 delta_attention_args_exp_sink = int(word.split("_")[1])
             elif word.startswith("expwindow_"):
                 delta_attention_args_exp_window = int(word.split("_")[1])
+            elif word.startswith("version_"):
+                delta_version = int(word.split("_")[1])
             else:
                 warnings.warn(f"unknown delta args: {word}")
 
@@ -1433,7 +1436,7 @@ def _forward_paged_hip(
             inner_function=__forward_sliding_window_wrapper,
         )
     elif using_delta_attention and (
-        (not is_decode) or (is_decode and delta_attention_args_dense_decode)
+        ((not is_decode) or (is_decode and delta_attention_args_dense_decode))
     ):
         if (
             (is_decode and delta_attention_args_dense_decode)
@@ -2366,6 +2369,214 @@ def _forward_paged_hip(
                         delta_attention_args_w,
                         delta_attention_args_smooth,
                     )
+    elif using_delta_attention and (
+        (not is_decode) or (is_decode and delta_attention_args_dense_decode)) and delta_version == 2:
+
+        if (
+            (is_decode and delta_attention_args_dense_decode)
+            or (using_dense_prefill and (not is_decode))
+            or ((query.shape[1] < 256) and (not is_decode))
+        ):
+            # TODO: removed this case for simplicity, copy from delta version 1 block above if needed
+            assert not args.need_apply_rope
+            assert not args.using_extend
+
+            assert args.using_paged_cache
+
+            k_cache = args.get_k_cache()
+            v_cache = args.get_v_cache()
+
+            q_reshaped = query.contiguous().view(-1, query.shape[2], query.shape[3])
+
+            # print(k_cache.shape, v_cache.shape)
+
+            cu_seqlens_q = (
+                torch.arange(
+                    0, query.shape[0] + 1, device=query.device, dtype=torch.int32
+                )
+                * query.shape[1]
+            )
+            cache_seqlens = (args.position_ids[:, -1] + 1).to(torch.int32)
+            cu_seqlens_k_new = torch.zeros(
+                (args.position_ids.shape[0] + 1,),
+                dtype=torch.int32,
+                device=q_reshaped.device,
+            )
+            cu_seqlens_k_new[1:] = cache_seqlens
+
+            block_table = args.block_table
+
+            context = flash_attn_with_kvcache(
+                q=q_reshaped,
+                k_cache=k_cache,
+                v_cache=v_cache,
+                page_table=block_table,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k_new=cu_seqlens_k_new,
+                # max_seqlen_q=cu_seqlens_q.amax().item(),
+                max_seqlen_q=args.model_context_length,
+                causal=True,
+                softmax_scale=sm_scale,
+            )
+
+            metadata = None
+        else:
+            # On prefill
+            assert not is_decode
+            assert not torch.cuda.is_current_stream_capturing()
+
+            num_queries = query.shape[1]
+            num_last_dense = num_queries % delta_attention_args_w + max(
+                128, delta_attention_args_w
+            )
+            num_sparse = num_queries - num_last_dense
+
+            context_sparse = context_sparse[:, :num_sparse]
+
+            if num_last_dense > 0:
+                idx = torch.arange(
+                    0,
+                    # delta_attention_args_w - 1,
+                    num_sparse,
+                    step=delta_attention_args_w,
+                    device=query.device,
+                )
+
+                # take first
+                idx = torch.cat(
+                    (
+                        idx,
+                        torch.arange(num_sparse, num_queries, device=query.device),
+                    )
+                )
+                query_for_dense = query[:, idx]
+
+            # TODO: removed this block for simplicity, copy and modify from delta version 1 above
+            # if needed
+            assert not args.need_apply_rope
+            assert not args.using_extend
+
+            delta_qsa_bsa_k = 64
+            delta_qsa_q_block = 64
+            delta_qsa_k_block = 32
+
+            if args.using_paged_cache:
+                assert args.using_paged_cache
+
+                query_for_recomp = query_for_dense
+                k_cache = args.get_k_cache()
+                v_cache = args.get_v_cache()
+
+                assert args.position_ids.shape[0] == 1
+
+                context_dense, (bsa_idx, _) = query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    k=None,
+                    v=None,
+                    mask=args.position_ids[:, idx],
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    block_table=args.block_table, 
+                    return_bsa_indices=True,
+                    sm_scale=sm_scale,
+                    bsa_top_block_k=delta_qsa_bsa_k,
+                    bsa_block_size_q=1,
+                    bsa_block_size_k=delta_qsa_k_block,
+                )
+
+            else:
+                assert k is not None
+                assert v is not None
+
+                context_dense, (bsa_idx, _) = query_sparse_attention(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous(),
+                    k.permute(0, 2, 1, 3).contiguous(),
+                    v.permute(0, 2, 1, 3).contiguous(),
+                    mask=args.position_ids[:, idx],
+                    k_cache=None,
+                    v_cache=None,
+                    block_table=None, 
+                    return_bsa_indices=True,
+                    sm_scale=sm_scale,
+                    bsa_top_block_k=delta_qsa_bsa_k,
+                    bsa_block_size_q=1,
+                    bsa_block_size_k=delta_qsa_k_block,
+                )
+
+                context_dense = context_dense.permute(0, 2, 1, 3).contiguous()
+
+            # =====================================================
+            # until here, we have only calculated dense attention. Use the bsa mask 
+            # from the qsa kernel to now perform bsa and delta correction.
+
+
+            # setup args for bsa mask based on returned bsa idx from qsa kernel
+            ks = (bsa_idx < 987654321).sum(dim=-1)
+            ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
+            ks_count = ks.unsqueeze(-1)
+            ks_start_end = torch.nn.functional.pad(ks_count, (1, 0), "constant", 0)
+
+            assert isinstance(delta_attention_args_window, int)
+            assert delta_attention_args_window > 0
+
+            # NOTE: the whole window == 0 block above 
+            # only applies to hip so we can remove it
+            bsa_fn = get_block_sparse_backend(args, query)
+
+            # dist.barrier()
+            # if get_tensor_model_parallel_rank() == 0:
+            #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+            BSZ, TDST, HEAD, HID = query.shape
+
+            args_sw = args.clone()
+            if args_sw.rope_range is None:
+                args_sw.rope_range = (0, HID)
+            args_sw.block_size_q = delta_qsa_q_block
+            args_sw.block_size_k = delta_qsa_k_block
+            args_sw.second_stage_k = 0
+            # args_sw.sink_token_size = 0 #NOTE: you should inherit this value
+            args_sw.sliding_window_size = delta_attention_args_window
+            args_sw.sliding_window_indices = None
+
+            BDST = triton.cdiv(TDST, args_sw.block_size_q)
+            BH = BSZ * HEAD
+
+            bsa_out = block_sparse_attention(
+                q=(query * sm_scale).to(query.dtype),
+                k=k,
+                v=v,
+                seq_lens=args_sw.position_ids + 1,
+                indices=bsa_idx.reshape(b * h, bsa_idx.size(2), bsa_idx.size(3)),
+                ks=ks,
+                ks_count=ks_count,
+                ks_start_end=ks_start_end,
+                access_counter=None,
+                cache_miss_counter=None,
+                EXTEND_BACKEND=args_sw.sa_extend_backend,
+                model_context_length=args_sw.model_context_length,
+                extend_context_length=args_sw.extend_context_length,
+                offload_update_cache=False,
+                return_running_statistics=delta_attention_args_adjust_norm_const,
+                args=args_sw,
+            )
+
+            context_sparse = context_sparse.to(query.dtype)
+            context_sparse = context_sparse[:, -query.shape[1] :, :, :].contiguous()
+            metadata = None
+
+            from .delta.apply_delta import apply_delta
+
+            context = apply_delta(
+                context_dense,
+                context_sparse,
+                idx,
+                num_last_dense,
+                delta_attention_args_w,
+                delta_attention_args_smooth,
+            )
+
     elif (force_dense_decode and is_decode) or (
         using_dense_prefill and (not is_decode)
     ):
