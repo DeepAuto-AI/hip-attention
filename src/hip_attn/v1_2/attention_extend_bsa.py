@@ -2509,7 +2509,7 @@ def block_sparse_attention(
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
-    
+
     BLOCKWISE_MASKING = os.getenv("SA_BLOCKWISE_MASKING", "1") == "1"
 
     max_block_size = int(os.getenv("SA_BLOCK_SIZE", "128"))

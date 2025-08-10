@@ -1855,7 +1855,7 @@ def decode_block_sparse_attention_stage1(
     assert q.ndim == 4
     BLOCK_H = max(16, q.shape[2])
     NUM_SM = int(os.getenv("SA_DECODE_NUM_SM", 144 + 16))  # H100 + Slack
-    
+
     BLOCKWISE_MASKING = os.getenv("SA_BLOCKWISE_MASKING", "1") == "1"
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
