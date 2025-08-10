@@ -1476,7 +1476,7 @@ def _forward_delta_attn(
                 assert delta_attention_args_extend in ("self_extend",)
 
             query_for_recomp = query_for_dense
-            
+
             if args.using_paged_cache:
                 assert args.using_paged_cache
 
@@ -2494,7 +2494,7 @@ def _forward_paged_hip(
     #     if (not is_decode) and (dst_seq_len == 1) and (args.using_extend and args.sa_extend_backend == "self_extend"):
     #         print('asduogsh')
     #         sliding_window_size = args.model_context_length
-    
+
     # Plan 1
     # TODO use flash attention under 100K
 

@@ -550,8 +550,8 @@ def block_sparse_attention_cuda_step(
                 ]
             else:
                 qk_mask = ~(
-                    mask_tsrc[None, :] 
-                    & mask_tdst[:, None] 
+                    mask_tsrc[None, :]
+                    & mask_tdst[:, None]
                     & (idx_tsrc[None, :] < (pos_tdst[:, None] - sliding_window_size))
                 )
         else:
@@ -566,7 +566,7 @@ def block_sparse_attention_cuda_step(
                 #     )
                 #     | (~(mask_tdst[:, None] & mask_tsrc[None, :]))
                 # )
-                
+
                 if BLOCKWISE_MASKING:
                     qk_mask = (
                         ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
@@ -576,7 +576,10 @@ def block_sparse_attention_cuda_step(
                 else:
                     qk_mask = (
                         ((pos_tdst - 1)[:, None] < idx_tsrc[None, :])
-                        | ~(idx_tsrc[None, :] >= (pos_tdst[:, None] - sliding_window_size))
+                        | ~(
+                            idx_tsrc[None, :]
+                            >= (pos_tdst[:, None] - sliding_window_size)
+                        )
                         | ~(mask_tdst[:, None] & mask_tsrc[None, :])
                     )
             else:
@@ -2418,11 +2421,11 @@ def block_sparse_attention_cuda(
         tl.store(NC + mx_nc_offsets, l_i, mask=mask_tdst[:, None])
 
     # epilogue
-    l_i = (tl.where(l_i == 0.0, 1e-20, l_i))
+    l_i = tl.where(l_i == 0.0, 1e-20, l_i)
     if SOFTMAX_SINK is not None:
         curr_sink = tl.load(SOFTMAX_SINK + idx_head)
         l_i += tl.exp(curr_sink - m_i)
-    
+
     m_i += tl.math.log2(l_i)
     acc = acc / l_i
 

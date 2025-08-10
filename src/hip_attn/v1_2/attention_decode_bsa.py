@@ -2051,7 +2051,7 @@ def _fwd_kernel_stage2(
     if SOFTMAX_SINK is not None:
         curr_sink = tl.load(SOFTMAX_SINK + cur_head)
         e_sum += tl.exp(curr_sink - e_max)
-    
+
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
 
     tl.store(

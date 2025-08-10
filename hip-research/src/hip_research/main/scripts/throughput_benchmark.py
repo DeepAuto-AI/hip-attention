@@ -112,7 +112,9 @@ def stream_chat_completion(
                             data = json.loads(data_str)
                             try:
                                 delta_content = data["choices"][0]["delta"]["content"]
-                                delta_content = delta_content or data["choices"][0]["delta"].get("reasoning_content", None)
+                                delta_content = delta_content or data["choices"][0][
+                                    "delta"
+                                ].get("reasoning_content", None)
                                 if delta_content:
                                     delta_content = delta_content.replace("\n", "\\n")
                                     print(delta_content, end="", flush=True)

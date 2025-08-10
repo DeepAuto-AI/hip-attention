@@ -137,7 +137,7 @@ class UVMCache:
             view_dtype = torch.uint16
             view_dtype_np = np.uint16
         elif self.bank_cpu.dtype in [
-            torch.uint8, 
+            torch.uint8,
             torch.float8_e5m2,
             torch.float8_e4m3fn,
         ]:
@@ -663,11 +663,7 @@ class HiPOffloadCache:
                 view_dtype = torch.uint16
             elif cache_k.dtype in [torch.float32]:
                 view_dtype = torch.uint32
-            elif cache_k.dtype in [
-                torch.uint8, 
-                torch.float8_e5m2, 
-                torch.float8_e4m3fn
-            ]:
+            elif cache_k.dtype in [torch.uint8, torch.float8_e5m2, torch.float8_e4m3fn]:
                 view_dtype = torch.uint8
             else:
                 raise Exception(f"not supported dtype {cache_k.dtype}")

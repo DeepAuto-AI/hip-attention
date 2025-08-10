@@ -53,8 +53,9 @@ def convert_fp8_to_bf16(k: tl.tensor):
         | (k.dtype == tl.float8e4b15)
     ):
         k = k.to(tl.bfloat16)
-    
+
     return k
+
 
 @triton.jit
 def _attn_fwd_inner(
@@ -117,9 +118,9 @@ def _attn_fwd_inner(
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
         V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
     # else:
-        # idx_hid = tl.arange(0, HEAD_ROPE)
-        # idx_tsrc = tl.arange(0, BLOCK_N) + lo
-        # mask_tsrc = idx_tsrc < hi
+    # idx_hid = tl.arange(0, HEAD_ROPE)
+    # idx_tsrc = tl.arange(0, BLOCK_N) + lo
+    # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=1):
@@ -130,15 +131,10 @@ def _attn_fwd_inner(
 
         if not USING_PAGED_CACHE:
             tl.static_assert(EXTEND_BACKEND == "none")
-            k = tl.load(
-                K_block_ptr, 
-                boundary_check=(1,), 
-                padding_option="zero"
-            )
+            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
         else:
             idx_t = tl.load(
-                BLOCK_TABLE 
-                + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                 mask=mask_tsrc,
             ).to(tl.int64)
             k = tl.load(
@@ -153,14 +149,11 @@ def _attn_fwd_inner(
             if not USING_PAGED_CACHE:
                 tl.static_assert(EXTEND_BACKEND == "none")
                 k_nope = tl.load(
-                    K_NOPE_block_ptr, 
-                    boundary_check=(1,), 
-                    padding_option="zero"
+                    K_NOPE_block_ptr, boundary_check=(1,), padding_option="zero"
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE 
-                    + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
                 k_nope = tl.load(
@@ -225,8 +218,7 @@ def _attn_fwd_inner(
                 )
             else:
                 idx_t = tl.load(
-                    BLOCK_TABLE 
-                    + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
                     mask=mask_tsrc,
                 ).to(tl.int64)
                 k_rot = tl.load(
@@ -276,18 +268,18 @@ def _attn_fwd_inner(
         ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
         # qk = tl.dot(
-        #     (q * cq).to(q_dtype), 
+        #     (q * cq).to(q_dtype),
         #     (k.to(q_dtype) * ck).to(q_dtype)
         # ).to(tl.float32)
         # if HEAD_DIM != HEAD_ROPE:
         #     qk = qk + tl.dot(
-        #         (q_nope * cq).to(q_dtype), 
+        #         (q_nope * cq).to(q_dtype),
         #         (k_nope.to(q_dtype) * ck).to(q_dtype)
         #     ).to(tl.float32)
         qk = tl.dot(q, k)
         if HEAD_DIM != HEAD_ROPE:
             qk = qk + tl.dot(q_nope, k_nope)
-        
+
         qk = qk * 1.44269504
 
         if MASKING:
@@ -536,7 +528,7 @@ def _attn_fwd(
             block_shape=(BLOCK_M, HEAD_NOPE),
             order=(1, 0),
         )
-        
+
     if not USING_PAGED_CACHE:
         v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
         V_block_ptr = tl.make_block_ptr(
@@ -596,9 +588,7 @@ def _attn_fwd(
     offs_n = tl.arange(0, BLOCK_N)
 
     mask_idx = tl.load(
-        MaskIdx 
-        + off_z.to(tl.int64) * stride_mz 
-        + offs_m.to(tl.int64) * stride_mm,
+        MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
         mask=mask_m,
         other=0,
     )
@@ -946,7 +936,7 @@ def _attn_fwd(
         if SOFTMAX_SINK is not None:
             curr_sink = tl.load(SOFTMAX_SINK + off_h)
             l_i += tl.exp(curr_sink - m_i)
-        
+
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
             tl.store(m_ptrs, m_i, mask=mask_m)
@@ -1181,7 +1171,7 @@ class _attention(torch.autograd.Function):
 
         HEAD_DIM_K_ROPE = rope_sin.shape[-1]
         HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
-        
+
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
         N_SM = 256  # TODO make a good solution to get this without init CUDA context on GPU 0
