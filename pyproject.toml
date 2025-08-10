@@ -1,20 +1,19 @@
 [build-system]
 requires = [
-    "setuptools>=49.4.0",
+    "setuptools>=80.9.0",
     "setuptools-scm",
 
     # Build dependencies. (Especially for flash-attn)
     "cmake>=3.21",
     "ninja",
     "packaging",
-    "torch==2.5.1",
-    "wheel",
+    "wheel>=0.45.1",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hip-attn"  # Name of package when installed using pip
-version = "1.2.7"
+version = "1.2.8"
 description = "HiP Attention"
 authors = [
     { name="DeepAuto.ai", email="contact@deepauto.ai" },
@@ -35,7 +34,7 @@ dependencies = [
     # Required
     "torch",
     "triton",
-    "setuptools", # Required by triton amd backend
+    "setuptools>=80.9.0",  # Required by triton amd backend
     "numba",
     "performer_pytorch",
     "peft",
