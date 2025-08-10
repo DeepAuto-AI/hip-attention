@@ -165,11 +165,13 @@ while True:
 
             text = ""
             t_ttft = None
+            during_reasoning = False
             num_decoded = 0
 
             for line in response.iter_lines():
                 if t_ttft is None:
                     t_ttft = time.time()
+                    print(f"TTFT: {t_ttft-t_start:.2f} s")
 
                 if line:
                     num_decoded += 1
@@ -186,8 +188,16 @@ while True:
                             delta = json_data["choices"][0]["delta"]
                             delta_text = delta.get("content", "")
                             if delta_text is not None:
+                                if during_reasoning:
+                                    print()
+                                during_reasoning = False
                                 print(delta_text, end="", flush=True)
                                 text += delta_text
+                            else:
+                                delta_text = delta.get("reasoning_content", "")
+                                if delta_text is not None:
+                                    print("\033[0;32m", delta_text, "\033[0;0m", sep="", end="", flush=True)
+                                    during_reasoning = True
                         except Exception as e:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
 
