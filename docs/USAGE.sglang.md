@@ -1306,7 +1306,7 @@ uv run -m sglang.launch_server \
 --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
 --max-running-requests 8 \
 --trust-remote-code \
---reasoning-parser qwen3
+--reasoning-parser qwen3-thinking
 ```
 
 #### Docker
@@ -1332,7 +1332,7 @@ docker run --rm \
 --env "HIP_DEBUG_BENCH=0" \
 --env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
 --env "CUDA_LAUNCH_BLOCKING=0" \
-deepauto/hip-attention:v1.2.7-sglang \
+deepauto/hip-attention:v1.2.8-sglang \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
@@ -1351,7 +1351,7 @@ python \
 --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
 --max-running-requests 8 \
 --trust-remote-code \
---reasoning-parser qwen3
+--reasoning-parser qwen3-thinking
 ```
 
 ## `openai/gpt-oss-120b`
@@ -1371,8 +1371,8 @@ python \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+SA_BLOCKWISE_MASKING=0 \
 SRT_FORCE_SPECIAL_TOKENS=1 \
-HIP_DEBUG_TRITON_COMPILE_IGNORE_DEPENDENCY=1 \
 HIP_DEBUG_RECOMPUTE_SPLIT=0 \
 TRITON_PRINT_AUTOTUNING=1 \
 SRT_WARMUP_ALL_SEQ_LENS=0 \
@@ -1381,7 +1381,7 @@ PASSKEY_DECODE_LEN=128 \
 PASSKEY_LEN=8 \
 SA_BLOCK_SIZE=256 \
 SA_DECODE_BLOCK_SIZE=128 \
-HIP_DISABLE_AUTOTUNE=1 \
+HIP_DISABLE_AUTOTUNE=0 \
 HIP_DEBUG=0 \
 HIP_DEBUG_BENCH=0 \
 HIP_DEBUG_CAPTURE_DECORATOR=1 \
@@ -1414,8 +1414,8 @@ docker run --rm \
 --ipc=host \
 -v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
+--env "SA_BLOCKWISE_MASKING=0" \
 --env "SRT_FORCE_SPECIAL_TOKENS=1" \
---env "HIP_DEBUG_TRITON_COMPILE_IGNORE_DEPENDENCY=1" \
 --env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
 --env "TRITON_PRINT_AUTOTUNING=1" \
 --env "SRT_WARMUP_ALL_SEQ_LENS=0" \
@@ -1424,11 +1424,11 @@ docker run --rm \
 --env "PASSKEY_LEN=8" \
 --env "SA_BLOCK_SIZE=256" \
 --env "SA_DECODE_BLOCK_SIZE=128" \
---env "HIP_DISABLE_AUTOTUNE=1" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
 --env "HIP_DEBUG=0" \
 --env "HIP_DEBUG_BENCH=0" \
 --env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
-deepauto/hip-attention:v1.2.7-sglang \
+deepauto/hip-attention:v1.2.8-sglang \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
