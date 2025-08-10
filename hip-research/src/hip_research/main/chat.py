@@ -196,7 +196,14 @@ while True:
                             else:
                                 delta_text = delta.get("reasoning_content", "")
                                 if delta_text is not None:
-                                    print("\033[0;32m", delta_text, "\033[0;0m", sep="", end="", flush=True)
+                                    print(
+                                        "\033[0;32m",
+                                        delta_text,
+                                        "\033[0;0m",
+                                        sep="",
+                                        end="",
+                                        flush=True,
+                                    )
                                     during_reasoning = True
                         except Exception as e:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
