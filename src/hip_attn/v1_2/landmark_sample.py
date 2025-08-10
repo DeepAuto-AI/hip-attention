@@ -8,7 +8,7 @@ import triton.language as tl
 from torch import Tensor
 
 from .attention_metadata import HiPAttentionArgs, HiPAttentionState, safe_stride
-from .utils import capture
+from .utils import capture, triton_jit
 
 if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
     configs = [
@@ -50,8 +50,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["HID", "USING_PAGED_CACHE"])
-@triton.jit
+@triton_jit(configs=list(filter(keep, configs)), key=["HID", "USING_PAGED_CACHE"])
 def _sw_score_sample(
     Q,
     stride_q_bsz,

@@ -7,6 +7,7 @@ import triton.language as tl
 from torch import Tensor
 
 from hip_attn.v1_2.attention_metadata import safe_stride
+from hip_attn.v1_2.utils import triton_jit
 
 
 @triton.jit
@@ -94,8 +95,7 @@ def keep(conf):
     return True
 
 
-@triton.autotune(list(filter(keep, configs)), key=["HID"])
-@triton.jit
+@triton_jit(configs=list(filter(keep, configs)), key=["HID"])
 def _compute_scores_landmark_cuda(
     Q,
     stride_q_bsz,

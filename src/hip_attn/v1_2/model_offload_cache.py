@@ -289,6 +289,7 @@ class HiPModelOffloadCache:
         assert cache_k.shape[3] == self.head_dim
         assert k.shape[1] == prefix_seq_len + cache_k.shape[1]
         assert k.dtype in [
+            torch.float8_e4m3fn,
             torch.float8_e5m2,
             torch.float16,
             torch.bfloat16,

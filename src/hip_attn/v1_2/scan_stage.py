@@ -7,7 +7,7 @@ import triton.language as tl
 
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_metadata import safe_stride
-from hip_attn.v1_2.utils import capture
+from hip_attn.v1_2.utils import capture, triton_jit
 from hip_attn.v1_2.uvm_gpu_cache import load_tokens
 
 
@@ -590,7 +590,7 @@ def get_decode_scan_stage_configs():
     return configs
 
 
-@triton.autotune(
+@triton_jit(
     configs=get_decode_scan_stage_configs(),
     key=[
         "BLOCK_SIZE_Q",
@@ -602,7 +602,6 @@ def get_decode_scan_stage_configs():
         "INDICES_RIGHT",
     ],
 )
-@triton.jit
 def chunk_controllable_sampling_mask_cuda(
     Q,
     stride_q_bsz,
@@ -2299,8 +2298,8 @@ def chunk_controllable_sampling_mask(
     if (q.shape[1] == 1) and not using_online_cache_update:
         HEAD_REPEAT = HEAD // HEAD_KV
         BLOCK_HEAD = HEAD_REPEAT
-        assert triton.next_power_of_2(BLOCK_HEAD) == BLOCK_HEAD
         BLOCK_HEAD_PADDED = max(BLOCK_HEAD, 16)
+        assert triton.next_power_of_2(BLOCK_HEAD_PADDED) == BLOCK_HEAD_PADDED
 
         assert TDST == q.shape[1]
 

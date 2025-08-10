@@ -284,6 +284,8 @@ class HiPAttentionArgs:
 
     self_extend_scale: int = 12
 
+    softmax_sink: Optional[Tensor] = None
+
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
             self.rope_cos = self.rope_cos.view(-1, self.rope_cos.shape[-1])
@@ -291,6 +293,9 @@ class HiPAttentionArgs:
         # if self.q_quant is not None:
         #     assert self.q_quant.ndim == 4
         #     assert self.k_quant.ndim == 4
+        if self.using_extend:
+            assert self.model_context_length is not None
+            assert self.extend_context_length is not None
         self.update_flags()
 
     def update_flags(self):

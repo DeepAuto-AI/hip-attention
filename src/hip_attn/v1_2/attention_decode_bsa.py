@@ -1827,6 +1827,7 @@ def decode_block_sparse_attention_stage1(
     v: Optional[Tensor],
     k_descale: Optional[Tensor],
     v_descale: Optional[Tensor],
+    softmax_sink: Optional[Tensor],
     seq_lens: Tensor,
     indices: Tensor,
     ks_start_end: Tensor,
@@ -1991,6 +1992,7 @@ def _fwd_kernel_stage2(
     B_SEQ_LEN,
     stride_pos_bsz,
     stride_pos_tdst,
+    SOFTMAX_SINK,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
@@ -2046,6 +2048,10 @@ def _fwd_kernel_stage2(
         e_sum = tl.where(n_e_max_valid, e_sum * old_scale + exp_logic, e_sum)
         e_max = n_e_max
 
+    if SOFTMAX_SINK is not None:
+        curr_sink = tl.load(SOFTMAX_SINK + cur_head)
+        e_sum += tl.exp(curr_sink - e_max)
+
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
 
     tl.store(
@@ -2064,6 +2070,7 @@ def decode_block_sparse_attention_stage2(
     q,
     o,
     b_seq_len,
+    softmax_sink,
     num_total_kv_splits,
     HID_V: int,
 ):
@@ -2081,6 +2088,7 @@ def decode_block_sparse_attention_stage2(
         *safe_stride(o, 4),
         b_seq_len,
         *safe_stride(b_seq_len, 2),
+        softmax_sink.contiguous() if softmax_sink is not None else None,
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
@@ -2129,6 +2137,7 @@ def decode_block_sparse_attention_impl(
         v,
         k_descale=k_descale,
         v_descale=v_descale,
+        softmax_sink=args.softmax_sink,
         seq_lens=seq_lens,
         indices=indices,
         ks_start_end=ks_start_end,
@@ -2153,6 +2162,7 @@ def decode_block_sparse_attention_impl(
         q,
         context,
         seq_lens,
+        args.softmax_sink,
         NUM_TOTAL_KV_SPLITS,
         HID_V,
     )

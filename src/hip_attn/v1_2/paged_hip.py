@@ -1242,6 +1242,7 @@ def _forward_delta_attn(
                     args.block_table,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    softmax_sink=args.softmax_sink,
                 )
                 .permute(0, 2, 1, 3)
                 .contiguous()
@@ -1465,6 +1466,7 @@ def _forward_delta_attn(
                     None,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    softmax_sink=args.softmax_sink,
                 )
                 .permute(0, 2, 1, 3)
                 .contiguous()
@@ -1473,14 +1475,19 @@ def _forward_delta_attn(
             if args.need_apply_rope and args.using_extend:
                 assert delta_attention_args_extend in ("self_extend",)
 
+            query_for_recomp = query_for_dense
+
             if args.using_paged_cache:
                 assert args.using_paged_cache
 
-                query_for_recomp = query_for_dense
                 k_cache = args.get_k_cache()
                 v_cache = args.get_v_cache()
 
                 assert args.position_ids.shape[0] == 1
+                print(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
+                    args.position_ids[:, idx].shape,
+                )
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
@@ -1498,6 +1505,7 @@ def _forward_delta_attn(
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
+                    softmax_sink=args.softmax_sink,
                 )
             else:
                 assert k is not None
@@ -1519,6 +1527,7 @@ def _forward_delta_attn(
                     rope_sin=rope_sin,
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
+                    softmax_sink=args.softmax_sink,
                 )
 
             if delta_attention_args_adjust_norm_const:
@@ -1729,9 +1738,9 @@ def _forward_delta_attn(
         else:
             from .delta.apply_delta import apply_delta
 
-            if delta_attention_args_extend == "self_extend":
-                # FIXME this is surely bug...
-                last_context_sparse = context_sparse_raw[:, -2048:].clone()
+            # if delta_attention_args_extend == "self_extend":
+            #     # FIXME this is surely bug...
+            #     last_context_sparse = context_sparse_raw[:, -1024:].clone()
 
             context = apply_delta(
                 context_dense,
@@ -1742,9 +1751,9 @@ def _forward_delta_attn(
                 delta_attention_args_smooth,
             )
 
-            if delta_attention_args_extend == "self_extend":
-                # FIXME this is surely bug...
-                context[:, -2048:] = last_context_sparse
+            # if delta_attention_args_extend == "self_extend":
+            #     # FIXME this is surely bug...
+            #     context[:, -1024:] = last_context_sparse
 
     return context, metadata
 
@@ -1922,14 +1931,31 @@ def _forward_fa3(
                     None, : key_rot.shape[1], None, : rope_dim // 2
                 ].repeat_interleave(2, -1)
 
-            q = (
-                query_rot.to(torch.float32) * cos_q.to(torch.float32)
-                + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)
-            ).to(query_rot.dtype)
-            k = (
-                key_rot.to(torch.float32) * cos_k.to(torch.float32)
-                + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)
-            ).to(key_rot.dtype)
+            if q.shape[-1] == cos_q.shape[-1]:
+                q = (
+                    query_rot.to(torch.float32) * cos_q.to(torch.float32)
+                    + rotate_fn(query_rot.to(torch.float32)) * sin_q.to(torch.float32)
+                ).to(query_rot.dtype)
+                k = (
+                    key_rot.to(torch.float32) * cos_k.to(torch.float32)
+                    + rotate_fn(key_rot.to(torch.float32)) * sin_k.to(torch.float32)
+                ).to(key_rot.dtype)
+            else:
+                assert q.shape[-1] > cos_q.shape[-1]
+                warnings.warn("Is this GLM4.5?")
+
+                def apply_rope(toks, cos, sin):
+                    rope_dim = cos.shape[-1]
+                    toks_rope, toks_pass = toks[..., -rope_dim:], toks[..., :-rope_dim]
+                    toks_embed = (
+                        toks_rope.to(torch.float32) * cos.to(torch.float32)
+                        + rotate_fn(toks_rope.to(torch.float32)) * sin.to(torch.float32)
+                    ).to(toks.dtype)
+                    # NOTE format is DeepSeek style. Caution in GLM4.5
+                    return torch.cat([toks_pass, toks_embed], dim=-1)
+
+                q = apply_rope(query_rot, cos_q, sin_q)
+                k = apply_rope(key_rot, cos_k, sin_k)
 
     tp_q_head, tp_q_dim = q.shape[2:]
     tp_k_head, tp_k_dim = k.shape[2:]
@@ -2179,6 +2205,8 @@ def _forward_sliding_window(
     args: HiPAttentionArgs,
     sliding_window_size: int,
     sliding_window_sink: int,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
 ):
     query = q
     bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
@@ -2225,6 +2253,8 @@ def _forward_sliding_window(
         extend_context_length=args.extend_context_length,
         offload_update_cache=False,
         args=args,
+        k_descale=k_descale,
+        v_descale=v_descale,
     )
     context = context.to(query.dtype)
 
@@ -2443,12 +2473,27 @@ def _forward_paged_hip(
     sliding_window_size = os.getenv("HIP_DEBUG_SLLM_WINDOW", sliding_window_size)
     if isinstance(sliding_window_size, str):
         sliding_window_size = int(sliding_window_size)
+    if isinstance(sliding_window_sink, torch.Tensor):
+        softmax_sink = sliding_window_sink
+        sliding_window_sink = 0
+        args.softmax_sink = softmax_sink
+    elif sliding_window_sink is None:
+        sliding_window_sink = 0
     sliding_window_sink = int(
         os.getenv("HIP_DEBUG_SLLM_SINK", max(0, sliding_window_sink))
     )
     if args.second_stage_k == 0:
-        sliding_window_size = args.sliding_window_size
-        sliding_window_sink = args.sink_token_size
+        if sliding_window_size is not None and sliding_window_size > 0:
+            sliding_window_size = min(sliding_window_size, args.sliding_window_size)
+            sliding_window_sink = min(sliding_window_sink, args.sink_token_size)
+        else:
+            sliding_window_size = args.sliding_window_size
+            sliding_window_sink = args.sink_token_size
+
+    # if True:
+    #     if (not is_decode) and (dst_seq_len == 1) and (args.using_extend and args.sa_extend_backend == "self_extend"):
+    #         print('asduogsh')
+    #         sliding_window_size = args.model_context_length
 
     # Plan 1
     # TODO use flash attention under 100K
@@ -2533,6 +2578,8 @@ def _forward_paged_hip(
                     delta_attention_args_extend = "self_extend"
                 else:
                     raise Exception(extend_mode)
+                if not args.using_extend:
+                    delta_attention_args_extend = "none"
             elif word.startswith("window_"):
                 delta_attention_args_window = int(word.split("_")[1])
             elif word.startswith("diff_"):
@@ -2586,6 +2633,8 @@ def _forward_paged_hip(
                 args=args,
                 sliding_window_size=sliding_window_size,
                 sliding_window_sink=sliding_window_sink,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
 
         context, metadata = _forward_partial_fa3(

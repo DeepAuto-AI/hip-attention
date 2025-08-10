@@ -47,8 +47,9 @@ def stream_chat_completion(
     num_decode: int,
     num_concurrent: int,
     verbose: bool,
+    flush_cache: bool = True,
 ):
-    if not is_third_party(endpoint):
+    if not is_third_party(endpoint) and flush_cache:
         url = f"{endpoint}/flush_cache"
         requests.post(url)
 
@@ -78,6 +79,7 @@ def stream_chat_completion(
             "temperature": 0.0,
             "max_tokens": num_decode,
             "min_tokens": num_decode,
+            "ignore_eos": True,
             "stream": True,
             "n": num_concurrent,
         }
@@ -110,6 +112,9 @@ def stream_chat_completion(
                             data = json.loads(data_str)
                             try:
                                 delta_content = data["choices"][0]["delta"]["content"]
+                                delta_content = delta_content or data["choices"][0][
+                                    "delta"
+                                ].get("reasoning_content", None)
                                 if delta_content:
                                     delta_content = delta_content.replace("\n", "\\n")
                                     print(delta_content, end="", flush=True)
@@ -145,7 +150,7 @@ def stream_chat_completion(
 
     return RequestStatistics(
         prefill_throughput=num_prefill / (timestamp_first_token - timestamp_start),
-        decode_throughput=(num_decode * num_concurrent)
+        decode_throughput=(num_returned * num_concurrent)
         / (timestamp_end - timestamp_first_token),
         num_returned=num_returned,
     )
@@ -159,17 +164,15 @@ def shuffle(lst):
 
 
 def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
-    header = f"{random.randint(0, 1000)} There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey."
-    passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
-    footer = "In previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
-    filler = (
-        " ".join(
-            shuffle(
-                "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ".split()
-            )
+    def random_char(y):
+        return "".join(
+            random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for x in range(y)
         )
-        + " "
-    )
+
+    header = f"There is a passkey hidden inside a lot of irrelevant text. Find the passkey and memorize it. I will quiz you about the the passkey.\n\n------\n\n"
+    passkey = "HERE IS THE PASSKEY! The passkey is $000310$. $000310$ is the passkey. **the passkey is $000310$** LOOK BEHIND FOR PASSKEY"
+    footer = "\n\n------\n\nIn previous text, you have seen the passkey. You had to remember that passkey. What was the passkey? Just answer the secret keyword without any verbal text."
+    filler = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
     len_filler = tokenizer(filler, return_tensors="pt").input_ids.shape[-1]
     num_filler = math.ceil(seq_len * 1024 / len_filler * 1.2)
 
@@ -193,7 +196,7 @@ def get_random_passkey(tokenizer: transformers.LlamaTokenizer, seq_len: int):
     return [
         {
             "role": "system",
-            "content": "You are a knowledge retrieval. You have to find a given passkey from random text, and answer only passkey numbers.",
+            "content": f"You are a helpful assistant. Here is chat session handle: {random_char(6)}",
         },
         {"role": "user", "content": text},
     ]
@@ -215,6 +218,7 @@ def benchmark(
     decode_lens: List[int],
     num_concurrents: List[int],
     verbose: bool,
+    no_warmup: bool,
 ):
     data = []
 
@@ -231,7 +235,7 @@ def benchmark(
         leave=False,
     ):
         example = get_random_example(tokenizer, dataset, seq_len)
-        if not is_third_party(endpoint):
+        if (not is_third_party(endpoint)) and (not no_warmup):
             # run warmup
             stream_chat_completion(
                 endpoint,
@@ -244,7 +248,13 @@ def benchmark(
         # sample
         example = get_random_example(tokenizer, dataset, seq_len)
         result = stream_chat_completion(
-            endpoint, example, seq_len * 1024, decode_len, num_concurrent, verbose
+            endpoint,
+            example,
+            seq_len * 1024,
+            decode_len,
+            num_concurrent,
+            verbose,
+            flush_cache=not no_warmup,
         )
         data.append(
             {
@@ -276,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--decode", nargs="+", type=int)
     parser.add_argument("--batch", nargs="+", type=int)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--no-warmup", action="store_true")
 
     args = parser.parse_args()
 
@@ -287,4 +298,5 @@ if __name__ == "__main__":
         args.decode,
         args.batch,
         args.verbose,
+        args.no_warmup,
     )

@@ -120,3 +120,6 @@ class capture(object):
             )
 
         return ret
+
+
+from .triton_jit import triton_jit

@@ -23,10 +23,9 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
 
 from hip_attn.v1_2.attention_metadata import safe_stride
-from hip_attn.v1_2.utils import capture
+from hip_attn.v1_2.utils import capture, triton_jit
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = "cuda:0"
@@ -41,12 +40,32 @@ def is_cuda():
 
 
 @triton.jit
+def convert_fp8_to_bf16(k: tl.tensor):
+    if k is None:
+        return None
+
+    if k.dtype == tl.uint8:
+        k = k.to(tl.float8e5, bitcast=True)
+    if (
+        (k.dtype == tl.float8e5)
+        | (k.dtype == tl.float8e4nv)
+        | (k.dtype == tl.float8e4b8)
+        | (k.dtype == tl.float8e4b15)
+    ):
+        k = k.to(tl.bfloat16)
+
+    return k
+
+
+@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
     m_i,
     q,
+    q_nope,
     K_block_ptr,
+    K_NOPE_block_ptr,
     V_block_ptr,
     mask_idx,
     start_m,
@@ -55,6 +74,8 @@ def _attn_fwd_inner(
     v_descale,
     BLOCK_M: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    HEAD_NOPE: tl.constexpr,
+    HEAD_ROPE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     offs_m,
     offs_n,
@@ -96,10 +117,10 @@ def _attn_fwd_inner(
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
         V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
-    else:
-        idx_hid = tl.arange(0, HEAD_DIM)
-        # idx_tsrc = tl.arange(0, BLOCK_N) + lo
-        # mask_tsrc = idx_tsrc < hi
+    # else:
+    # idx_hid = tl.arange(0, HEAD_ROPE)
+    # idx_tsrc = tl.arange(0, BLOCK_N) + lo
+    # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=1):
@@ -120,27 +141,43 @@ def _attn_fwd_inner(
                 K_CACHE
                 + idx_t[None, :] * stride_k_cache_t
                 + 0 * stride_k_cache_page
-                + idx_hid[:, None] * stride_k_cache_hid,
+                + (tl.arange(0, HEAD_ROPE) + HEAD_NOPE)[:, None] * stride_k_cache_hid,
                 mask=mask_tsrc[None, :],
                 other=0.0,
             )
-            if k.dtype == tl.uint8:
-                k = k.to(tl.float8e5, bitcast=True)
-            if (
-                (k.dtype == tl.float8e5)
-                | (k.dtype == tl.float8e4b8)
-                | (k.dtype == tl.float8e4b15)
-                | (k.dtype == tl.float8e4nv)
-            ):
-                k = k.to(tl.bfloat16)
+        if HEAD_DIM != HEAD_ROPE:
+            if not USING_PAGED_CACHE:
+                tl.static_assert(EXTEND_BACKEND == "none")
+                k_nope = tl.load(
+                    K_NOPE_block_ptr, boundary_check=(1,), padding_option="zero"
+                )
+            else:
+                idx_t = tl.load(
+                    BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
+                    mask=mask_tsrc,
+                ).to(tl.int64)
+                k_nope = tl.load(
+                    K_CACHE
+                    + idx_t[None, :] * stride_k_cache_t
+                    + 0 * stride_k_cache_page
+                    + (tl.arange(0, HEAD_NOPE))[:, None] * stride_k_cache_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0.0,
+                )
+        else:
+            k_nope = None
+
+        k = convert_fp8_to_bf16(k)
+        if k_nope is not None:
+            k_nope = convert_fp8_to_bf16(k_nope)
 
         if EXTEND_BACKEND == "none":
             pass
         elif EXTEND_BACKEND == "self_extend":
-            idx_hid = tl.arange(0, HEAD_DIM)
-            idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
-            idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
-            rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
+            idx_hid = tl.arange(0, HEAD_ROPE)
+            idx_hid_rot = (idx_hid + HEAD_ROPE // 2) % HEAD_ROPE
+            idx_hid_cos_sin = idx_hid % (HEAD_ROPE // 2)
+            rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
             SELF_EXTEND_WINDOW = 4096
 
@@ -169,13 +206,14 @@ def _attn_fwd_inner(
                 - 1
                 - SELF_EXTEND_WINDOW,
             )
+            idx_rope = idx_tsrc
 
             if not USING_PAGED_CACHE:
                 k_rot = tl.load(
                     K_ROT
                     + idx_tsrc[None, :] * stride_k_rot_tsrc
-                    + idx_hid_rot[:, None] * stride_k_rot_hid,
-                    mask=mask_tsrc,
+                    + (idx_hid_rot + HEAD_NOPE)[:, None] * stride_k_rot_hid,
+                    mask=mask_tsrc[None, :],
                     other=0.0,
                 )
             else:
@@ -187,21 +225,12 @@ def _attn_fwd_inner(
                     K_CACHE
                     + idx_t[None, :] * stride_k_cache_t
                     + 0 * stride_k_cache_page
-                    + idx_hid_rot[:, None] * stride_k_cache_hid,
+                    + (idx_hid_rot + HEAD_NOPE)[:, None] * stride_k_cache_hid,
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 )
 
-            if k_rot.dtype == tl.uint8:
-                k_rot = k_rot.to(tl.float8e5, bitcast=True)
-            if (
-                (k_rot.dtype == tl.float8e5)
-                | (k_rot.dtype == tl.float8e4nv)
-                | (k_rot.dtype == tl.float8e4b8)
-                | (k_rot.dtype == tl.float8e5b16)
-                | (k_rot.dtype == tl.float8e4b15)
-            ):
-                k_rot = k_rot.to(tl.bfloat16)
+            k_rot = convert_fp8_to_bf16(k_rot)
 
             cos = tl.load(
                 COS
@@ -229,6 +258,7 @@ def _attn_fwd_inner(
 
         if k_descale is not None:
             k *= k_descale
+            k_nope *= k_descale
 
         # qk = tl.dot(q, k)
 
@@ -237,15 +267,25 @@ def _attn_fwd_inner(
         cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
         ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
-        qk = tl.dot((q * cq).to(q_dtype), (k.to(q_dtype) * ck).to(q_dtype)).to(
-            tl.float32
-        )
+        # qk = tl.dot(
+        #     (q * cq).to(q_dtype),
+        #     (k.to(q_dtype) * ck).to(q_dtype)
+        # ).to(tl.float32)
+        # if HEAD_DIM != HEAD_ROPE:
+        #     qk = qk + tl.dot(
+        #         (q_nope * cq).to(q_dtype),
+        #         (k_nope.to(q_dtype) * ck).to(q_dtype)
+        #     ).to(tl.float32)
+        qk = tl.dot(q, k)
+        if HEAD_DIM != HEAD_ROPE:
+            qk = qk + tl.dot(q_nope, k_nope)
 
         qk = qk * 1.44269504
 
         if MASKING:
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
             qk = tl.where(mask, qk, float("-inf"))
+        qk = tl.where(qk == 0, float("-inf"), qk)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -269,7 +309,7 @@ def _attn_fwd_inner(
                 V_CACHE
                 + idx_t[:, None] * stride_v_cache_t
                 + 0 * stride_v_cache_page
-                + idx_hid[None, :] * stride_v_cache_hid,
+                + tl.arange(0, HEAD_DIM)[None, :] * stride_v_cache_hid,
                 mask=mask_tsrc[:, None],
                 other=0.0,
             )
@@ -342,8 +382,8 @@ def keep(conf):
     return True
 
 
-@triton.autotune(
-    list(filter(keep, configs)),
+@triton_jit(
+    configs=list(filter(keep, configs)),
     key=[
         # "N_CTX",
         # "N_KV",
@@ -351,13 +391,13 @@ def keep(conf):
         "USING_PAGED_CACHE",
     ],
 )
-@triton.jit
 def _attn_fwd(
     Q,
     K,
     V,
     K_DESCALE,
     V_DESCALE,
+    SOFTMAX_SINK,
     sm_scale,
     M,
     MX,
@@ -432,6 +472,8 @@ def _attn_fwd(
     N_CTX,
     N_KV,
     HEAD_DIM: tl.constexpr,
+    HEAD_NOPE: tl.constexpr,
+    HEAD_ROPE: tl.constexpr,
     N_SPLIT,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -459,14 +501,34 @@ def _attn_fwd(
     idx_split = pid_n_split.to(tl.int64)
 
     # block pointers
-    Q_block_ptr = tl.make_block_ptr(
-        base=Q + q_offset,
-        shape=(N_CTX, HEAD_DIM),
-        strides=(stride_qm, stride_qk),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, HEAD_DIM),
-        order=(1, 0),
-    )
+    if HEAD_DIM == HEAD_ROPE:
+        Q_block_ptr = tl.make_block_ptr(
+            base=Q + q_offset,
+            shape=(N_CTX, HEAD_DIM),
+            strides=(stride_qm, stride_qk),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, HEAD_DIM),
+            order=(1, 0),
+        )
+        Q_NOPE_block_ptr = None
+    else:
+        Q_block_ptr = tl.make_block_ptr(
+            base=Q + q_offset,
+            shape=(N_CTX, HEAD_DIM),
+            strides=(stride_qm, stride_qk),
+            offsets=(start_m * BLOCK_M, HEAD_NOPE),
+            block_shape=(BLOCK_M, HEAD_ROPE),
+            order=(1, 0),
+        )
+        Q_NOPE_block_ptr = tl.make_block_ptr(
+            base=Q + q_offset,
+            shape=(N_CTX, HEAD_DIM),
+            strides=(stride_qm, stride_qk),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, HEAD_NOPE),
+            order=(1, 0),
+        )
+
     if not USING_PAGED_CACHE:
         v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
         V_block_ptr = tl.make_block_ptr(
@@ -477,19 +539,39 @@ def _attn_fwd(
             block_shape=(BLOCK_N, HEAD_DIM),
             order=v_order,
         )
-        K_block_ptr = tl.make_block_ptr(
-            base=K + kv_offset,
-            shape=(HEAD_DIM, N_KV),
-            strides=(stride_kk, stride_kn),
-            offsets=(0, 0),
-            block_shape=(HEAD_DIM, BLOCK_N),
-            order=(0, 1),
-        )
+        if HEAD_DIM == HEAD_ROPE:
+            K_block_ptr = tl.make_block_ptr(
+                base=K + kv_offset,
+                shape=(HEAD_DIM, N_KV),
+                strides=(stride_kk, stride_kn),
+                offsets=(0, 0),
+                block_shape=(HEAD_DIM, BLOCK_N),
+                order=(0, 1),
+            )
+            K_NOPE_block_ptr = None
+        else:
+            K_block_ptr = tl.make_block_ptr(
+                base=K + kv_offset,
+                shape=(HEAD_DIM, N_KV),
+                strides=(stride_kk, stride_kn),
+                offsets=(HEAD_NOPE, 0),
+                block_shape=(HEAD_ROPE, BLOCK_N),
+                order=(0, 1),
+            )
+            K_NOPE_block_ptr = tl.make_block_ptr(
+                base=K + kv_offset,
+                shape=(HEAD_DIM, N_KV),
+                strides=(stride_kk, stride_kn),
+                offsets=(0, 0),
+                block_shape=(HEAD_NOPE, BLOCK_N),
+                order=(0, 1),
+            )
     else:
         K_CACHE = K_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_k_cache_head_kv
         V_CACHE = V_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_v_cache_head_kv
         BLOCK_TABLE = BLOCK_TABLE + off_z.to(tl.int64) * stride_block_table_bsz
         K_block_ptr = None
+        K_NOPE_block_ptr = None
         V_block_ptr = None
     O_block_ptr = tl.make_block_ptr(
         base=Out + q_offset,
@@ -531,6 +613,14 @@ def _attn_fwd(
         boundary_check=(0,),
         padding_option="zero",
     )
+    if Q_NOPE_block_ptr is not None:
+        q_nope = tl.load(
+            Q_NOPE_block_ptr,
+            boundary_check=(0,),
+            padding_option="zero",
+        )
+    else:
+        q_nope = None
 
     _K = K_CACHE if USING_PAGED_CACHE else K
     if (
@@ -542,24 +632,27 @@ def _attn_fwd(
         | (_K.dtype.element_ty == tl.int8)
     ):
         q = q.to(tl.bfloat16)
+        if q_nope is not None:
+            q_nope = q_nope.to(tl.bfloat16)
 
     if EXTEND_BACKEND == "none":
         q_rot = None
     elif EXTEND_BACKEND == "self_extend":
-        idx_hid = tl.arange(0, HEAD_DIM)
-        idx_hid_rot = (idx_hid + HEAD_DIM // 2) % HEAD_DIM
-        idx_hid_cos_sin = idx_hid % (HEAD_DIM // 2)
-        rope_mult = tl.where((idx_hid + HEAD_DIM // 2) < HEAD_DIM, -1.0, 1.0)
+        idx_hid = tl.arange(0, HEAD_ROPE)
+        idx_hid_rot = (idx_hid + HEAD_ROPE) % HEAD_ROPE
+        idx_hid_cos_sin = idx_hid % (HEAD_ROPE // 2)
+        rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
-        max_pos_tdst = tl.max(tl.where(mask_m, mask_idx + 1, 0) - 1)
+        max_pos_tdst = tl.max(tl.where(mask_m, mask_idx, 0))
         idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1
+        idx_rope = mask_idx.to(tl.int64)
 
         q_rot = tl.load(
             Q
             + off_z.to(tl.int64) * stride_qz
             + off_h.to(tl.int64) * stride_qh
             + offs_m[:, None].to(tl.int64) * stride_qm
-            + idx_hid_rot[None, :].to(tl.int64) * stride_qk,
+            + (idx_hid_rot + HEAD_NOPE)[None, :].to(tl.int64) * stride_qk,
             mask=mask_m[:, None],
             other=0.0,
         )
@@ -588,13 +681,127 @@ def _attn_fwd(
     else:
         raise Exception()
 
-    if (not USING_PAGED_CACHE) and False:
+    lo = 0
+    mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(
+        tl.int32
+    )
+    tl.multiple_of(mid, BLOCK_N)
+    hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
+
+    if (N_SPLIT > 1) and False:
+        k_chunk_size = tl.cdiv(hi, N_SPLIT)
+        start_k = k_chunk_size * idx_split
+        end_k = k_chunk_size * (idx_split + 1)
+
+        # (start_k, end_k) (lo, mid)
+        if tl.maximum(start_k, lo) < tl.minimum(end_k, mid):
+            acc, l_i, m_i = _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                K_block_ptr,
+                V_block_ptr,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=tl.maximum(start_k, lo).to(tl.int32),
+                hi=tl.minimum(end_k, mid).to(tl.int32),
+                MASKING=False,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            )
+        # (start_k, end_k) (mid, hi)
+        if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
+            acc, l_i, m_i = _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                K_block_ptr,
+                V_block_ptr,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=tl.maximum(start_k, mid).to(tl.int32),
+                hi=tl.minimum(end_k, hi).to(tl.int32),
+                MASKING=True,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            )
+    else:
         acc, l_i, m_i = _attn_fwd_inner(
             acc,
             l_i,
             m_i,
             q,
+            q_nope,
             K_block_ptr,
+            K_NOPE_block_ptr,
             V_block_ptr,
             mask_idx,
             start_m,
@@ -603,224 +810,95 @@ def _attn_fwd(
             v_descale,
             BLOCK_M,
             HEAD_DIM,
+            HEAD_NOPE,
+            HEAD_ROPE,
             BLOCK_N,
             offs_m,
             offs_n,
+            mask_m,
             N_CTX,
             N_KV,
             V_FP8,
+            USING_PAGED_CACHE=USING_PAGED_CACHE,
+            K_CACHE=K_CACHE,
+            stride_k_cache_t=stride_k_cache_t,
+            stride_k_cache_page=stride_k_cache_page,
+            stride_k_cache_hid=stride_k_cache_hid,
+            V_CACHE=V_CACHE,
+            stride_v_cache_t=stride_v_cache_t,
+            stride_v_cache_page=stride_v_cache_page,
+            stride_v_cache_hid=stride_v_cache_hid,
+            BLOCK_TABLE=BLOCK_TABLE,
+            stride_block_table_tsrc=stride_block_table_tsrc,
+            COS=COS,
+            stride_cos_t=stride_cos_t,
+            stride_cos_hid=stride_cos_hid,
+            SIN=SIN,
+            stride_sin_t=stride_sin_t,
+            stride_sin_hid=stride_sin_hid,
+            K_ROT=K + kv_offset if K is not None else None,
+            stride_k_rot_tsrc=stride_kn,
+            stride_k_rot_hid=stride_kk,
+            lo=lo,
+            hi=mid,
+            MASKING=False,
+            EXTEND_BACKEND=EXTEND_BACKEND,
+            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
         )
-    else:
-        lo = 0
-        mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(
-            tl.int32
+
+        acc, l_i, m_i = _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            q_nope,
+            K_block_ptr,
+            K_NOPE_block_ptr,
+            V_block_ptr,
+            mask_idx,
+            start_m,
+            qk_scale,
+            k_descale,
+            v_descale,
+            BLOCK_M,
+            HEAD_DIM,
+            HEAD_NOPE,
+            HEAD_ROPE,
+            BLOCK_N,
+            offs_m,
+            offs_n,
+            mask_m,
+            N_CTX,
+            N_KV,
+            V_FP8,
+            USING_PAGED_CACHE=USING_PAGED_CACHE,
+            K_CACHE=K_CACHE,
+            stride_k_cache_t=stride_k_cache_t,
+            stride_k_cache_page=stride_k_cache_page,
+            stride_k_cache_hid=stride_k_cache_hid,
+            V_CACHE=V_CACHE,
+            stride_v_cache_t=stride_v_cache_t,
+            stride_v_cache_page=stride_v_cache_page,
+            stride_v_cache_hid=stride_v_cache_hid,
+            BLOCK_TABLE=BLOCK_TABLE,
+            stride_block_table_tsrc=stride_block_table_tsrc,
+            COS=COS,
+            stride_cos_t=stride_cos_t,
+            stride_cos_hid=stride_cos_hid,
+            SIN=SIN,
+            stride_sin_t=stride_sin_t,
+            stride_sin_hid=stride_sin_hid,
+            K_ROT=K + kv_offset if K is not None else None,
+            stride_k_rot_tsrc=stride_kn,
+            stride_k_rot_hid=stride_kk,
+            lo=mid,
+            hi=hi,
+            MASKING=True,
+            EXTEND_BACKEND=EXTEND_BACKEND,
+            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
         )
-        tl.multiple_of(mid, BLOCK_N)
-        hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
-
-        if N_SPLIT > 1:
-            k_chunk_size = tl.cdiv(hi, N_SPLIT)
-            start_k = k_chunk_size * idx_split
-            end_k = k_chunk_size * (idx_split + 1)
-
-            # (start_k, end_k) (lo, mid)
-            if tl.maximum(start_k, lo) < tl.minimum(end_k, mid):
-                acc, l_i, m_i = _attn_fwd_inner(
-                    acc,
-                    l_i,
-                    m_i,
-                    q,
-                    K_block_ptr,
-                    V_block_ptr,
-                    mask_idx,
-                    start_m,
-                    qk_scale,
-                    k_descale,
-                    v_descale,
-                    BLOCK_M,
-                    HEAD_DIM,
-                    BLOCK_N,
-                    offs_m,
-                    offs_n,
-                    mask_m,
-                    N_CTX,
-                    N_KV,
-                    V_FP8,
-                    USING_PAGED_CACHE=USING_PAGED_CACHE,
-                    K_CACHE=K_CACHE,
-                    stride_k_cache_t=stride_k_cache_t,
-                    stride_k_cache_page=stride_k_cache_page,
-                    stride_k_cache_hid=stride_k_cache_hid,
-                    V_CACHE=V_CACHE,
-                    stride_v_cache_t=stride_v_cache_t,
-                    stride_v_cache_page=stride_v_cache_page,
-                    stride_v_cache_hid=stride_v_cache_hid,
-                    BLOCK_TABLE=BLOCK_TABLE,
-                    stride_block_table_tsrc=stride_block_table_tsrc,
-                    COS=COS,
-                    stride_cos_t=stride_cos_t,
-                    stride_cos_hid=stride_cos_hid,
-                    SIN=SIN,
-                    stride_sin_t=stride_sin_t,
-                    stride_sin_hid=stride_sin_hid,
-                    K_ROT=K + kv_offset if K is not None else None,
-                    stride_k_rot_tsrc=stride_kn,
-                    stride_k_rot_hid=stride_kk,
-                    lo=tl.maximum(start_k, lo).to(tl.int32),
-                    hi=tl.minimum(end_k, mid).to(tl.int32),
-                    MASKING=False,
-                    EXTEND_BACKEND=EXTEND_BACKEND,
-                    MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-                )
-            # (start_k, end_k) (mid, hi)
-            if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
-                acc, l_i, m_i = _attn_fwd_inner(
-                    acc,
-                    l_i,
-                    m_i,
-                    q,
-                    K_block_ptr,
-                    V_block_ptr,
-                    mask_idx,
-                    start_m,
-                    qk_scale,
-                    k_descale,
-                    v_descale,
-                    BLOCK_M,
-                    HEAD_DIM,
-                    BLOCK_N,
-                    offs_m,
-                    offs_n,
-                    mask_m,
-                    N_CTX,
-                    N_KV,
-                    V_FP8,
-                    USING_PAGED_CACHE=USING_PAGED_CACHE,
-                    K_CACHE=K_CACHE,
-                    stride_k_cache_t=stride_k_cache_t,
-                    stride_k_cache_page=stride_k_cache_page,
-                    stride_k_cache_hid=stride_k_cache_hid,
-                    V_CACHE=V_CACHE,
-                    stride_v_cache_t=stride_v_cache_t,
-                    stride_v_cache_page=stride_v_cache_page,
-                    stride_v_cache_hid=stride_v_cache_hid,
-                    BLOCK_TABLE=BLOCK_TABLE,
-                    stride_block_table_tsrc=stride_block_table_tsrc,
-                    COS=COS,
-                    stride_cos_t=stride_cos_t,
-                    stride_cos_hid=stride_cos_hid,
-                    SIN=SIN,
-                    stride_sin_t=stride_sin_t,
-                    stride_sin_hid=stride_sin_hid,
-                    K_ROT=K + kv_offset if K is not None else None,
-                    stride_k_rot_tsrc=stride_kn,
-                    stride_k_rot_hid=stride_kk,
-                    lo=tl.maximum(start_k, mid).to(tl.int32),
-                    hi=tl.minimum(end_k, hi).to(tl.int32),
-                    MASKING=True,
-                    EXTEND_BACKEND=EXTEND_BACKEND,
-                    MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-                    SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-                )
-        else:
-            acc, l_i, m_i = _attn_fwd_inner(
-                acc,
-                l_i,
-                m_i,
-                q,
-                K_block_ptr,
-                V_block_ptr,
-                mask_idx,
-                start_m,
-                qk_scale,
-                k_descale,
-                v_descale,
-                BLOCK_M,
-                HEAD_DIM,
-                BLOCK_N,
-                offs_m,
-                offs_n,
-                mask_m,
-                N_CTX,
-                N_KV,
-                V_FP8,
-                USING_PAGED_CACHE=USING_PAGED_CACHE,
-                K_CACHE=K_CACHE,
-                stride_k_cache_t=stride_k_cache_t,
-                stride_k_cache_page=stride_k_cache_page,
-                stride_k_cache_hid=stride_k_cache_hid,
-                V_CACHE=V_CACHE,
-                stride_v_cache_t=stride_v_cache_t,
-                stride_v_cache_page=stride_v_cache_page,
-                stride_v_cache_hid=stride_v_cache_hid,
-                BLOCK_TABLE=BLOCK_TABLE,
-                stride_block_table_tsrc=stride_block_table_tsrc,
-                COS=COS,
-                stride_cos_t=stride_cos_t,
-                stride_cos_hid=stride_cos_hid,
-                SIN=SIN,
-                stride_sin_t=stride_sin_t,
-                stride_sin_hid=stride_sin_hid,
-                K_ROT=K + kv_offset if K is not None else None,
-                stride_k_rot_tsrc=stride_kn,
-                stride_k_rot_hid=stride_kk,
-                lo=lo,
-                hi=mid,
-                MASKING=False,
-                EXTEND_BACKEND=EXTEND_BACKEND,
-                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            )
-
-            acc, l_i, m_i = _attn_fwd_inner(
-                acc,
-                l_i,
-                m_i,
-                q,
-                K_block_ptr,
-                V_block_ptr,
-                mask_idx,
-                start_m,
-                qk_scale,
-                k_descale,
-                v_descale,
-                BLOCK_M,
-                HEAD_DIM,
-                BLOCK_N,
-                offs_m,
-                offs_n,
-                mask_m,
-                N_CTX,
-                N_KV,
-                V_FP8,
-                USING_PAGED_CACHE=USING_PAGED_CACHE,
-                K_CACHE=K_CACHE,
-                stride_k_cache_t=stride_k_cache_t,
-                stride_k_cache_page=stride_k_cache_page,
-                stride_k_cache_hid=stride_k_cache_hid,
-                V_CACHE=V_CACHE,
-                stride_v_cache_t=stride_v_cache_t,
-                stride_v_cache_page=stride_v_cache_page,
-                stride_v_cache_hid=stride_v_cache_hid,
-                BLOCK_TABLE=BLOCK_TABLE,
-                stride_block_table_tsrc=stride_block_table_tsrc,
-                COS=COS,
-                stride_cos_t=stride_cos_t,
-                stride_cos_hid=stride_cos_hid,
-                SIN=SIN,
-                stride_sin_t=stride_sin_t,
-                stride_sin_hid=stride_sin_hid,
-                K_ROT=K + kv_offset if K is not None else None,
-                stride_k_rot_tsrc=stride_kn,
-                stride_k_rot_hid=stride_kk,
-                lo=mid,
-                hi=hi,
-                MASKING=True,
-                EXTEND_BACKEND=EXTEND_BACKEND,
-                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            )
 
     # epilogue
     if N_SPLIT > 1:
@@ -855,6 +933,10 @@ def _attn_fwd(
         )
 
     if N_SPLIT <= 1:
+        if SOFTMAX_SINK is not None:
+            curr_sink = tl.load(SOFTMAX_SINK + off_h)
+            l_i += tl.exp(curr_sink - m_i)
+
         if MX is not None:
             m_ptrs = MX + off_hz * N_CTX + offs_m
             tl.store(m_ptrs, m_i, mask=mask_m)
@@ -983,6 +1065,7 @@ class _attention(torch.autograd.Function):
         v: torch.Tensor,
         k_descale: torch.Tensor,
         v_descale: torch.Tensor,
+        softmax_sink: torch.Tensor,
         mask: torch.Tensor,
         sm_scale: float,
         k_cache: torch.Tensor,
@@ -1085,6 +1168,9 @@ class _attention(torch.autograd.Function):
             assert rope_sin.ndim == 2
             assert rope_cos.ndim == 2
             assert extend_backend in ["self_extend"]
+
+        HEAD_DIM_K_ROPE = rope_sin.shape[-1]
+        HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
 
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
@@ -1254,6 +1340,7 @@ class _attention(torch.autograd.Function):
                 v,
                 k_descale,
                 v_descale,
+                softmax_sink.contiguous() if softmax_sink is not None else None,
                 sm_scale,
                 M,
                 MX,
@@ -1302,6 +1389,8 @@ class _attention(torch.autograd.Function):
                     else k_cache.shape[0] * k_cache.shape[1]
                 ),
                 HEAD_DIM=HEAD_DIM_K,
+                HEAD_NOPE=HEAD_DIM_K_NOPE,
+                HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
@@ -1337,6 +1426,7 @@ def query_sparse_attention(
     score_pooling_max_seq_len: int = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
+    softmax_sink: Optional[torch.Tensor] = None,
     extend_backend: Literal["self_extend", "none"] = "none",
     rope_cos: Optional[torch.Tensor] = None,
     rope_sin: Optional[torch.Tensor] = None,
@@ -1349,6 +1439,7 @@ def query_sparse_attention(
         v,
         k_descale,
         v_descale,
+        softmax_sink,
         mask,
         sm_scale,
         k_cache,

@@ -62,3 +62,4 @@ dummy*.jpg
 flux-dev.png
 
 .env
+results/
