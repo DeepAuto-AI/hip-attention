@@ -913,6 +913,7 @@ def block_sparse_attention_cuda(
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
     SELF_EXTEND_SCALE,
+    BLOCKWISE_MASKING: tl.constexpr,
 ):
     G: tl.constexpr = 1
 
@@ -1542,6 +1543,7 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                BLOCKWISE_MASKING=BLOCKWISE_MASKING,
             )
 
     # 29ms
@@ -1974,6 +1976,7 @@ def block_sparse_attention_cuda(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 CHUNKED_SW=CHUNKED_SW,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                BLOCKWISE_MASKING=BLOCKWISE_MASKING,
             )
 
     # 60ms
@@ -2406,6 +2409,7 @@ def block_sparse_attention_cuda(
                     BLOCK_SIZE_K,
                     EXTEND_BACKEND=EXTEND_BACKEND,
                     SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                    BLOCKWISE_MASKING=BLOCKWISE_MASKING,
                 )
             else:
                 pass
@@ -2505,6 +2509,8 @@ def block_sparse_attention(
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
+
+    BLOCKWISE_MASKING = os.getenv("SA_BLOCKWISE_MASKING", "1") == "1"
 
     max_block_size = int(os.getenv("SA_BLOCK_SIZE", "128"))
     BLOCK_BK = max_block_size // args.block_size_k
@@ -2647,6 +2653,7 @@ def block_sparse_attention(
         UPDATE_CACHE=offload_update_cache,
         CHUNKED_SW=args.using_chunked_sliding_window,
         SELF_EXTEND_SCALE=args.self_extend_scale,
+        BLOCKWISE_MASKING=BLOCKWISE_MASKING,
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
     )

@@ -281,6 +281,7 @@ def _fwd_kernel_stage1(
     UPDATE_CACHE: tl.constexpr,
     CHUNKED_SW: tl.constexpr,
     SELF_EXTEND_SCALE,
+    BLOCKWISE_MASKING: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     TOTAL_HEAD_BLOCKS = tl.cdiv(q_head_num, tl.minimum(BLOCK_H, kv_group_num))
@@ -946,6 +947,7 @@ def _fwd_kernel_stage1(
                     BLOCK_SIZE_K,
                     EXTEND_BACKEND=EXTEND_BACKEND,
                     SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                    BLOCKWISE_MASKING=BLOCKWISE_MASKING,
                 )
             else:
                 pass
@@ -1359,6 +1361,7 @@ def _fwd_kernel_stage1(
                 BLOCK_SIZE_K,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                BLOCKWISE_MASKING=BLOCKWISE_MASKING,
             )
 
     # process sliding window
@@ -1789,6 +1792,7 @@ def _fwd_kernel_stage1(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 CHUNKED_SW=CHUNKED_SW,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                BLOCKWISE_MASKING=BLOCKWISE_MASKING,
             )
 
     e_sum = tl.where(e_sum < 1e-20, 1e-20, e_sum)
@@ -1851,6 +1855,8 @@ def decode_block_sparse_attention_stage1(
     assert q.ndim == 4
     BLOCK_H = max(16, q.shape[2])
     NUM_SM = int(os.getenv("SA_DECODE_NUM_SM", 144 + 16))  # H100 + Slack
+
+    BLOCKWISE_MASKING = os.getenv("SA_BLOCKWISE_MASKING", "1") == "1"
 
     total_tokens = args.second_stage_k + args.sink_token_size + args.sliding_window_size
     MAX_PROGRAM = int(
@@ -1971,6 +1977,7 @@ def decode_block_sparse_attention_stage1(
         UPDATE_CACHE=offload_update_cache,
         CHUNKED_SW=args.using_chunked_sliding_window,
         SELF_EXTEND_SCALE=args.self_extend_scale,
+        BLOCKWISE_MASKING=BLOCKWISE_MASKING,
     )
 
     return temp_attn_logits, NUM_TOTAL_KV_SPLITS

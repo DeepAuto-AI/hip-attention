@@ -1484,10 +1484,10 @@ def _forward_delta_attn(
                 v_cache = args.get_v_cache()
 
                 assert args.position_ids.shape[0] == 1
-                print(
-                    query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
-                    args.position_ids[:, idx].shape,
-                )
+                # print(
+                #     query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
+                #     args.position_ids[:, idx].shape,
+                # )
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
