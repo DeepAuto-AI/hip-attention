@@ -1475,14 +1475,19 @@ def _forward_delta_attn(
             if args.need_apply_rope and args.using_extend:
                 assert delta_attention_args_extend in ("self_extend",)
 
+            query_for_recomp = query_for_dense
+            
             if args.using_paged_cache:
                 assert args.using_paged_cache
 
-                query_for_recomp = query_for_dense
                 k_cache = args.get_k_cache()
                 v_cache = args.get_v_cache()
 
                 assert args.position_ids.shape[0] == 1
+                print(
+                    query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
+                    args.position_ids[:, idx].shape,
+                )
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
@@ -1733,9 +1738,9 @@ def _forward_delta_attn(
         else:
             from .delta.apply_delta import apply_delta
 
-            if delta_attention_args_extend == "self_extend":
-                # FIXME this is surely bug...
-                last_context_sparse = context_sparse_raw[:, -2048:].clone()
+            # if delta_attention_args_extend == "self_extend":
+            #     # FIXME this is surely bug...
+            #     last_context_sparse = context_sparse_raw[:, -1024:].clone()
 
             context = apply_delta(
                 context_dense,
@@ -1746,9 +1751,9 @@ def _forward_delta_attn(
                 delta_attention_args_smooth,
             )
 
-            if delta_attention_args_extend == "self_extend":
-                # FIXME this is surely bug...
-                context[:, -2048:] = last_context_sparse
+            # if delta_attention_args_extend == "self_extend":
+            #     # FIXME this is surely bug...
+            #     context[:, -1024:] = last_context_sparse
 
     return context, metadata
 
@@ -2485,6 +2490,11 @@ def _forward_paged_hip(
             sliding_window_size = args.sliding_window_size
             sliding_window_sink = args.sink_token_size
 
+    # if True:
+    #     if (not is_decode) and (dst_seq_len == 1) and (args.using_extend and args.sa_extend_backend == "self_extend"):
+    #         print('asduogsh')
+    #         sliding_window_size = args.model_context_length
+    
     # Plan 1
     # TODO use flash attention under 100K
 
@@ -2568,6 +2578,8 @@ def _forward_paged_hip(
                     delta_attention_args_extend = "self_extend"
                 else:
                     raise Exception(extend_mode)
+                if not args.using_extend:
+                    delta_attention_args_extend = "none"
             elif word.startswith("window_"):
                 delta_attention_args_window = int(word.split("_")[1])
             elif word.startswith("diff_"):
