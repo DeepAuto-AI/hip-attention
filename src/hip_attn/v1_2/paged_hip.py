@@ -2512,7 +2512,7 @@ def _forward_paged_hip(
         seq_thresh_fa3 = args.model_context_length
 
     mixing_len = os.getenv(
-        "HIP_DEBUG_FA3_MIXING_LEN", "sw" if seq_thresh_fa3 > 0 else "0"
+        "HIP_DEBUG_FA3_MIXING_LEN", "0" if seq_thresh_fa3 > 0 else "0"
     )
     if mixing_len.lower() == "sw":
         mixing_len = int(
@@ -2645,7 +2645,7 @@ def _forward_paged_hip(
             rope_is_neox_style=rope_is_neox_style,
             cached_metadata=cached_metadata,
             is_decode=is_decode,
-            seq_thresh_fa3=seq_thresh_fa3,
+            seq_thresh_fa3=0, #seq_thresh_fa3,
             mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,

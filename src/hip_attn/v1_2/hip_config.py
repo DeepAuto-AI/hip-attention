@@ -517,7 +517,7 @@ class HiPAttentionConfig:
                 given_args = parsed_json["__seq_thresh_fa3"]
                 if os.getenv("HIP_DEBUG_SEQ_THRESH_FA3", given_args) != given_args:
                     warnings.warn(
-                        "envvar HIP_HEAD_REDUCE is overrided by hip attention args"
+                        "envvar HIP_DEBUG_SEQ_THRESH_FA3 is overrided by hip attention args"
                     )
                 assert int(str(given_args)) == given_args
                 os.environ["HIP_DEBUG_SEQ_THRESH_FA3"] = str(given_args)

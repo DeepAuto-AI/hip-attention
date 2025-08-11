@@ -1169,8 +1169,12 @@ class _attention(torch.autograd.Function):
             assert rope_cos.ndim == 2
             assert extend_backend in ["self_extend"]
 
-        HEAD_DIM_K_ROPE = rope_sin.shape[-1]
-        HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
+        if rope_sin is not None:
+            HEAD_DIM_K_ROPE = rope_sin.shape[-1]
+            HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
+        else:
+            HEAD_DIM_K_ROPE = HEAD_DIM_K
+            HEAD_DIM_K_NOPE = 0
 
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
