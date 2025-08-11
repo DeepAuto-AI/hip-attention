@@ -1269,8 +1269,8 @@ python \
 - Tested GPU: 8x H100 80GB
 - Tested at: 2025-08-10
 - Tested version:
-  - `hip-attention`: `e05985804a4a08d38cbfc0f904d79afd583a66b2`
-  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `63a1119982b859338844c4bb1e3028a66fb40147`
+  - `hip-attention`: `9101ab9df2cd6bd1ff02c088a8a7dfb6f2d4d8c4`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `6b5d93e9916256b18139ed62fddb5f18a57bfd42`
 
 #### Local
 
@@ -1364,8 +1364,8 @@ python \
 - Tested GPU: 8x H100 80GB
 - Tested at: 2025-08-10
 - Tested version:
-  - `hip-attention`: `e05985804a4a08d38cbfc0f904d79afd583a66b2`
-  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `63a1119982b859338844c4bb1e3028a66fb40147`
+  - `hip-attention`: `9101ab9df2cd6bd1ff02c088a8a7dfb6f2d4d8c4`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `6b5d93e9916256b18139ed62fddb5f18a57bfd42`
 
 #### Local
 
