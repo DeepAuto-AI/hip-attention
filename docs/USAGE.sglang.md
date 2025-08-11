@@ -1358,7 +1358,7 @@ python \
 
 ### Multi GPU with extended 2M context length
 
-- 768k context length (with context extension)
+- 2M context length (with context extension)
 - Cache offloading disabled
 - Tested model: [`lmsys/gpt-oss-120b-bf16`](https://huggingface.co/lmsys/gpt-oss-120b-bf16)
 - Tested GPU: 8x H100 80GB
