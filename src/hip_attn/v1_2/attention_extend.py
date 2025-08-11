@@ -1278,10 +1278,9 @@ def dual_stage_quadratic_hip_attention(
             if DEBUG_LOGALL and (BDST > 1):
                 os.makedirs("./cache/mask_log", exist_ok=True)
                 __logall_index += 1
-                cv2.imwrite(
-                    f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png",
-                    debug,
-                )
+                img_path = f"./cache/mask_log/{__logall_index:04d}_dummy_sampled_final.png"
+                print(img_path)
+                cv2.imwrite(img_path, debug)
             else:
                 cv2.imwrite("dummy_sampled_final.png", debug)
             # print('saved dummy_sampled_final.png')
