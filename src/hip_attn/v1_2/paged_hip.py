@@ -13,6 +13,31 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
 
+import numpy as np
+import numba
+import cv2
+
+# @numba.njit
+def convert_qsa_mask_to_img(
+    bsa_indices: np.ndarray, 
+    idx: np.ndarray,
+    TDST: int,
+    TSRC: int,
+    POOL_SIZE: int
+):
+    N_SPARSE_Q = bsa_indices.shape[0]
+    N_BLOCK = bsa_indices.shape[1]
+    img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE), dtype=np.uint8)
+    
+    for i_q in numba.prange(N_SPARSE_Q):
+        for k in range(N_BLOCK):
+            pty = idx[i_q]
+            ptx = bsa_indices[i_q, k]
+            if (ptx // POOL_SIZE) < img.shape[1] and (pty // POOL_SIZE) < img.shape[0]:
+                row = img[pty // POOL_SIZE]
+                row[ptx//POOL_SIZE] = 255
+    
+    return img
 
 @capture
 def flash_attn_varlen_func(
@@ -1488,11 +1513,15 @@ def _forward_delta_attn(
                 #     query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
                 #     args.position_ids[:, idx].shape,
                 # )
+                
+                test_qsa_masking = True
+                mask_idx = args.position_ids[:, idx]
+                
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
                     None,
-                    args.position_ids[:, idx],
+                    mask_idx,
                     sm_scale,
                     k_cache,
                     v_cache,
@@ -1506,7 +1535,20 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
+                    return_bsa_indices=test_qsa_masking,
                 )
+                
+                if test_qsa_masking:
+                    context_dense, (bsa_indices, bsa_block_sums) = context_dense
+                    # mask = convert_qsa_mask_to_img(
+                    #     bsa_indices.cpu().numpy()[0,0],
+                    #     idx.cpu().numpy(),
+                    #     query.shape[1],
+                    #     int(mask_idx.amax().item()) + 128,
+                    #     128,
+                    # )
+                    # cv2.imwrite("dummy_qsa_mask.png", mask)
+                    # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
             else:
                 assert k is not None
                 assert v is not None
