@@ -452,10 +452,12 @@ def _attn_fwd(
     stride_qh,
     stride_qm,
     stride_qk,
+    
     stride_kz,
     stride_kh,
     stride_kn,
     stride_kk,
+    
     stride_vz,
     stride_vh,
     stride_vk,
@@ -465,6 +467,7 @@ def _attn_fwd(
     stride_oh,
     stride_om,
     stride_on,
+    
     stride_mz,
     stride_mm,
     
@@ -487,6 +490,16 @@ def _attn_fwd(
     stride_block_table_bsz,
     stride_block_table_tsrc,
     
+    RETURN_POOLED_SCORES: tl.constexpr,
+    SCORE_POOLING_BQ: tl.constexpr,
+    SCORE_POOLING_BK: tl.constexpr,
+    
+    SCORES,
+    stride_scores_bsz,
+    stride_scores_head,
+    stride_scores_bdst,
+    stride_scores_bsrc,
+    
     ACC,
     stride_acc_bsz,
     stride_acc_head,
@@ -503,21 +516,14 @@ def _attn_fwd(
     stride_li_head,
     stride_li_split,
     stride_li_tdst,
+    
     COS,
     stride_cos_t,
     stride_cos_hid,
+    
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    
-    RETURN_POOLED_SCORES: tl.constexpr,
-    SCORE_POOLING_BQ: tl.constexpr,
-    SCORE_POOLING_BK: tl.constexpr,
-    SCORES,
-    stride_scores_bsz,
-    stride_scores_head,
-    stride_scores_bdst,
-    stride_scores_bsrc,
     
     RETURN_BSA_MASK: tl.constexpr,
     BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
