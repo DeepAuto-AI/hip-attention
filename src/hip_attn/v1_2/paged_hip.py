@@ -1514,7 +1514,7 @@ def _forward_delta_attn(
                 #     args.position_ids[:, idx].shape,
                 # )
                 
-                test_qsa_masking = True
+                test_qsa_masking = False
                 mask_idx = args.position_ids[:, idx]
                 
                 context_dense = query_sparse_attention(
