@@ -283,6 +283,7 @@ class HiPAttentionArgs:
     v_descale: Optional[Tensor] = None
 
     self_extend_scale: int = 12
+    self_extend_window: int = 4096
 
     softmax_sink: Optional[Tensor] = None
 

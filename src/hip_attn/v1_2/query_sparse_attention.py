@@ -109,6 +109,7 @@ def _attn_fwd_inner(
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH,
     SELF_EXTEND_SCALE,
+    SELF_EXTEND_WINDOW,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
@@ -179,8 +180,6 @@ def _attn_fwd_inner(
             idx_hid_cos_sin = idx_hid % (HEAD_ROPE // 2)
             rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
-            SELF_EXTEND_WINDOW = 4096
-
             # max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
 
             # offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
@@ -196,17 +195,22 @@ def _attn_fwd_inner(
             # # idx_rope = idx_tsrc
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
+            min_pos_tsrc = tl.min(tl.where(mask_m, mask_idx, 987654321))
+            
+            self_sliding_window = tl.maximum(
+                1024 + max_pos_tsrc - min_pos_tsrc, 
+                SELF_EXTEND_WINDOW
+            )
 
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
             idx_rope = tl.where(
-                offset > (-SELF_EXTEND_WINDOW),
-                offset + MODEL_CONTEXT_LENGTH - 1,
-                (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
-                + MODEL_CONTEXT_LENGTH
-                - 1
-                - SELF_EXTEND_WINDOW,
+                offset > (-self_sliding_window),
+                offset + (MODEL_CONTEXT_LENGTH - 1),
+                (offset + self_sliding_window) // SELF_EXTEND_SCALE
+                + (MODEL_CONTEXT_LENGTH - 1)
+                - self_sliding_window,
             )
-            idx_rope = idx_tsrc
+            # idx_rope = idx_tsrc
 
             if not USING_PAGED_CACHE:
                 k_rot = tl.load(
@@ -481,6 +485,7 @@ def _attn_fwd(
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
+    SELF_EXTEND_WINDOW=1024,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -644,8 +649,8 @@ def _attn_fwd(
         rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
         max_pos_tdst = tl.max(tl.where(mask_m, mask_idx, 0))
-        idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1
-        idx_rope = mask_idx.to(tl.int64)
+        idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1 + 1
+        # idx_rope = mask_idx.to(tl.int64)
 
         q_rot = tl.load(
             Q
@@ -845,6 +850,7 @@ def _attn_fwd(
             EXTEND_BACKEND=EXTEND_BACKEND,
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
         )
 
         acc, l_i, m_i = _attn_fwd_inner(
@@ -898,6 +904,7 @@ def _attn_fwd(
             EXTEND_BACKEND=EXTEND_BACKEND,
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
         )
 
     # epilogue
@@ -1167,7 +1174,7 @@ class _attention(torch.autograd.Function):
             assert isinstance(rope_cos, torch.Tensor)
             assert rope_sin.ndim == 2
             assert rope_cos.ndim == 2
-            assert extend_backend in ["self_extend"]
+            assert extend_backend in ["self_extend", "nope"]
 
         if rope_sin is not None:
             HEAD_DIM_K_ROPE = rope_sin.shape[-1]
@@ -1397,7 +1404,12 @@ class _attention(torch.autograd.Function):
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
                 V_FP8=V_FP8,
-                EXTEND_BACKEND=extend_backend,
+                EXTEND_BACKEND=(
+                    "none" 
+                    if extend_backend == "nope" else 
+                    extend_backend
+                ),
+                # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
                 **extra_kern_args,

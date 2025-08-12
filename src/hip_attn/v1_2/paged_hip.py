@@ -1473,7 +1473,7 @@ def _forward_delta_attn(
             )
         else:
             if args.need_apply_rope and args.using_extend:
-                assert delta_attention_args_extend in ("self_extend",)
+                assert delta_attention_args_extend in ("self_extend", "nope")
 
             query_for_recomp = query_for_dense
 
@@ -1750,6 +1750,9 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
+            
+            if delta_attention_args_extend == "nope":
+                context[:, idx] = context_sparse_raw[:, idx]
 
             # if delta_attention_args_extend == "self_extend":
             #     # FIXME this is surely bug...
@@ -2576,6 +2579,8 @@ def _forward_paged_hip(
                 extend_mode = word.split("_")[1]
                 if extend_mode == "self":
                     delta_attention_args_extend = "self_extend"
+                elif extend_mode == "nope":
+                    delta_attention_args_extend = "nope"
                 else:
                     raise Exception(extend_mode)
                 if not args.using_extend:

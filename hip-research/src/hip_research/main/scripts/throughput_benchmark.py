@@ -66,7 +66,7 @@ def stream_chat_completion(
         data = {
             "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
             "prompt": messages[-1]["content"],
-            "temperature": 0.0,
+            "temperature": 0.7,
             "max_tokens": num_decode,
             "min_tokens": num_decode,
             "stream": True,
@@ -76,7 +76,7 @@ def stream_chat_completion(
         data = {
             "model": os.getenv("HIP_SGLANG_MODEL", "anything"),
             "messages": messages,
-            "temperature": 0.0,
+            "temperature": 0.7,
             "max_tokens": num_decode,
             "min_tokens": num_decode,
             "ignore_eos": True,

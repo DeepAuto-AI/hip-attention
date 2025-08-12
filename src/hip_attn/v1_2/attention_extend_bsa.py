@@ -53,6 +53,7 @@ def apply_rope_to_keys(
     NEED_APPLY_ROPE: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     SELF_EXTEND_SCALE,
+    SELF_EXTEND_WINDOW,
 ):
     tl.static_assert(USING_EXTEND)
 
@@ -222,8 +223,6 @@ def apply_rope_to_keys(
                         new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
                     new_tsrc = tl.maximum(0, new_tsrc)
                 elif EXTEND_BACKEND == "self_extend":
-                    SELF_EXTEND_WINDOW: tl.constexpr = 4096
-
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
 
                     offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
@@ -282,7 +281,7 @@ def apply_rope_to_keys(
                         new_tsrc = new_tsrc - (num_sparse_tokens - model_context_length)
                     new_tsrc = tl.maximum(0, new_tsrc)
                 elif EXTEND_BACKEND == "self_extend":
-                    SELF_EXTEND_WINDOW: tl.constexpr = 4096
+                    # SELF_EXTEND_WINDOW: tl.constexpr = 4096
                     # SELF_EXTEND_SCALE: tl.constexpr = 12
 
                     max_pos_tsrc = tl.max(tl.where(mask_tdst, pos_tdst - 1, 0))
@@ -422,6 +421,7 @@ def block_sparse_attention_cuda_step(
     CHUNKED_SW: tl.constexpr = False,
     SELF_EXTEND_SCALE=12,
     BLOCKWISE_MASKING: tl.constexpr = True,
+    SELF_EXTEND_WINDOW=4096,
 ):
     HID_BLOCK_0: tl.constexpr = queries_0.shape[1]
     HID_BLOCK_1: tl.constexpr = queries_1.shape[1] if queries_1 is not None else 0
@@ -462,6 +462,7 @@ def block_sparse_attention_cuda_step(
                 NEED_APPLY_ROPE,
                 EXTEND_BACKEND,
                 SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW,
             )
 
         if HID_BLOCK_1 > 0:
@@ -500,6 +501,7 @@ def block_sparse_attention_cuda_step(
                 NEED_APPLY_ROPE,
                 EXTEND_BACKEND,
                 SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW,
             )
 
     q_dtype = queries_0.dtype
