@@ -67,10 +67,6 @@ def _attn_fwd_inner(
     K_block_ptr,
     K_NOPE_block_ptr,
     V_block_ptr,
-    BLOCK_IDX,
-    BLOCK_SUMS,
-    stride_bim,
-    stride_bik,
     mask_idx,
     start_m,
     qk_scale,
@@ -87,7 +83,6 @@ def _attn_fwd_inner(
     N_CTX,
     N_KV,
     fp8_v: tl.constexpr,
-    
     USING_PAGED_CACHE: tl.constexpr,
     K_CACHE,
     stride_k_cache_t,
@@ -99,6 +94,14 @@ def _attn_fwd_inner(
     stride_v_cache_hid,
     BLOCK_TABLE,
     stride_block_table_tsrc,
+    RETURN_BSA_MASK: tl.constexpr,
+    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
+    BSA_K: tl.constexpr,
+    BSA_BLOCK_SIZE_K: tl.constexpr,
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    stride_bim,
+    stride_bik,
     COS,
     stride_cos_t,
     stride_cos_hid,
@@ -108,17 +111,6 @@ def _attn_fwd_inner(
     K_ROT,
     stride_k_rot_tsrc,
     stride_k_rot_hid,
-    
-    RETURN_BSA_MASK: tl.constexpr,
-    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
-    BSA_K: tl.constexpr,
-    BSA_BLOCK_SIZE_Q: tl.constexpr,
-    BSA_BLOCK_SIZE_K: tl.constexpr,
-    BSA_INDICES,
-    BSA_BLOCK_SUMS,
-    stride_bim,
-    stride_bik,
-    
     lo,
     hi,
     MASKING: tl.constexpr,
@@ -132,12 +124,10 @@ def _attn_fwd_inner(
     # lo, hi = 0, tl.max(mask_idx) + 1
 
     if RETURN_BSA_MASK:
-        tl.static_assert(BLOCK_M >= BSA_BLOCK_SIZE_Q)
-        
         b_idx = (
             (
-                start_m * (BLOCK_M // BSA_BLOCK_SIZE_Q) 
-                + tl.arange(0, (BLOCK_M // BSA_BLOCK_SIZE_Q))[:, None]
+                start_m * BLOCK_M
+                + tl.arange(0, BLOCK_M)[:, None]
             ) * stride_bim
             + tl.arange(0, BSA_K)[None, :] * stride_bik
         )
@@ -330,10 +320,10 @@ def _attn_fwd_inner(
         # -- update block sums and indices for block sparse attention
         # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
-            block_sums *= tl.sum(tl.reshape(alpha, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)[:, None] # adjust previous sums for new normalization constant
+            block_sums *= alpha[:, None] # adjust previous sums for new normalization constant
 
             block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
-            block_sums_max = tl.maximum(block_sums_min, tl.sum(tl.reshape(l_ij, BLOCK_M // BSA_BLOCK_SIZE_Q, BSA_BLOCK_SIZE_Q), axis=-1)) # (M,)
+            block_sums_max = tl.maximum(block_sums_min, l_ij) # (M,)
 
             # if these two are equal, it means that the maximum is equal 
             # to the old value (i.e no change necessary)
@@ -532,7 +522,6 @@ def _attn_fwd(
     RETURN_BSA_MASK: tl.constexpr,
     BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
     BSA_K: tl.constexpr,
-    BSA_BLOCK_SIZE_Q: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
     BSA_INDICES,
     BSA_BLOCK_SUMS,
@@ -816,7 +805,6 @@ def _attn_fwd(
                 RETURN_BSA_MASK=RETURN_BSA_MASK,
                 BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                 BSA_K=BSA_K,
-                BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
                 BSA_INDICES=BSA_INDICES,
                 BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
@@ -881,7 +869,6 @@ def _attn_fwd(
                 RETURN_BSA_MASK=RETURN_BSA_MASK,
                 BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
                 BSA_K=BSA_K,
-                BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
                 BSA_INDICES=BSA_INDICES,
                 BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
@@ -913,70 +900,6 @@ def _attn_fwd(
             K_block_ptr,
             K_NOPE_block_ptr,
             V_block_ptr,
-            BSA_IDX,
-            BLOCK_SUMS,
-            stride_bim,
-            stride_bik,
-            mask_idx,
-            start_m,
-            qk_scale,
-            k_descale,
-            v_descale,
-            BLOCK_M,
-            HEAD_DIM,
-            HEAD_NOPE,
-            HEAD_ROPE,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            mask_m,
-            N_CTX,
-            N_KV,
-            V_FP8,
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
-            COS=COS,
-            stride_cos_t=stride_cos_t,
-            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
-            stride_cos_hid=stride_cos_hid,
-            SIN=SIN,
-            stride_sin_t=stride_sin_t,
-            stride_sin_hid=stride_sin_hid,
-            K_ROT=K + kv_offset if K is not None else None,
-            stride_k_rot_tsrc=stride_kn,
-            stride_k_rot_hid=stride_kk,
-            lo=lo,
-            hi=mid,
-            MASKING=False,
-            EXTEND_BACKEND=EXTEND_BACKEND,
-            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
-            BSA_K=BSA_K,
-        )
-
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
-            BSA_IDX,
-            BLOCK_SUMS,
-            stride_bim,
-            stride_bik,
             mask_idx,
             start_m,
             qk_scale,
@@ -1007,7 +930,68 @@ def _attn_fwd(
             RETURN_BSA_MASK=RETURN_BSA_MASK,
             BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
             BSA_K=BSA_K,
-            BSA_BLOCK_SIZE_Q=BSA_BLOCK_SIZE_Q,
+            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+            BSA_INDICES=BSA_INDICES,
+            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+            stride_bim=stride_bim,
+            stride_bik=stride_bik,
+            COS=COS,
+            stride_cos_t=stride_cos_t,
+            stride_cos_hid=stride_cos_hid,
+            SIN=SIN,
+            stride_sin_t=stride_sin_t,
+            stride_sin_hid=stride_sin_hid,
+            K_ROT=K + kv_offset if K is not None else None,
+            stride_k_rot_tsrc=stride_kn,
+            stride_k_rot_hid=stride_kk,
+            lo=lo,
+            hi=mid,
+            MASKING=False,
+            EXTEND_BACKEND=EXTEND_BACKEND,
+            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+        )
+
+        acc, l_i, m_i = _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            q_nope,
+            K_block_ptr,
+            K_NOPE_block_ptr,
+            V_block_ptr,
+            mask_idx,
+            start_m,
+            qk_scale,
+            k_descale,
+            v_descale,
+            BLOCK_M,
+            HEAD_DIM,
+            HEAD_NOPE,
+            HEAD_ROPE,
+            BLOCK_N,
+            offs_m,
+            offs_n,
+            mask_m,
+            N_CTX,
+            N_KV,
+            V_FP8,
+            USING_PAGED_CACHE=USING_PAGED_CACHE,
+            K_CACHE=K_CACHE,
+            stride_k_cache_t=stride_k_cache_t,
+            stride_k_cache_page=stride_k_cache_page,
+            stride_k_cache_hid=stride_k_cache_hid,
+            V_CACHE=V_CACHE,
+            stride_v_cache_t=stride_v_cache_t,
+            stride_v_cache_page=stride_v_cache_page,
+            stride_v_cache_hid=stride_v_cache_hid,
+            BLOCK_TABLE=BLOCK_TABLE,
+            stride_block_table_tsrc=stride_block_table_tsrc,
+            RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+            BSA_K=BSA_K,
             BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
             BSA_INDICES=BSA_INDICES,
             BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
@@ -1215,13 +1199,8 @@ class _attention(torch.autograd.Function):
         model_context_length: int,
         self_extend_scale: int,
         bsa_top_block_k: int,
-        bsa_block_size_q: int,
         bsa_block_size_k: int,
     ):
-
-        if bsa_block_size_q > 1:
-            raise NotImplementedError(f"{bsa_block_size_q=}. bsa block size q is not imeplentened for block size greater than 1")
-
         q = (q * sm_scale).to(q.dtype)
 
         USING_PAGED_CACHE = k_cache is not None
@@ -1278,15 +1257,14 @@ class _attention(torch.autograd.Function):
             assert not return_running_statistics
             assert not return_pooled_scores
             BSZ, HEAD, TDST = q.shape[:3]
-            BDST = triton.cdiv(TDST, bsa_block_size_q)
             bsa_indices = torch.full(
-                (BSZ, HEAD, BDST, bsa_top_block_k),
+                (BSZ, HEAD, TDST, bsa_top_block_k),
                 987654321,
                 device=q.device,
                 dtype=torch.int64,
             )
             bsa_block_sums = torch.full(
-                (BSZ, HEAD, BDST, bsa_top_block_k),
+                (BSZ, HEAD, TDST, bsa_top_block_k),
                 fill_value=1e-12,
                 device=q.device,
                 dtype=torch.float32,
@@ -1573,7 +1551,6 @@ class _attention(torch.autograd.Function):
                 (bsa_indices is not None) and (bsa_block_sums is not None),
                 bsa_mask_sink_token_size,
                 bsa_top_block_k,
-                bsa_block_size_q,
                 bsa_block_size_k,
                 bsa_indices,
                 bsa_block_sums,
@@ -1591,8 +1568,8 @@ class _attention(torch.autograd.Function):
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
-                BLOCK_M=64,
-                BLOCK_N=32,
+                # BLOCK_M=64,
+                # BLOCK_N=32,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=(
                     "none" 
@@ -1643,7 +1620,6 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     bsa_top_block_k: int = 128,
-    bsa_block_size_q: int = 1,
     bsa_block_size_k: int = 2,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
@@ -1671,6 +1647,5 @@ def query_sparse_attention(
         model_context_length,
         self_extend_scale,
         bsa_top_block_k,
-        bsa_block_size_q,
         bsa_block_size_k,
     )
