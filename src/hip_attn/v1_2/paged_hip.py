@@ -1540,15 +1540,15 @@ def _forward_delta_attn(
                 
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
-                    # mask = convert_qsa_mask_to_img(
-                    #     bsa_indices.cpu().numpy()[0,0],
-                    #     idx.cpu().numpy(),
-                    #     query.shape[1],
-                    #     int(mask_idx.amax().item()) + 128,
-                    #     128,
-                    # )
-                    # cv2.imwrite("dummy_qsa_mask.png", mask)
-                    # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+                    mask = convert_qsa_mask_to_img(
+                        bsa_indices.cpu().numpy()[0,0],
+                        idx.cpu().numpy(),
+                        query.shape[1],
+                        int(mask_idx.amax().item()) + 128,
+                        128,
+                    )
+                    cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
+                    print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
             else:
                 assert k is not None
                 assert v is not None
