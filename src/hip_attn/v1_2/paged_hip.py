@@ -17,9 +17,10 @@ import numpy as np
 import numba
 import cv2
 
-# @numba.njit
+@numba.njit
 def convert_qsa_mask_to_img(
     bsa_indices: np.ndarray, 
+    bsa_scores: np.ndarray,
     idx: np.ndarray,
     TDST: int,
     TSRC: int,
@@ -27,15 +28,27 @@ def convert_qsa_mask_to_img(
 ):
     N_SPARSE_Q = bsa_indices.shape[0]
     N_BLOCK = bsa_indices.shape[1]
-    img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE), dtype=np.uint8)
+    img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 3), dtype=np.int32)
+    img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
     
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
             pty = idx[i_q]
             ptx = bsa_indices[i_q, k]
             if (ptx // POOL_SIZE) < img.shape[1] and (pty // POOL_SIZE) < img.shape[0]:
-                row = img[pty // POOL_SIZE]
-                row[ptx//POOL_SIZE] = 255
+                score = bsa_scores[i_q, k]
+                img[pty // POOL_SIZE, ptx//POOL_SIZE, 0] += 255
+                img[pty // POOL_SIZE, ptx//POOL_SIZE, 1] += int(255 * score)
+                img[pty // POOL_SIZE, ptx//POOL_SIZE, 2] += int(255 * (1 - score))
+                img_cnt[pty // POOL_SIZE, ptx//POOL_SIZE] += 1
+    
+    for i in numba.prange(img.shape[0]):
+        for j in range(img.shape[1]):
+            c = img_cnt[i, j]
+            if c > 0:
+                img[i, j] = (img[i, j] / c).astype(np.int32)
+    
+    img = img.astype(np.uint8)
     
     return img
 
@@ -928,6 +941,7 @@ def _forward_delta_attn(
     assert not is_decode
     assert not torch.cuda.is_current_stream_capturing()
 
+    # NOTE: sample sparse context
     assert isinstance(delta_attention_args_window, int)
     if delta_attention_args_window == 0:
         assert delta_attention_args_window == 0
@@ -1535,20 +1549,32 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
+                    bsa_top_block_k=32,
+                    bsa_mask_sink_token_size=max(1, args.sink_token_size),
+                    bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
                 )
                 
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
-                    mask = convert_qsa_mask_to_img(
-                        bsa_indices.cpu().numpy()[0,0],
-                        idx.cpu().numpy(),
-                        query.shape[1],
-                        int(mask_idx.amax().item()) + 128,
-                        128,
-                    )
-                    cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
-                    print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+                    
+                    if get_local_rank() == 0:
+                        scores = bsa_block_sums[0,0]
+                        scores_min = scores.amin()
+                        scores_max = scores.amax()
+                        scores = (scores - scores_min) / (scores_max - scores_min)
+                        mask = convert_qsa_mask_to_img(
+                            bsa_indices[0,0].cpu().numpy(),
+                            scores.cpu().float().numpy(),
+                            idx.cpu().numpy(),
+                            query.shape[1],
+                            int(mask_idx.amax().item()) + 128,
+                            128,
+                        )
+                        cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
+                        print(bsa_indices[0, 0, -1])
+                        print(bsa_block_sums[0, 0, -1])
+                        print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
             else:
                 assert k is not None
                 assert v is not None
@@ -2557,7 +2583,7 @@ def _forward_paged_hip(
         seq_thresh_fa3 = args.model_context_length
 
     mixing_len = os.getenv(
-        "HIP_DEBUG_FA3_MIXING_LEN", "0" if seq_thresh_fa3 > 0 else "0"
+        "HIP_DEBUG_FA3_MIXING_LEN", "sw" if seq_thresh_fa3 > 0 else "0"
     )
     if mixing_len.lower() == "sw":
         mixing_len = int(
