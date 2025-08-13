@@ -25,6 +25,7 @@ import triton
 import triton.language as tl
 
 from hip_attn.v1_2.attention_metadata import safe_stride
+from hip_attn.v1_2.triton_argsort import argsort
 from hip_attn.v1_2.utils import capture, triton_jit
 
 # DEVICE = triton.runtime.driver.active.get_active_torch_device()
@@ -55,6 +56,48 @@ def convert_fp8_to_bf16(k: tl.tensor):
         k = k.to(tl.bfloat16)
 
     return k
+
+
+@triton.jit
+def update_block_sums_idx(
+    block_sums,
+    block_idx,
+    update_exp_sum,
+    start_n,
+    i_offset,
+    topk_idx,
+    BSA_K: tl.constexpr,
+    ONLINE_TOPK_METHOD: tl.constexpr,
+):
+    if ONLINE_TOPK_METHOD == "naive":
+        block_sums_min, block_sums_min_idx = tl.min(
+            block_sums, axis=-1, return_indices=True
+        )  # (M, K) -> (M,)
+        block_sums_max = tl.maximum(block_sums_min, update_exp_sum)  # (M,)
+
+        # if these two are equal, it means that the maximum is equal
+        # to the old value (i.e no change necessary)
+        block_update = block_sums_min != block_sums_max  # (M,)
+        col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K)
+
+        # make a mask of the minimum indices
+        bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
+        bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
+
+        block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+        block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+
+    elif ONLINE_TOPK_METHOD == "sort":
+        offset = topk_idx % BSA_K
+        if offset == 0:
+            # sort the block sums and indices
+            block_sums, block_idx = argsort(block_sums, block_idx, descending=True)
+
+        mask = offset == tl.arange(0, BSA_K * 2) - BSA_K
+        block_sums = tl.where(mask, update_exp_sum[:, None], block_sums)
+        block_idx = tl.where(mask, start_n + i_offset, block_idx)
+
+    return block_sums, block_idx
 
 
 @triton.jit
@@ -124,16 +167,21 @@ def _attn_fwd_inner(
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
 
+    ONLINE_TOPK_METHOD: tl.constexpr = "sort"
+
     if RETURN_BSA_MASK:
-        b_idx = (
-            (
-                start_m * BLOCK_M
-                + tl.arange(0, BLOCK_M)[:, None]
-            ) * stride_bim
-            + tl.arange(0, BSA_K)[None, :] * stride_bik
-        )
-        block_idx = tl.load(BSA_INDICES + b_idx)
-        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
+        if ONLINE_TOPK_METHOD != "sort":
+            b_idx = (
+                start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+            ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
+            b_mask = True
+        else:
+            b_idx = (
+                start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+            ) * stride_bim + tl.arange(0, BSA_K * 2)[None, :] * stride_bik
+            b_mask = tl.arange(0, BSA_K * 2)[None, :] < BSA_K
+        block_idx = tl.load(BSA_INDICES + b_idx, mask=b_mask, other=-1)
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=b_mask, other=-10000.0)
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -144,6 +192,7 @@ def _attn_fwd_inner(
     # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
+    topk_idx = 0
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -216,10 +265,9 @@ def _attn_fwd_inner(
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
             min_pos_tsrc = tl.min(tl.where(mask_m, mask_idx, 987654321))
-            
+
             self_sliding_window = tl.maximum(
-                1024 + max_pos_tsrc - min_pos_tsrc, 
-                SELF_EXTEND_WINDOW
+                1024 + max_pos_tsrc - min_pos_tsrc, SELF_EXTEND_WINDOW
             )
 
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
@@ -331,16 +379,18 @@ def _attn_fwd_inner(
                 | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
                 | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
             )
-            
+
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
             using_exp_sum = False
             if using_exp_sum:
                 if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
                     p_split = tl.where(mask, p, 0.0)
                 else:
                     p_split = p
-                
+
                 if BLOCK_N == BSA_MASK_STEP_SIZE:
                     l_ij_0 = l_ij
                 elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
@@ -357,11 +407,13 @@ def _attn_fwd_inner(
                     raise Exception()
             else:
                 if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-                    p_split = tl.where(mask, qk_original, float('-inf'))
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
+                    p_split = tl.where(mask, qk_original, float("-inf"))
                 else:
                     p_split = qk_original
-                
+
                 if BLOCK_N == BSA_MASK_STEP_SIZE:
                     l_ij_0 = tl.max(p_split, 1)
                 elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
@@ -376,41 +428,62 @@ def _attn_fwd_inner(
                     l_ij_2, l_ij_3 = tl.split(l_ij_23)
                 else:
                     raise Exception()
-            
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-                
-                if   i_offset == (0 * BLOCK_N):
-                    update_exp_sum = l_ij_0
-                elif i_offset == (1 * BLOCK_N):
-                    update_exp_sum = l_ij_1
-                elif i_offset == (2 * BLOCK_N):
-                    update_exp_sum = l_ij_2
-                elif i_offset == (3 * BLOCK_N):
-                    update_exp_sum = l_ij_3
-                
-                # NOTE: update indices and scores
-                if (update_alpha is not None) and (using_exp_sum):
-                    block_sums *= update_alpha[:, None] # adjust previous sums for new normalization constant
 
-                block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
-                block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
+            # NOTE: update indices and scores
+            if using_exp_sum:
+                block_sums *= alpha[
+                    :, None
+                ]  # adjust previous sums for new normalization constant
 
-                # if these two are equal, it means that the maximum is equal 
-                # to the old value (i.e no change necessary)
-                block_update = block_sums_min != block_sums_max # (M,)
-                col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
+            if 0 * BSA_MASK_STEP_SIZE < BLOCK_N:
+                block_sums, block_idx = update_block_sums_idx(
+                    block_sums=block_sums,
+                    block_idx=block_idx,
+                    update_exp_sum=l_ij_0,
+                    start_n=start_n,
+                    i_offset=0 * BSA_MASK_STEP_SIZE,
+                    topk_idx=topk_idx,
+                    BSA_K=BSA_K,
+                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                )
+                topk_idx += 1
+            if 1 * BSA_MASK_STEP_SIZE < BLOCK_N:
+                block_sums, block_idx = update_block_sums_idx(
+                    block_sums=block_sums,
+                    block_idx=block_idx,
+                    update_exp_sum=l_ij_1,
+                    start_n=start_n,
+                    i_offset=1 * BSA_MASK_STEP_SIZE,
+                    topk_idx=topk_idx,
+                    BSA_K=BSA_K,
+                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                )
+                topk_idx += 1
+            if 2 * BSA_MASK_STEP_SIZE < BLOCK_N:
+                block_sums, block_idx = update_block_sums_idx(
+                    block_sums=block_sums,
+                    block_idx=block_idx,
+                    update_exp_sum=l_ij_2,
+                    start_n=start_n,
+                    i_offset=2 * BSA_MASK_STEP_SIZE,
+                    topk_idx=topk_idx,
+                    BSA_K=BSA_K,
+                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                )
+                topk_idx += 1
+            if 3 * BSA_MASK_STEP_SIZE < BLOCK_N:
+                block_sums, block_idx = update_block_sums_idx(
+                    block_sums=block_sums,
+                    block_idx=block_idx,
+                    update_exp_sum=l_ij_3,
+                    start_n=start_n,
+                    i_offset=3 * BSA_MASK_STEP_SIZE,
+                    topk_idx=topk_idx,
+                    BSA_K=BSA_K,
+                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                )
+                topk_idx += 1
 
-                # make a mask of the minimum indices
-                bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
-                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
-
-                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-                block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
-        
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
@@ -456,8 +529,8 @@ def _attn_fwd_inner(
             pass
 
     if RETURN_BSA_MASK:
-        tl.store(BSA_INDICES + b_idx, value=block_idx)
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
+        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=b_mask)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=b_mask)
 
     return acc, l_i, m_i
 
@@ -521,59 +594,47 @@ def _attn_fwd(
     NC,
     Out,
     MaskIdx,
-    
     stride_qz,
     stride_qh,
     stride_qm,
     stride_qk,
-    
     stride_kz,
     stride_kh,
     stride_kn,
     stride_kk,
-    
     stride_vz,
     stride_vh,
     stride_vk,
     stride_vn,
-    
     stride_oz,
     stride_oh,
     stride_om,
     stride_on,
-    
     stride_mz,
     stride_mm,
-    
     USING_PAGED_CACHE: tl.constexpr,
     HEAD_REPEAT: tl.constexpr,
-    
     K_CACHE,
     stride_k_cache_t,
     stride_k_cache_page,
     stride_k_cache_head_kv,
     stride_k_cache_hid,
-    
     V_CACHE,
     stride_v_cache_t,
     stride_v_cache_page,
     stride_v_cache_head_kv,
     stride_v_cache_hid,
-    
     BLOCK_TABLE,
     stride_block_table_bsz,
     stride_block_table_tsrc,
-    
     RETURN_POOLED_SCORES: tl.constexpr,
     SCORE_POOLING_BQ: tl.constexpr,
     SCORE_POOLING_BK: tl.constexpr,
-
     SCORES,
     stride_scores_bsz,
     stride_scores_head,
     stride_scores_bdst,
     stride_scores_bsrc,
-    
     ACC,
     stride_acc_bsz,
     stride_acc_head,
@@ -590,15 +651,12 @@ def _attn_fwd(
     stride_li_head,
     stride_li_split,
     stride_li_tdst,
-    
     COS,
     stride_cos_t,
     stride_cos_hid,
-    
     SIN,
     stride_sin_t,
     stride_sin_hid,
-    
     RETURN_BSA_MASK: tl.constexpr,
     BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
     BSA_MASK_SW_SIZE,
@@ -610,7 +668,6 @@ def _attn_fwd(
     stride_bih,
     stride_bim,
     stride_bik,
-    
     Z,
     H,
     N_CTX,
@@ -758,7 +815,6 @@ def _attn_fwd(
         k_descale = None
         v_descale = None
 
-
     # load q: it will stay in SRAM throughout
     q = tl.load(
         Q_block_ptr,
@@ -835,16 +891,16 @@ def _attn_fwd(
 
     lo = 0
     mid = tl.maximum(
-        0, 
+        0,
         tl.min(
             tl.where(
-                (mask_m - BSA_MASK_SW_SIZE)
-                if RETURN_BSA_MASK else
-                mask_m,
-                mask_idx, 
-                987654321
+                (mask_m - BSA_MASK_SW_SIZE) if RETURN_BSA_MASK else mask_m,
+                mask_idx,
+                987654321,
             )
-        ) // BLOCK_N * BLOCK_N
+        )
+        // BLOCK_N
+        * BLOCK_N,
     ).to(tl.int32)
     tl.multiple_of(mid, BLOCK_N)
     hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
@@ -1344,7 +1400,7 @@ class _attention(torch.autograd.Function):
                 device=q.device,
                 dtype=torch.float32,
             )
-        
+
         bsa_indices = bsa_block_sums = None
         if return_bsa_indices:
             assert not return_running_statistics
@@ -1358,7 +1414,7 @@ class _attention(torch.autograd.Function):
             )
             bsa_block_sums = torch.full(
                 (BSZ, HEAD, TDST, bsa_top_block_k),
-                fill_value=float('-inf'),
+                fill_value=float("-inf"),
                 device=q.device,
                 dtype=torch.float32,
             )
@@ -1433,7 +1489,7 @@ class _attention(torch.autograd.Function):
         if bsa_indices is not None:
             assert bsa_block_sums is not None
             assert bsa_indices.stride() == bsa_block_sums.stride()
-        
+
         if (N_SPLIT > 1) and (not ignore_n_split):
             raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")
             # N_SPLIT = 1
@@ -1607,7 +1663,6 @@ class _attention(torch.autograd.Function):
                 NC,
                 o,
                 mask,
-                
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
@@ -1641,7 +1696,6 @@ class _attention(torch.autograd.Function):
                 *safe_stride(rope_cos, 2),
                 rope_sin,
                 *safe_stride(rope_sin, 2),
-                
                 (bsa_indices is not None) and (bsa_block_sums is not None),
                 bsa_mask_sink_token_size,
                 bsa_mask_sliding_window_size,
@@ -1650,7 +1704,6 @@ class _attention(torch.autograd.Function):
                 bsa_indices,
                 bsa_block_sums,
                 *safe_stride(bsa_indices, 4),
-                
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
@@ -1666,11 +1719,7 @@ class _attention(torch.autograd.Function):
                 # BLOCK_M=64,
                 # BLOCK_N=32,
                 V_FP8=V_FP8,
-                EXTEND_BACKEND=(
-                    "none" 
-                    if extend_backend == "nope" else 
-                    extend_backend
-                ),
+                EXTEND_BACKEND=("none" if extend_backend == "nope" else extend_backend),
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,

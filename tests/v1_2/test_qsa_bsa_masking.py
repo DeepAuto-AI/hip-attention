@@ -1,15 +1,16 @@
-import torch
+import math
 import os
 
+import torch
+from flash_attn import flash_attn_func
 from hip_research.utils.load_checkouts import load_checkouts
-from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
+
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
+from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
 from hip_attn.v1_2.delta.apply_delta import apply_delta
-import math
-
-from flash_attn import flash_attn_func
 from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
+
 
 def main():
     # B, H, H_KV, S, D = 1, 32, 8, 32768, 128
@@ -24,7 +25,7 @@ def main():
     dtype = torch.bfloat16
     # source = "checkout"
     source = "rand"
-    
+
     if source == "checkout":
         seq_len = int(os.getenv("SEQ_LEN", "131072"))
         query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
@@ -47,42 +48,38 @@ def main():
         seq_len = seq_len * seq_dups
 
         q = q.repeat(1, query_seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        k = (
-            k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        )
-        v = (
-            v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        )
+        k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
+        v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
         if cos is not None:
             cos = cos.repeat(seq_dups, 1)
             sin = sin.repeat(seq_dups, 1)
-        
+
         q = q.permute(0, 2, 1, 3)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
-        
+
         print(q.shape, k.shape, v.shape, q.dtype, k.dtype, v.dtype)
     else:
         q, k, v = (
-            torch.randn(B, H, S, D, device=device, dtype=dtype), 
-            torch.randn(B, H_KV, S, D, device=device, dtype=dtype), 
-            torch.randn(B, H_KV, S, D, device=device, dtype=dtype)
+            torch.randn(B, H, S, D, device=device, dtype=dtype),
+            torch.randn(B, H_KV, S, D, device=device, dtype=dtype),
+            torch.randn(B, H_KV, S, D, device=device, dtype=dtype),
         )
         cos, sin = torch.randn(S, D), torch.randn(S, D)
 
     mask = torch.arange(0, S, device=device)[None, :].repeat(B, 1)
-    
+
     def fwd(return_bsa_indices: bool, debug: bool = False):
         if return_bsa_indices:
             out, (bsa_idx, block_sums) = query_sparse_attention(
-                q=q, 
-                k=k, 
-                v=v, 
-                mask=mask, 
-                sm_scale=scale, 
-                k_cache=None, 
-                v_cache=None, 
-                block_table=None, 
+                q=q,
+                k=k,
+                v=v,
+                mask=mask,
+                sm_scale=scale,
+                k_cache=None,
+                v_cache=None,
+                block_table=None,
                 return_bsa_indices=True,
                 bsa_top_block_k=bsa_top_block_k,
                 bsa_block_size_q=bsa_block_size_q,
@@ -93,30 +90,32 @@ def main():
 
                 print(f"{q.size()=} {k.size()=} {v.size()=}")
                 print(f"{bsa_idx.size()=}")
-                torch.set_printoptions(threshold=bsa_idx.size(2) * bsa_idx.size(3) + 1000)
+                torch.set_printoptions(
+                    threshold=bsa_idx.size(2) * bsa_idx.size(3) + 1000
+                )
                 print(f"bsa index:  {bsa_idx[0, 0, :10]=} {bsa_idx[0, 0, -10:]}")
                 print(f"bsa sums:  {block_sums[0, 0, :10]=} {block_sums[0, 0, -10:]}")
                 print(f"bsa index:  {bsa_idx[0, 0]=}")
         else:
             out = query_sparse_attention(
-                q=q, 
-                k=k, 
-                v=v, 
-                mask=mask, 
-                sm_scale=scale, 
-                k_cache=None, 
-                v_cache=None, 
-                block_table=None, 
+                q=q,
+                k=k,
+                v=v,
+                mask=mask,
+                sm_scale=scale,
+                k_cache=None,
+                v_cache=None,
+                block_table=None,
                 return_bsa_indices=False,
             )
-    
+
     fwd(return_bsa_indices=True, debug=True)
     print(f"[done] return_bsa_indices=True")
 
     fwd(return_bsa_indices=False, debug=True)
     print(f"[done] return_bsa_indices=False")
-    
-    def latency(fn, n_sample = 10):
+
+    def latency(fn, n_sample=10):
         elapsed = []
         for i in range(n_sample):
             start = torch.cuda.Event(True)
@@ -128,11 +127,11 @@ def main():
             if i > 3:
                 elapsed.append(start.elapsed_time(end))
         return sum(elapsed) / len(elapsed)
-    
+
     latency_return_mask = latency(lambda: fwd(return_bsa_indices=True))
-    print(f'with mask: {latency_return_mask:.2f} ms took')
+    print(f"with mask: {latency_return_mask:.2f} ms took")
     latency_original = latency(lambda: fwd(return_bsa_indices=False))
-    print(f'without mask: {latency_original:.2f} ms took')
+    print(f"without mask: {latency_original:.2f} ms took")
 
 
 def test_with_hip_bsa():
@@ -142,21 +141,42 @@ def test_with_hip_bsa():
     K = 128
     window_size = 2048
 
-    d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
-    q, k, v, cos, sin = d["q"].cuda(device), d["k"].cuda(device), d["v"].cuda(device), d["cos"].cuda(device), d["sin"].cuda(device)
+    d = torch.load(
+        "/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu"
+    )
+    q, k, v, cos, sin = (
+        d["q"].cuda(device),
+        d["k"].cuda(device),
+        d["v"].cuda(device),
+        d["cos"].cuda(device),
+        d["sin"].cuda(device),
+    )
 
     def rotate_half(x):
         n = x.size(2) // 2
         return torch.cat((-x[:, :, :n], x[:, :, n:]), dim=2)
-        
+
     b, h, s, d = k.size()
-    k = k.view(b, h, 1, s, d).repeat(1, 1, q.size(1) // k.size(1), 1, 1).view(b, -1, s, d)
-    v = v.view(b, h, 1, s, d).repeat(1, 1, q.size(1) // v.size(1), 1, 1).view(b, -1, s, d)
+    k = (
+        k.view(b, h, 1, s, d)
+        .repeat(1, 1, q.size(1) // k.size(1), 1, 1)
+        .view(b, -1, s, d)
+    )
+    v = (
+        v.view(b, h, 1, s, d)
+        .repeat(1, 1, q.size(1) // v.size(1), 1, 1)
+        .view(b, -1, s, d)
+    )
 
     q = q * cos[:, None] + rotate_half(q) * sin[:, None]
     k = k * cos[:, None] + rotate_half(k) * sin[:, None]
 
-    o = flash_attn_func(q[:, :, :seq].transpose(1, 2), k[:, :, :seq].transpose(1, 2), v[:, :, :seq].transpose(1, 2), causal=True)
+    o = flash_attn_func(
+        q[:, :, :seq].transpose(1, 2),
+        k[:, :, :seq].transpose(1, 2),
+        v[:, :, :seq].transpose(1, 2),
+        causal=True,
+    )
     o = o.transpose(1, 2)
 
     qp = q[:, :, :seq]
@@ -167,7 +187,7 @@ def test_with_hip_bsa():
 
     b, h, s, d = qp.size()
     mask = torch.arange(seq).view(1, seq).repeat(b, 1).cuda(device)
-    mask = mask.view(b, seq // q_block, q_block)[:, :, 0] 
+    mask = mask.view(b, seq // q_block, q_block)[:, :, 0]
     qp = qp.view(b, h, s // q_block, q_block, d)[:, :, :, 0]
 
     access_counter = torch.zeros(b, h, seq, dtype=torch.long, device=q.device)
@@ -193,11 +213,10 @@ def test_with_hip_bsa():
             mask=mask,
             k_cache=None,
             v_cache=None,
-            block_table=None, 
+            block_table=None,
             return_bsa_indices=True,
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
-            bsa_block_size_q=1,
             bsa_block_size_k=k_block,
         )
 
@@ -222,14 +241,18 @@ def test_with_hip_bsa():
             cache_miss_counter,
         )
         return out, bsa_out, bsa_idx
-    
+
     out, bsa_out, block_idx = qsa()
     print(f"{block_idx=}")
 
     bsa_out = bsa_out.transpose(1, 2)
 
     delta = out - bsa_out.view(b, h, seq // q_block, q_block, d)[:, :, :, 0]
-    delta = delta.view(b, h, seq // q_block, 1, d).repeat(1, 1, 1, q_block, 1).reshape(b, h, seq, d)
+    delta = (
+        delta.view(b, h, seq // q_block, 1, d)
+        .repeat(1, 1, 1, q_block, 1)
+        .reshape(b, h, seq, d)
+    )
     delta = delta + bsa_out
 
     delta_cos = torch.nn.functional.cosine_similarity(delta, o, dim=-1)
@@ -364,13 +387,19 @@ def test_with_hip_bsa():
     print(f"number of differing elements in hip/bsa output: {diff}")
 
     delta_hip = out - hip_out.view(b, h, seq // q_block, q_block, d)[:, :, :, 0]
-    delta_hip = delta_hip.view(b, h, seq // q_block, 1, d).repeat(1, 1, 1, q_block, 1).reshape(b, h, seq, d)
+    delta_hip = (
+        delta_hip.view(b, h, seq // q_block, 1, d)
+        .repeat(1, 1, 1, q_block, 1)
+        .reshape(b, h, seq, d)
+    )
     delta_hip = delta_hip + hip_out
 
     hip_qsa_delta_cos = torch.nn.functional.cosine_similarity(delta_hip, delta, dim=-1)
     hip_qsa_delta_cos_mean = hip_qsa_delta_cos.mean()
     hip_qsa_delta_cos_std = hip_qsa_delta_cos.std()
-    print(f"hip+delta/qsabsa+delta cos: {hip_qsa_delta_cos_mean} +- {hip_qsa_delta_cos_std}")
+    print(
+        f"hip+delta/qsabsa+delta cos: {hip_qsa_delta_cos_mean} +- {hip_qsa_delta_cos_std}"
+    )
 
     hip_delta_cos = torch.nn.functional.cosine_similarity(delta_hip, o, dim=-1)
     hip_cos = torch.nn.functional.cosine_similarity(hip_out, o, dim=-1)
@@ -390,7 +419,7 @@ def test_with_hip_bsa():
             k[:, :, :seq].transpose(1, 2),
             v[:, :, :seq].transpose(1, 2),
             seq_lens,
-            None, 
+            None,
             None,
             None,
             None,
@@ -400,12 +429,15 @@ def test_with_hip_bsa():
         )
         return sllm_out
 
-
     sllm_out = sllm()
     sllm_out = sllm_out.transpose(1, 2)
 
     delta = out - sllm_out.view(b, h, seq // q_block, q_block, d)[:, :, :, 0]
-    delta = delta.view(b, h, seq // q_block, 1, d).repeat(1, 1, 1, q_block, 1).reshape(b, h, seq, d)
+    delta = (
+        delta.view(b, h, seq // q_block, 1, d)
+        .repeat(1, 1, 1, q_block, 1)
+        .reshape(b, h, seq, d)
+    )
     delta = delta + sllm_out
 
     sllm_delta_cos = torch.nn.functional.cosine_similarity(delta, o, dim=-1)
@@ -420,7 +452,7 @@ def test_with_hip_bsa():
     print(f"{sllm_delta_cos_mean=} {sllm_delta_cos_std=}")
     print(f"{sllm_cos_mean=} {sllm_cos_std=}")
 
-    def latency(fn, n_sample = 10):
+    def latency(fn, n_sample=10):
         elapsed = []
         for i in range(n_sample):
             start = torch.cuda.Event(True)
@@ -433,20 +465,25 @@ def test_with_hip_bsa():
                 elapsed.append(start.elapsed_time(end))
         return sum(elapsed) / len(elapsed)
 
-
-
     latency_sllm = latency(lambda: sllm())
-    print(f'sllm: {latency_sllm:.2f} ms took')
-    latency_hip = latency(lambda: dual_stage_quadratic_hip_attention(**dual_stage_kwargs, cached_metadata=None))
-    print(f'hip: {latency_hip:.2f} ms took')
+    print(f"sllm: {latency_sllm:.2f} ms took")
+    latency_hip = latency(
+        lambda: dual_stage_quadratic_hip_attention(
+            **dual_stage_kwargs, cached_metadata=None
+        )
+    )
+    print(f"hip: {latency_hip:.2f} ms took")
     latency_qsa = latency(lambda: qsa())
-    print(f'qsa: {latency_qsa:.2f} ms took')
-    latency_flash = latency(lambda: flash_attn_func(q[:, :, :seq].transpose(1, 2), k[:, :, :seq].transpose(1, 2), v[:, :, :seq].transpose(1, 2), causal=True))
-    print(f'flash attn: {latency_flash:.2f} ms took')
-
-
-
-
+    print(f"qsa: {latency_qsa:.2f} ms took")
+    latency_flash = latency(
+        lambda: flash_attn_func(
+            q[:, :, :seq].transpose(1, 2),
+            k[:, :, :seq].transpose(1, 2),
+            v[:, :, :seq].transpose(1, 2),
+            causal=True,
+        )
+    )
+    print(f"flash attn: {latency_flash:.2f} ms took")
 
 
 if __name__ == "__main__":
