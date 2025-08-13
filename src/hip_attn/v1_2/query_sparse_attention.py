@@ -309,6 +309,7 @@ def _attn_fwd_inner(
             qk = tl.where(mask, qk, float("-inf"))
         qk = tl.where(qk == 0, float("-inf"), qk)
 
+        qk_original = qk
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
 
@@ -322,7 +323,7 @@ def _attn_fwd_inner(
         # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = 16
+            BSA_MASK_STEP_SIZE: tl.constexpr = 32
             tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
             tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
             tl.static_assert(
@@ -357,9 +358,9 @@ def _attn_fwd_inner(
             else:
                 if MASKING:
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-                    p_split = tl.where(mask, qk + m_ij[:, None], float('-inf'))
+                    p_split = tl.where(mask, qk_original, float('-inf'))
                 else:
-                    p_split = qk + m_ij[:, None]
+                    p_split = qk_original
                 
                 if BLOCK_N == BSA_MASK_STEP_SIZE:
                     l_ij_0 = tl.max(p_split, 1)

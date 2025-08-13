@@ -1528,7 +1528,7 @@ def _forward_delta_attn(
                 #     args.position_ids[:, idx].shape,
                 # )
                 
-                test_qsa_masking = False
+                test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
                 mask_idx = args.position_ids[:, idx]
                 
                 context_dense = query_sparse_attention(
@@ -1549,7 +1549,7 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
-                    bsa_top_block_k=32,
+                    bsa_top_block_k=64,
                     bsa_mask_sink_token_size=max(1, args.sink_token_size),
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
@@ -1568,13 +1568,13 @@ def _forward_delta_attn(
                             scores.cpu().float().numpy(),
                             idx.cpu().numpy(),
                             query.shape[1],
-                            int(mask_idx.amax().item()) + 128,
-                            128,
+                            int(mask_idx.amax().item()) + 256,
+                            256,
                         )
                         cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
-                        print(bsa_indices[0, 0, -1])
-                        print(bsa_block_sums[0, 0, -1])
-                        print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+                        # print(bsa_indices[0, 0, -1])
+                        # print(bsa_block_sums[0, 0, -1])
+                        # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
             else:
                 assert k is not None
                 assert v is not None
