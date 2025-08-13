@@ -940,6 +940,8 @@ def _forward_delta_attn(
     # On prefill
     assert not is_decode
     assert not torch.cuda.is_current_stream_capturing()
+    
+    test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
 
     # NOTE: sample sparse context
     assert isinstance(delta_attention_args_window, int)
@@ -1144,14 +1146,17 @@ def _forward_delta_attn(
             # )
 
             args.bsa_return_running_statistics = delta_attention_args_adjust_norm_const
-
-            context_sparse, metadata = dual_stage_quadratic_hip_attention(
-                q=(query * sm_scale).to(query.dtype),
-                k=k,
-                v=v,
-                args=args,
-                cached_metadata=cached_metadata,
-            )
+            
+            if test_qsa_masking:
+                context_sparse = torch.zeros_like(query)
+            else:
+                context_sparse, metadata = dual_stage_quadratic_hip_attention(
+                    q=(query * sm_scale).to(query.dtype),
+                    k=k,
+                    v=v,
+                    args=args,
+                    cached_metadata=cached_metadata,
+                )
 
             if delta_attention_args_adjust_norm_const:
                 context_sparse, (sparse_mx, sparse_nc) = context_sparse
@@ -1549,7 +1554,7 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
-                    bsa_top_block_k=64,
+                    bsa_top_block_k=32,
                     bsa_mask_sink_token_size=max(1, args.sink_token_size),
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
@@ -1558,23 +1563,107 @@ def _forward_delta_attn(
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
                     
-                    if get_local_rank() == 0:
-                        scores = bsa_block_sums[0,0]
-                        scores_min = scores.amin()
-                        scores_max = scores.amax()
-                        scores = (scores - scores_min) / (scores_max - scores_min)
-                        mask = convert_qsa_mask_to_img(
-                            bsa_indices[0,0].cpu().numpy(),
-                            scores.cpu().float().numpy(),
-                            idx.cpu().numpy(),
-                            query.shape[1],
-                            int(mask_idx.amax().item()) + 256,
-                            256,
-                        )
-                        cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
-                        # print(bsa_indices[0, 0, -1])
-                        # print(bsa_block_sums[0, 0, -1])
-                        # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+                    # if get_local_rank() == 0:
+                    #     scores = bsa_block_sums[0,0]
+                    #     scores_min = scores.amin()
+                    #     scores_max = scores.amax()
+                    #     scores = (scores - scores_min) / (scores_max - scores_min)
+                    #     mask = convert_qsa_mask_to_img(
+                    #         bsa_indices[0,0].cpu().numpy(),
+                    #         scores.cpu().float().numpy(),
+                    #         idx.cpu().numpy(),
+                    #         query.shape[1],
+                    #         int(mask_idx.amax().item()) + 256,
+                    #         256,
+                    #     )
+                    #     cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
+                    #     # print(bsa_indices[0, 0, -1])
+                    #     # print(bsa_block_sums[0, 0, -1])
+                    #     # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+                    
+                    args_sparse = args.clone()
+                    args_sparse.rope_range = (0, query.shape[-1])
+                    args_sparse.position_ids = args_sparse.position_ids[:, :-num_last_dense]
+                    args_sparse.block_size_q = 128
+                    args_sparse.block_sparse_block_size_q = 128
+                    args_sparse.block_size_k = 32 #NOTE: this need to be sync up with STEP_SIZE
+                    
+                    bsa_fn = get_block_sparse_backend(
+                        query,
+                        args.disable_flashdecode,
+                    )
+                    
+                    indices = bsa_indices.flatten(0, 1)[:, :-num_last_dense, :]
+                    indices = torch.sort(indices, dim=-1).values
+                    
+                    num_union = (
+                        args_sparse.block_sparse_block_size_q 
+                        // delta_attention_args_w
+                    )
+                    assert (args_sparse.block_sparse_block_size_q % delta_attention_args_w) == 0
+                    if (indices.shape[1] % num_union):
+                        indices = torch.cat([
+                            indices,
+                            indices[:, -1:, :].repeat(1, num_union - indices.shape[1] % num_union, 1)
+                        ], dim=1)
+                    indices = indices.view(
+                        indices.shape[0], 
+                        indices.shape[1] // num_union, 
+                        num_union, 
+                        indices.shape[2]
+                    )
+                    indices = indices.flatten(-2, -1)
+                    
+                    indices, _ = indices.sort(dim=-1)
+                    indices = indices // args_sparse.block_size_k * args_sparse.block_size_k
+
+                    unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+                    indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+                    indices, _ = indices.sort(dim=-1)
+
+                    active_mask = indices < (
+                        args_sparse.position_ids[:, :: args_sparse.block_size_q, None]\
+                            .repeat_interleave(query.shape[2], 0)
+                        + args.block_size_q
+                    )
+                    ks = active_mask.int().sum(-1)
+                    ks_count = ks.unsqueeze(-1)
+                    ks_start_end = torch.zeros(
+                        (ks.shape[0], ks.shape[1], 2), 
+                        dtype=torch.int32, 
+                        device=query.device
+                    )
+                    ks_start_end[:, :, -1] = ks
+                    
+                    context_sparse = bsa_fn(
+                        q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
+                        k=k,
+                        v=v,
+                        seq_lens=args_sparse.position_ids + 1,
+                        indices=indices,
+                        ks=ks,
+                        ks_count=ks_count,
+                        ks_start_end=ks_start_end,
+                        access_counter=None,
+                        cache_miss_counter=None,
+                        EXTEND_BACKEND=args_sparse.sa_extend_backend,
+                        model_context_length=args_sparse.model_context_length,
+                        extend_context_length=args_sparse.extend_context_length,
+                        offload_update_cache=False,
+                        args=args_sparse,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                    )
+                    
+                    context_sparse = torch.cat([
+                        context_sparse,
+                        context_dense.permute(0, 2, 1, 3)[:, -num_last_dense:],
+                    ], dim=1)
+                    
+                    metadata = None
+                    
+                    context_sparse_raw = context_sparse
+                    context_sparse = context_sparse[:, :num_sparse]
             else:
                 assert k is not None
                 assert v is not None
