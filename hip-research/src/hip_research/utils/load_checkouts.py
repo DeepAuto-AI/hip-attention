@@ -1,7 +1,8 @@
-import torch
+import os
 import warnings
 
-import os
+import torch
+
 
 def load_checkouts(
     idx=24,

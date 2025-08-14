@@ -3,6 +3,9 @@ import os
 import warnings
 from typing import Any, List, Optional
 
+import cv2
+import numba
+import numpy as np
 import torch
 import triton
 from flash_attn import flash_attn_func
@@ -13,44 +16,42 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
 
-import numpy as np
-import numba
-import cv2
 
 @numba.njit
 def convert_qsa_mask_to_img(
-    bsa_indices: np.ndarray, 
+    bsa_indices: np.ndarray,
     bsa_scores: np.ndarray,
     idx: np.ndarray,
     TDST: int,
     TSRC: int,
-    POOL_SIZE: int
+    POOL_SIZE: int,
 ):
     N_SPARSE_Q = bsa_indices.shape[0]
     N_BLOCK = bsa_indices.shape[1]
     img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 3), dtype=np.int32)
     img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
-    
+
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
             pty = idx[i_q]
             ptx = bsa_indices[i_q, k]
             if (ptx // POOL_SIZE) < img.shape[1] and (pty // POOL_SIZE) < img.shape[0]:
                 score = bsa_scores[i_q, k]
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 0] += 255
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 1] += int(255 * score)
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 2] += int(255 * (1 - score))
-                img_cnt[pty // POOL_SIZE, ptx//POOL_SIZE] += 1
-    
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 0] += 255
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 1] += int(255 * score)
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 2] += int(255 * (1 - score))
+                img_cnt[pty // POOL_SIZE, ptx // POOL_SIZE] += 1
+
     for i in numba.prange(img.shape[0]):
         for j in range(img.shape[1]):
             c = img_cnt[i, j]
             if c > 0:
                 img[i, j] = (img[i, j] / c).astype(np.int32)
-    
+
     img = img.astype(np.uint8)
-    
+
     return img
+
 
 @capture
 def flash_attn_varlen_func(
@@ -940,8 +941,8 @@ def _forward_delta_attn(
     # On prefill
     assert not is_decode
     assert not torch.cuda.is_current_stream_capturing()
-    
-    test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
+
+    test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
 
     # NOTE: sample sparse context
     assert isinstance(delta_attention_args_window, int)
@@ -1146,7 +1147,7 @@ def _forward_delta_attn(
             # )
 
             args.bsa_return_running_statistics = delta_attention_args_adjust_norm_const
-            
+
             if test_qsa_masking:
                 context_sparse = torch.zeros_like(query)
             else:
@@ -1532,13 +1533,13 @@ def _forward_delta_attn(
                 #     query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
                 #     args.position_ids[:, idx].shape,
                 # )
-                
-                test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
+
+                test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = 32
                 qsa_mask_block_top_k = 64
-                
+
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
@@ -1563,10 +1564,10 @@ def _forward_delta_attn(
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
                 )
-                
+
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
-                    
+
                     # if get_local_rank() == 0:
                     #     scores = bsa_block_sums[0,0]
                     #     scores_min = scores.amin()
@@ -1584,64 +1585,79 @@ def _forward_delta_attn(
                     #     # print(bsa_indices[0, 0, -1])
                     #     # print(bsa_block_sums[0, 0, -1])
                     #     # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
-                    
+
                     args_sparse = args.clone()
                     args_sparse.rope_range = (0, query.shape[-1])
-                    args_sparse.position_ids = args_sparse.position_ids[:, :-num_last_dense]
+                    args_sparse.position_ids = args_sparse.position_ids[
+                        :, :-num_last_dense
+                    ]
                     args_sparse.block_size_q = qsa_mask_block_size_q
                     args_sparse.block_sparse_block_size_q = args_sparse.block_size_q
                     args_sparse.block_size_k = qsa_mask_block_size_k
-                    args_sparse.sliding_window_size = args_sparse.sliding_window_size + 2048
-                    
+                    args_sparse.sliding_window_size = (
+                        args_sparse.sliding_window_size + 2048
+                    )
+
                     bsa_fn = get_block_sparse_backend(
                         query,
                         args.disable_flashdecode,
                     )
-                    
+
                     indices = bsa_indices.flatten(0, 1)[:, :-num_last_dense, :]
                     indices = torch.sort(indices, dim=-1).values
-                    
+
                     num_union = (
-                        args_sparse.block_sparse_block_size_q 
-                        // delta_attention_args_w
+                        args_sparse.block_sparse_block_size_q // delta_attention_args_w
                     )
-                    assert (args_sparse.block_sparse_block_size_q % delta_attention_args_w) == 0
-                    if (indices.shape[1] % num_union):
-                        indices = torch.cat([
-                            indices,
-                            indices[:, -1:, :].repeat(1, num_union - indices.shape[1] % num_union, 1)
-                        ], dim=1)
+                    assert (
+                        args_sparse.block_sparse_block_size_q % delta_attention_args_w
+                    ) == 0
+                    if indices.shape[1] % num_union:
+                        indices = torch.cat(
+                            [
+                                indices,
+                                indices[:, -1:, :].repeat(
+                                    1, num_union - indices.shape[1] % num_union, 1
+                                ),
+                            ],
+                            dim=1,
+                        )
                     indices = indices.view(
-                        indices.shape[0], 
-                        indices.shape[1] // num_union, 
-                        num_union, 
-                        indices.shape[2]
+                        indices.shape[0],
+                        indices.shape[1] // num_union,
+                        num_union,
+                        indices.shape[2],
                     )
                     indices = indices.flatten(-2, -1)
-                    
+
                     indices, _ = indices.sort(dim=-1)
-                    indices = indices // args_sparse.block_size_k * args_sparse.block_size_k
+                    indices = (
+                        indices // args_sparse.block_size_k * args_sparse.block_size_k
+                    )
 
                     unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-                    indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+                    indices = torch.where(
+                        unique_mask, indices, torch.iinfo(indices.dtype).max
+                    )
                     indices, _ = indices.sort(dim=-1)
 
                     active_mask = indices < (
-                        args_sparse.position_ids[:, :: args_sparse.block_size_q, None]\
-                            .repeat_interleave(query.shape[2], 0)
+                        args_sparse.position_ids[
+                            :, :: args_sparse.block_size_q, None
+                        ].repeat_interleave(query.shape[2], 0)
                         + args.block_size_q
                     )
                     ks = active_mask.int().sum(-1)
                     ks_count = ks.unsqueeze(-1)
                     ks_start_end = torch.zeros(
-                        (ks.shape[0], ks.shape[1], 2), 
-                        dtype=torch.int32, 
-                        device=query.device
+                        (ks.shape[0], ks.shape[1], 2),
+                        dtype=torch.int32,
+                        device=query.device,
                     )
                     ks_start_end[:, :, -1] = ks
-                    
+
                     # print(ks.float().mean().item() * args_sparse.block_size_k)
-                    
+
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
                         k=k,
@@ -1661,14 +1677,17 @@ def _forward_delta_attn(
                         k_descale=k_descale,
                         v_descale=v_descale,
                     )
-                    
-                    context_sparse = torch.cat([
-                        context_sparse,
-                        context_dense.permute(0, 2, 1, 3)[:, -num_last_dense:],
-                    ], dim=1)
-                    
+
+                    context_sparse = torch.cat(
+                        [
+                            context_sparse,
+                            context_dense.permute(0, 2, 1, 3)[:, -num_last_dense:],
+                        ],
+                        dim=1,
+                    )
+
                     metadata = None
-                    
+
                     context_sparse_raw = context_sparse
                     context_sparse = context_sparse[:, :num_sparse]
             else:
@@ -1914,7 +1933,7 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
-            
+
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]
 
@@ -2814,7 +2833,7 @@ def _forward_paged_hip(
             rope_is_neox_style=rope_is_neox_style,
             cached_metadata=cached_metadata,
             is_decode=is_decode,
-            seq_thresh_fa3=0, #seq_thresh_fa3,
+            seq_thresh_fa3=0,  # seq_thresh_fa3,
             mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
