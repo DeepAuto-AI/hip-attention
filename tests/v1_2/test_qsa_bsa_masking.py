@@ -136,9 +136,9 @@ def main() -> None:
 
 def test_with_hip_bsa() -> None:
     q_block, k_block = 128, 32
-    seq = 32768
+    seq = 4096
     device = 0
-    K = 128
+    K = 16
     window_size = 128
 
     # d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
@@ -226,7 +226,8 @@ def test_with_hip_bsa() -> None:
             bsa_heap=False,
         )
 
-        print(f"bsa_idx: {bsa_idx}")
+        print(f"bsa_idx: {bsa_idx[0, 0]=}")
+        print(f"bsa_sums: {block_sums[0, 0]=}")
         # bsa_idx = torch.where(bsa_idx == -1, 987654321, bsa_idx * k_block)
 
         ks = (bsa_idx < 987654321).sum(dim=-1)
