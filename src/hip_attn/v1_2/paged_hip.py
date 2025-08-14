@@ -1535,6 +1535,9 @@ def _forward_delta_attn(
                 
                 test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
                 mask_idx = args.position_ids[:, idx]
+                qsa_mask_block_size_q = 128
+                qsa_mask_block_size_k = 32
+                qsa_mask_block_top_k = 64
                 
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
@@ -1554,7 +1557,8 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
-                    bsa_top_block_k=32,
+                    bsa_top_block_k=qsa_mask_block_top_k,
+                    bsa_block_size_k=qsa_mask_block_size_k,
                     bsa_mask_sink_token_size=max(1, args.sink_token_size),
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
@@ -1584,9 +1588,10 @@ def _forward_delta_attn(
                     args_sparse = args.clone()
                     args_sparse.rope_range = (0, query.shape[-1])
                     args_sparse.position_ids = args_sparse.position_ids[:, :-num_last_dense]
-                    args_sparse.block_size_q = 128
-                    args_sparse.block_sparse_block_size_q = 128
-                    args_sparse.block_size_k = 32 #NOTE: this need to be sync up with STEP_SIZE
+                    args_sparse.block_size_q = qsa_mask_block_size_q
+                    args_sparse.block_sparse_block_size_q = args_sparse.block_size_q
+                    args_sparse.block_size_k = qsa_mask_block_size_k
+                    args_sparse.sliding_window_size = args_sparse.sliding_window_size + 2048
                     
                     bsa_fn = get_block_sparse_backend(
                         query,
@@ -1634,6 +1639,8 @@ def _forward_delta_attn(
                         device=query.device
                     )
                     ks_start_end[:, :, -1] = ks
+                    
+                    # print(ks.float().mean().item() * args_sparse.block_size_k)
                     
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
@@ -2672,13 +2679,13 @@ def _forward_paged_hip(
         seq_thresh_fa3 = args.model_context_length
 
     mixing_len = os.getenv(
-        "HIP_DEBUG_FA3_MIXING_LEN", "sw" if seq_thresh_fa3 > 0 else "0"
+        "HIP_DEBUG_FA3_MIXING_LEN", "0" if seq_thresh_fa3 > 0 else "0"
     )
     if mixing_len.lower() == "sw":
         mixing_len = int(
-            sliding_window_size * 1.5
+            sliding_window_size * 1.0
             if isinstance(sliding_window_size, int) and (sliding_window_size > 0)
-            else args.sliding_window_size * 1.5
+            else args.sliding_window_size * 1.0
         )
     else:
         mixing_len = int(mixing_len)

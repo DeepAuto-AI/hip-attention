@@ -323,7 +323,7 @@ def _attn_fwd_inner(
         # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = 32
+            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
             tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
             tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
             tl.static_assert(
@@ -383,13 +383,13 @@ def _attn_fwd_inner(
                 else:
                     update_alpha = None
                 
-                if   i_offset == (0 * BLOCK_N):
+                if   i_offset == (0 * BSA_MASK_STEP_SIZE):
                     update_exp_sum = l_ij_0
-                elif i_offset == (1 * BLOCK_N):
+                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
                     update_exp_sum = l_ij_1
-                elif i_offset == (2 * BLOCK_N):
+                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
                     update_exp_sum = l_ij_2
-                elif i_offset == (3 * BLOCK_N):
+                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
                     update_exp_sum = l_ij_3
                 
                 # NOTE: update indices and scores
