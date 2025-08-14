@@ -19,6 +19,7 @@ import warnings
 from typing import Callable, Literal, Optional, Tuple, Union
 
 import numpy as np
+import math
 
 # import pytest
 import torch
@@ -56,6 +57,79 @@ def convert_fp8_to_bf16(k: tl.tensor):
         k = k.to(tl.bfloat16)
 
     return k
+
+@triton.jit
+def winner_update_inline_32(
+    cand_v,                  # (32,) float32 – candidate scores per query (lanes)
+    cand_i,                  # (32,) int32   – candidate key-block ids per query
+    tree_val_ptr,            # base pointer to tree values
+    tree_leaf_ptr,           # base pointer to tree leaf-ids
+    leaf_payload_ptr,        # base pointer to payloads (top-k block ids)
+    base_tree_off,           # (32,) int32 offsets: q * (2*K2)
+    K2: tl.constexpr,        # power-of-two >= K
+    LOGK: tl.constexpr,      # = log2(K2)
+    start_n: tl.constexpr,
+):
+    # Load current threshold and its winning leaf
+    root_v  = tl.load(tree_val_ptr  + (base_tree_off + 1))
+    root_lf = tl.load(tree_leaf_ptr + (base_tree_off + 1))   # [0..K2-1]
+
+    beat = cand_v > root_v                     # lanes that actually update
+    leaf_node = (K2 + root_lf)
+    leaf_off  = base_tree_off + leaf_node
+
+    # if tl.program_id(0) == 0:
+    #     print(f"0 beat mask: ", beat)
+    #     # print(f"0 cand i: ", cand_i)
+    #     # print(f"0 root lf: ", root_lf)
+    #     print(f"0 root v: ", root_v)
+    #     print(f"0 cand v: ", cand_v)
+
+    # if tl.program_id(0) == 1024:
+    #     # print(f"1024 cand i: ", cand_i)
+    #     # print(f"1024 root lf: ", root_lf)
+    #     print(f"1024 root v: ", root_v)
+    #     print(f"1024 cand v: ", cand_v)
+    #     print(f"1024 beat mask: ", beat)
+    #     print(f"start n: ", start_n)
+
+    # Overwrite the losing leaf with the new candidate
+    tl.store(tree_val_ptr  + leaf_off, cand_v, mask=beat)
+    tl.store(tree_leaf_ptr + leaf_off, root_lf, mask=beat)   # store its own leaf id
+    tl.store(leaf_payload_ptr + leaf_off, cand_i, mask=beat)
+
+    # Climb and recompute winners up to the root (O(log K))
+    node = leaf_node >> 1
+    for _ in tl.static_range(LOGK):
+        left  = (node << 1)
+        right = left + 1
+
+        lv = tl.load(tree_val_ptr  + (base_tree_off + left),  mask=beat, other=0.0)
+        rv = tl.load(tree_val_ptr  + (base_tree_off + right), mask=beat, other=0.0)
+        lp = tl.load(tree_leaf_ptr + (base_tree_off + left),  mask=beat, other=0)
+        rp = tl.load(tree_leaf_ptr + (base_tree_off + right), mask=beat, other=0)
+
+        # if tl.program_id(0) == 0:
+        #     print(f"0 lv: ", lv)
+        #     print(f"0 rv: ", rv)
+        #     print(f"0 lp: ", lp)
+        #     print(f"0 rp: ", rp)
+
+        # if tl.program_id(0) == 1024:
+        #     print(f"1024 lv: ", lv)
+        #     print(f"1024 rv: ", rv)
+        #     print(f"1024 lp: ", lp)
+        #     print(f"1024 rp: ", rp)
+
+        take_left = lv <= rv
+        # print("take left: ", take_left)
+        win_v = tl.where(take_left, lv, rv)
+        win_p = tl.where(take_left, lp, rp)
+
+        tl.store(tree_val_ptr  + (base_tree_off + node), win_v, mask=beat)
+        tl.store(tree_leaf_ptr + (base_tree_off + node), win_p, mask=beat)
+
+        node = node >> 1
 
 
 @triton.jit
@@ -258,22 +332,19 @@ def _attn_fwd_inner(
 
     if RETURN_BSA_MASK:
         if BSA_HEAP:
-            b_idx = (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)).to(
-                tl.int64
-            ) * stride_bim
-            root_v = tl.load(BSA_BLOCK_SUMS + (b_idx + 1).to(tl.int64))  # node 1
-            root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64))
+            b_idx = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
+
         else:
             b_idx = (
-                start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-            ) * stride_bim + tl.arange(0, BSA_K)[None, :].to(tl.int64) * stride_bik
+                (
+                    start_m * BLOCK_M
+                    + tl.arange(0, BLOCK_M)[:, None]
+                ) * stride_bim
+                + tl.arange(0, BSA_K)[None, :] * stride_bik
+            )
 
-            block_idx = tl.load(BSA_INDICES + b_idx, mask=mask_m[:, None])
-            block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=mask_m[:, None])
-            block_sums_min, block_sums_min_idx = tl.min(
-                block_sums, axis=-1, return_indices=True
-            )  # (M, K) -> (M,)
-            col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K) will be used later
+            block_idx = tl.load(BSA_INDICES + b_idx)
+            block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
 
     if not USING_PAGED_CACHE:
         advance_init = lo
@@ -436,8 +507,8 @@ def _attn_fwd_inner(
 
         q_dtype = q.dtype
 
-        cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
-        ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        # cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        # ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
         # qk = tl.dot(
         #     (q * cq).to(q_dtype),
@@ -460,6 +531,7 @@ def _attn_fwd_inner(
 
         qk = tl.where(qk == 0, float("-inf"), qk)
 
+        qk_before = qk
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         # if we go backwards through the keys, some blocks may be totally masked
         # if block_m > block_n and the max will be at the init value -inf.
@@ -474,8 +546,8 @@ def _attn_fwd_inner(
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
         # -- update block sums and indices for block sparse attention
-        # if RETURN_BSA_MASK:
-        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+        # if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+        if RETURN_BSA_MASK:
             # FIXME How can i this thing more dynamic?
             tl.static_assert(BLOCK_N >= BSA_BLOCK_SIZE_K)
             tl.static_assert(BLOCK_N <= (BSA_BLOCK_SIZE_K * 4))
@@ -513,14 +585,10 @@ def _attn_fwd_inner(
                     raise Exception()
             else:
                 if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
-                        start_n + offs_n[None, :]
-                    )
-                    p_split = tl.where(mask, qk + m_ij[:, None], -3200.0)
-                else:
-                    p_split = qk + m_ij[:, None]
-
-                if BLOCK_N == BSA_BLOCK_SIZE_K:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
+                
+                p_split = qk_before 
+                if BLOCK_N == BSA_MASK_STEP_SIZE:
                     l_ij_0 = tl.max(p_split, 1)
                 elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
                     p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
@@ -567,28 +635,49 @@ def _attn_fwd_inner(
                         root_lf,
                     )
                 else:
-                    block_update = (update_exp_sum > block_sums_min) * mask_m
-                    if tl.sum(block_update.to(tl.int32)) > 0:
-                        block_sums_max = tl.maximum(
-                            block_sums_min, update_exp_sum
-                        )  # (M,)
+                    update_alpha = None
+                
+                if   i_offset == (0 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_0
+                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_1
+                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_2
+                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_3
+                
+                if not BSA_HEAP:
+                    # NOTE: update indices and scores
+                    if (update_alpha is not None) and (using_exp_sum):
+                        block_sums *= update_alpha[:, None] # adjust previous sums for new normalization constant
 
-                        # make a mask of the minimum indices
-                        bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
-                        bsa_mask = (block_update[:, None] & bsa_mask).to(
-                            tl.int1
-                        )  # (M, K)
+                    block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
+                    block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
 
-                        block_sums = tl.where(
-                            bsa_mask, block_sums_max[:, None], block_sums
-                        ).to(block_sums.dtype)
-                        block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+                    # if these two are equal, it means that the maximum is equal 
+                    # to the old value (i.e no change necessary)
+                    block_update = block_sums_min != block_sums_max # (M,)
+                    col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
 
-                        # calculate the new block sums min for the next iteration
-                        block_sums_min, block_sums_min_idx = tl.min(
-                            block_sums, axis=-1, return_indices=True
-                        )  # (M, K) -> (M,)
+                    # make a mask of the minimum indices
+                    bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
+                    bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
 
+                    block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+                    block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+                else:
+                    winner_update_inline_32(
+                        update_exp_sum,
+                        tl.full((BLOCK_M,), start_n + i_offset, dtype=tl.int64),
+                        BSA_BLOCK_SUMS,
+                        BSA_HEAP_INDICES,
+                        BSA_INDICES,
+                        b_idx,
+                        BSA_K,
+                        BSA_LOGK,
+                        start_n,
+                    )
+        
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
@@ -636,10 +725,8 @@ def _attn_fwd_inner(
             pass
 
     if RETURN_BSA_MASK and not BSA_HEAP:
-        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
-        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
+        tl.store(BSA_INDICES + b_idx, value=block_idx)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
 
     return acc, l_i, m_i
 
@@ -1494,7 +1581,6 @@ class _attention(torch.autograd.Function):
         bsa_top_block_k: int,
         bsa_block_size_k: int,
         bsa_heap: bool,
-        reverse_iter: bool,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1546,7 +1632,7 @@ class _attention(torch.autograd.Function):
                 device=q.device,
                 dtype=torch.float32,
             )
-
+        
         bsa_indices = bsa_block_sums = bsa_heap_indices = None
         if return_bsa_indices:
             assert not return_running_statistics
@@ -1557,81 +1643,56 @@ class _attention(torch.autograd.Function):
             if bsa_heap:
                 k_factor = 2
 
-                # FIXME: this doesn't need to be 2K but I could not find the
-                # energy to split the strides and add more arguments :(
-                bsa_indices = torch.full(  # for real block indices
-                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    987654321,
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-                bsa_block_sums = torch.full(  # for real block indices
-                    (bsa_top_block_k * k_factor,),
-                    -3200.0,
-                    device=q.device,
-                    dtype=torch.float32,
-                )
-
                 # need to initialize the heap in the proper order
-                bsa_heap_indices = torch.zeros(
-                    bsa_top_block_k * 2, device=q.device, dtype=torch.int32
-                )
-                bsa_heap_indices[bsa_top_block_k:] = torch.arange(
-                    0, bsa_top_block_k, device=q.device, dtype=torch.int32
-                )
+                bsa_heap_indices = torch.zeros(bsa_top_block_k * 2, device=q.device, dtype=torch.long)
+                bsa_heap_indices[bsa_top_block_k:] = torch.arange(0, bsa_top_block_k, device=q.device, dtype=torch.long)
 
+                warnings.warn("CLEAN THIS UP IN TRITON INIT")
                 for node in range(bsa_top_block_k - 1, 0, -1):
                     l = node << 1
                     r = l + 1
-
-                    lv = bsa_block_sums[l]
-                    rv = bsa_block_sums[r]
                     lp = bsa_heap_indices[l]
-                    rp = bsa_heap_indices[r]
+                    # rp = bsa_heap_indices[r]
+                    # take_left = True
+                    # bsa_heap_indices[:, node, :] = torch.where(take_left, lp, rp)
+                    bsa_heap_indices[node] = lp
 
-                    take_left = lv < rv
-                    bsa_heap_indices[node] = torch.where(take_left, lp, rp)
-                    bsa_block_sums[node] = torch.where(take_left, lv, rv)
-
-                bsa_heap_indices = bsa_heap_indices.view(1, 1, 1, -1).repeat(
-                    BSZ, HEAD, TDST, 1
-                )
-                bsa_block_sums = bsa_block_sums.view(1, 1, 1, -1).repeat(
-                    BSZ, HEAD, TDST, 1
-                )
+                bsa_heap_indices = bsa_heap_indices.view(1, 1, 1, -1).repeat(BSZ, HEAD, TDST, 1)
                 bsa_heap_indices = bsa_heap_indices.contiguous()
-                bsa_block_sums = bsa_block_sums.contiguous()
+                # bsa_heap_indices = torch.full( # for indices used in the heap
+                #     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                #     fill_value=bsa_top_block_k,
+                #     device=q.device,
+                #     dtype=torch.int64,
+                # )
 
-                assert (
-                    bsa_indices.stride()
-                    == bsa_block_sums.stride()
-                    == bsa_heap_indices.stride()
-                )
 
-                # print("before")
-                # print(f"{q.size()=}")
+            # FIXME: this doesn't need to be 2K but I could not find the 
+            # energy to split the strides and add more arguments :(
+            bsa_indices = torch.full( # for real block indices
+                (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                987654321,
+                device=q.device,
+                dtype=torch.int64,
+            )
+            bsa_block_sums = torch.full( # for 
+                (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                fill_value=float('-inf'),
+                device=q.device,
+                dtype=torch.float32,
+            )
 
-                # print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
+            if bsa_heap:
+                print("before")
+                print(f"{q.size()=}")
 
-                # print(f"{bsa_heap_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_block_sums[0, 0, 61:65]=}")
-            else:
-                # energy to split the strides and add more arguments :(
-                bsa_indices = torch.full(  # for real block indices
-                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    987654321,
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-                bsa_block_sums = torch.full(  # for
-                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    fill_value=-3200.0,
-                    device=q.device,
-                    dtype=torch.float32,
-                )
+                print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
 
-                assert bsa_indices.stride() == bsa_block_sums.stride()
+                print(f"{bsa_heap_indices[0, 0, 2048]=}")
+                print(f"{bsa_indices[0, 0, 2048]=}")
+                print(f"{bsa_block_sums[0, 0, 2048]=}")
+
+            assert bsa_indices.stride() == bsa_block_sums.stride()
             if bsa_heap:
                 assert bsa_indices.stride() == bsa_heap_indices.stride()
 
@@ -1866,17 +1927,8 @@ class _attention(torch.autograd.Function):
                 triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
             )
 
-            assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
-            
-            N_CTX=N_CTX
-            N_KV=(
-                k.shape[2]
-                if not USING_PAGED_CACHE
-                else k_cache.shape[0] * k_cache.shape[1]
-            )
-            
-            N_CTX_AUTOTUNE=128 if N_CTX > 128 else 1
-            N_KV_AUTOTUNE=1024 if N_KV > 1024 else 1
+            assert math.log2(bsa_top_block_k) == math.log2(bsa_top_block_k) // 1
+            print(math.log2(bsa_top_block_k), math.log2(bsa_top_block_k) // 1)
 
             _attn_fwd[grid](
                 q,
@@ -1943,9 +1995,6 @@ class _attention(torch.autograd.Function):
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
-                # BLOCK_M=64,
-                # BLOCK_N=32,
-                REVERSE_ITER=reverse_iter,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=("none" if extend_backend == "nope" else extend_backend),
                 # EXTEND_BACKEND=extend_backend,
@@ -1956,16 +2005,11 @@ class _attention(torch.autograd.Function):
                 **extra_kern_args,
             )
 
-            # if bsa_heap:
-            #     print("after")
-            #     # print(f"{bsa_heap_indices[0, 0, 60:64 + 1]=}")
-            #     # print(f"{bsa_indices[0, 0, 60:64 + 1]=}")
-            #     # print(f"{bsa_block_sums[0, 0, 60:64 + 1]=}")
-            #     rand_idx = torch.randperm(bsa_heap_indices.size(2))[:4]
-            #     print(f"{rand_idx=}")
-            #     print(f"{bsa_heap_indices[0, 0, rand_idx]=}")
-            #     print(f"{bsa_indices[0, 0, rand_idx]=}")
-            #     print(f"{bsa_block_sums[0, 0, rand_idx]=}")
+            if bsa_heap:
+                print("after")
+                print(f"{bsa_heap_indices[0, 0, 2048]=}")
+                print(f"{bsa_indices[0, 0, 2048]=}")
+                print(f"{bsa_block_sums[0, 0, 2048]=}")
 
         if return_running_statistics:
             return o, (MX, NC)
@@ -2009,13 +2053,13 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     return_bsa_indices: bool = False,
-    bsa_mask_sink_token_size: int = 64,
+    bsa_mask_sink_token_size: int = 16,
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
     bsa_heap: bool = False,
-    reverse_iter: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    warnings.warn("BSA_BLOCK_SIZE_K appears to be unused: remove")
     return _attention.apply(
         q,
         k,
@@ -2044,5 +2088,4 @@ def query_sparse_attention(
         bsa_top_block_k,
         bsa_block_size_k,
         bsa_heap,
-        reverse_iter,
     )
