@@ -94,6 +94,15 @@ def _attn_fwd_inner(
     stride_v_cache_hid,
     BLOCK_TABLE,
     stride_block_table_tsrc,
+    RETURN_BSA_MASK: tl.constexpr,
+    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
+    BSA_MASK_SW_SIZE,
+    BSA_K: tl.constexpr,
+    BSA_BLOCK_SIZE_K: tl.constexpr,
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    stride_bim,
+    stride_bik,
     COS,
     stride_cos_t,
     stride_cos_hid,
@@ -109,10 +118,18 @@ def _attn_fwd_inner(
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH,
     SELF_EXTEND_SCALE,
+    SELF_EXTEND_WINDOW,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
+
+    if RETURN_BSA_MASK:
+        b_idx = (
+            start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+        ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
+        block_idx = tl.load(BSA_INDICES + b_idx)
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -123,7 +140,7 @@ def _attn_fwd_inner(
     # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
-    for start_n in tl.range(lo, hi, BLOCK_N, num_stages=1):
+    for start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         idx_tsrc = offs_n + start_n
@@ -179,8 +196,6 @@ def _attn_fwd_inner(
             idx_hid_cos_sin = idx_hid % (HEAD_ROPE // 2)
             rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
-            SELF_EXTEND_WINDOW = 4096
-
             # max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
 
             # offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
@@ -196,17 +211,21 @@ def _attn_fwd_inner(
             # # idx_rope = idx_tsrc
 
             max_pos_tsrc = tl.max(tl.where(mask_m, mask_idx, 0))
+            min_pos_tsrc = tl.min(tl.where(mask_m, mask_idx, 987654321))
+
+            self_sliding_window = tl.maximum(
+                1024 + max_pos_tsrc - min_pos_tsrc, SELF_EXTEND_WINDOW
+            )
 
             offset = idx_tsrc.to(tl.int64) - max_pos_tsrc
             idx_rope = tl.where(
-                offset > (-SELF_EXTEND_WINDOW),
-                offset + MODEL_CONTEXT_LENGTH - 1,
-                (offset + SELF_EXTEND_WINDOW) // SELF_EXTEND_SCALE
-                + MODEL_CONTEXT_LENGTH
-                - 1
-                - SELF_EXTEND_WINDOW,
+                offset > (-self_sliding_window),
+                offset + (MODEL_CONTEXT_LENGTH - 1),
+                (offset + self_sliding_window) // SELF_EXTEND_SCALE
+                + (MODEL_CONTEXT_LENGTH - 1)
+                - self_sliding_window,
             )
-            idx_rope = idx_tsrc
+            # idx_rope = idx_tsrc
 
             if not USING_PAGED_CACHE:
                 k_rot = tl.load(
@@ -260,8 +279,6 @@ def _attn_fwd_inner(
             k *= k_descale
             k_nope *= k_descale
 
-        # qk = tl.dot(q, k)
-
         q_dtype = q.dtype
 
         cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
@@ -287,6 +304,7 @@ def _attn_fwd_inner(
             qk = tl.where(mask, qk, float("-inf"))
         qk = tl.where(qk == 0, float("-inf"), qk)
 
+        qk_original = qk
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
 
@@ -295,6 +313,107 @@ def _attn_fwd_inner(
         # -- update m_i and l_i
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
+
+        # -- update block sums and indices for block sparse attention
+        # if RETURN_BSA_MASK:
+        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+            # FIXME How can i this thing more dynamic?
+            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
+            tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
+            tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
+            tl.static_assert(
+                (BSA_MASK_STEP_SIZE == BLOCK_N)
+                | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
+                | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
+            )
+
+            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
+            using_exp_sum = True
+            if using_exp_sum:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
+                    p_split = tl.where(mask, p, 0.0)
+                else:
+                    p_split = p
+
+                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                    l_ij_0 = l_ij
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.sum(p_split, 2)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.sum(p_split, 3)
+                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
+                else:
+                    raise Exception()
+            else:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
+                    p_split = tl.where(mask, qk_original, float("-inf"))
+                else:
+                    p_split = qk_original
+
+                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                    l_ij_0 = tl.max(p_split, 1)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.max(p_split, 2)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.max(p_split, 3)
+                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
+                else:
+                    raise Exception()
+
+            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
+                if i_offset == 0:
+                    update_alpha = alpha
+                else:
+                    update_alpha = None
+
+                if i_offset == (0 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_0
+                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_1
+                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_2
+                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_3
+
+                # NOTE: update indices and scores
+                if (update_alpha is not None) and (using_exp_sum):
+                    block_sums *= update_alpha[
+                        :, None
+                    ]  # adjust previous sums for new normalization constant
+
+                block_sums_min, block_sums_min_idx = tl.min(
+                    block_sums, axis=-1, return_indices=True
+                )  # (M, K) -> (M,)
+                block_sums_max = tl.maximum(block_sums_min, update_exp_sum)  # (M,)
+
+                # if these two are equal, it means that the maximum is equal
+                # to the old value (i.e no change necessary)
+                block_update = block_sums_min != block_sums_max  # (M,)
+                col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K)
+
+                # make a mask of the minimum indices
+                bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
+                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
+
+                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+                block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
@@ -338,6 +457,11 @@ def _attn_fwd_inner(
             # idx_tsrc = idx_tsrc + BLOCK_N
             # mask_tsrc = idx_tsrc < hi
             pass
+
+    if RETURN_BSA_MASK:
+        tl.store(BSA_INDICES + b_idx, value=block_idx)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
+
     return acc, l_i, m_i
 
 
@@ -367,10 +491,6 @@ else:
         for BN in [32, 64]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
-        # for BM in [128,]
-        # for BN in [64,]
-        # for s in [3, ]
-        # for w in [4, ]
     ]
 
 
@@ -467,6 +587,17 @@ def _attn_fwd(
     SIN,
     stride_sin_t,
     stride_sin_hid,
+    RETURN_BSA_MASK: tl.constexpr,
+    BSA_MASK_SINK_TOKEN_SIZE: tl.constexpr,
+    BSA_MASK_SW_SIZE,
+    BSA_K: tl.constexpr,
+    BSA_BLOCK_SIZE_K: tl.constexpr,
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    stride_biz,
+    stride_bih,
+    stride_bim,
+    stride_bik,
     Z,
     H,
     N_CTX,
@@ -481,6 +612,7 @@ def _attn_fwd(
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
+    SELF_EXTEND_WINDOW=1024,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -529,6 +661,11 @@ def _attn_fwd(
             order=(1, 0),
         )
 
+    if RETURN_BSA_MASK:
+        bs_offset = off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
+        BSA_INDICES += bs_offset
+        BSA_BLOCK_SUMS += bs_offset
+
     if not USING_PAGED_CACHE:
         v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
         V_block_ptr = tl.make_block_ptr(
@@ -573,6 +710,7 @@ def _attn_fwd(
         K_block_ptr = None
         K_NOPE_block_ptr = None
         V_block_ptr = None
+
     O_block_ptr = tl.make_block_ptr(
         base=Out + q_offset,
         shape=(N_CTX, HEAD_DIM),
@@ -644,8 +782,8 @@ def _attn_fwd(
         rope_mult = tl.where((idx_hid + HEAD_ROPE // 2) < HEAD_ROPE, -1.0, 1.0)
 
         max_pos_tdst = tl.max(tl.where(mask_m, mask_idx, 0))
-        idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1
-        idx_rope = mask_idx.to(tl.int64)
+        idx_rope = mask_idx.to(tl.int64) - max_pos_tdst + MODEL_CONTEXT_LENGTH - 1 + 1
+        # idx_rope = mask_idx.to(tl.int64)
 
         q_rot = tl.load(
             Q
@@ -682,9 +820,18 @@ def _attn_fwd(
         raise Exception()
 
     lo = 0
-    mid = (tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N).to(
-        tl.int32
-    )
+    mid = tl.maximum(
+        0,
+        tl.min(
+            tl.where(
+                (mask_m - BSA_MASK_SW_SIZE) if RETURN_BSA_MASK else mask_m,
+                mask_idx,
+                987654321,
+            )
+        )
+        // BLOCK_N
+        * BLOCK_N,
+    ).to(tl.int32)
     tl.multiple_of(mid, BLOCK_N)
     hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
 
@@ -702,6 +849,10 @@ def _attn_fwd(
                 q,
                 K_block_ptr,
                 V_block_ptr,
+                BSA_IDX,
+                BLOCK_SUMS,
+                stride_bim,
+                stride_bik,
                 mask_idx,
                 start_m,
                 qk_scale,
@@ -727,6 +878,14 @@ def _attn_fwd(
                 stride_v_cache_hid=stride_v_cache_hid,
                 BLOCK_TABLE=BLOCK_TABLE,
                 stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -752,6 +911,12 @@ def _attn_fwd(
                 q,
                 K_block_ptr,
                 V_block_ptr,
+                BSA_IDX,
+                BLOCK_SUMS,
+                stride_bim,
+                stride_bik,
+                stride_bim,
+                stride_bik,
                 mask_idx,
                 start_m,
                 qk_scale,
@@ -777,6 +942,14 @@ def _attn_fwd(
                 stride_v_cache_hid=stride_v_cache_hid,
                 BLOCK_TABLE=BLOCK_TABLE,
                 stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -830,6 +1003,15 @@ def _attn_fwd(
             stride_v_cache_hid=stride_v_cache_hid,
             BLOCK_TABLE=BLOCK_TABLE,
             stride_block_table_tsrc=stride_block_table_tsrc,
+            RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+            BSA_K=BSA_K,
+            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+            BSA_INDICES=BSA_INDICES,
+            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+            stride_bim=stride_bim,
+            stride_bik=stride_bik,
             COS=COS,
             stride_cos_t=stride_cos_t,
             stride_cos_hid=stride_cos_hid,
@@ -845,6 +1027,7 @@ def _attn_fwd(
             EXTEND_BACKEND=EXTEND_BACKEND,
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
         )
 
         acc, l_i, m_i = _attn_fwd_inner(
@@ -883,6 +1066,15 @@ def _attn_fwd(
             stride_v_cache_hid=stride_v_cache_hid,
             BLOCK_TABLE=BLOCK_TABLE,
             stride_block_table_tsrc=stride_block_table_tsrc,
+            RETURN_BSA_MASK=RETURN_BSA_MASK,
+            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+            BSA_K=BSA_K,
+            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+            BSA_INDICES=BSA_INDICES,
+            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+            stride_bim=stride_bim,
+            stride_bik=stride_bik,
             COS=COS,
             stride_cos_t=stride_cos_t,
             stride_cos_hid=stride_cos_hid,
@@ -898,6 +1090,7 @@ def _attn_fwd(
             EXTEND_BACKEND=EXTEND_BACKEND,
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
         )
 
     # epilogue
@@ -1072,6 +1265,9 @@ class _attention(torch.autograd.Function):
         v_cache: torch.Tensor,
         block_table: torch.Tensor,
         return_running_statistics: bool,
+        return_bsa_indices: bool,
+        bsa_mask_sink_token_size: int,
+        bsa_mask_sliding_window_size: int,
         return_pooled_scores: bool,
         score_pooling_block_size_q: int,
         score_pooling_block_size_k: int,
@@ -1081,6 +1277,8 @@ class _attention(torch.autograd.Function):
         rope_sin: Optional[torch.Tensor],
         model_context_length: int,
         self_extend_scale: int,
+        bsa_top_block_k: int,
+        bsa_block_size_k: int,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1121,6 +1319,7 @@ class _attention(torch.autograd.Function):
         # )
         NC = MX = M = None
         if return_running_statistics:
+            assert not return_bsa_indices
             MX = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
@@ -1132,7 +1331,28 @@ class _attention(torch.autograd.Function):
                 dtype=torch.float32,
             )
 
+        bsa_indices = bsa_block_sums = None
+        if return_bsa_indices:
+            assert not return_running_statistics
+            assert not return_pooled_scores
+            BSZ, HEAD, TDST = q.shape[:3]
+            bsa_indices = torch.full(
+                (BSZ, HEAD, TDST, bsa_top_block_k),
+                987654321,
+                device=q.device,
+                dtype=torch.int64,
+            )
+            bsa_block_sums = torch.full(
+                (BSZ, HEAD, TDST, bsa_top_block_k),
+                fill_value=float("-inf"),
+                device=q.device,
+                dtype=torch.float32,
+            )
+            assert bsa_indices.stride() == bsa_block_sums.stride()
+
         if return_pooled_scores:
+            assert not return_running_statistics
+            assert not return_bsa_indices
             warnings.warn(
                 "Pooled score should not be returned for efficient inference."
             )
@@ -1167,10 +1387,14 @@ class _attention(torch.autograd.Function):
             assert isinstance(rope_cos, torch.Tensor)
             assert rope_sin.ndim == 2
             assert rope_cos.ndim == 2
-            assert extend_backend in ["self_extend"]
+            assert extend_backend in ["self_extend", "nope"]
 
-        HEAD_DIM_K_ROPE = rope_sin.shape[-1]
-        HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
+        if rope_sin is not None:
+            HEAD_DIM_K_ROPE = rope_sin.shape[-1]
+            HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
+        else:
+            HEAD_DIM_K_ROPE = HEAD_DIM_K
+            HEAD_DIM_K_NOPE = 0
 
         N_CTX_BLOCK = 128
         N_PROGRAM = triton.cdiv(N_CTX, N_CTX_BLOCK) * N_HEAD * N_BATCH
@@ -1182,7 +1406,22 @@ class _attention(torch.autograd.Function):
                 warnings.warn("N_SPLIT is ignored. this should be fixed")
             N_SPLIT = 1
 
+        if return_bsa_indices and (N_SPLIT > 1):
+            # BUG FIXME this warning should be activated later
+            # warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
+            N_SPLIT = 1
+        else:
+            warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
+            N_SPLIT = 1
+
+        assert safe_stride(k, 4)[:2] == safe_stride(v, 4)[:2]
+        assert safe_stride(q, 4)[:2] == safe_stride(o, 4)[:2]
+        if bsa_indices is not None:
+            assert bsa_block_sums is not None
+            assert bsa_indices.stride() == bsa_block_sums.stride()
+
         if (N_SPLIT > 1) and (not ignore_n_split):
+            raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")
             # N_SPLIT = 1
 
             grid = lambda args: (
@@ -1211,11 +1450,14 @@ class _attention(torch.autograd.Function):
                 M,
                 MX,
                 NC,
+                bsa_indices,
+                bsa_block_sums,
                 o,
                 mask,
                 *safe_stride(q, 4),
                 *safe_stride(k, 4),
                 *safe_stride(v, 4),
+                *safe_stride(bsa_indices, 4),
                 *safe_stride(o, 4),
                 *safe_stride(mask, 2),
                 k_cache is not None,
@@ -1259,6 +1501,7 @@ class _attention(torch.autograd.Function):
                 EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
+                BSA_K=bsa_top_block_k,
                 **extra_kern_args,
             )
 
@@ -1285,50 +1528,53 @@ class _attention(torch.autograd.Function):
                 BLOCK_TDST=BLOCK_M,
             )
 
-            # def sanity_check(t: torch.Tensor):
-            #     assert t.isnan().nonzero().shape[0] == 0
-            #     assert t.isinf().nonzero().shape[0] == 0
-            #     return t
+            """
+            # NOTE sanity check code for merge. do not delete for later debugging.
+            def sanity_check(t: torch.Tensor):
+                assert t.isnan().nonzero().shape[0] == 0
+                assert t.isinf().nonzero().shape[0] == 0
+                return t
 
-            # l_i = sanity_check(l_i)
-            # m_i = sanity_check(m_i)
-            # acc = sanity_check(acc)
+            l_i = sanity_check(l_i)
+            m_i = sanity_check(m_i)
+            acc = sanity_check(acc)
 
-            # # l_i = torch.where(l_i <= (1.0 + 1e-4), l_i + 1e-4, l_i)
+            # l_i = torch.where(l_i <= (1.0 + 1e-4), l_i + 1e-4, l_i)
 
-            # logits = acc / l_i[:, :, :, :, None]
-            # logits = sanity_check(logits)
-            # stats = m_i + torch.log2(l_i)
-            # stats = sanity_check(stats)
+            logits = acc / l_i[:, :, :, :, None]
+            logits = sanity_check(logits)
+            stats = m_i + torch.log2(l_i)
+            stats = sanity_check(stats)
 
-            # e_sum = torch.zeros_like(l_i[:, :, 0, :].contiguous())
-            # e_max = torch.full_like(m_i[:, :, 0, :].contiguous(), fill_value=float('-inf'))
-            # acc = torch.zeros_like(o, dtype=torch.float32)
+            e_sum = torch.zeros_like(l_i[:, :, 0, :].contiguous())
+            e_max = torch.full_like(m_i[:, :, 0, :].contiguous(), fill_value=float('-inf'))
+            acc = torch.zeros_like(o, dtype=torch.float32)
 
-            # for i_split in range(N_SPLIT):
-            #     tv = logits[:, :, i_split, :, :]
-            #     tv = sanity_check(tv)
-            #     tlogic = stats[:, :, i_split, :]
-            #     tlogic = sanity_check(tlogic)
-            #     n_e_max = torch.maximum(tlogic, e_max)
-            #     n_e_max = sanity_check(n_e_max)
+            for i_split in range(N_SPLIT):
+                tv = logits[:, :, i_split, :, :]
+                tv = sanity_check(tv)
+                tlogic = stats[:, :, i_split, :]
+                tlogic = sanity_check(tlogic)
+                n_e_max = torch.maximum(tlogic, e_max)
+                n_e_max = sanity_check(n_e_max)
 
-            #     old_scale = torch.exp2(e_max - n_e_max)
-            #     old_scale = sanity_check(old_scale)
-            #     exp_logic = torch.exp2(tlogic - n_e_max)
-            #     exp_logic = sanity_check(exp_logic)
-            #     acc = acc * old_scale[:, :, :, None] + exp_logic[:, :, :, None] * tv
-            #     acc = sanity_check(acc)
+                old_scale = torch.exp2(e_max - n_e_max)
+                old_scale = sanity_check(old_scale)
+                exp_logic = torch.exp2(tlogic - n_e_max)
+                exp_logic = sanity_check(exp_logic)
+                acc = acc * old_scale[:, :, :, None] + exp_logic[:, :, :, None] * tv
+                acc = sanity_check(acc)
 
-            #     e_sum = e_sum * old_scale + exp_logic
-            #     e_sum = sanity_check(e_sum)
-            #     e_max = n_e_max
-            #     e_max = sanity_check(e_max)
+                e_sum = e_sum * old_scale + exp_logic
+                e_sum = sanity_check(e_sum)
+                e_max = n_e_max
+                e_max = sanity_check(e_max)
 
-            # acc = acc / e_sum[:, :, :, None]
-            # acc = sanity_check(acc)
+            acc = acc / e_sum[:, :, :, None]
+            acc = sanity_check(acc)
 
-            # o = acc.to(o.dtype)
+            o = acc.to(o.dtype)
+            """
         else:
             grid = lambda args: (
                 triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
@@ -1380,6 +1626,14 @@ class _attention(torch.autograd.Function):
                 *safe_stride(rope_cos, 2),
                 rope_sin,
                 *safe_stride(rope_sin, 2),
+                (bsa_indices is not None) and (bsa_block_sums is not None),
+                bsa_mask_sink_token_size,
+                bsa_mask_sliding_window_size,
+                bsa_top_block_k,
+                bsa_block_size_k,
+                bsa_indices,
+                bsa_block_sums,
+                *safe_stride(bsa_indices, 4),
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
@@ -1392,8 +1646,11 @@ class _attention(torch.autograd.Function):
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
+                # BLOCK_M=64,
+                # BLOCK_N=32,
                 V_FP8=V_FP8,
-                EXTEND_BACKEND=extend_backend,
+                EXTEND_BACKEND=("none" if extend_backend == "nope" else extend_backend),
+                # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
                 **extra_kern_args,
@@ -1401,12 +1658,14 @@ class _attention(torch.autograd.Function):
 
         if return_running_statistics:
             return o, (MX, NC)
+        elif return_bsa_indices:
+            return o, (bsa_indices, bsa_block_sums)
         else:
             return o
 
     @staticmethod
     def backward(ctx, do):
-        raise NotImplementedError("bwd not implemented for recompute kernel")
+        raise NotImplementedError("bwd not implemented for query sparse kernel")
 
 
 # for typing wrapper and provide kwargs
@@ -1432,6 +1691,11 @@ def query_sparse_attention(
     rope_sin: Optional[torch.Tensor] = None,
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
+    return_bsa_indices: bool = False,
+    bsa_mask_sink_token_size: int = 64,
+    bsa_mask_sliding_window_size: int = 0,
+    bsa_top_block_k: int = 128,
+    bsa_block_size_k: int = 2,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -1446,6 +1710,9 @@ def query_sparse_attention(
         v_cache,
         block_table,
         return_running_statistics,
+        return_bsa_indices,
+        bsa_mask_sink_token_size,
+        bsa_mask_sliding_window_size,
         return_pooled_scores,
         score_pooling_block_size_q,
         score_pooling_block_size_k,
@@ -1455,4 +1722,6 @@ def query_sparse_attention(
         rope_sin,
         model_context_length,
         self_extend_scale,
+        bsa_top_block_k,
+        bsa_block_size_k,
     )
