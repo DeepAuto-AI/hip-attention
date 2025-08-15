@@ -392,7 +392,7 @@ def _attn_fwd_inner(
                         update_alpha = alpha
                     else:
                         update_alpha = None
-                    
+
                     if update_alpha is not None:
                         block_sums *= update_alpha[
                             :, None
