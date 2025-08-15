@@ -128,8 +128,8 @@ def _attn_fwd_inner(
         b_idx = (
             start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
         ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
-        block_idx = tl.load(BSA_INDICES + b_idx)
-        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
+        block_idx = tl.load(BSA_INDICES + b_idx, mask=mask_m[:, None])
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=mask_m[:, None])
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -328,7 +328,7 @@ def _attn_fwd_inner(
             )
 
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            using_exp_sum = True
+            using_exp_sum: tl.constexpr = True
             if using_exp_sum:
                 if MASKING:
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
@@ -377,11 +377,6 @@ def _attn_fwd_inner(
                     raise Exception()
 
             for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-
                 if i_offset == (0 * BSA_MASK_STEP_SIZE):
                     update_exp_sum = l_ij_0
                 elif i_offset == (1 * BSA_MASK_STEP_SIZE):
@@ -392,10 +387,16 @@ def _attn_fwd_inner(
                     update_exp_sum = l_ij_3
 
                 # NOTE: update indices and scores
-                if (update_alpha is not None) and (using_exp_sum):
-                    block_sums *= update_alpha[
-                        :, None
-                    ]  # adjust previous sums for new normalization constant
+                if using_exp_sum:
+                    if i_offset == 0:
+                        update_alpha = alpha
+                    else:
+                        update_alpha = None
+                    
+                    if update_alpha is not None:
+                        block_sums *= update_alpha[
+                            :, None
+                        ]  # adjust previous sums for new normalization constant
 
                 block_sums_min, block_sums_min_idx = tl.min(
                     block_sums, axis=-1, return_indices=True

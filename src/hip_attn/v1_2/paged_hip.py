@@ -1537,7 +1537,7 @@ def _forward_delta_attn(
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
-                qsa_mask_block_size_k = 32
+                qsa_mask_block_size_k = 16
                 qsa_mask_block_top_k = 64
 
                 context_dense = query_sparse_attention(
