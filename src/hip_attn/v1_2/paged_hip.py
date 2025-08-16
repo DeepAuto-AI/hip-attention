@@ -1542,7 +1542,7 @@ def _forward_delta_attn(
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = 64
-                qsa_mask_block_top_k = 32
+                qsa_mask_block_top_k = 64
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
                 # using sum of block scores
