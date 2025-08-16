@@ -177,7 +177,7 @@ def _attn_fwd_inner(
     if RETURN_BSA_MASK:
         if BSA_HEAP:
             b_idx = (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64) * stride_bim
-        else:
+    else:
             b_idx = (
                 (
                     start_m.to(tl.int64) * BLOCK_M
@@ -567,8 +567,8 @@ def _attn_fwd_inner(
 
                 # --- load root unmasked (no 'other' contamination) ---
                 b_idx   = b_idx.to(tl.int64)                                 # per-lane base into heap slab
-                root_v  = tl.load(BSA_BLOCK_SUMS   + (b_idx + 1).to(tl.int64), cache_modifier=".cv")            # node 1
-                root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64), cache_modifier=".cv").to(tl.int64)
+                root_v  = tl.load(BSA_BLOCK_SUMS   + (b_idx + 1).to(tl.int64))            # node 1
+                root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64)).to(tl.int64)
 
                 # lanes that actually update (top-k max → min-winner tree)
                 beat = update_exp_sum > root_v
@@ -597,8 +597,8 @@ def _attn_fwd_inner(
                     sib   = tl.where(path_is_left, right, left)
 
                     # load ONLY sibling from memory (unmasked loads)
-                    sib_v = tl.load(BSA_BLOCK_SUMS   + (b_idx + sib).to(tl.int64), cache_modifier=".cv")
-                    sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib).to(tl.int64), cache_modifier=".cv")
+                    sib_v = tl.load(BSA_BLOCK_SUMS   + (b_idx + sib).to(tl.int64))
+                    sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib).to(tl.int64))
 
                     # min-winner with **left-tie** policy (match typical winner-tree)
                     take_path = (path_v < sib_v) # | ((path_v == sib_v) & path_is_left)
@@ -706,14 +706,14 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        # for BM in [64, 128]
-        # for BN in [32, 64]
-        for BM in [128]
-        for BN in [32]
-        # for s in ([1] if is_hip() else [3, 4, 7])
-        # for w in [4, 8]
-        for w in [1]
-        for s in [3]
+        for BM in [64, 128]
+        for BN in [32, 64]
+        for s in ([1] if is_hip() else [3, 4, 7])
+        for w in [4, 8]
+        # for BM in [64]
+        # for BN in [32]
+        # for w in [1]
+        # for s in [3]
     ]
 
 
@@ -1626,14 +1626,14 @@ class _attention(torch.autograd.Function):
 
                 assert bsa_indices.stride() == bsa_block_sums.stride() == bsa_heap_indices.stride()
 
-                print("before")
-                print(f"{q.size()=}")
+                # print("before")
+                # print(f"{q.size()=}")
 
-                print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
+                # print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
 
-                print(f"{bsa_heap_indices[0, 0, 61:65]=}")
-                print(f"{bsa_indices[0, 0, 61:65]=}")
-                print(f"{bsa_block_sums[0, 0, 61:65]=}")
+                # print(f"{bsa_heap_indices[0, 0, 61:65]=}")
+                # print(f"{bsa_indices[0, 0, 61:65]=}")
+                # print(f"{bsa_block_sums[0, 0, 61:65]=}")
             else:
                 # FIXME: this doesn't need to be 2K but I could not find the 
                 # energy to split the strides and add more arguments :(
@@ -1957,8 +1957,6 @@ class _attention(torch.autograd.Function):
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
                 V_FP8=V_FP8,
-                # BLOCK_M=64,
-                # BLOCK_N=32,
                 EXTEND_BACKEND=(
                     "none" 
                     if extend_backend == "nope" else 
@@ -1970,16 +1968,16 @@ class _attention(torch.autograd.Function):
                 **extra_kern_args,
             )
 
-            if bsa_heap:
-                print("after")
-                # print(f"{bsa_heap_indices[0, 0, 60:64 + 1]=}")
-                # print(f"{bsa_indices[0, 0, 60:64 + 1]=}")
-                # print(f"{bsa_block_sums[0, 0, 60:64 + 1]=}")
-                rand_idx = torch.randperm(bsa_heap_indices.size(2))[:4]
-                print(f"{rand_idx=}")
-                print(f"{bsa_heap_indices[0, 0, rand_idx]=}")
-                print(f"{bsa_indices[0, 0, rand_idx]=}")
-                print(f"{bsa_block_sums[0, 0, rand_idx]=}")
+            # if bsa_heap:
+            #     print("after")
+            #     # print(f"{bsa_heap_indices[0, 0, 60:64 + 1]=}")
+            #     # print(f"{bsa_indices[0, 0, 60:64 + 1]=}")
+            #     # print(f"{bsa_block_sums[0, 0, 60:64 + 1]=}")
+            #     rand_idx = torch.randperm(bsa_heap_indices.size(2))[:4]
+            #     print(f"{rand_idx=}")
+            #     print(f"{bsa_heap_indices[0, 0, rand_idx]=}")
+            #     print(f"{bsa_indices[0, 0, rand_idx]=}")
+            #     print(f"{bsa_block_sums[0, 0, rand_idx]=}")
 
         if return_running_statistics:
             return o, (MX, NC)

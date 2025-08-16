@@ -136,7 +136,7 @@ def main() -> None:
 
 def test_with_hip_bsa() -> None:
     q_block, k_block = 32, 16
-    seq = 512
+    seq = 131072
     device = 0
     K = 8
     window_size = 16
@@ -230,28 +230,31 @@ def test_with_hip_bsa() -> None:
         print(f"bsa_sums: {block_sums[0, 0]=}")
         # bsa_idx = torch.where(bsa_idx == -1, 987654321, bsa_idx * k_block)
 
-        ks = (bsa_idx < 987654321).sum(dim=-1)
-        ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
-        ks_count = ks.unsqueeze(-1)
-        ks_start_end = torch.nn.functional.pad(ks_count, (1, 0), "constant", 0)
+        bsa_out = None
+        # ks = (bsa_idx < 987654321).sum(dim=-1)
+        # ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
+        # ks_count = ks.unsqueeze(-1)
+        # ks_start_end = torch.nn.functional.pad(ks_count, (1, 0), "constant", 0)
 
-        bsa_out = block_sparse_attention(
-            q[:, :, :seq].transpose(1, 2) * math.sqrt(1 / q.size(-1)),
-            k[:, :, :seq].transpose(1, 2),
-            v[:, :, :seq].transpose(1, 2),
-            seq_lens,
-            bsa_idx.reshape(b * h, bsa_idx.size(2), bsa_idx.size(3)),
-            ks,
-            ks_count,
-            ks_start_end,
-            args,
-            access_counter,
-            cache_miss_counter,
-        )
+        # bsa_out = block_sparse_attention(
+        #     q[:, :, :seq].transpose(1, 2) * math.sqrt(1 / q.size(-1)),
+        #     k[:, :, :seq].transpose(1, 2),
+        #     v[:, :, :seq].transpose(1, 2),
+        #     seq_lens,
+        #     bsa_idx.reshape(b * h, bsa_idx.size(2), bsa_idx.size(3)),
+        #     ks,
+        #     ks_count,
+        #     ks_start_end,
+        #     args,
+        #     access_counter,
+        #     cache_miss_counter,
+        # )
         return out, bsa_out, bsa_idx
 
     out, bsa_out, block_idx = qsa()
-    print(f"{block_idx=}")
+    print(f"1: {block_idx=}")
+    out, bsa_out, block_idx = qsa()
+    print(f"2: {block_idx=}")
 
     # bsa_out = bsa_out.transpose(1, 2)
 
