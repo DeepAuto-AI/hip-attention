@@ -3,7 +3,7 @@
     "__last_dense": -1,
     "__using_landmark": false,
     "__seq_thresh_fa3": 131072,
-    "__delta_attention_args": "window_0-diff_1-w_32-dense_decode-smooth",
+    "__delta_attention_args": "window_0-diff_1-w_16-dense_decode-smooth",
     "using_extend": false,
     "dense_layers": [0],
     "mask_refresh_interval": [96],
