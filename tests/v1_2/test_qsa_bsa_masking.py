@@ -135,11 +135,11 @@ def main() -> None:
 
 
 def test_with_hip_bsa() -> None:
-    q_block, k_block = 128, 32
-    seq = 4096
+    q_block, k_block = 32, 16
+    seq = 512
     device = 0
-    K = 16
-    window_size = 128
+    K = 8
+    window_size = 16
 
     # d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
     dtype = torch.bfloat16
@@ -223,7 +223,7 @@ def test_with_hip_bsa() -> None:
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
             bsa_block_size_k=k_block,
-            bsa_heap=False,
+            bsa_heap=True,
         )
 
         print(f"bsa_idx: {bsa_idx[0, 0]=}")
