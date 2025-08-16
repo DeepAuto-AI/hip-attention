@@ -127,7 +127,7 @@ def test_with_hip_bsa() -> None:
     q_block, k_block = 32, 16
     seq = 512
     device = 0
-    K = 8
+    K = 64
     window_size = 16
 
     # d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
@@ -175,8 +175,8 @@ def test_with_hip_bsa() -> None:
 
     b, h, s, d = qp.size()
     mask = torch.arange(seq).view(1, seq).repeat(b, 1).cuda(device)
-    # mask = mask.view(b, seq // q_block, q_block)[:, :, 0] 
-    # qp = qp.view(b, h, s // q_block, q_block, d)[:, :, :, 0]
+    mask = mask.view(b, seq // q_block, q_block)[:, :, 0] 
+    qp = qp.view(b, h, s // q_block, q_block, d)[:, :, :, 0]
 
     access_counter = torch.zeros(b, h, seq, dtype=torch.long, device=q.device)
     cache_miss_counter = torch.zeros(b, h, seq, dtype=torch.long, device=q.device)
@@ -193,7 +193,7 @@ def test_with_hip_bsa() -> None:
         using_extend=False,
     )
 
-    def qsa() -> Tuple[torch.Tensor, ...]:
+    def qsa(heap=False) -> Tuple[torch.Tensor, ...]:
         out, (bsa_idx, block_sums) = query_sparse_attention(
             q=qp,
             k=kp,
@@ -206,44 +206,44 @@ def test_with_hip_bsa() -> None:
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
             bsa_block_size_k=k_block,
-            bsa_heap=True,
+            bsa_heap=heap,
         )
 
-        print(f"bsa_idx: {bsa_idx[0, 0]=}")
-        print(f"bsa_sums: {block_sums[0, 0]=}")
-        # bsa_idx = torch.where(bsa_idx == -1, 987654321, bsa_idx * k_block)
+        bsa_out = None
+        # ks = (bsa_idx < 987654321).sum(dim=-1)
+        # ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
+        # ks_count = ks.unsqueeze(-1)
+        # ks_start_end = torch.nn.functional.pad(ks_count, (1, 0), "constant", 0)
 
-        ks = (bsa_idx < 987654321).sum(dim=-1)
-        ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
-        ks_count = ks.unsqueeze(-1)
-        ks_start_end = torch.nn.functional.pad(ks_count, (1, 0), "constant", 0)
-
-        bsa_out = block_sparse_attention(
-            q[:, :, :seq].transpose(1, 2) * math.sqrt(1 / q.size(-1)),
-            k[:, :, :seq].transpose(1, 2),
-            v[:, :, :seq].transpose(1, 2),
-            seq_lens,
-            bsa_idx.reshape(b * h, bsa_idx.size(2), bsa_idx.size(3)),
-            ks,
-            ks_count,
-            ks_start_end,
-            args,
-            access_counter,
-            cache_miss_counter,
-        )
-        return out, bsa_out, bsa_idx, block_sums
-
-    o = flash_attn_func(
-        q[:, :, :seq].transpose(1, 2),
-        k[:, :, :seq].transpose(1, 2),
-        v[:, :, :seq].transpose(1, 2),
-        causal=True,
-    )
-    o = o.transpose(1, 2)
-
+        # bsa_out = block_sparse_attention(
+        #     q[:, :, :seq].transpose(1, 2) * math.sqrt(1 / q.size(-1)),
+        #     k[:, :, :seq].transpose(1, 2),
+        #     v[:, :, :seq].transpose(1, 2),
+        #     seq_lens,
+        #     bsa_idx.reshape(b * h, bsa_idx.size(2), bsa_idx.size(3)),
+        #     ks,
+        #     ks_count,
+        #     ks_start_end,
+        #     args,
+        #     access_counter,
+        #     cache_miss_counter,
+        # )
+        return out, bsa_out, bsa_idx
+    
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    out, bsa_out, block_idx, _ = qsa(heap=False)
-    out, bsa_out, block_idx, _ = qsa(heap=True)
+    out, bsa_out, block_idx = qsa(heap=False)
+    out, bsa_out, block_idx = qsa(heap=True)
+
+    print(f"{block_idx.size()=}")
+    rand_idx = torch.randperm(block_idx.size(2))[:4]
+    out, bsa_out, block_idx = qsa(heap=False)
+    out, bsa_out, block_idx_heap = qsa(heap=True)
+
+    eq = block_idx[0, 0, rand_idx].unsqueeze(-1) == block_idx_heap[0, 0, rand_idx].unsqueeze(-2)
+    eq = eq.sum(-1)
+    print(f"heap and plain returned same indices: {eq=}")
+    # print(f"1: {block_idx[0, 0, rand_idx]=}")
+    # print(f"2: {block_idx[0, 0, rand_idx, K:]=}")
 
     # bsa_out = bsa_out.transpose(1, 2)
 
@@ -458,7 +458,9 @@ def test_with_hip_bsa() -> None:
     # print(f'hip: {latency_hip:.2f} ms took')
     print(f"calling qsa latency")
     latency_qsa = latency(lambda: qsa())
-    print(f'qsa: {latency_qsa:.2f} ms took')
+    print(f'qsa no heap: {latency_qsa:.2f} ms took')
+    latency_qsa = latency(lambda: qsa(heap=True))
+    print(f'qsa heap: {latency_qsa:.2f} ms took')
     latency_flash = latency(lambda: flash_attn_func(q[:, :, :seq].transpose(1, 2), k[:, :, :seq].transpose(1, 2), v[:, :, :seq].transpose(1, 2), causal=True))
     print(f'flash attn: {latency_flash:.2f} ms took')
 
