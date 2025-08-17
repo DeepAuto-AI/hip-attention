@@ -59,51 +59,122 @@ def convert_fp8_to_bf16(k: tl.tensor):
     return k
 
 @triton.jit
-def winner_update_inline_32(
-    cand_v,                  # (32,) float32 – candidate scores per query (lanes)
-    cand_i,                  # (32,) int32   – candidate key-block ids per query
-    tree_val_ptr,            # base pointer to tree values
-    tree_leaf_ptr,           # base pointer to tree leaf-ids
-    leaf_payload_ptr,        # base pointer to payloads (top-k block ids)
-    base_tree_off,           # (32,) int32 offsets: q * (2*K2)
-    K2: tl.constexpr,        # power-of-two >= K
-    LOGK: tl.constexpr,      # = log2(K2)
-    BLOCK_M: tl.constexpr,
-    mask_m,
+def winner_update_inline(
+    update_exp_sum,         # (M,) float32 – candidate scores per query (lanes)
+    start_n,                # (1,) int64   – candidate key-block ids per query
+    BSA_BLOCK_SUMS,         # pointer to values
+    BSA_HEAP_INDICES,       # pointer to winner tree indices
+    BSA_INDICES,            # pointer to bsa block indices
+    b_idx,                  # offset from base pointers
+    BSA_K,                  # K in top-K
+    BSA_LOGK,               # log2(K)
+    BLOCK_M,                # query block size
+    mask_m,                 # query mask
 ):
     # Load current threshold and its winning leaf
-    root_v  = tl.load(tree_val_ptr  + (base_tree_off + 1))
-    root_lf = tl.load(tree_leaf_ptr + (base_tree_off + 1))   # [0..K2-1]
+    root_v  = tl.load(BSA_BLOCK_SUMS  + (b_idx + 1))
+    root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1))   # [0..K2-1]
 
-    beat = (cand_v > root_v) & mask_m                     # lanes that actually update
+    beat = (update_exp_sum > root_v) & mask_m                     # lanes that actually update
     if tl.sum(beat) > 0:
-        leaf_node = (K2 + root_lf)
-        leaf_off  = base_tree_off + leaf_node
+        leaf_node = (BSA_K + root_lf)
+        leaf_off  = b_idx + leaf_node
 
         # Overwrite the losing leaf with the new candidate
-        tl.store(tree_val_ptr  + leaf_off, cand_v.to(tl.float32), mask=beat)
-        tl.store(leaf_payload_ptr + leaf_off, cand_i, mask=beat)
+        tl.store(BSA_BLOCK_SUMS  + leaf_off, update_exp_sum.to(tl.float32), mask=beat)
+        tl.store(BSA_INDICES + leaf_off, start_n, mask=beat)
 
         # Climb and recompute winners up to the root (O(log K))
         node = leaf_node >> 1
-        for j in tl.range(0, LOGK):
+        for j in tl.range(0, BSA_LOGK):
             left  = (node << 1)
             right = left + 1
 
-            lv = tl.load(tree_val_ptr  + (base_tree_off + left))
-            rv = tl.load(tree_val_ptr  + (base_tree_off + right))
-            lp = tl.load(tree_leaf_ptr + (base_tree_off + left))
-            rp = tl.load(tree_leaf_ptr + (base_tree_off + right))
+            lv = tl.load(BSA_BLOCK_SUMS  + (b_idx + left))
+            rv = tl.load(BSA_BLOCK_SUMS  + (b_idx + right))
+            lp = tl.load(BSA_HEAP_INDICES + (b_idx + left))
+            rp = tl.load(BSA_HEAP_INDICES + (b_idx + right))
 
             take_left = lv <= rv
             # print("take left: ", take_left)
             win_v = tl.where(take_left, lv, rv)
             win_p = tl.where(take_left, lp, rp)
 
-            tl.store(tree_val_ptr  + (base_tree_off + node), win_v, mask=beat)
-            tl.store(tree_leaf_ptr + (base_tree_off + node), win_p, mask=beat)
+            tl.store(BSA_BLOCK_SUMS  + (b_idx + node), win_v, mask=beat)
+            tl.store(BSA_HEAP_INDICES + (b_idx + node), win_p, mask=beat)
 
             node = node >> 1
+
+@triton.jit
+def winner_update_inline_efficient(
+    update_exp_sum,         # (M,) float32 – candidate scores per query (lanes)
+    start_n,                # (1,) int64   – candidate key-block ids per query
+    BSA_BLOCK_SUMS,         # pointer to values
+    BSA_HEAP_INDICES,       # pointer to winner tree indices
+    BSA_INDICES,            # pointer to bsa block indices
+    b_idx,                  # offset from base pointers
+    BSA_K,                  # K in top-K
+    BSA_LOGK,               # log2(K)
+    BLOCK_M,                # query block size
+    mask_m,                 # query mask
+):
+    # # K2 must be power-of-two, LOGK == log2(K2)
+    tl.static_assert(((BSA_K & (BSA_K - 1)) == 0), "BSA_K must be power-of-two")
+    tl.static_assert(((1 << BSA_LOGK) == BSA_K),    "BSA_LOGK must equal log2(BSA_K)")
+
+    # --- load root unmasked (no 'other' contamination) ---
+    b_idx   = b_idx.to(tl.int64)                                 # per-lane base into heap slab
+    root_v  = tl.load(BSA_BLOCK_SUMS   + (b_idx + 1).to(tl.int64))            # node 1
+    root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64)).to(tl.int64)
+
+    # lanes that actually update (top-k max → min-winner tree)
+    beat = update_exp_sum > root_v
+
+    if tl.sum(beat) > 0:
+        # --- write leaf value + payload (only for beating lanes) ---
+        leaf_idx  = (BSA_K + root_lf).to(tl.int64)                                   # [BSA_K .. 2*BSA_K-1]
+        leaf_addr = b_idx + leaf_idx
+        tl.store(BSA_BLOCK_SUMS + leaf_addr, update_exp_sum, mask=beat)
+        tl.store(BSA_INDICES    + leaf_addr, start_n,        mask=beat)
+
+        # --- climb: keep the path child (value, pointer, index) in registers ---
+        path_v = update_exp_sum.to(tl.float32)         # fp32
+        path_p = root_lf                 # int64 leaf-id [0..BSA_K-1]
+        child  = leaf_idx                # int64 node idx [BSA_K..2*BSA_K-1]
+        node   = child >> 1              # parent idx [1..BSA_K-1]
+
+        # optional runtime guards (enable with TRITON_DEBUG=1)
+        tl.device_assert((leaf_idx >= BSA_K) & (leaf_idx < 2*BSA_K), "leaf_idx OOR")
+
+        for _ in tl.range(0, BSA_LOGK, num_stages=1):   # exactly BSA_LOGK steps; last write is root (node==1)
+            left  = (node << 1).to(tl.int64)
+            right = (left + 1).to(tl.int64)
+
+            # which side is our path child?
+            path_is_left = (child == left).to(tl.int1)
+            sib   = tl.where(path_is_left, right, left)
+
+            # load ONLY sibling from memory (unmasked loads)
+            sib_v = tl.load(BSA_BLOCK_SUMS   + (b_idx + sib).to(tl.int64))
+            sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib).to(tl.int64))
+
+            # min-winner with **left-tie** policy (match typical winner-tree)
+            take_path = (path_v < sib_v) # | ((path_v == sib_v) & path_is_left)
+            # print(f"path v, sib v, take path: ", path_v, sib_v, take_path)
+            win_v = tl.where(take_path, path_v, sib_v)
+            win_p = tl.where(take_path, path_p, sib_p)
+
+            # win_v = tl.where(take_path, path_v, path_v)
+            # win_p = tl.where(take_path, path_p, path_p)
+
+            tl.store(BSA_BLOCK_SUMS   + (b_idx + node).to(tl.int64), win_v.to(tl.float32), mask=beat)
+            tl.store(BSA_HEAP_INDICES + (b_idx + node).to(tl.int64), win_p.to(tl.int64), mask=beat)
+
+            # move up one level
+            child  = node.to(tl.int64)
+            node   = (node >> 1).to(tl.int64)
+            path_v = win_v.to(tl.float32)
+            path_p = win_p.to(tl.int64)
 
 
 @triton.jit
@@ -521,8 +592,8 @@ def _attn_fwd_inner(
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
         # -- update block sums and indices for block sparse attention
-        # if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
-        if RETURN_BSA_MASK:
+        # if RETURN_BSA_MASK:
+        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
             BSA_MASK_STEP_SIZE: tl.constexpr = 16
             tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
@@ -533,224 +604,167 @@ def _attn_fwd_inner(
                 | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
             )
             
-            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            using_exp_sum = False
-            if using_exp_sum:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-                    p_split = tl.where(mask, p, 0.0)
-                else:
-                    p_split = p
-                
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-            else:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-                    p_split = tl.where(mask, qk + m_ij[:, None], float('-inf'))
-                else:
-                    p_split = qk + m_ij[:, None]
-
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-            
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-                
-                if   i_offset == (0 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_0
-                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_1
-                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_2
-                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_3
-                
-                if not BSA_HEAP:
-                    # NOTE: update indices and scores
-                    if (update_alpha is not None) and (using_exp_sum):
-                        block_sums *= update_alpha[:, None] # adjust previous sums for new normalization constant
-                    else:
-                        block_sums *= 1 # WHY WHY WHY??? I HATE YOU
-
-                    # attempt to make it faster, but this is slower
-                    # better = update_exp_sum > thr
-                    # if tl.sum(better) > 0:
-                    #     # replace current min slot
-                    #     col  = thr_pos[:, None]
-                    #     hit  = (col_idx == col)
-
-                    #     block_sums = tl.where(hit, update_exp_sum[:, None], block_sums)
-                    #     block_idx = tl.where(hit, (start_n).to(tl.int32), block_idx)
-
-                    #     new_thr, new_pos = tl.min(block_sums, axis=1, return_indices=True)
-                    #     thr     = tl.where(better, new_thr, thr)
-                    #     thr_pos = tl.where(better, new_pos.to(tl.int32), thr_pos)
-
-                    block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
-                    block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
-
-                    # if these two are equal, it means that the maximum is equal 
-                    # to the old value (i.e no change necessary)
-                    block_update = block_sums_min != block_sums_max # (M,)
-
-                    # make a mask of the minimum indices
-                    bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
-                    bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
-
-                    block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-                    block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
-                else:
-                    winner_update_inline_32(
-                      update_exp_sum,
-                      start_n,
-                      BSA_BLOCK_SUMS,
-                      BSA_HEAP_INDICES,
-                      BSA_INDICES,
-                      b_idx,
-                      BSA_K,
-                      BSA_LOGK,
-                      BLOCK_M,
-                      mask_m,
-                    )
-
-            # using_exp_sum: tl.constexpr = False
+            # # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
+            # using_exp_sum = False
             # if using_exp_sum:
             #     if MASKING:
             #         mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-            #         update_exp_sum = tl.where(mask, p, 0.0)
-            #         update_exp_sum = tl.sum(update_exp_sum, 1)
+            #         p_split = tl.where(mask, p, 0.0)
             #     else:
-            #         update_exp_sum = tl.sum(p, 1)
+            #         p_split = p
+            #     
+            #     if BLOCK_N == BSA_MASK_STEP_SIZE:
+            #         l_ij_0 = l_ij
+            #     elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+            #         p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+            #         l_ij_all = tl.sum(p_split, 2)
+            #         l_ij_0, l_ij_1 = tl.split(l_ij_all)
+            #     elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+            #         p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+            #         l_ij_all = tl.sum(p_split, 3)
+            #         l_ij_01, l_ij_23 = tl.split(l_ij_all)
+            #         l_ij_0, l_ij_1 = tl.split(l_ij_01)
+            #         l_ij_2, l_ij_3 = tl.split(l_ij_23)
+            #     else:
+            #         raise Exception()
             # else:
             #     if MASKING:
             #         mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
-            #         update_exp_sum = tl.where(mask, qk + m_ij[:, None], float("-inf"))
-            #         update_exp_sum = tl.max(update_exp_sum, 1)
+            #         p_split = tl.where(mask, qk + m_ij[:, None], float('-inf'))
             #     else:
-            #         update_exp_sum = qk + m_ij[:, None]
-            #         update_exp_sum = tl.max(update_exp_sum, 1)
+            #         p_split = qk + m_ij[:, None]
 
-            # if not BSA_HEAP:
-            #     # NOTE: update indices and scores
-            #     if (alpha is not None) and (using_exp_sum):
-            #         block_sums *= alpha[:, None] # adjust previous sums for new normalization constant
+            #     if BLOCK_N == BSA_MASK_STEP_SIZE:
+            #         l_ij_0 = tl.max(p_split, 1)
+            #     elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+            #         p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+            #         l_ij_all = tl.max(p_split, 2)
+            #         l_ij_0, l_ij_1 = tl.split(l_ij_all)
+            #     elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+            #         p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+            #         l_ij_all = tl.max(p_split, 3)
+            #         l_ij_01, l_ij_23 = tl.split(l_ij_all)
+            #         l_ij_0, l_ij_1 = tl.split(l_ij_01)
+            #         l_ij_2, l_ij_3 = tl.split(l_ij_23)
             #     else:
-            #         block_sums *= 1 # WHY WHY WHY??? I HATE YOU
+            #         raise Exception()
+            # 
+            # for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
+            #     if i_offset == 0:
+            #         update_alpha = alpha
+            #     else:
+            #         update_alpha = None
+            #     
+            #     if   i_offset == (0 * BSA_MASK_STEP_SIZE):
+            #         update_exp_sum = l_ij_0
+            #     elif i_offset == (1 * BSA_MASK_STEP_SIZE):
+            #         update_exp_sum = l_ij_1
+            #     elif i_offset == (2 * BSA_MASK_STEP_SIZE):
+            #         update_exp_sum = l_ij_2
+            #     elif i_offset == (3 * BSA_MASK_STEP_SIZE):
+            #         update_exp_sum = l_ij_3
+            #     
+            #     if not BSA_HEAP:
+            #         # NOTE: update indices and scores
+            #         if (update_alpha is not None) and (using_exp_sum):
+            #             block_sums *= update_alpha[:, None] # adjust previous sums for new normalization constant
+            #         else:
+            #             block_sums *= 1 # WHY WHY WHY??? I HATE YOU
 
-            #     block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
-            #     block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
+            #         # attempt to make it faster, but this is slower
+            #         # better = update_exp_sum > thr
+            #         # if tl.sum(better) > 0:
+            #         #     # replace current min slot
+            #         #     col  = thr_pos[:, None]
+            #         #     hit  = (col_idx == col)
 
-            #     # if these two are equal, it means that the maximum is equal 
-            #     # to the old value (i.e no change necessary)
-            #     block_update = block_sums_min != block_sums_max # (M,)
-            #     col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
+            #         #     block_sums = tl.where(hit, update_exp_sum[:, None], block_sums)
+            #         #     block_idx = tl.where(hit, (start_n).to(tl.int32), block_idx)
 
-            #     # make a mask of the minimum indices
-            #     bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
-            #     bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
+            #         #     new_thr, new_pos = tl.min(block_sums, axis=1, return_indices=True)
+            #         #     thr     = tl.where(better, new_thr, thr)
+            #         #     thr_pos = tl.where(better, new_pos.to(tl.int32), thr_pos)
 
-            #     block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-            #     block_idx = tl.where(bsa_mask, start_n, block_idx)
-            # else:
+            #         block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
+            #         block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
 
-            #     # # # K2 must be power-of-two, LOGK == log2(K2)
-            #     # tl.static_assert(((BSA_K & (BSA_K - 1)) == 0), "BSA_K must be power-of-two")
-            #     # tl.static_assert(((1 << BSA_LOGK) == BSA_K),    "BSA_LOGK must equal log2(BSA_K)")
+            #         # if these two are equal, it means that the maximum is equal 
+            #         # to the old value (i.e no change necessary)
+            #         block_update = block_sums_min != block_sums_max # (M,)
 
-            #     # # --- load root unmasked (no 'other' contamination) ---
-            #     # b_idx   = b_idx.to(tl.int64)                                 # per-lane base into heap slab
-            #     # root_v  = tl.load(BSA_BLOCK_SUMS   + (b_idx + 1).to(tl.int64))            # node 1
-            #     # root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64)).to(tl.int64)
+            #         # make a mask of the minimum indices
+            #         bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
+            #         bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
 
-            #     # # lanes that actually update (top-k max → min-winner tree)
-            #     # beat = update_exp_sum > root_v
+            #         block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+            #         block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+            #     else:
+            #         winner_update_inline_32(
+            #             update_exp_sum,
+            #             start_n,
+            #             BSA_BLOCK_SUMS,
+            #             BSA_HEAP_INDICES,
+            #             BSA_INDICES,
+            #             b_idx,
+            #             BSA_K,
+            #             BSA_LOGK,
+            #             BLOCK_M,
+            #             mask_m,
+            #         )
 
-            #     # # --- write leaf value + payload (only for beating lanes) ---
-            #     # leaf_idx  = (BSA_K + root_lf).to(tl.int64)                                   # [BSA_K .. 2*BSA_K-1]
-            #     # leaf_addr = b_idx + leaf_idx
-            #     # tl.store(BSA_BLOCK_SUMS + leaf_addr, update_exp_sum, mask=beat)
-            #     # tl.store(BSA_INDICES    + leaf_addr, start_n,        mask=beat)
+            using_exp_sum: tl.constexpr = False
+            if using_exp_sum:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
+                    update_exp_sum = tl.where(mask, p, 0.0)
+                    update_exp_sum = tl.sum(update_exp_sum, 1)
+                else:
+                    update_exp_sum = tl.sum(p, 1)
+            else:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
+                    update_exp_sum = tl.where(mask, qk + m_ij[:, None], float("-inf"))
+                    update_exp_sum = tl.max(update_exp_sum, 1)
+                else:
+                    update_exp_sum = qk + m_ij[:, None]
+                    update_exp_sum = tl.max(update_exp_sum, 1)
 
-            #     # # --- climb: keep the path child (value, pointer, index) in registers ---
-            #     # path_v = update_exp_sum.to(tl.float32)         # fp32
-            #     # path_p = root_lf                 # int64 leaf-id [0..BSA_K-1]
-            #     # child  = leaf_idx                # int64 node idx [BSA_K..2*BSA_K-1]
-            #     # node   = child >> 1              # parent idx [1..BSA_K-1]
+            if not BSA_HEAP:
+                # NOTE: update indices and scores
+                if (alpha is not None) and (using_exp_sum):
+                    block_sums *= alpha[:, None] # adjust previous sums for new normalization constant
+                else:
+                    block_sums *= 1 # WHY WHY WHY??? I HATE YOU
 
-            #     # # optional runtime guards (enable with TRITON_DEBUG=1)
-            #     # tl.device_assert((leaf_idx >= BSA_K) & (leaf_idx < 2*BSA_K), "leaf_idx OOR")
+                block_sums_min, block_sums_min_idx = tl.min(block_sums, axis=-1, return_indices=True) # (M, K) -> (M,)
+                block_sums_max = tl.maximum(block_sums_min, update_exp_sum) # (M,)
 
-            #     # for _ in tl.range(0, BSA_LOGK, num_stages=1):   # exactly BSA_LOGK steps; last write is root (node==1)
-            #     #     left  = (node << 1).to(tl.int64)
-            #     #     right = (left + 1).to(tl.int64)
+                # if these two are equal, it means that the maximum is equal 
+                # to the old value (i.e no change necessary)
+                block_update = block_sums_min != block_sums_max # (M,)
+                col_idx = tl.arange(0, BSA_K)[None, :] # (1, K)
 
-            #     #     # which side is our path child?
-            #     #     path_is_left = (child == left).to(tl.int64)
-            #     #     sib   = tl.where(path_is_left, right, left)
+                # make a mask of the minimum indices
+                bsa_mask = col_idx == block_sums_min_idx[:, None] # (M, K)
+                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1) # (M, K)
 
-            #     #     # load ONLY sibling from memory (unmasked loads)
-            #     #     sib_v = tl.load(BSA_BLOCK_SUMS   + (b_idx + sib).to(tl.int64))
-            #     #     sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib).to(tl.int64))
+                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+                block_idx = tl.where(bsa_mask, start_n, block_idx)
+            else:
+                # winner_update_inline(
+                winner_update_inline_efficient(
+                    update_exp_sum,
+                    start_n,
+                    BSA_BLOCK_SUMS,
+                    BSA_HEAP_INDICES,
+                    BSA_INDICES,
+                    b_idx,
+                    BSA_K,
+                    BSA_LOGK,
+                    BLOCK_M,
+                    mask_m,
+                )
 
-            #     #     # min-winner with **left-tie** policy (match typical winner-tree)
-            #     #     take_path = (path_v < sib_v) # | ((path_v == sib_v) & path_is_left)
-            #     #     # print(f"path v, sib v, take path: ", path_v, sib_v, take_path)
-            #     #     win_v = tl.where(take_path, path_v, sib_v)
-            #     #     win_p = tl.where(take_path, path_p, sib_p)
-
-            #     #     # win_v = tl.where(take_path, path_v, path_v)
-            #     #     # win_p = tl.where(take_path, path_p, path_p)
-
-            #     #     tl.store(BSA_BLOCK_SUMS   + (b_idx + node).to(tl.int64), win_v.to(tl.float32), mask=beat)
-            #     #     tl.store(BSA_HEAP_INDICES + (b_idx + node).to(tl.int64), win_p.to(tl.int64), mask=beat)
-
-            #     #     # move up one level
-            #     #     child  = node.to(tl.int64)
-            #     #     node   = (node >> 1).to(tl.int64)
-            #     #     path_v = win_v.to(tl.float32)
-            #     #     path_p = win_p.to(tl.int64)
-
-            #     winner_update_inline_32(
-            #         update_exp_sum,
-            #         start_n,
-            #         BSA_BLOCK_SUMS,
-            #         BSA_HEAP_INDICES,
-            #         BSA_INDICES,
-            #         b_idx,
-            #         BSA_K,
-            #         BSA_LOGK,
-            #         BLOCK_M,
-            #         mask_m,
-            #     )
-        
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
@@ -1171,16 +1185,8 @@ def _attn_fwd(
 
     lo = 0
     mid = tl.maximum(
-        0,
-        tl.min(
-            tl.where(
-                (offs_m - BSA_MASK_SW_SIZE) > 0 if RETURN_BSA_MASK else mask_m,
-                mask_idx, 
-                987654321
-            )
-        )
-        // BLOCK_N
-        * BLOCK_N,
+        0, 
+        tl.min(tl.where(mask_m, mask_idx, 987654321)) // BLOCK_N * BLOCK_N
     ).to(tl.int32)
     tl.multiple_of(mid, BLOCK_N)
     hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
@@ -2150,7 +2156,7 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     return_bsa_indices: bool = False,
-    bsa_mask_sink_token_size: int = 16,
+    bsa_mask_sink_token_size: int = 64,
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
