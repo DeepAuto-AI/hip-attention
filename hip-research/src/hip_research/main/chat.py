@@ -209,8 +209,8 @@ while True:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
 
             print(
-                f"[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]", 
-                flush=True
+                f"[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]",
+                flush=True,
             )
 
             if "<think>" in text:

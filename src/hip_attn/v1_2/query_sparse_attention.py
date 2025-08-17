@@ -293,10 +293,7 @@ def _attn_fwd_inner(
         #         (q_nope * cq).to(q_dtype),
         #         (k_nope.to(q_dtype) * ck).to(q_dtype)
         #     ).to(tl.float32)
-        qk = tl.dot(
-            (q * cq).to(q_dtype), 
-            (k * ck).to(q_dtype)
-        )
+        qk = tl.dot((q * cq).to(q_dtype), (k * ck).to(q_dtype))
         if HEAD_DIM != HEAD_ROPE:
             qk = tl.dot(q_nope, k_nope, acc=qk)
 
@@ -359,7 +356,7 @@ def _attn_fwd_inner(
             # idx_tsrc = idx_tsrc + BLOCK_N
             # mask_tsrc = idx_tsrc < hi
             pass
-    
+
         # -- update block sums and indices for block sparse attention
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
@@ -437,8 +434,8 @@ def _attn_fwd_inner(
 
                 # NOTE: update indices and scores
                 block_sums_min, block_sums_min_idx = tl.min(
-                    block_sums, 
-                    axis=-1, 
+                    block_sums,
+                    axis=-1,
                     return_indices=True,
                     # FIXME tie_break_left=False not working
                     return_indices_tie_break_left=True,
@@ -486,8 +483,10 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64,128,256]
-        for BN in [64,]
+        for BM in [64, 128, 256]
+        for BN in [
+            64,
+        ]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
     ]

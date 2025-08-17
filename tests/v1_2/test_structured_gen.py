@@ -21,9 +21,9 @@ uv run --env-file .env scripts/test_structured_output.py
 ```
 """
 
+import os
 from typing import List, Optional
 
-import os
 from openai import OpenAI
 from pydantic import BaseModel, Field
 

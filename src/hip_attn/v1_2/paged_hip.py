@@ -1577,12 +1577,12 @@ def _forward_delta_attn(
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
 
                     if debug_qsa_masking and (get_local_rank() == 0):
-                        scores = bsa_block_sums[0,0]
+                        scores = bsa_block_sums[0, 0]
                         scores_min = scores.amin()
                         scores_max = scores.amax()
                         scores = (scores - scores_min) / (scores_max - scores_min)
                         mask = convert_qsa_mask_to_img(
-                            bsa_indices[0,0].cpu().numpy(),
+                            bsa_indices[0, 0].cpu().numpy(),
                             scores.cpu().float().numpy(),
                             idx.cpu().numpy(),
                             query.shape[1],
@@ -1612,7 +1612,7 @@ def _forward_delta_attn(
                     )
 
                     indices = bsa_indices.flatten(0, 1)[:, :-num_last_dense, :]
-                    
+
                     num_union = (
                         args_sparse.block_sparse_block_size_q // delta_attention_args_w
                     )
@@ -1639,13 +1639,17 @@ def _forward_delta_attn(
 
                     num_blocks_to_trim = qsa_mask_pre_trim // args_sparse.block_size_k
                     if num_blocks_to_trim < indices.shape[-1]:
-                        block_scores = bsa_block_sums.flatten(0, 1)[:, :-num_last_dense, :]
+                        block_scores = bsa_block_sums.flatten(0, 1)[
+                            :, :-num_last_dense, :
+                        ]
                         if block_scores.shape[1] % num_union:
                             block_scores = torch.cat(
                                 [
                                     block_scores,
                                     block_scores[:, -1:, :].repeat(
-                                        1, num_union - block_scores.shape[1] % num_union, 1
+                                        1,
+                                        num_union - block_scores.shape[1] % num_union,
+                                        1,
                                     ),
                                 ],
                                 dim=1,
@@ -1658,25 +1662,31 @@ def _forward_delta_attn(
                         )
                         block_scores = block_scores.flatten(-2, -1)
 
-                        t_indices = torch.sort(block_scores, dim=-1, descending=True).indices
+                        t_indices = torch.sort(
+                            block_scores, dim=-1, descending=True
+                        ).indices
                         indices = indices.gather(
                             dim=-1,
-                            index=t_indices[..., :num_blocks_to_trim], 
+                            index=t_indices[..., :num_blocks_to_trim],
                         )
-                    
+
                     indices, t_sort = indices.sort(dim=-1)
                     # indices = (
                     #     indices // args_sparse.block_size_k * args_sparse.block_size_k
                     # )
                     num_blocks_to_trim = qsa_mask_post_trim // args_sparse.block_size_k
                     if num_blocks_to_trim < indices.shape[-1]:
-                        block_scores = bsa_block_sums.flatten(0, 1)[:, :-num_last_dense, :]
+                        block_scores = bsa_block_sums.flatten(0, 1)[
+                            :, :-num_last_dense, :
+                        ]
                         if block_scores.shape[1] % num_union:
                             block_scores = torch.cat(
                                 [
                                     block_scores,
                                     block_scores[:, -1:, :].repeat(
-                                        1, num_union - block_scores.shape[1] % num_union, 1
+                                        1,
+                                        num_union - block_scores.shape[1] % num_union,
+                                        1,
                                     ),
                                 ],
                                 dim=1,
@@ -1692,18 +1702,25 @@ def _forward_delta_attn(
 
                         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
                         block_scores_cumsum = block_scores.cumsum(-1)
-                        block_scores_cumsum_block = (block_scores_cumsum * unique_mask).cumsum(-1)
-                        block_scores_cumsum = (block_scores_cumsum + (block_scores * unique_mask).cumsum(-1)) - block_scores_cumsum_block
+                        block_scores_cumsum_block = (
+                            block_scores_cumsum * unique_mask
+                        ).cumsum(-1)
+                        block_scores_cumsum = (
+                            block_scores_cumsum
+                            + (block_scores * unique_mask).cumsum(-1)
+                        ) - block_scores_cumsum_block
                         unique_mask = torch.roll(indices, shifts=-1, dims=-1) != indices
                         block_scores = torch.where(
-                            unique_mask, block_scores, torch.finfo(block_scores.dtype).min
+                            unique_mask,
+                            block_scores,
+                            torch.finfo(block_scores.dtype).min,
                         )
                         indices = torch.where(
                             unique_mask, indices, torch.iinfo(indices.dtype).max
                         )
                         t_sort = block_scores.argsort(dim=-1, descending=True)
                         indices = indices.gather(
-                            index=t_sort[...,:num_blocks_to_trim], dim=-1
+                            index=t_sort[..., :num_blocks_to_trim], dim=-1
                         )
                     else:
                         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
@@ -1733,13 +1750,17 @@ def _forward_delta_attn(
                         mask = convert_qsa_mask_to_img(
                             indices[0].cpu().numpy(),
                             None,
-                            args_sparse.position_ids[0, ::args_sparse.block_size_q].cpu().numpy(),
+                            args_sparse.position_ids[0, :: args_sparse.block_size_q]
+                            .cpu()
+                            .numpy(),
                             query.shape[1],
                             int(args_sparse.position_ids.amax().item()) + 256,
                             256,
                         )
-                        cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask)
-                    
+                        cv2.imwrite(
+                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                        )
+
                     bsa_block_size_q = 128
                     if args_sparse.block_size_q > bsa_block_size_q:
                         assert (args_sparse.block_size_q % bsa_block_size_q) == 0
