@@ -127,8 +127,8 @@ def test_with_hip_bsa() -> None:
     q_block, k_block = 32, 16
     seq = 4096 * 32
     device = 0
-    K = 16
-    window_size, sink_tokens = 128, 64
+    K = 512
+    window_size, sink_tokens = 2048, 64
 
     # d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
     dtype = torch.bfloat16
@@ -193,23 +193,32 @@ def test_with_hip_bsa() -> None:
         using_extend=False,
     )
 
-    def qsa(heap=False) -> Tuple[torch.Tensor, ...]:
-        out, (bsa_idx, block_sums) = query_sparse_attention(
-            q=qp,
-            k=kp,
-            v=vp,
-            mask=mask,
-            k_cache=None,
-            v_cache=None,
-            block_table=None,
-            return_bsa_indices=True,
-            sm_scale=math.sqrt(1 / q.size(-1)),
-            bsa_top_block_k=K,
-            bsa_block_size_k=k_block,
-            bsa_mask_sliding_window_size=window_size,
-            bsa_mask_sink_token_size=sink_tokens,
-            bsa_heap=heap,
-        )
+    def qsa(heap=False, bsa_sort=False, return_bsa_indices=True) -> Tuple[torch.Tensor, ...]:
+        bsa_idx, block_sums = None, None
+        if return_bsa_indices:
+            out, (bsa_idx, block_sums) = query_sparse_attention(
+                q=qp,
+                k=kp,
+                v=vp,
+                mask=mask,
+                k_cache=None,
+                v_cache=None,
+                block_table=None, 
+                return_bsa_indices=return_bsa_indices,
+                sm_scale=math.sqrt(1 / q.size(-1)),
+                bsa_top_block_k=K,
+                bsa_block_size_k=k_block,
+                bsa_mask_sliding_window_size=window_size,
+                bsa_mask_sink_token_size=sink_tokens,
+                bsa_heap=heap,
+                bsa_sort=bsa_sort,
+            )
+        else:
+            out = query_sparse_attention(
+                q=qp, k=kp, v=vp,
+                mask=mask, k_cache=None, v_cache=None,
+                block_table=None, sm_scale=math.sqrt(1 / q.size(-1)),
+            )
 
         bsa_out = None
         # ks = (bsa_idx < 987654321).sum(dim=-1)
@@ -230,22 +239,25 @@ def test_with_hip_bsa() -> None:
         #     access_counter,
         #     cache_miss_counter,
         # )
-        return out, bsa_out, bsa_idx
+        return out, bsa_out, bsa_idx, block_sums
     
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    out, bsa_out, block_idx = qsa(heap=False)
-    out, bsa_out, block_idx = qsa(heap=True)
+    out, bsa_out, block_idx, _ = qsa(heap=False)
+    out, bsa_out, block_idx, _ = qsa(heap=True)
 
     print(f"{block_idx.size()=}")
     rand_idx = torch.randperm(block_idx.size(2))[:4]
-    out, bsa_out, block_idx = qsa(heap=False)
-    out, bsa_out, block_idx_heap = qsa(heap=True)
+    out, bsa_out, block_idx, block_sums = qsa(heap=False)
+    out, bsa_out, block_idx_heap, block_sums_heap = qsa(heap=True)
 
-    eq = block_idx[0, 0, rand_idx].unsqueeze(-1) == block_idx_heap[0, 0, rand_idx].unsqueeze(-2)
+    eq = block_idx[0, 0, rand_idx].unsqueeze(-1) == block_idx_heap[0, 0, rand_idx, K:].unsqueeze(-2)
     eq = eq.sum(-1).sum(-1)
     print(f"heap and plain returned same indices: {eq=}")
-    # print(f"1: {block_idx[0, 0, rand_idx]=}")
-    # print(f"2: {block_idx[0, 0, rand_idx, K:]=}")
+    print(f"1: {block_idx[0, 0, rand_idx]=}")
+    print(f"2: {block_idx_heap[0, 0, rand_idx, K:]=}")
+
+    print(f"\n\n1 sums: {block_sums[0, 0, rand_idx]=}")
+    print(f"2 sums: {block_sums_heap[0, 0, rand_idx, K:]=}")
 
     # bsa_out = bsa_out.transpose(1, 2)
 
@@ -459,6 +471,9 @@ def test_with_hip_bsa() -> None:
     # latency_hip = latency(lambda: dual_stage_quadratic_hip_attention(**dual_stage_kwargs, cached_metadata=None))
     # print(f'hip: {latency_hip:.2f} ms took')
     print(f"calling qsa latency")
+
+    latency_qsa = latency(lambda: qsa(return_bsa_indices=False))
+    print(f'qsa no bsa indices: {latency_qsa:.2f} ms took')
     latency_qsa = latency(lambda: qsa())
     print(f'qsa no heap: {latency_qsa:.2f} ms took')
     latency_qsa = latency(lambda: qsa(heap=True))
