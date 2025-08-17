@@ -136,10 +136,10 @@ def main() -> None:
 
 def test_with_hip_bsa() -> None:
     q_block, k_block = 32, 16
-    seq = 131072
+    seq = 4096 * 32
     device = 0
-    K = 64
-    window_size = 16
+    K = 16
+    window_size, sink_tokens = 128, 64
 
     # d = torch.load("/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu")
     dtype = torch.bfloat16
@@ -203,7 +203,7 @@ def test_with_hip_bsa() -> None:
         block_size_q=q_block,
         block_size_k=k_block,
         position_ids=None,
-        sink_token_size=64,
+        sink_token_size=sink_tokens,
         sliding_window_size=window_size,
         logit_softcap=None,
         rope_range=[0, d],
@@ -223,6 +223,8 @@ def test_with_hip_bsa() -> None:
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
             bsa_block_size_k=k_block,
+            bsa_mask_sliding_window_size=window_size,
+            bsa_mask_sink_token_size=sink_tokens,
             bsa_heap=heap,
         )
 
@@ -257,7 +259,7 @@ def test_with_hip_bsa() -> None:
     out, bsa_out, block_idx_heap = qsa(heap=True)
 
     eq = block_idx[0, 0, rand_idx].unsqueeze(-1) == block_idx_heap[0, 0, rand_idx].unsqueeze(-2)
-    eq = eq.sum(-1)
+    eq = eq.sum(-1).sum(-1)
     print(f"heap and plain returned same indices: {eq=}")
     # print(f"1: {block_idx[0, 0, rand_idx]=}")
     # print(f"2: {block_idx[0, 0, rand_idx, K:]=}")
