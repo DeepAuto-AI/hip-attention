@@ -39,7 +39,7 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_API_BASE", None),
 )
 
-note = "Ship the SDK docs by 2025-08-20 in UTC+0 timestamp format and tag as docs, release."
+note = "Ship the SDK docs by 2025-08-20 and tag as docs, release."
 
 # 2) Ask the model to produce data matching the schema
 completion = client.chat.completions.parse(
@@ -49,7 +49,7 @@ completion = client.chat.completions.parse(
         {"role": "user", "content": note},
     ],
     response_format=Todo,  # <<— pass the Pydantic class directly
-    temperature=0,
+    temperature=0.7,
 )
 
 # 3) Get a Pydantic instance back
