@@ -128,8 +128,8 @@ def _attn_fwd_inner(
         b_idx = (
             start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
         ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
-        block_idx = tl.load(BSA_INDICES + b_idx)
-        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx)
+        block_idx = tl.load(BSA_INDICES + b_idx, mask=mask_m[:, None])
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=mask_m[:, None])
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -293,9 +293,9 @@ def _attn_fwd_inner(
         #         (q_nope * cq).to(q_dtype),
         #         (k_nope.to(q_dtype) * ck).to(q_dtype)
         #     ).to(tl.float32)
-        qk = tl.dot(q, k)
+        qk = tl.dot((q * cq).to(q_dtype), (k * ck).to(q_dtype))
         if HEAD_DIM != HEAD_ROPE:
-            qk = qk + tl.dot(q_nope, k_nope)
+            qk = tl.dot(q_nope, k_nope, acc=qk)
 
         qk = qk * 1.44269504
 
@@ -313,106 +313,6 @@ def _attn_fwd_inner(
         # -- update m_i and l_i
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
-
-        # -- update block sums and indices for block sparse attention
-        # if RETURN_BSA_MASK:
-        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
-            # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
-            tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
-            tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
-            tl.static_assert(
-                (BSA_MASK_STEP_SIZE == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
-            )
-
-            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            using_exp_sum = True
-            if using_exp_sum:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
-                        start_n + offs_n[None, :]
-                    )
-                    p_split = tl.where(mask, p, 0.0)
-                else:
-                    p_split = p
-
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-            else:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
-                        start_n + offs_n[None, :]
-                    )
-                    p_split = tl.where(mask, qk_original, float("-inf"))
-                else:
-                    p_split = qk_original
-
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-
-                if i_offset == (0 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_0
-                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_1
-                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_2
-                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_3
-
-                # NOTE: update indices and scores
-                if (update_alpha is not None) and (using_exp_sum):
-                    block_sums *= update_alpha[
-                        :, None
-                    ]  # adjust previous sums for new normalization constant
-
-                block_sums_min, block_sums_min_idx = tl.min(
-                    block_sums, axis=-1, return_indices=True
-                )  # (M, K) -> (M,)
-                block_sums_max = tl.maximum(block_sums_min, update_exp_sum)  # (M,)
-
-                # if these two are equal, it means that the maximum is equal
-                # to the old value (i.e no change necessary)
-                block_update = block_sums_min != block_sums_max  # (M,)
-                col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K)
-
-                # make a mask of the minimum indices
-                bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
-                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
-
-                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-                block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
 
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
@@ -442,11 +342,10 @@ def _attn_fwd_inner(
         # else:
         #     p = p.to(v.dtype)
 
-        acc = acc + tl.dot(
+        acc = tl.dot(
             p.to(q_dtype),
             v.to(q_dtype),
-            out_dtype=tl.float32,
-            allow_tf32=True,
+            acc=acc,
         )
         # update m_i and l_i
         m_i = m_ij
@@ -458,9 +357,106 @@ def _attn_fwd_inner(
             # mask_tsrc = idx_tsrc < hi
             pass
 
+        # -- update block sums and indices for block sparse attention
+        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+            # FIXME How can i this thing more dynamic?
+            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
+            tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
+            tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
+            tl.static_assert(
+                (BSA_MASK_STEP_SIZE == BLOCK_N)
+                | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
+                | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
+            )
+
+            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
+            using_exp_sum: tl.constexpr = True
+            if using_exp_sum:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
+                    p_split = tl.where(mask.to(tl.int1), p, 0.0)
+                else:
+                    p_split = p
+
+                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                    l_ij_0 = l_ij
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.sum(p_split, 2)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.sum(p_split, 3)
+                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
+                else:
+                    raise Exception()
+            else:
+                if MASKING:
+                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                        start_n + offs_n[None, :]
+                    )
+                    p_split = tl.where(mask.to(tl.int1), qk_original, float("-inf"))
+                else:
+                    p_split = qk_original
+
+                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                    l_ij_0 = tl.max(p_split, 1)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.max(p_split, 2)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
+                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                    l_ij_all = tl.max(p_split, 3)
+                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
+                else:
+                    raise Exception()
+
+            if using_exp_sum:
+                # adjust previous sums for new normalization constant
+                block_sums *= alpha[:, None]
+
+            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
+                if i_offset == (0 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_0
+                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_1
+                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_2
+                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
+                    update_exp_sum = l_ij_3
+
+                # NOTE: update indices and scores
+                block_sums_min, block_sums_min_idx = tl.min(
+                    block_sums,
+                    axis=-1,
+                    return_indices=True,
+                    # FIXME tie_break_left=False not working
+                    return_indices_tie_break_left=True,
+                )  # (M, K) -> (M,)
+                block_sums_max = tl.maximum(block_sums_min, update_exp_sum)  # (M,)
+
+                # if these two are equal, it means that the maximum is equal
+                # to the old value (i.e no change necessary)
+                block_update = block_sums_min != block_sums_max  # (M,)
+                col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K)
+
+                # make a mask of the minimum indices
+                bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
+                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
+
+                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
+                block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+
     if RETURN_BSA_MASK:
-        tl.store(BSA_INDICES + b_idx, value=block_idx)
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums)
+        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
 
     return acc, l_i, m_i
 
@@ -487,8 +483,10 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128]
-        for BN in [32, 64]
+        for BM in [64, 128, 256]
+        for BN in [
+            64,
+        ]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
     ]
@@ -1344,7 +1342,7 @@ class _attention(torch.autograd.Function):
             )
             bsa_block_sums = torch.full(
                 (BSZ, HEAD, TDST, bsa_top_block_k),
-                fill_value=float("-inf"),
+                fill_value=-3200.0,
                 device=q.device,
                 dtype=torch.float32,
             )
@@ -1692,7 +1690,7 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     return_bsa_indices: bool = False,
-    bsa_mask_sink_token_size: int = 64,
+    bsa_mask_sink_token_size: int = 0,
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 2,

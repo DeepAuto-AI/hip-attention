@@ -189,8 +189,8 @@ while True:
                             delta_text = delta.get("content", "")
                             if delta_text is not None:
                                 if during_reasoning:
-                                    print()
-                                during_reasoning = False
+                                    during_reasoning = False
+                                    print(flush=True)
                                 print(delta_text, end="", flush=True)
                                 text += delta_text
                             else:
@@ -209,7 +209,8 @@ while True:
                             print(f"\n[Error parsing line] {decoded_line}\n{e}")
 
             print(
-                f"[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]"
+                f"[TTFT = {t_ttft - t_start:.2f} sec, THPT = {num_decoded / (time.time() - t_ttft):.2f} tok/sec]",
+                flush=True,
             )
 
             if "<think>" in text:

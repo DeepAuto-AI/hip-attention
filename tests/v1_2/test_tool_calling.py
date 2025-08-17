@@ -33,9 +33,7 @@ from langgraph.prebuilt import create_react_agent
 @tool
 def write_file(file_path: str, content: str) -> str:
     """Write a file to the filesystem."""
-    print("`write_file` called!")
-    with open(file_path, "w") as f:
-        _ = f.write(content)
+    print("[test] `write_file` called! Content: ```", content, "```", sep="")
     return f"File {file_path} written successfully."
 
 
