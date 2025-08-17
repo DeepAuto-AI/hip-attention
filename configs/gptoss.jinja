@@ -201,7 +201,7 @@
     {{- "Knowledge cutoff: 2024-06\n" }}
     {{- "Current date: " + strftime_now("%Y-%m-%d") + "\n\n" }}
     {%- if reasoning_effort is not defined %}
-        {%- set reasoning_effort = "high" %}
+        {%- set reasoning_effort = "medium" %}
     {%- endif %}
     {{- "Reasoning: " + reasoning_effort + "\n\n" }}
     {%- if builtin_tools %}

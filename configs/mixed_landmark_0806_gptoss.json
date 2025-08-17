@@ -6,7 +6,7 @@
     "using_extend": true,
     "dense_layers": [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34],
     "mask_refresh_interval": [96],
-    "self_extend_scale": 20,
+    "self_extend_scale": 10,
     "layers": [
         {
             "sliding_window_size": 128,
@@ -16,7 +16,7 @@
             "stages": [ { } ]
         },
         {
-            "sliding_window_size": 4096000,
+            "sliding_window_size": 1024000,
             "second_stage_k": 0,
             "sink_token_size": 0,
             "sa_extend_backend": "self_extend",
