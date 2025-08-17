@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "flashinfer-python"
-version = "0.2.11.post1"
+version = "0.2.11.post3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cuda-python" },
@@ -783,7 +783,7 @@ dependencies = [
     { name = "requests" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/37/e3/2e8e31f7f7ee26f39968264e4fcf74f9810d90e940859016d974106ed5c6/flashinfer_python-0.2.11.post1.tar.gz", hash = "sha256:014ea1e3cbc19763f5cb73ed72ea727ade9f47c4ff4fb9107e05ca2c5e5cca7f", size = 3567506, upload-time = "2025-08-11T09:47:51.311Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/09/5d89ef0bc2d19d3ebcf3b9fa621c945909f681818c9d55aa3181921db874/flashinfer_python-0.2.11.post3.tar.gz", hash = "sha256:d8b0c20021b86f3623f304aaa83ab4c0043d0d82aafb5eef4497c91a13b09fa4", size = 3550352, upload-time = "2025-08-14T06:18:46.088Z" }
 
 [[package]]
 name = "fonttools"
@@ -3489,16 +3489,16 @@ wheels = [
 
 [[package]]
 name = "sgl-kernel"
-version = "0.3.3"
+version = "0.3.5"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/ab/de247f0ed3eca2c19c707857244ca348e79f40e24a18269c38195a31136d/sgl_kernel-0.3.3-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:7b7b7071a373f673838923cbfd0982e09c91dc5b42adb4c7dacd6ec36d969ae9", size = 280871576, upload-time = "2025-08-08T09:16:21.198Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/59/463faa351550bd3ca370b6d2db871dea20517d010a2b99c6070b09d3557b/sgl_kernel-0.3.5-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:accf452917a8f87f7c861ef6fb499c8e290f0985cedfa4294534388bfcd5b12a", size = 308487449, upload-time = "2025-08-14T11:10:36.75Z" },
 ]
 
 [[package]]
 name = "sglang"
-version = "0.5.0rc0"
-source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#8f0dad7248b0885e450e8c428f76224bd91eeef4" }
+version = "0.5.0rc2"
+source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#086fecf50ec1baa81d141efdce247fd23721b385" }
 dependencies = [
     { name = "aiohttp" },
     { name = "ipython", version = "8.34.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -3952,7 +3952,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "4.55.0"
+version = "4.55.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -3966,9 +3966,9 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/5d/f7dc746eef83336a6b34197311fe0c1da0d1192f637c726c6a5cf0d83502/transformers-4.55.0.tar.gz", hash = "sha256:15aa138a05d07a15b30d191ea2c45e23061ebf9fcc928a1318e03fe2234f3ae1", size = 9569089, upload-time = "2025-08-05T16:13:48.997Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/a5/d8b8a1f3a051daeb5f11253bb69fc241f193d1c0566e299210ed9220ff4e/transformers-4.55.2.tar.gz", hash = "sha256:a45ec60c03474fd67adbce5c434685051b7608b3f4f167c25aa6aeb1cad16d4f", size = 9571466, upload-time = "2025-08-13T18:25:43.767Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/93/bcb22fb52ed65084c0199270832aa4cdd4b41296d896f3e7ade188bccb68/transformers-4.55.0-py3-none-any.whl", hash = "sha256:29d9b8800e32a4a831bb16efb5f762f6a9742fef9fce5d693ed018d19b106490", size = 11267905, upload-time = "2025-08-05T16:13:34.814Z" },
+    { url = "https://files.pythonhosted.org/packages/db/5a/022ac010bedfb5119734cf9d743cf1d830cb4c604f53bb1552216f4344dc/transformers-4.55.2-py3-none-any.whl", hash = "sha256:097e3c2e2c0c9681db3da9d748d8f9d6a724c644514673d0030e8c5a1109f1f1", size = 11269748, upload-time = "2025-08-13T18:25:40.394Z" },
 ]
 
 [package.optional-dependencies]
