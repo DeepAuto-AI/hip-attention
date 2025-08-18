@@ -217,6 +217,7 @@ def test_with_hip_bsa():
             return_bsa_indices=True,
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
+            bsa_block_size_q=1,
             bsa_block_size_k=k_block,
         )
 

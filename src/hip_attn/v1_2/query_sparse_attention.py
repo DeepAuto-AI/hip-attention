@@ -174,12 +174,12 @@ def _attn_fwd_inner(
             b_idx = (
                 start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
             ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
-            b_mask = True
+            b_mask = mask_m
         else:
             b_idx = (
                 start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
             ) * stride_bim + tl.arange(0, BSA_K * 2)[None, :] * stride_bik
-            b_mask = tl.arange(0, BSA_K * 2)[None, :] < BSA_K
+            b_mask = mask_m & (tl.arange(0, BSA_K * 2)[None, :] < BSA_K)
         block_idx = tl.load(BSA_INDICES + b_idx, mask=b_mask, other=-1)
         block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=b_mask, other=-10000.0)
 
@@ -346,9 +346,9 @@ def _attn_fwd_inner(
         #         (q_nope * cq).to(q_dtype),
         #         (k_nope.to(q_dtype) * ck).to(q_dtype)
         #     ).to(tl.float32)
-        qk = tl.dot(q, k)
+        qk = tl.dot((q * cq).to(q_dtype), (k * ck).to(q_dtype))
         if HEAD_DIM != HEAD_ROPE:
-            qk = qk + tl.dot(q_nope, k_nope)
+            qk = tl.dot(q_nope, k_nope, acc=qk)
 
         qk = qk * 1.44269504
 
@@ -367,11 +367,53 @@ def _attn_fwd_inner(
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
+        # -- update output accumulator --
+        acc = acc * alpha.to(acc.dtype)[:, None]
+        # update acc
+        if not USING_PAGED_CACHE:
+            v = tl.load(
+                V_block_ptr,
+                boundary_check=(0,),
+                padding_option="zero",
+            )
+        else:
+            v = tl.load(
+                V_CACHE
+                + idx_t[:, None] * stride_v_cache_t
+                + 0 * stride_v_cache_page
+                + tl.arange(0, HEAD_DIM)[None, :] * stride_v_cache_hid,
+                mask=mask_tsrc[:, None],
+                other=0.0,
+            )
+
+        if v_descale is not None:
+            v *= v_descale
+
+        # NOTE FIXME why this conversion needed?
+        # if fp8_v:
+        #     p = p.to(tl.float8e5)
+        # else:
+        #     p = p.to(v.dtype)
+
+        acc = tl.dot(
+            p.to(q_dtype),
+            v.to(q_dtype),
+            acc=acc,
+        )
+        # update m_i and l_i
+        m_i = m_ij
+        if not USING_PAGED_CACHE:
+            V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+            K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+        else:
+            # idx_tsrc = idx_tsrc + BLOCK_N
+            # mask_tsrc = idx_tsrc < hi
+            pass
+
         # -- update block sums and indices for block sparse attention
-        # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = 32
+            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
             tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
             tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
             tl.static_assert(
@@ -381,13 +423,13 @@ def _attn_fwd_inner(
             )
 
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            using_exp_sum = False
+            using_exp_sum: tl.constexpr = True
             if using_exp_sum:
                 if MASKING:
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
                         start_n + offs_n[None, :]
                     )
-                    p_split = tl.where(mask, p, 0.0)
+                    p_split = tl.where(mask.to(tl.int1), p, 0.0)
                 else:
                     p_split = p
 
@@ -410,7 +452,7 @@ def _attn_fwd_inner(
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
                         start_n + offs_n[None, :]
                     )
-                    p_split = tl.where(mask, qk_original, float("-inf"))
+                    p_split = tl.where(mask.to(tl.int1), qk_original, float("-inf"))
                 else:
                     p_split = qk_original
 
@@ -485,50 +527,6 @@ def _attn_fwd_inner(
                 )
                 topk_idx += 1
 
-        # -- update output accumulator --
-        acc = acc * alpha.to(acc.dtype)[:, None]
-        # update acc
-        if not USING_PAGED_CACHE:
-            v = tl.load(
-                V_block_ptr,
-                boundary_check=(0,),
-                padding_option="zero",
-            )
-        else:
-            v = tl.load(
-                V_CACHE
-                + idx_t[:, None] * stride_v_cache_t
-                + 0 * stride_v_cache_page
-                + tl.arange(0, HEAD_DIM)[None, :] * stride_v_cache_hid,
-                mask=mask_tsrc[:, None],
-                other=0.0,
-            )
-
-        if v_descale is not None:
-            v *= v_descale
-
-        # NOTE FIXME why this conversion needed?
-        # if fp8_v:
-        #     p = p.to(tl.float8e5)
-        # else:
-        #     p = p.to(v.dtype)
-
-        acc = acc + tl.dot(
-            p.to(q_dtype),
-            v.to(q_dtype),
-            out_dtype=tl.float32,
-            allow_tf32=True,
-        )
-        # update m_i and l_i
-        m_i = m_ij
-        if not USING_PAGED_CACHE:
-            V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-            K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-        else:
-            # idx_tsrc = idx_tsrc + BLOCK_N
-            # mask_tsrc = idx_tsrc < hi
-            pass
-
     if RETURN_BSA_MASK:
         tl.store(BSA_INDICES + b_idx, value=block_idx, mask=b_mask)
         tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=b_mask)
@@ -558,8 +556,10 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128]
-        for BN in [32, 64]
+        for BM in [64, 128, 256]
+        for BN in [
+            64,
+        ]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
     ]
@@ -1421,6 +1421,25 @@ class _attention(torch.autograd.Function):
             )
             assert bsa_indices.stride() == bsa_block_sums.stride()
 
+        bsa_indices = bsa_block_sums = None
+        if return_bsa_indices:
+            assert not return_running_statistics
+            assert not return_pooled_scores
+            BSZ, HEAD, TDST = q.shape[:3]
+            bsa_indices = torch.full(
+                (BSZ, HEAD, TDST, bsa_top_block_k),
+                987654321,
+                device=q.device,
+                dtype=torch.int64,
+            )
+            bsa_block_sums = torch.full(
+                (BSZ, HEAD, TDST, bsa_top_block_k),
+                fill_value=-3200.0,
+                device=q.device,
+                dtype=torch.float32,
+            )
+            assert bsa_indices.stride() == bsa_block_sums.stride()
+
         if return_pooled_scores:
             assert not return_running_statistics
             assert not return_bsa_indices
@@ -1763,7 +1782,7 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     return_bsa_indices: bool = False,
-    bsa_mask_sink_token_size: int = 64,
+    bsa_mask_sink_token_size: int = 0,
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 2,

@@ -88,7 +88,8 @@ git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 
 # This install all research dev dependencies in .venv/
-uv sync
+uv sync --no-dev  # Install base dependencies first
+uv sync  # Then install all dependencies including no-build-isolation packages (e.g., flash-attn)
 uv run pre-commit install
 ```
 
@@ -172,6 +173,14 @@ Check [how to reproduce experiment](docs/REPRODUCE.md) page
 ```
 
 ## Contributing
+
+### Updating dependencies
+
+```bash
+# This will update git commit hash of sglang
+uv lock --upgrade-package sglang
+uv sync
+```
 
 ### Building and publishing
 

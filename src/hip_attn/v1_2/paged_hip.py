@@ -3,6 +3,9 @@ import os
 import warnings
 from typing import Any, List, Optional
 
+import cv2
+import numba
+import numpy as np
 import torch
 import triton
 from flash_attn import flash_attn_func
@@ -13,44 +16,45 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
 
-import numpy as np
-import numba
-import cv2
 
-@numba.njit
+@numba.njit(parallel=False)
 def convert_qsa_mask_to_img(
-    bsa_indices: np.ndarray, 
-    bsa_scores: np.ndarray,
-    idx: np.ndarray,
+    bsa_indices: np.ndarray,
+    bsa_scores: Optional[np.ndarray],
+    tdst: np.ndarray,
     TDST: int,
     TSRC: int,
-    POOL_SIZE: int
+    POOL_SIZE: int,
 ):
     N_SPARSE_Q = bsa_indices.shape[0]
     N_BLOCK = bsa_indices.shape[1]
     img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 3), dtype=np.int32)
     img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
-    
+
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
-            pty = idx[i_q]
+            pty = tdst[i_q]
             ptx = bsa_indices[i_q, k]
             if (ptx // POOL_SIZE) < img.shape[1] and (pty // POOL_SIZE) < img.shape[0]:
-                score = bsa_scores[i_q, k]
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 0] += 255
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 1] += int(255 * score)
-                img[pty // POOL_SIZE, ptx//POOL_SIZE, 2] += int(255 * (1 - score))
-                img_cnt[pty // POOL_SIZE, ptx//POOL_SIZE] += 1
-    
+                if bsa_scores is not None:
+                    score = bsa_scores[i_q, k]
+                else:
+                    score = 1.0
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 0] += 255
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 1] += int(255 * score)
+                img[pty // POOL_SIZE, ptx // POOL_SIZE, 2] += int(255 * (1 - score))
+                img_cnt[pty // POOL_SIZE, ptx // POOL_SIZE] += 1
+
     for i in numba.prange(img.shape[0]):
         for j in range(img.shape[1]):
             c = img_cnt[i, j]
             if c > 0:
                 img[i, j] = (img[i, j] / c).astype(np.int32)
-    
+
     img = img.astype(np.uint8)
-    
+
     return img
+
 
 @capture
 def flash_attn_varlen_func(
@@ -274,13 +278,17 @@ def forward_paged_hip(
         if cached_metadata is not None:
             states = cached_metadata.state
             if isinstance(states, list) and (len(states) < len(extend_seq_lens_cpu)):
-                assert (len(extend_seq_lens_cpu) % len(states)) == 0
-                n_repeat = len(extend_seq_lens_cpu) // len(states)
-                new_states = []
-                for state in states:
-                    for _ in range(n_repeat):
-                        new_states.append(copy.deepcopy(state))
-                states = new_states
+                if (len(extend_seq_lens_cpu) % len(states)) == 0:
+                    assert (len(extend_seq_lens_cpu) % len(states)) == 0
+                    n_repeat = len(extend_seq_lens_cpu) // len(states)
+                    new_states = []
+                    for state in states:
+                        for _ in range(n_repeat):
+                            new_states.append(copy.deepcopy(state))
+                    states = new_states
+                else:
+                    cached_metadata.state = None
+                    states = None
 
         start_len = 0
         decoding_reqs = []
@@ -940,8 +948,8 @@ def _forward_delta_attn(
     # On prefill
     assert not is_decode
     assert not torch.cuda.is_current_stream_capturing()
-    
-    test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
+
+    test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
 
     # NOTE: sample sparse context
     assert isinstance(delta_attention_args_window, int)
@@ -1146,7 +1154,7 @@ def _forward_delta_attn(
             # )
 
             args.bsa_return_running_statistics = delta_attention_args_adjust_norm_const
-            
+
             if test_qsa_masking:
                 context_sparse = torch.zeros_like(query)
             else:
@@ -1532,10 +1540,18 @@ def _forward_delta_attn(
                 #     query_for_recomp.permute(0, 2, 1, 3).contiguous().shape,
                 #     args.position_ids[:, idx].shape,
                 # )
-                
-                test_qsa_masking = os.getenv('HIP_DEBUG_DELTA_QSA', '0') == '1'
+
+                test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
+                debug_qsa_masking = False
                 mask_idx = args.position_ids[:, idx]
-                
+                qsa_mask_block_size_q = 128
+                qsa_mask_block_size_k = 64
+                qsa_mask_block_top_k = 64
+                # using each block scores
+                qsa_mask_pre_trim = 40960000
+                # using sum of block scores
+                qsa_mask_post_trim = 4096
+
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
                     None,
@@ -1554,87 +1570,212 @@ def _forward_delta_attn(
                     model_context_length=args.model_context_length,
                     self_extend_scale=args.self_extend_scale,
                     softmax_sink=args.softmax_sink,
-                    bsa_top_block_k=32,
+                    bsa_top_block_k=qsa_mask_block_top_k,
+                    bsa_block_size_k=qsa_mask_block_size_k,
                     bsa_mask_sink_token_size=max(1, args.sink_token_size),
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
                 )
-                
+
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
-                    
-                    # if get_local_rank() == 0:
-                    #     scores = bsa_block_sums[0,0]
-                    #     scores_min = scores.amin()
-                    #     scores_max = scores.amax()
-                    #     scores = (scores - scores_min) / (scores_max - scores_min)
-                    #     mask = convert_qsa_mask_to_img(
-                    #         bsa_indices[0,0].cpu().numpy(),
-                    #         scores.cpu().float().numpy(),
-                    #         idx.cpu().numpy(),
-                    #         query.shape[1],
-                    #         int(mask_idx.amax().item()) + 256,
-                    #         256,
-                    #     )
-                    #     cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
-                    #     # print(bsa_indices[0, 0, -1])
-                    #     # print(bsa_block_sums[0, 0, -1])
-                    #     # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
-                    
+
+                    if debug_qsa_masking and (get_local_rank() == 0):
+                        scores = bsa_block_sums[0, 0]
+                        scores_min = scores.amin()
+                        scores_max = scores.amax()
+                        scores = (scores - scores_min) / (scores_max - scores_min)
+                        mask = convert_qsa_mask_to_img(
+                            bsa_indices[0, 0].cpu().numpy(),
+                            scores.cpu().float().numpy(),
+                            idx.cpu().numpy(),
+                            query.shape[1],
+                            int(mask_idx.amax().item()) + 256,
+                            256,
+                        )
+                        cv2.imwrite(f"dummy_qsa_mask_ilayer_{args.layer_id}.png", mask)
+                        # print(bsa_indices[0, 0, -1])
+                        # print(bsa_block_sums[0, 0, -1])
+                        # print(query.shape, query_for_recomp.shape, mask_idx.shape, bsa_indices.shape, bsa_block_sums.shape)
+
                     args_sparse = args.clone()
                     args_sparse.rope_range = (0, query.shape[-1])
-                    args_sparse.position_ids = args_sparse.position_ids[:, :-num_last_dense]
-                    args_sparse.block_size_q = 128
-                    args_sparse.block_sparse_block_size_q = 128
-                    args_sparse.block_size_k = 32 #NOTE: this need to be sync up with STEP_SIZE
-                    
+                    args_sparse.position_ids = args_sparse.position_ids[
+                        :, :-num_last_dense
+                    ]
+                    args_sparse.block_size_q = qsa_mask_block_size_q
+                    args_sparse.block_sparse_block_size_q = args_sparse.block_size_q
+                    args_sparse.block_size_k = qsa_mask_block_size_k
+                    args_sparse.sliding_window_size = (
+                        args_sparse.sliding_window_size + 512
+                    )
+
                     bsa_fn = get_block_sparse_backend(
                         query,
                         args.disable_flashdecode,
                     )
-                    
+
                     indices = bsa_indices.flatten(0, 1)[:, :-num_last_dense, :]
-                    indices = torch.sort(indices, dim=-1).values
-                    
+
                     num_union = (
-                        args_sparse.block_sparse_block_size_q 
-                        // delta_attention_args_w
+                        args_sparse.block_sparse_block_size_q // delta_attention_args_w
                     )
-                    assert (args_sparse.block_sparse_block_size_q % delta_attention_args_w) == 0
-                    if (indices.shape[1] % num_union):
-                        indices = torch.cat([
-                            indices,
-                            indices[:, -1:, :].repeat(1, num_union - indices.shape[1] % num_union, 1)
-                        ], dim=1)
+                    assert (
+                        args_sparse.block_sparse_block_size_q % delta_attention_args_w
+                    ) == 0
+                    if indices.shape[1] % num_union:
+                        indices = torch.cat(
+                            [
+                                indices,
+                                indices[:, -1:, :].repeat(
+                                    1, num_union - indices.shape[1] % num_union, 1
+                                ),
+                            ],
+                            dim=1,
+                        )
                     indices = indices.view(
-                        indices.shape[0], 
-                        indices.shape[1] // num_union, 
-                        num_union, 
-                        indices.shape[2]
+                        indices.shape[0],
+                        indices.shape[1] // num_union,
+                        num_union,
+                        indices.shape[2],
                     )
                     indices = indices.flatten(-2, -1)
-                    
-                    indices, _ = indices.sort(dim=-1)
-                    indices = indices // args_sparse.block_size_k * args_sparse.block_size_k
 
-                    unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-                    indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+                    num_blocks_to_trim = qsa_mask_pre_trim // args_sparse.block_size_k
+                    if num_blocks_to_trim < indices.shape[-1]:
+                        block_scores = bsa_block_sums.flatten(0, 1)[
+                            :, :-num_last_dense, :
+                        ]
+                        if block_scores.shape[1] % num_union:
+                            block_scores = torch.cat(
+                                [
+                                    block_scores,
+                                    block_scores[:, -1:, :].repeat(
+                                        1,
+                                        num_union - block_scores.shape[1] % num_union,
+                                        1,
+                                    ),
+                                ],
+                                dim=1,
+                            )
+                        block_scores = block_scores.view(
+                            block_scores.shape[0],
+                            block_scores.shape[1] // num_union,
+                            num_union,
+                            block_scores.shape[2],
+                        )
+                        block_scores = block_scores.flatten(-2, -1)
+
+                        t_indices = torch.sort(
+                            block_scores, dim=-1, descending=True
+                        ).indices
+                        indices = indices.gather(
+                            dim=-1,
+                            index=t_indices[..., :num_blocks_to_trim],
+                        )
+
+                    indices, t_sort = indices.sort(dim=-1)
+                    # indices = (
+                    #     indices // args_sparse.block_size_k * args_sparse.block_size_k
+                    # )
+                    num_blocks_to_trim = qsa_mask_post_trim // args_sparse.block_size_k
+                    if num_blocks_to_trim < indices.shape[-1]:
+                        block_scores = bsa_block_sums.flatten(0, 1)[
+                            :, :-num_last_dense, :
+                        ]
+                        if block_scores.shape[1] % num_union:
+                            block_scores = torch.cat(
+                                [
+                                    block_scores,
+                                    block_scores[:, -1:, :].repeat(
+                                        1,
+                                        num_union - block_scores.shape[1] % num_union,
+                                        1,
+                                    ),
+                                ],
+                                dim=1,
+                            )
+                        block_scores = block_scores.view(
+                            block_scores.shape[0],
+                            block_scores.shape[1] // num_union,
+                            num_union,
+                            block_scores.shape[2],
+                        )
+                        block_scores = block_scores.flatten(-2, -1)
+                        block_scores = block_scores.gather(dim=-1, index=t_sort)
+
+                        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+                        block_scores_cumsum = block_scores.cumsum(-1)
+                        block_scores_cumsum_block = (
+                            block_scores_cumsum * unique_mask
+                        ).cumsum(-1)
+                        block_scores_cumsum = (
+                            block_scores_cumsum
+                            + (block_scores * unique_mask).cumsum(-1)
+                        ) - block_scores_cumsum_block
+                        unique_mask = torch.roll(indices, shifts=-1, dims=-1) != indices
+                        block_scores = torch.where(
+                            unique_mask,
+                            block_scores,
+                            torch.finfo(block_scores.dtype).min,
+                        )
+                        indices = torch.where(
+                            unique_mask, indices, torch.iinfo(indices.dtype).max
+                        )
+                        t_sort = block_scores.argsort(dim=-1, descending=True)
+                        indices = indices.gather(
+                            index=t_sort[..., :num_blocks_to_trim], dim=-1
+                        )
+                    else:
+                        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+                        indices = torch.where(
+                            unique_mask, indices, torch.iinfo(indices.dtype).max
+                        )
                     indices, _ = indices.sort(dim=-1)
 
                     active_mask = indices < (
-                        args_sparse.position_ids[:, :: args_sparse.block_size_q, None]\
-                            .repeat_interleave(query.shape[2], 0)
+                        args_sparse.position_ids[
+                            :, :: args_sparse.block_size_q, None
+                        ].repeat_interleave(query.shape[2], 0)
                         + args.block_size_q
                     )
                     ks = active_mask.int().sum(-1)
                     ks_count = ks.unsqueeze(-1)
                     ks_start_end = torch.zeros(
-                        (ks.shape[0], ks.shape[1], 2), 
-                        dtype=torch.int32, 
-                        device=query.device
+                        (ks.shape[0], ks.shape[1], 2),
+                        dtype=torch.int32,
+                        device=query.device,
                     )
                     ks_start_end[:, :, -1] = ks
-                    
+
+                    # print(ks.float().mean().item() * args_sparse.block_size_k)
+
+                    if debug_qsa_masking and (get_local_rank() == 0):
+                        mask = convert_qsa_mask_to_img(
+                            indices[0].cpu().numpy(),
+                            None,
+                            args_sparse.position_ids[0, :: args_sparse.block_size_q]
+                            .cpu()
+                            .numpy(),
+                            query.shape[1],
+                            int(args_sparse.position_ids.amax().item()) + 256,
+                            256,
+                        )
+                        cv2.imwrite(
+                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                        )
+
+                    bsa_block_size_q = 128
+                    if args_sparse.block_size_q > bsa_block_size_q:
+                        assert (args_sparse.block_size_q % bsa_block_size_q) == 0
+                        nrepeat = args_sparse.block_size_q // bsa_block_size_q
+                        indices = indices.repeat_interleave(nrepeat, 1)
+                        ks = ks.repeat_interleave(nrepeat, 1)
+                        ks_count = ks_count.repeat_interleave(nrepeat, 1)
+                        ks_start_end = ks_start_end.repeat_interleave(nrepeat, 1)
+                        args_sparse.block_size_q = bsa_block_size_q
+                        args_sparse.block_sparse_block_size_q = bsa_block_size_q
+
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
                         k=k,
@@ -1654,14 +1795,17 @@ def _forward_delta_attn(
                         k_descale=k_descale,
                         v_descale=v_descale,
                     )
-                    
-                    context_sparse = torch.cat([
-                        context_sparse,
-                        context_dense.permute(0, 2, 1, 3)[:, -num_last_dense:],
-                    ], dim=1)
-                    
+
+                    context_sparse = torch.cat(
+                        [
+                            context_sparse,
+                            context_dense.permute(0, 2, 1, 3)[:, -num_last_dense:],
+                        ],
+                        dim=1,
+                    )
+
                     metadata = None
-                    
+
                     context_sparse_raw = context_sparse
                     context_sparse = context_sparse[:, :num_sparse]
             else:
@@ -1907,7 +2051,7 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
-            
+
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]
 
@@ -2672,13 +2816,13 @@ def _forward_paged_hip(
         seq_thresh_fa3 = args.model_context_length
 
     mixing_len = os.getenv(
-        "HIP_DEBUG_FA3_MIXING_LEN", "sw" if seq_thresh_fa3 > 0 else "0"
+        "HIP_DEBUG_FA3_MIXING_LEN", "0" if seq_thresh_fa3 > 0 else "0"
     )
     if mixing_len.lower() == "sw":
         mixing_len = int(
-            sliding_window_size * 1.5
+            sliding_window_size * 1.0
             if isinstance(sliding_window_size, int) and (sliding_window_size > 0)
-            else args.sliding_window_size * 1.5
+            else args.sliding_window_size * 1.0
         )
     else:
         mixing_len = int(mixing_len)
@@ -2807,7 +2951,7 @@ def _forward_paged_hip(
             rope_is_neox_style=rope_is_neox_style,
             cached_metadata=cached_metadata,
             is_decode=is_decode,
-            seq_thresh_fa3=0, #seq_thresh_fa3,
+            seq_thresh_fa3=0,  # seq_thresh_fa3,
             mixing_len=mixing_len,
             args=args,
             max_context_len=max_batch_context_len,
