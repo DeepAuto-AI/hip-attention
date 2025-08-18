@@ -58,195 +58,6 @@ def convert_fp8_to_bf16(k: tl.tensor):
 
     return k
 
-# Flush the current buffer (width = 2*K) into the head using bucketed selection.
-# Keeps all items from bins above the cutoff and then items from the cutoff bin
-# until the per-row count reaches (or just exceeds) K. Writes the winners
-# sequentially to [0:count_new), and stores count_new back.
-@triton.jit
-def bsa_bucket_flush_gather(
-    VALS,                # *values* buffer (BSA_BLOCK_SUMS) pointer
-    IDX,                 # *indices* buffer (BSA_BLOCK_INDICES) pointer (int32 preferred)
-    b_idx,               # (M,) base offsets for this block's rows (already includes row stride)
-    mask_m,              # (M,) row mask
-    count,
-    stride_bik: tl.constexpr,    # last-dim (slot) stride in *elements*
-    K: tl.constexpr,             # top-K target (power-of-two recommended)
-    B: tl.constexpr,               # number of buckets (e.g., 32 or 64)
-):
-    WIDTH: tl.constexpr = 2 * K
-    cnt = count
-
-    # ---- Load values (and optionally indices) across [0:2K); mark slots >= cnt invalid
-    ix = tl.arange(0, WIDTH)[None, :]                               # (1, W)
-    off = b_idx[:, None] + ix * stride_bik                           # (M, W)
-    valid = (ix < cnt[:, None])                                      # (M, W)
-    mv = mask_m[:, None] & valid
-
-    v = tl.load(VALS + off, mask=mv, other=float("-inf"))            # (M, W)
-    # We'll re-load IDX column-by-column during gather; no need to load full matrix now.
-
-    # ---- Compute per-row vmin/vmax over *valid* slots
-    v_for_min = tl.where(valid, v, float("inf"))
-    v_for_max = tl.where(valid, v, float("-inf"))
-    vmin = tl.min(v_for_min, axis=1)                                 # (M,)
-    vmax = tl.max(v_for_max, axis=1)                                 # (M,)
-
-    # Avoid degenerate bucket width
-    eps = 1e-6
-    span = tl.maximum(vmax - vmin, eps)
-    step = span / B                                                  # (M,)
-
-    # ---- Scan buckets from high->low to find cutoff bin b*
-    # cum holds how many items are strictly above current bin
-    cum = 0
-    above = 0
-    b_star = 0
-
-    # loop b = B-1 .. 0
-    for b in tl.static_range(B - 1, -1, -1):
-        # count how many elements fell into bin b
-        lower = vmin[:, None] + (b    ) * step[:, None]
-        upper = vmin[:, None] + (b + 1) * step[:, None]
-        in_b = (v >= lower) & (v < upper) & valid                    # (M, W)
-        cnt_b = tl.sum(in_b.to(tl.int32), axis=1)                    # (M,)
-
-        reach = cum + cnt_b
-        choose = (reach >= K) & (cum < K)                            # pick *first* bin crossing K
-        b_star = tl.where(choose, b, b_star)
-        above  = tl.where(choose, cum,                above)
-        # advance cum as long as we haven't crossed K yet
-        cum    = tl.where(cum < K,  reach,            cum)
-
-    # If total valid < K, then we never "chose" a cutoff; in that case b_star stays 0,
-    # and 'cum' is total. That's fine: we'll gather everything below.
-
-    # ---- Gather winners sequentially into the head:
-    # pass 1: bins > b_star  (take all)
-    pos = 0
-    for t in tl.static_range(0, WIDTH):
-        col_valid = mask_m & (t < cnt)
-        # reload the column 't' (values & idx) from global
-        off_t = b_idx + t * stride_bik
-        vt = tl.load(VALS + off_t, mask=col_valid, other=float("-inf"))
-        it = tl.load(IDX  + off_t, mask=col_valid, other=0)
-
-        # compute bin for this element (only matters if valid)
-        rel = (vt - vmin) / step                                      # (M,)
-        bt  = tl.maximum(0, tl.minimum(B - 1, rel.to(tl.int32)))      # (M,)
-
-        take = (bt > b_star) & col_valid                              # (M,)
-        out_off = b_idx + pos * stride_bik                            # (M,)
-        tl.store(VALS + out_off, vt, mask=take)
-        tl.store(IDX  + out_off, it, mask=take)
-        pos = pos + take.to(tl.int32)                                 # advance per-row
-
-    # pass 2: bin == b_star  (take until we reach K; you can flip to 'pos <= K-1' if you
-    # want to allow exceeding K on the last write)
-    for t in tl.static_range(0, WIDTH):
-        col_valid = mask_m & (t < cnt)
-        off_t = b_idx + t * stride_bik
-        vt = tl.load(VALS + off_t, mask=col_valid, other=float("-inf"))
-        it = tl.load(IDX  + off_t, mask=col_valid, other=0)
-
-        rel = (vt - vmin) / step
-        bt  = tl.maximum(0, tl.minimum(B - 1, rel.to(tl.int32)))
-
-        take = (bt == b_star) & col_valid & (pos < K)                 # stop once pos hits K
-        out_off = b_idx + pos * stride_bik
-        tl.store(VALS + out_off, vt, mask=take)
-        tl.store(IDX  + out_off, it, mask=take)
-        pos = pos + take.to(tl.int32)
-
-    return pos # this is the new count
-
-@triton.jit
-def bitonic_keyval_desc_inplace(
-    VALS, IDX,                 # pointers to arrays whose last dim is the slots
-    b_idx, mask_m,             # (M,) base offsets (already include row-stride), row mask (M,)
-    stride_bik: tl.constexpr,  # stride (in elements) along the slot axis
-    LOGW: tl.constexpr,        # log2(WIDTH)
-    WIDTH: tl.constexpr        # number of slots per row (power of two)
-):
-    ix = tl.arange(0, WIDTH).to(tl.int64)[None, :]         # (1, W)
-    off_i = b_idx[:, None] + ix * stride_bik               # (M, W)
-
-    # classic bitonic: for k=2,4,8,...,WIDTH; for j=k/2,k/4,...,1
-    for p in tl.static_range(1, LOGW + 1):
-        k = 1 << p
-        for q in tl.static_range(p - 1, -1, -1):
-            j = 1 << q
-            partner = ix ^ j                               # (1, W)
-            off_p = b_idx[:, None] + partner * stride_bik  # (M, W)
-
-            a  = tl.load(VALS + off_i, mask=mask_m[:, None])
-            b  = tl.load(VALS + off_p, mask=mask_m[:, None])
-            ia = tl.load(IDX  + off_i, mask=mask_m[:, None])
-            ib = tl.load(IDX  + off_p, mask=mask_m[:, None])
-
-            # lower half asc, upper half desc → final overall DESC
-            dir_asc = ((ix & k) == 0)
-            # if ascending half: keep smaller on left => swap if a > b
-            # else (descending half): keep larger on left => swap if a < b
-            swap = tl.where(dir_asc, a > b, a < b)
-
-            # deterministic tie-break (optional): lower index wins
-            tie = a == b
-            swap = tl.where(tie & (ib < ia), True, swap)
-
-            na  = tl.where(swap, b,  a)
-            nb  = tl.where(swap, a,  b)
-            nia = tl.where(swap, ib, ia)
-            nib = tl.where(swap, ia, ib)
-
-            tl.store(VALS + off_i, na,  mask=mask_m[:, None])
-            tl.store(VALS + off_p, nb,  mask=mask_m[:, None])
-            tl.store(IDX  + off_i, nia, mask=mask_m[:, None])
-            tl.store(IDX  + off_p, nib, mask=mask_m[:, None])
-
-def bitonic_keyval_desc_inplace_old(
-    VALS, IDX,                 # global pointers to [ ... , WIDTH ] along the last dim
-    b_idx, mask_m,             # per-row base offsets (already multiplied by stride of the row dim), row mask
-    stride_bik: tl.constexpr,  # stride (in elements) along the "slot" axis
-    LOGW: tl.constexpr,        # = log2(WIDTH)
-    WIDTH: tl.constexpr        # = 1 << LOGW
-):
-    ix = tl.arange(0, WIDTH).to(tl.int64)[None, :]        # (1, W)
-    off_i = b_idx[:, None] + ix * stride_bik              # (M, W) element offsets per row
-
-    # bitonic network: for p=1..LOGW, for j=k/2..1 (k=2^p)
-    for p in tl.static_range(1, LOGW + 1):
-        k = 1 << p
-        j = k >> 1
-        while j > 0:
-            partner = ix ^ j                              # (1, W)
-            off_p = b_idx[:, None] + partner * stride_bik
-
-            a  = tl.load(VALS + off_i, mask=mask_m[:, None])
-            b  = tl.load(VALS + off_p, mask=mask_m[:, None])
-            ia = tl.load(IDX  + off_i, mask=mask_m[:, None])
-            ib = tl.load(IDX  + off_p, mask=mask_m[:, None])
-
-            # direction: lower half ascending, upper half descending → final result descending
-            dir_asc = ((ix & k) == 0)
-            # compare–swap mask (desc): if dir_asc, keep smaller on left; else keep larger on left
-            take_b = tl.where(dir_asc, a > b, a < b)
-            # (optional) stable tie-break to make results deterministic
-            tie = a == b
-            take_b = tl.where(tie, (ib < ia), take_b)
-
-            # swap both key and value using the SAME mask
-            a2  = tl.where(take_b, b,  a)
-            b2  = tl.where(take_b, a,  b)
-            ia2 = tl.where(take_b, ib, ia)
-            ib2 = tl.where(take_b, ia, ib)
-
-            tl.store(VALS + off_i, a2, mask=mask_m[:, None])
-            tl.store(VALS + off_p, b2, mask=mask_m[:, None])
-            tl.store(IDX  + off_i, ia2, mask=mask_m[:, None])
-            tl.store(IDX  + off_p, ib2, mask=mask_m[:, None])
-
-            j >>= 1
-
 
 @triton.jit
 def winner_update_inline(
@@ -534,7 +345,6 @@ def _attn_fwd_inner(
     BSA_K: tl.constexpr,
     BSA_LOGK: tl.constexpr,
     BSA_HEAP: tl.constexpr,
-    BSA_SORT: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
     BSA_INDICES,
     BSA_BLOCK_SUMS,
@@ -568,9 +378,6 @@ def _attn_fwd_inner(
             b_idx = (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64) * stride_bim
             root_v  = tl.load(BSA_BLOCK_SUMS   + (b_idx + 1).to(tl.int64))            # node 1
             root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64))
-        elif BSA_SORT:
-            b_idx = (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
-            stored = 0
         else:
             b_idx = (
                 (
@@ -768,7 +575,7 @@ def _attn_fwd_inner(
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
             qk = tl.where(mask, qk, float("-inf"))
 
-        qk = tl.where(qk == 0, float("-inf"), qk)
+        # qk = tl.where(qk == 0, float("-inf"), qk)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         # if we go backwards through the keys, some blocks may be totally masked
@@ -787,13 +594,12 @@ def _attn_fwd_inner(
         # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
             # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = 32
-            tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
-            tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
+            tl.static_assert(BLOCK_N >= BSA_BLOCK_SIZE_K)
+            tl.static_assert(BLOCK_N <= (BSA_BLOCK_SIZE_K * 4))
             tl.static_assert(
-                (BSA_MASK_STEP_SIZE == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
+                (BSA_BLOCK_SIZE_K == BLOCK_N)
+                | ((BSA_BLOCK_SIZE_K * 2) == BLOCK_N)
+                | ((BSA_BLOCK_SIZE_K * 4) == BLOCK_N)
             )
             
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
@@ -806,14 +612,14 @@ def _attn_fwd_inner(
                 else:
                     p_split = p
                 
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                if BLOCK_N == BSA_BLOCK_SIZE_K:
                     l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
                     l_ij_all = tl.sum(p_split, 2)
                     l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
                     l_ij_all = tl.sum(p_split, 3)
                     l_ij_01, l_ij_23 = tl.split(l_ij_all)
                     l_ij_0, l_ij_1 = tl.split(l_ij_01)
@@ -827,14 +633,14 @@ def _attn_fwd_inner(
                 else:
                     p_split = qk + m_ij[:, None]
 
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
+                if BLOCK_N == BSA_BLOCK_SIZE_K:
                     l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
+                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
                     l_ij_all = tl.max(p_split, 2)
                     l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
+                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
+                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
                     l_ij_all = tl.max(p_split, 3)
                     l_ij_01, l_ij_23 = tl.split(l_ij_all)
                     l_ij_0, l_ij_1 = tl.split(l_ij_01)
@@ -842,24 +648,24 @@ def _attn_fwd_inner(
                 else:
                     raise Exception()
             
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
+            for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
                 if i_offset == 0:
                     update_alpha = alpha
                 else:
                     update_alpha = None
                 
-                if   i_offset == (0 * BSA_MASK_STEP_SIZE):
+                if   i_offset == (0 * BSA_BLOCK_SIZE_K):
                     update_exp_sum = l_ij_0
-                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
+                elif i_offset == (1 * BSA_BLOCK_SIZE_K):
                     update_exp_sum = l_ij_1
-                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
+                elif i_offset == (2 * BSA_BLOCK_SIZE_K):
                     update_exp_sum = l_ij_2
-                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
+                elif i_offset == (3 * BSA_BLOCK_SIZE_K):
                     update_exp_sum = l_ij_3
                 
                 if BSA_HEAP:
-                    # root_v, root_lf = winner_update_inline_efficient(
-                    root_v, root_lf = winner_update_inline(
+                    # root_v, root_lf = winner_update_inline(
+                    root_v, root_lf = winner_update_inline_efficient(
                         update_exp_sum,
                         start_n + i_offset,
                         BSA_BLOCK_SUMS,
@@ -873,40 +679,12 @@ def _attn_fwd_inner(
                         root_v,
                         root_lf,
                     )
-                elif BSA_SORT:
-                    if stored < 2 * BSA_K:
-                        # store one more
-                        tl.store(BSA_BLOCK_SUMS  + b_idx + stored, update_exp_sum.to(tl.float32), mask=mask_m)
-                        tl.store(BSA_INDICES + b_idx + stored, start_n + i_offset, mask=mask_m)
-                        stored += 1
-                    else:
-                        bsa_bucket_flush_gather(
-                            BSA_BLOCK_SUMS,
-                            BSA_INDICES,
-                            b_idx,
-                            mask_m,
-                            stored,
-                            stride_bik,
-                            BSA_K,
-                            BSA_K >> 1,
-                        )
-                        # load, sort, store, and reset stored position
-                        # bitonic_keyval_desc_inplace(
-                        #     BSA_BLOCK_SUMS,
-                        #     BSA_INDICES,
-                        #     b_idx,
-                        #     mask_m,
-                        #     stride_bik,
-                        #     BSA_LOGK + 1,
-                        #     2 * BSA_K,
-                        # )
-                        # stored = BSA_K
                 else:
                     # NOTE: update indices and scores
                     if (update_alpha is not None) and (using_exp_sum):
                         block_sums *= update_alpha[:, None] # adjust previous sums for new normalization constant
-                    # else:
-                    #     block_sums *= 1 # WHY WHY WHY??? I HATE YOU
+                    else:
+                        block_sums *= 1 # WHY WHY WHY??? I HATE YOU
 
                     block_update = update_exp_sum > block_sums_min
                     if tl.sum(block_update) > 0:
@@ -968,7 +746,7 @@ def _attn_fwd_inner(
             # mask_tsrc = idx_tsrc < hi
             pass
 
-    if RETURN_BSA_MASK and not BSA_HEAP and not BSA_SORT:
+    if RETURN_BSA_MASK and not BSA_HEAP:
         tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
         tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
 
@@ -1015,11 +793,12 @@ def keep(conf):
 # @triton_jit(
 #     configs=list(filter(keep, configs)),
 #     key=[
-#         # "N_CTX",
-#         # "N_KV",
+#         "N_CTX",
+#         "N_KV",
 #         "HEAD_DIM",
 #         "USING_PAGED_CACHE",
 #     ],
+#     do_autotune=True,
 # )
 @triton.autotune(configs=configs, key=['N_CTX, N_KV'])
 @triton.jit
@@ -1105,7 +884,6 @@ def _attn_fwd(
     BSA_K: tl.constexpr,
     BSA_LOGK: tl.constexpr,
     BSA_HEAP: tl.constexpr,
-    BSA_SORT: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
     BSA_INDICES,
     BSA_BLOCK_SUMS,
@@ -1530,7 +1308,6 @@ def _attn_fwd(
             BSA_K=BSA_K,
             BSA_LOGK=BSA_LOGK,
             BSA_HEAP=BSA_HEAP,
-            BSA_SORT=BSA_SORT,
             BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
             BSA_INDICES=BSA_INDICES,
             BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
@@ -1598,7 +1375,6 @@ def _attn_fwd(
             BSA_K=BSA_K,
             BSA_LOGK=BSA_LOGK,
             BSA_HEAP=BSA_HEAP,
-            BSA_SORT=BSA_SORT,
             BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
             BSA_INDICES=BSA_INDICES,
             BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
@@ -1810,7 +1586,7 @@ class _attention(torch.autograd.Function):
         bsa_top_block_k: int,
         bsa_block_size_k: int,
         bsa_heap: bool,
-        bsa_sort: bool,
+        reverse_iter: bool,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1870,8 +1646,6 @@ class _attention(torch.autograd.Function):
             BSZ, HEAD, TDST = q.shape[:3]
 
             k_factor = 1
-
-            # FIXME: temporary
             if bsa_heap:
                 k_factor = 2
 
@@ -1889,18 +1663,11 @@ class _attention(torch.autograd.Function):
                     device=q.device,
                     dtype=torch.float32,
                 )
-                # bsa_block_sums = torch.arange(0,  # for 
-                #     bsa_top_block_k * k_factor,
-                #     device=q.device,
-                # ).to(torch.float32) - 1000.0
-
-                # bsa_block_sums = bsa_block_sums[torch.randperm(bsa_block_sums.size(0))]
 
                 # need to initialize the heap in the proper order
                 bsa_heap_indices = torch.zeros(bsa_top_block_k * 2, device=q.device, dtype=torch.long)
                 bsa_heap_indices[bsa_top_block_k:] = torch.arange(0, bsa_top_block_k, device=q.device, dtype=torch.long)
 
-                warnings.warn("CLEAN THIS UP IN TRITON INIT")
                 for node in range(bsa_top_block_k - 1, 0, -1):
                     l = node << 1
                     r = l + 1
@@ -1929,18 +1696,6 @@ class _attention(torch.autograd.Function):
                 # print(f"{bsa_heap_indices[0, 0, 61:65]=}")
                 # print(f"{bsa_indices[0, 0, 61:65]=}")
                 # print(f"{bsa_block_sums[0, 0, 61:65]=}")
-            elif bsa_sort:
-                k_factor = 2
-                bsa_indices = torch.empty( # for real block indices
-                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    device=q.device,
-                    dtype=torch.int64,
-                )
-                bsa_block_sums = torch.empty( # for 
-                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    device=q.device,
-                    dtype=torch.float32,
-                )
             else:
                 # energy to split the strides and add more arguments :(
                 bsa_indices = torch.full( # for real block indices
@@ -2246,7 +2001,6 @@ class _attention(torch.autograd.Function):
                 bsa_top_block_k,
                 int(math.log2(bsa_top_block_k)),
                 bsa_heap,
-                bsa_sort,
                 bsa_block_size_k,
                 bsa_indices,
                 bsa_block_sums,
@@ -2262,6 +2016,7 @@ class _attention(torch.autograd.Function):
                 N_SPLIT=1,
                 # BLOCK_M=64,
                 # BLOCK_N=32,
+                REVERSE_ITER=reverse_iter,
                 V_FP8=V_FP8,
                 # BLOCK_M=64,
                 # BLOCK_N=32,
@@ -2294,10 +2049,7 @@ class _attention(torch.autograd.Function):
         elif return_bsa_indices:
             if not bsa_heap:
                 return o, (bsa_indices, bsa_block_sums)
-            return o, (
-                bsa_indices[:, :, :, bsa_top_block_k:],
-                bsa_block_sums[:, :, :, bsa_top_block_k:],
-            )
+            return o, (bsa_indices[:, :, :, bsa_top_block_k:], bsa_block_sums[:, :, :, bsa_top_block_k:])
         else:
             return o
 
@@ -2336,9 +2088,8 @@ def query_sparse_attention(
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
     bsa_heap: bool = False,
-    bsa_sort: bool = False,
+    reverse_iter: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
-    warnings.warn("BSA_BLOCK_SIZE_K appears to be unused: remove")
     return _attention.apply(
         q,
         k,
@@ -2367,5 +2118,5 @@ def query_sparse_attention(
         bsa_top_block_k,
         bsa_block_size_k,
         bsa_heap,
-        bsa_sort,
+        reverse_iter,
     )
