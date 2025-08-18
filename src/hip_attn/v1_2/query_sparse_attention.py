@@ -431,9 +431,10 @@ def _attn_fwd_inner(
 
             # NOTE: update indices and scores
             if using_exp_sum:
-                block_sums *= alpha[
-                    :, None
-                ]  # adjust previous sums for new normalization constant
+                # adjust previous sums for new normalization constant
+                block_sums *= alpha[:, None]
+            else:
+                block_sums *= 1.0
 
             if 0 * BSA_MASK_STEP_SIZE < BLOCK_N:
                 block_sums, block_idx = update_block_sums_idx(
