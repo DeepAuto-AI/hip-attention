@@ -278,13 +278,17 @@ def forward_paged_hip(
         if cached_metadata is not None:
             states = cached_metadata.state
             if isinstance(states, list) and (len(states) < len(extend_seq_lens_cpu)):
-                assert (len(extend_seq_lens_cpu) % len(states)) == 0
-                n_repeat = len(extend_seq_lens_cpu) // len(states)
-                new_states = []
-                for state in states:
-                    for _ in range(n_repeat):
-                        new_states.append(copy.deepcopy(state))
-                states = new_states
+                if (len(extend_seq_lens_cpu) % len(states)) == 0:
+                    assert (len(extend_seq_lens_cpu) % len(states)) == 0
+                    n_repeat = len(extend_seq_lens_cpu) // len(states)
+                    new_states = []
+                    for state in states:
+                        for _ in range(n_repeat):
+                            new_states.append(copy.deepcopy(state))
+                    states = new_states
+                else:
+                    cached_metadata.state = None
+                    states = None
 
         start_len = 0
         decoding_reqs = []
