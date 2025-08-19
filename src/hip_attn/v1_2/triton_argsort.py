@@ -80,9 +80,12 @@ def _bitonic_merge(
 
 
 @triton.jit
-def argsort(x, ids, descending: tl.constexpr = False):
+def argsort(x, ids, descending: tl.constexpr = False, stages: tl.constexpr = None):
     # iteratively run bitonic merge-sort steps
-    n_dims: tl.constexpr = _log2(x.shape[1])
+    if stages is None:
+        n_dims: tl.constexpr = _log2(x.shape[1])
+    else:
+        n_dims: tl.constexpr = stages
     for i in tl.static_range(1, n_dims + 1):
         x, ids = _bitonic_merge(x, ids, i, 2 if i < n_dims else descending, n_dims)
     return x, ids

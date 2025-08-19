@@ -138,7 +138,7 @@ def test_with_hip_bsa():
     q_block, k_block = 128, 32
     seq = 131072
     device = 0
-    K = 128
+    K = 256
     window_size = 2048
 
     d = torch.load(
@@ -205,7 +205,7 @@ def test_with_hip_bsa():
         using_extend=False,
     )
 
-    def qsa():
+    def qsa(online_topk_method):
         out, (bsa_idx, block_sums) = query_sparse_attention(
             q=qp,
             k=kp,
@@ -217,8 +217,8 @@ def test_with_hip_bsa():
             return_bsa_indices=True,
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
-            bsa_block_size_q=1,
             bsa_block_size_k=k_block,
+            online_topk_method=online_topk_method,
         )
 
         # bsa_idx = torch.where(bsa_idx == -1, 987654321, bsa_idx * k_block)
@@ -243,7 +243,7 @@ def test_with_hip_bsa():
         )
         return out, bsa_out, bsa_idx
 
-    out, bsa_out, block_idx = qsa()
+    out, bsa_out, block_idx = qsa("sort")
     print(f"{block_idx=}")
 
     bsa_out = bsa_out.transpose(1, 2)
@@ -474,8 +474,10 @@ def test_with_hip_bsa():
         )
     )
     print(f"hip: {latency_hip:.2f} ms took")
-    latency_qsa = latency(lambda: qsa())
-    print(f"qsa: {latency_qsa:.2f} ms took")
+    latency_qsa = latency(lambda: qsa("naive"))
+    print(f"qsa(naive): {latency_qsa:.2f} ms took")
+    latency_qsa = latency(lambda: qsa("sort"))
+    print(f"qsa(sort): {latency_qsa:.2f} ms took")
     latency_flash = latency(
         lambda: flash_attn_func(
             q[:, :, :seq].transpose(1, 2),

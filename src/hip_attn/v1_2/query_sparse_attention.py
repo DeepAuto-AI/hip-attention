@@ -62,6 +62,8 @@ def convert_fp8_to_bf16(k: tl.tensor):
 def update_block_sums_idx(
     block_sums,
     block_idx,
+    staging_sums,
+    staging_idx,
     update_exp_sum,
     start_n,
     i_offset,
@@ -84,20 +86,38 @@ def update_block_sums_idx(
         bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
         bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
 
-        block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-        block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+        block_sums = tl.where(
+            bsa_mask, block_sums_max[:, None].to(block_sums.dtype), block_sums
+        )
+        block_idx = tl.where(
+            bsa_mask, (start_n + i_offset).to(block_idx.dtype), block_idx
+        )
 
     elif ONLINE_TOPK_METHOD == "sort":
         offset = topk_idx % BSA_K
-        if offset == 0:
-            # sort the block sums and indices
-            block_sums, block_idx = argsort(block_sums, block_idx, descending=True)
 
-        mask = offset == tl.arange(0, BSA_K * 2) - BSA_K
-        block_sums = tl.where(mask, update_exp_sum[:, None], block_sums)
-        block_idx = tl.where(mask, start_n + i_offset, block_idx)
+        # if offset == 0:
+        # sort the block sums and indices
+        M: tl.constexpr = block_sums.shape[0]
+        merge_block_sums = tl.reshape(tl.join(block_sums, staging_sums), (M, BSA_K * 2))
+        merge_block_idx = tl.reshape(tl.join(block_idx, staging_idx), (M, BSA_K * 2))
+        merge_block_sums, merge_block_idx = argsort(
+            merge_block_sums,
+            merge_block_idx,
+            descending=True,
+        )
+        block_sums, staging_sums = tl.split(tl.reshape(merge_block_sums, (M, BSA_K, 2)))
+        block_idx, staging_idx = tl.split(tl.reshape(merge_block_idx, (M, BSA_K, 2)))
 
-    return block_sums, block_idx
+        mask = offset == tl.arange(0, BSA_K)
+        staging_sums = tl.where(
+            mask, update_exp_sum[:, None].to(staging_sums.dtype), staging_sums
+        )
+        staging_idx = tl.where(
+            mask, (start_n + i_offset).to(staging_idx.dtype), staging_idx
+        )
+
+    return block_sums, block_idx, staging_sums, staging_idx
 
 
 @triton.jit
@@ -162,26 +182,19 @@ def _attn_fwd_inner(
     MODEL_CONTEXT_LENGTH,
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
+    ONLINE_TOPK_METHOD: tl.constexpr = "naive",
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
 
-    ONLINE_TOPK_METHOD: tl.constexpr = "sort"
-
     if RETURN_BSA_MASK:
-        if ONLINE_TOPK_METHOD != "sort":
-            b_idx = (
-                start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-            ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
-            b_mask = mask_m
-        else:
-            b_idx = (
-                start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-            ) * stride_bim + tl.arange(0, BSA_K * 2)[None, :] * stride_bik
-            b_mask = mask_m & (tl.arange(0, BSA_K * 2)[None, :] < BSA_K)
-        block_idx = tl.load(BSA_INDICES + b_idx, mask=b_mask, other=-1)
-        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=b_mask, other=-10000.0)
+        b_idx = (
+            start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+        ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
+        b_mask = mask_m[:, None]
+        block_idx = tl.load(BSA_INDICES + b_idx, mask=b_mask).to(tl.int32)
+        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=b_mask).to(tl.float16)
 
     if not USING_PAGED_CACHE:
         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -192,7 +205,9 @@ def _attn_fwd_inner(
     # mask_tsrc = idx_tsrc < hi
 
     # loop over k, v and update accumulator
-    topk_idx = 0
+    topk_idx = tl.zeros((), dtype=tl.int32)
+    staging_idx = tl.zeros_like(block_idx) - 1
+    staging_sums = tl.zeros_like(block_sums) - 10000.0
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -474,56 +489,72 @@ def _attn_fwd_inner(
             # NOTE: update indices and scores
             if using_exp_sum:
                 # adjust previous sums for new normalization constant
-                block_sums *= alpha[:, None]
+                block_sums = (block_sums * alpha[:, None]).to(tl.float16)
             else:
-                block_sums *= 1.0
+                block_sums = (block_sums * 1.0).to(tl.float16)
 
             if 0 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx = update_block_sums_idx(
-                    block_sums=block_sums,
-                    block_idx=block_idx,
-                    update_exp_sum=l_ij_0,
-                    start_n=start_n,
-                    i_offset=0 * BSA_MASK_STEP_SIZE,
-                    topk_idx=topk_idx,
-                    BSA_K=BSA_K,
-                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                block_sums, block_idx, staging_sums, staging_idx = (
+                    update_block_sums_idx(
+                        block_sums=block_sums,
+                        block_idx=block_idx,
+                        staging_sums=staging_sums,
+                        staging_idx=staging_idx,
+                        update_exp_sum=l_ij_0,
+                        start_n=start_n,
+                        i_offset=0 * BSA_MASK_STEP_SIZE,
+                        topk_idx=topk_idx,
+                        BSA_K=BSA_K,
+                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                    )
                 )
                 topk_idx += 1
             if 1 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx = update_block_sums_idx(
-                    block_sums=block_sums,
-                    block_idx=block_idx,
-                    update_exp_sum=l_ij_1,
-                    start_n=start_n,
-                    i_offset=1 * BSA_MASK_STEP_SIZE,
-                    topk_idx=topk_idx,
-                    BSA_K=BSA_K,
-                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                block_sums, block_idx, staging_sums, staging_idx = (
+                    update_block_sums_idx(
+                        block_sums=block_sums,
+                        block_idx=block_idx,
+                        staging_sums=staging_sums,
+                        staging_idx=staging_idx,
+                        update_exp_sum=l_ij_1,
+                        start_n=start_n,
+                        i_offset=1 * BSA_MASK_STEP_SIZE,
+                        topk_idx=topk_idx,
+                        BSA_K=BSA_K,
+                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                    )
                 )
                 topk_idx += 1
             if 2 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx = update_block_sums_idx(
-                    block_sums=block_sums,
-                    block_idx=block_idx,
-                    update_exp_sum=l_ij_2,
-                    start_n=start_n,
-                    i_offset=2 * BSA_MASK_STEP_SIZE,
-                    topk_idx=topk_idx,
-                    BSA_K=BSA_K,
-                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                block_sums, block_idx, staging_sums, staging_idx = (
+                    update_block_sums_idx(
+                        block_sums=block_sums,
+                        block_idx=block_idx,
+                        staging_sums=staging_sums,
+                        staging_idx=staging_idx,
+                        update_exp_sum=l_ij_2,
+                        start_n=start_n,
+                        i_offset=2 * BSA_MASK_STEP_SIZE,
+                        topk_idx=topk_idx,
+                        BSA_K=BSA_K,
+                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                    )
                 )
                 topk_idx += 1
             if 3 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx = update_block_sums_idx(
-                    block_sums=block_sums,
-                    block_idx=block_idx,
-                    update_exp_sum=l_ij_3,
-                    start_n=start_n,
-                    i_offset=3 * BSA_MASK_STEP_SIZE,
-                    topk_idx=topk_idx,
-                    BSA_K=BSA_K,
-                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                block_sums, block_idx, staging_sums, staging_idx = (
+                    update_block_sums_idx(
+                        block_sums=block_sums,
+                        block_idx=block_idx,
+                        staging_sums=staging_sums,
+                        staging_idx=staging_idx,
+                        update_exp_sum=l_ij_3,
+                        start_n=start_n,
+                        i_offset=3 * BSA_MASK_STEP_SIZE,
+                        topk_idx=topk_idx,
+                        BSA_K=BSA_K,
+                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                    )
                 )
                 topk_idx += 1
 
@@ -684,6 +715,7 @@ def _attn_fwd(
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
     SELF_EXTEND_WINDOW=1024,
+    ONLINE_TOPK_METHOD: tl.constexpr = "naive",
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -972,6 +1004,7 @@ def _attn_fwd(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
             )
         # (start_k, end_k) (mid, hi)
         if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -1036,6 +1069,7 @@ def _attn_fwd(
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
             )
     else:
         acc, l_i, m_i = _attn_fwd_inner(
@@ -1099,6 +1133,7 @@ def _attn_fwd(
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+            ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
         )
 
         acc, l_i, m_i = _attn_fwd_inner(
@@ -1162,6 +1197,7 @@ def _attn_fwd(
             MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
             SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
             SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+            ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
         )
 
     # epilogue
@@ -1350,6 +1386,7 @@ class _attention(torch.autograd.Function):
         self_extend_scale: int,
         bsa_top_block_k: int,
         bsa_block_size_k: int,
+        online_topk_method: Literal["naive", "sort"],
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -1592,6 +1629,7 @@ class _attention(torch.autograd.Function):
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
                 BSA_K=bsa_top_block_k,
+                ONLINE_TOPK_METHOD=online_topk_method,
                 **extra_kern_args,
             )
 
@@ -1743,6 +1781,7 @@ class _attention(torch.autograd.Function):
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
+                ONLINE_TOPK_METHOD=online_topk_method,
                 **extra_kern_args,
             )
 
@@ -1786,6 +1825,7 @@ def query_sparse_attention(
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 2,
+    online_topk_method: Literal["naive", "sort"] = "naive",
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -1814,4 +1854,5 @@ def query_sparse_attention(
         self_extend_scale,
         bsa_top_block_k,
         bsa_block_size_k,
+        online_topk_method,
     )
