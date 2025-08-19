@@ -137,7 +137,7 @@ def winner_update_inline_efficient(
         tl.store(BSA_INDICES + leaf_addr, start_n, mask=beat)
 
         # --- climb: keep the path child (value, pointer, index) in registers ---
-        path_v = tl.where(beat, update_exp_sum.to(tl.bfloat16), path_v)  # fp32
+        path_v = tl.where(beat, update_exp_sum.to(tl.float32), path_v)  # fp32
         path_p = root_lf  # int64 leaf-id [0..BSA_K-1]
         child = leaf_idx  # int64 node idx [BSA_K..2*BSA_K-1]
         node = child >> 1  # parent idx [1..BSA_K-1]
@@ -168,7 +168,7 @@ def winner_update_inline_efficient(
 
             tl.store(
                 BSA_BLOCK_SUMS + (b_idx + node).to(tl.int32),
-                win_v.to(tl.bfloat16),
+                win_v.to(tl.float32),
                 mask=beat,
             )
             tl.store(
@@ -180,7 +180,7 @@ def winner_update_inline_efficient(
             # move up one level
             child = node.to(tl.int32)
             node = (node >> 1).to(tl.int32)
-            path_v = win_v.to(tl.bfloat16)
+            path_v = win_v.to(tl.float32)
             path_p = win_p.to(tl.int32)
     return path_v, path_p
 
@@ -542,13 +542,13 @@ def _attn_fwd_inner(
             
             for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
                 if i_offset == (0 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_0.to(tl.bfloat16)
+                    update_exp_sum = l_ij_0.to(tl.float32)
                 elif i_offset == (1 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_1.to(tl.bfloat16)
+                    update_exp_sum = l_ij_1.to(tl.float32)
                 elif i_offset == (2 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_2.to(tl.bfloat16)
+                    update_exp_sum = l_ij_2.to(tl.float32)
                 elif i_offset == (3 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_3.to(tl.bfloat16)
+                    update_exp_sum = l_ij_3.to(tl.float32)
 
                 if BSA_HEAP:
                     # root_v, root_lf = winner_update_inline(
@@ -1569,7 +1569,7 @@ class _attention(torch.autograd.Function):
                     (bsa_top_block_k * k_factor,),
                     -3200.0,
                     device=q.device,
-                    dtype=torch.bfloat16,
+                    dtype=torch.float32,
                 )
 
                 # need to initialize the heap in the proper order
@@ -1628,7 +1628,7 @@ class _attention(torch.autograd.Function):
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     fill_value=-3200.0,
                     device=q.device,
-                    dtype=torch.bfloat16,
+                    dtype=torch.float32,
                 )
 
                 assert bsa_indices.stride() == bsa_block_sums.stride()
@@ -2014,7 +2014,7 @@ def query_sparse_attention(
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
     bsa_heap: bool = False,
-    reverse_iter: bool = True,
+    reverse_iter: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
