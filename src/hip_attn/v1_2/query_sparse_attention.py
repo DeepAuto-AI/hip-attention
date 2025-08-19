@@ -436,8 +436,8 @@ def _attn_fwd_inner(
 
         q_dtype = q.dtype
 
-        # cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
-        # ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
         # qk = tl.dot(
         #     (q * cq).to(q_dtype),
@@ -458,7 +458,7 @@ def _attn_fwd_inner(
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
             qk = tl.where(mask, qk, float("-inf"))
 
-        # qk = tl.where(qk == 0, float("-inf"), qk)
+        qk = tl.where(qk == 0, float("-inf"), qk)
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         # if we go backwards through the keys, some blocks may be totally masked
@@ -530,7 +530,7 @@ def _attn_fwd_inner(
 
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
             # USING EXP SUM IS INCOMPATIBLE WITH WINNER TREE UPDATES BECAUSE WE CANNOT UPDATE EACH TREE ENTRY FOR EVERY INSERT
-            using_exp_sum = False
+            using_exp_sum: tl.constexpr = True and (not BSA_HEAP)
             if using_exp_sum:
                 if MASKING:
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
@@ -559,7 +559,7 @@ def _attn_fwd_inner(
                     mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
                         start_n + offs_n[None, :]
                     )
-                    p_split = tl.where(mask, qk + m_ij[:, None], float("-inf"))
+                    p_split = tl.where(mask, qk + m_ij[:, None], -3200.0)
                 else:
                     p_split = qk + m_ij[:, None]
 
@@ -618,7 +618,7 @@ def _attn_fwd_inner(
                     else:
                         block_sums *= 1  # WHY WHY WHY??? I HATE YOU
 
-                    block_update = update_exp_sum > block_sums_min
+                    block_update = (update_exp_sum > block_sums_min) * mask_m
                     if tl.sum(block_update) > 0:
                         block_sums_max = tl.maximum(
                             block_sums_min, update_exp_sum
@@ -718,7 +718,7 @@ else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
         for BM in [64, 128]
-        for BN in [32, 64]
+        for BN in [64,]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
     ]
@@ -1608,7 +1608,7 @@ class _attention(torch.autograd.Function):
                 )
                 bsa_block_sums = torch.full(  # for real block indices
                     (bsa_top_block_k * k_factor,),
-                    float("-inf"),
+                    -3200.0,
                     device=q.device,
                     dtype=torch.float32,
                 )
@@ -1667,7 +1667,7 @@ class _attention(torch.autograd.Function):
                 )
                 bsa_block_sums = torch.full(  # for
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
-                    fill_value=float("-inf"),
+                    fill_value=-3200.0,
                     device=q.device,
                     dtype=torch.float32,
                 )
@@ -1696,7 +1696,7 @@ class _attention(torch.autograd.Function):
                     triton.cdiv(q.shape[2], score_pooling_block_size_q),
                     triton.cdiv(MAX_TSRC, score_pooling_block_size_k),
                 ),
-                fill_value=float("-inf"),
+                fill_value=-3200.0,
                 dtype=torch.float32,
                 device=q.shape,
             )
@@ -2045,8 +2045,8 @@ def query_sparse_attention(
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
-    bsa_heap: bool = False,
-    reverse_iter: bool = False,
+    bsa_heap: bool = True,
+    reverse_iter: bool = True,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
