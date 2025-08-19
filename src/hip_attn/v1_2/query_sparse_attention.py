@@ -692,7 +692,15 @@ def keep(conf):
 #     ],
 #     do_autotune=True,
 # )
-@triton.autotune(configs=configs, key=["N_CTX", "N_KV"])
+@triton.autotune(
+    configs=configs, 
+    key=[
+        "N_CTX_AUTOTUNE", 
+        "N_KV_AUTOTUNE",
+        "HEAD_DIM",
+        "USING_PAGED_CACHE",
+    ]
+)
 @triton.jit
 def _attn_fwd(
     Q,
@@ -800,6 +808,8 @@ def _attn_fwd(
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
     SELF_EXTEND_WINDOW=1024,
+    N_KV_AUTOTUNE=0,
+    N_CTX_AUTOTUNE=0,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -1454,7 +1464,6 @@ def _attn_merge(
 
 class _attention(torch.autograd.Function):
 
-    @capture
     @staticmethod
     def forward(
         ctx,
@@ -1858,6 +1867,16 @@ class _attention(torch.autograd.Function):
             )
 
             assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
+            
+            N_CTX=N_CTX
+            N_KV=(
+                k.shape[2]
+                if not USING_PAGED_CACHE
+                else k_cache.shape[0] * k_cache.shape[1]
+            )
+            
+            N_CTX_AUTOTUNE=128 if N_CTX > 128 else 1
+            N_KV_AUTOTUNE=1024 if N_KV > 1024 else 1
 
             _attn_fwd[grid](
                 q,
@@ -1919,11 +1938,7 @@ class _attention(torch.autograd.Function):
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
-                N_KV=(
-                    k.shape[2]
-                    if not USING_PAGED_CACHE
-                    else k_cache.shape[0] * k_cache.shape[1]
-                ),
+                N_KV=N_KV,
                 HEAD_DIM=HEAD_DIM_K,
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
@@ -1936,6 +1951,8 @@ class _attention(torch.autograd.Function):
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
+                N_CTX_AUTOTUNE=N_CTX_AUTOTUNE,
+                N_KV_AUTOTUNE=N_KV_AUTOTUNE,
                 **extra_kern_args,
             )
 
@@ -1968,6 +1985,7 @@ class _attention(torch.autograd.Function):
 
 
 # for typing wrapper and provide kwargs
+@capture
 def query_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
