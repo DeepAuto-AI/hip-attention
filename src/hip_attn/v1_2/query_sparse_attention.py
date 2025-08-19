@@ -76,7 +76,7 @@ def winner_update_inline(
 
     win_v, win_p = root_v, root_lf
     beat = (update_exp_sum > root_v) & mask_m  # lanes that actually update
-    if tl.sum(beat) > 0:
+    if tl.sum(beat.to(tl.int32)) > 0:
         leaf_node = BSA_K + root_lf
         leaf_off = b_idx + leaf_node
 
@@ -129,15 +129,15 @@ def winner_update_inline_efficient(
     # lanes that actually update (top-k max → min-winner tree)
     beat = (update_exp_sum > root_v) & mask_m
     path_v, path_p = root_v, root_lf
-    if tl.sum(beat) > 0:
+    if tl.sum(beat.to(tl.int32)) > 0:
         # --- write leaf value + payload (only for beating lanes) ---
-        leaf_idx = (BSA_K + root_lf).to(tl.int64)  # [BSA_K .. 2*BSA_K-1]
-        leaf_addr = b_idx + leaf_idx
+        leaf_idx = (BSA_K + root_lf).to(tl.int32)  # [BSA_K .. 2*BSA_K-1]
+        leaf_addr = b_idx + leaf_idx.to(tl.int64)
         tl.store(BSA_BLOCK_SUMS + leaf_addr, update_exp_sum, mask=beat)
         tl.store(BSA_INDICES + leaf_addr, start_n, mask=beat)
 
         # --- climb: keep the path child (value, pointer, index) in registers ---
-        path_v = tl.where(beat, update_exp_sum.to(tl.float32), path_v)  # fp32
+        path_v = tl.where(beat, update_exp_sum.to(tl.bfloat16), path_v)  # fp32
         path_p = root_lf  # int64 leaf-id [0..BSA_K-1]
         child = leaf_idx  # int64 node idx [BSA_K..2*BSA_K-1]
         node = child >> 1  # parent idx [1..BSA_K-1]
@@ -149,16 +149,16 @@ def winner_update_inline_efficient(
         for _ in tl.static_range(
             0, BSA_LOGK
         ):  # exactly BSA_LOGK steps; last write is root (node==1)
-            left = (node << 1).to(tl.int64)
-            right = (left + 1).to(tl.int64)
+            left = (node << 1).to(tl.int32)
+            right = (left + 1).to(tl.int32)
 
             # which side is our path child?
             path_is_left = (child == left).to(tl.int1)
             sib = tl.where(path_is_left, right, left)
 
             # load ONLY sibling from memory (unmasked loads)
-            sib_v = tl.load(BSA_BLOCK_SUMS + (b_idx + sib).to(tl.int64))
-            sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib).to(tl.int64))
+            sib_v = tl.load(BSA_BLOCK_SUMS + (b_idx + sib.to(tl.int64)))
+            sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib.to(tl.int64)))
 
             # min-winner with **left-tie** policy (match typical winner-tree)
             take_path = path_v < sib_v  # | ((path_v == sib_v) & path_is_left)
@@ -167,21 +167,21 @@ def winner_update_inline_efficient(
             win_p = tl.where(take_path, path_p, sib_p)
 
             tl.store(
-                BSA_BLOCK_SUMS + (b_idx + node).to(tl.int64),
-                win_v.to(tl.float32),
+                BSA_BLOCK_SUMS + (b_idx + node).to(tl.int32),
+                win_v.to(tl.bfloat16),
                 mask=beat,
             )
             tl.store(
-                BSA_HEAP_INDICES + (b_idx + node).to(tl.int64),
-                win_p.to(tl.int64),
+                BSA_HEAP_INDICES + (b_idx + node).to(tl.int32),
+                win_p.to(tl.int32),
                 mask=beat,
             )
 
             # move up one level
-            child = node.to(tl.int64)
-            node = (node >> 1).to(tl.int64)
-            path_v = win_v.to(tl.float32)
-            path_p = win_p.to(tl.int64)
+            child = node.to(tl.int32)
+            node = (node >> 1).to(tl.int32)
+            path_v = win_v.to(tl.bfloat16)
+            path_p = win_p.to(tl.int32)
     return path_v, path_p
 
 
@@ -473,49 +473,6 @@ def _attn_fwd_inner(
         alpha = tl.where(m_ij == float("-inf"), 1, tl.math.exp2(m_i - m_ij))
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
 
-        # -- update output accumulator --
-        acc = acc * alpha.to(acc.dtype)[:, None]
-        # update acc
-        if not USING_PAGED_CACHE:
-            v = tl.load(
-                V_block_ptr,
-                boundary_check=(0,),
-                padding_option="zero",
-            )
-        else:
-            v = tl.load(
-                V_CACHE
-                + idx_t[:, None] * stride_v_cache_t
-                + 0 * stride_v_cache_page
-                + tl.arange(0, HEAD_DIM)[None, :] * stride_v_cache_hid,
-                mask=mask_tsrc[:, None],
-                other=0.0,
-            )
-
-        if v_descale is not None:
-            v *= v_descale
-
-        # NOTE FIXME why this conversion needed?
-        # if fp8_v:
-        #     p = p.to(tl.float8e5)
-        # else:
-        #     p = p.to(v.dtype)
-
-        acc = tl.dot(
-            p.to(q_dtype),
-            v.to(q_dtype),
-            acc=acc,
-        )
-        # update m_i and l_i
-        m_i = m_ij
-        if not USING_PAGED_CACHE:
-            V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-            K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-        else:
-            # idx_tsrc = idx_tsrc + BLOCK_N
-            # mask_tsrc = idx_tsrc < hi
-            pass
-
         # -- update block sums and indices for block sparse attention
         # if RETURN_BSA_MASK:
         if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
@@ -578,20 +535,20 @@ def _attn_fwd_inner(
                 else:
                     raise Exception()
 
+            # NOTE: update indices and scores
+            if using_exp_sum and (not BSA_HEAP):
+                block_sums = (block_sums * alpha[:, None]).to(block_sums.dtype)
+                block_sums_min = (block_sums_min * alpha).to(block_sums_min.dtype)
+            
             for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-
                 if i_offset == (0 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_0
+                    update_exp_sum = l_ij_0.to(tl.bfloat16)
                 elif i_offset == (1 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_1
+                    update_exp_sum = l_ij_1.to(tl.bfloat16)
                 elif i_offset == (2 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_2
+                    update_exp_sum = l_ij_2.to(tl.bfloat16)
                 elif i_offset == (3 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_3
+                    update_exp_sum = l_ij_3.to(tl.bfloat16)
 
                 if BSA_HEAP:
                     # root_v, root_lf = winner_update_inline(
@@ -610,16 +567,8 @@ def _attn_fwd_inner(
                         root_lf,
                     )
                 else:
-                    # NOTE: update indices and scores
-                    if (update_alpha is not None) and (using_exp_sum):
-                        block_sums *= update_alpha[
-                            :, None
-                        ]  # adjust previous sums for new normalization constant
-                    else:
-                        block_sums *= 1  # WHY WHY WHY??? I HATE YOU
-
                     block_update = (update_exp_sum > block_sums_min) * mask_m
-                    if tl.sum(block_update) > 0:
+                    if tl.sum(block_update.to(tl.int32)) > 0:
                         block_sums_max = tl.maximum(
                             block_sums_min, update_exp_sum
                         )  # (M,)
@@ -632,7 +581,7 @@ def _attn_fwd_inner(
 
                         block_sums = tl.where(
                             bsa_mask, block_sums_max[:, None], block_sums
-                        )
+                        ).to(block_sums.dtype)
                         block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
 
                         # calculate the new block sums min for the next iteration
@@ -717,8 +666,9 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128]
+        for BM in [64, 128, 256]
         for BN in [64,]
+        # for BN in [64, 128]
         for s in ([1] if is_hip() else [3, 4, 7])
         for w in [4, 8]
     ]
@@ -742,7 +692,7 @@ def keep(conf):
 #     ],
 #     do_autotune=True,
 # )
-@triton.autotune(configs=configs, key=["N_CTX, N_KV"])
+@triton.autotune(configs=configs, key=["N_CTX", "N_KV"])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -1604,21 +1554,21 @@ class _attention(torch.autograd.Function):
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     987654321,
                     device=q.device,
-                    dtype=torch.int64,
+                    dtype=torch.int32,
                 )
                 bsa_block_sums = torch.full(  # for real block indices
                     (bsa_top_block_k * k_factor,),
                     -3200.0,
                     device=q.device,
-                    dtype=torch.float32,
+                    dtype=torch.bfloat16,
                 )
 
                 # need to initialize the heap in the proper order
                 bsa_heap_indices = torch.zeros(
-                    bsa_top_block_k * 2, device=q.device, dtype=torch.long
+                    bsa_top_block_k * 2, device=q.device, dtype=torch.int32
                 )
                 bsa_heap_indices[bsa_top_block_k:] = torch.arange(
-                    0, bsa_top_block_k, device=q.device, dtype=torch.long
+                    0, bsa_top_block_k, device=q.device, dtype=torch.int32
                 )
 
                 for node in range(bsa_top_block_k - 1, 0, -1):
@@ -1663,13 +1613,13 @@ class _attention(torch.autograd.Function):
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     987654321,
                     device=q.device,
-                    dtype=torch.int64,
+                    dtype=torch.int32,
                 )
                 bsa_block_sums = torch.full(  # for
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     fill_value=-3200.0,
                     device=q.device,
-                    dtype=torch.float32,
+                    dtype=torch.bfloat16,
                 )
 
                 assert bsa_indices.stride() == bsa_block_sums.stride()
@@ -2045,7 +1995,7 @@ def query_sparse_attention(
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
-    bsa_heap: bool = True,
+    bsa_heap: bool = False,
     reverse_iter: bool = True,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
