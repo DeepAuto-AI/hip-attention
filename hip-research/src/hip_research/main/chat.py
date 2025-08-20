@@ -152,6 +152,7 @@ while True:
             "model": "anything",
             "messages": [{"role": "system", "content": sys_prompt}] + chat_log,
             "stream": True,
+            "max_tokens": 32768,
             "temperature": 0.7,
             "top_p": 0.8,
             "top_k": 20,

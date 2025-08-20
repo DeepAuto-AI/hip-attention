@@ -1,145 +1,271 @@
 import math
 import os
+from typing import Any, Tuple
 
 import torch
 from flash_attn import flash_attn_func
-from hip_research.utils.load_checkouts import load_checkouts
 
 from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
+
+# from hip_research.utils.load_checkouts import load_checkouts
 from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
 from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
 from hip_attn.v1_2.delta.apply_delta import apply_delta
 from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
 
 
-def main():
-    # B, H, H_KV, S, D = 1, 32, 8, 32768, 128
-    B, H, H_KV, S, D = 1, 1, 1, 4096, 128
-    delta_w = 16
-    # bsa_block_size_q = 64 // delta_w
-    bsa_block_size_q = 1
-    bsa_block_size_k = 64
-    bsa_top_block_k = 1024 // bsa_block_size_k
-    scale = math.sqrt(1 / D)
-    device = "cuda"
-    dtype = torch.bfloat16
-    # source = "checkout"
-    source = "rand"
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    n = x.size(2) // 2
+    return torch.cat((-x[:, :, :n], x[:, :, n:]), dim=2)
 
-    if source == "checkout":
-        seq_len = int(os.getenv("SEQ_LEN", "131072"))
-        query_seq_dups = int(os.getenv("Q_DUPS", "-1"))
-        seq_dups = int(os.getenv("DUPS", "1"))
-        if query_seq_dups < 0:
-            query_seq_dups = seq_dups
 
-        assert seq_dups > 0
+def latency(fn: Any, n_sample: int = 10) -> float:
+    elapsed = []
+    for i in range(n_sample):
+        start = torch.cuda.Event(True)
+        end = torch.cuda.Event(True)
+        start.record()
+        _ = fn()
+        end.record()
+        end.synchronize()
+        if i > 3:
+            elapsed.append(start.elapsed_time(end))
+    return float(sum(elapsed) / len(elapsed))
 
-        using_extend = True
 
-        q, k, v, out, cos, sin = load_checkouts(
-            idx=0,
-            window=40,
-            seq_len=seq_len,
-            return_cos_sin=True,
-            derope=using_extend,
-            dtype=torch.bfloat16,
-        )
-        seq_len = seq_len * seq_dups
+def test_qsa() -> None:
+    q_block, k_block = 32, 32
+    seq = 4096 * 32
+    device = 0
+    window_size, sink_tokens = 2048, 64
 
-        q = q.repeat(1, query_seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        k = k.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        v = v.repeat(1, seq_dups, 1).permute(1, 0, 2).contiguous().unsqueeze(0)
-        if cos is not None:
-            cos = cos.repeat(seq_dups, 1)
-            sin = sin.repeat(seq_dups, 1)
-
-        q = q.permute(0, 2, 1, 3)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
-
-        print(q.shape, k.shape, v.shape, q.dtype, k.dtype, v.dtype)
-    else:
-        q, k, v = (
-            torch.randn(B, H, S, D, device=device, dtype=dtype),
-            torch.randn(B, H_KV, S, D, device=device, dtype=dtype),
-            torch.randn(B, H_KV, S, D, device=device, dtype=dtype),
-        )
-        cos, sin = torch.randn(S, D), torch.randn(S, D)
-
-    mask = torch.arange(0, S, device=device)[None, :].repeat(B, 1)
-
-    def fwd(return_bsa_indices: bool, debug: bool = False):
+    def qsa(
+        q,
+        k,
+        v,
+        heap=False,
+        return_bsa_indices=False,
+        reverse=False,
+        K=64,
+        mask=None,
+    ) -> Tuple[torch.Tensor, ...]:
+        bsa_idx, block_sums = None, None
         if return_bsa_indices:
             out, (bsa_idx, block_sums) = query_sparse_attention(
                 q=q,
                 k=k,
                 v=v,
                 mask=mask,
-                sm_scale=scale,
                 k_cache=None,
                 v_cache=None,
                 block_table=None,
+                return_bsa_indices=return_bsa_indices,
+                sm_scale=math.sqrt(1 / q.size(-1)),
+                bsa_top_block_k=K,
+                bsa_block_size_k=k_block,
+                bsa_mask_sliding_window_size=window_size,
+                bsa_mask_sink_token_size=sink_tokens,
+                bsa_heap=heap,
+                reverse_iter=reverse,
+            )
+            return out, bsa_idx, block_sums
+
+        out = query_sparse_attention(
+            q=q,
+            k=k,
+            v=v,
+            mask=mask,
+            k_cache=None,
+            v_cache=None,
+            block_table=None,
+            sm_scale=math.sqrt(1 / q.size(-1)),
+        )
+        return out, None, None
+
+    path = "/home/jeff/python/delta2/checkout/qkvout.pth"
+    d = torch.load(path)
+
+    q, k, v, cos, sin = (
+        d["q"].cuda(device),
+        d["k"].cuda(device),
+        d["v"].cuda(device),
+        d["cos"].cuda(device),
+        d["sin"].cuda(device),
+    )
+    q, k, v, cos, sin = (
+        q[:, :, :seq],
+        k[:, :, :seq],
+        v[:, :, :seq],
+        cos[:, :seq],
+        sin[:, :seq],
+    )
+    b, h, s, d = q.size()
+    k = k.view(b, -1, 1, s, d).repeat(1, 1, h // k.size(1), 1, 1).reshape(b, h, s, d)
+    v = v.view(b, -1, 1, s, d).repeat(1, 1, h // v.size(1), 1, 1).reshape(b, h, s, d)
+    print(f"after making q: {q.size()=} {k.size()=} {v.size()=}")
+
+    q = q * cos[:, None] + rotate_half(q) * sin[:, None]
+    k = k * cos[:, None] + rotate_half(k) * sin[:, None]
+
+    # 1. test forward/reverse is equivalent to flash
+    s = 2048
+    o = flash_attn_func(
+        q[:, :, :s].transpose(1, 2),
+        k[:, :, :s].transpose(1, 2),
+        v[:, :, :s].transpose(1, 2),
+        causal=True,
+    )
+    o = o.transpose(1, 2)
+
+    mask = torch.arange(seq).view(1, seq).repeat(b, 1).cuda(device)
+    out, _, _ = qsa(
+        q[:, :, :s], k[:, :, :s], v[:, :, :s], return_bsa_indices=False, mask=mask
+    )
+    diff = (o - out).abs()
+    assert diff.mean() < 1e-4, f"{diff.mean()=}"
+    assert diff.amax() < 1e-1, f"{diff.mean()=}"  # due to bfloat15 precision
+    print("flash/qsa fwd equivalent ok!")
+
+    out, _, _ = qsa(
+        q[:, :, :s],
+        k[:, :, :s],
+        v[:, :, :s],
+        return_bsa_indices=False,
+        reverse=True,
+        mask=mask,
+    )
+    diff = (o - out).abs()
+    assert diff.mean() < 1e-4, f"{diff.mean()=}"
+    assert diff.amax() < 1e-1, f"{diff.mean()=}"  # due to bfloat15 precision
+    print("flash/qsa rev equivalent ok!")
+
+    mask = mask.view(b, seq // q_block, q_block)[:, :, 0]
+    print(f"{mask.size()=} {q.size()=} {seq=} {q_block=}")
+    qq = q.view(b, h, seq // q_block, q_block, d)[:, :, :, 0]
+
+    # 2. test forward/reverse gives same indices scan top-k. One burn in for safety
+    _, bsa_idx_fwd, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=False, mask=mask)
+    _, bsa_idx_rev, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=True, mask=mask)
+
+    _, bsa_idx_fwd, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=False, mask=mask)
+    _, bsa_idx_rev, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=True, mask=mask)
+    rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
+    eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
+        0, 0, rand_idx
+    ].unsqueeze(-2)
+    eq = eq.sum(-1).sum(-1)
+    print(f"linear scan fwd/rev indices match: {eq=}")
+
+    # 3. test forward/reverse gives same indices winner tree top-k. One burn in for safety
+    _, bsa_idx_fwd, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
+    )
+    _, bsa_idx_rev, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
+    )
+
+    _, bsa_idx_fwd, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
+    )
+    _, bsa_idx_rev, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
+    )
+    rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
+    eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
+        0, 0, rand_idx
+    ].unsqueeze(-2)
+    eq = eq.sum(-1).sum(-1)
+    print(f"winner tree fwd/rev indices match {eq=}")
+
+    # 4. test linear scan and heap give same indices. One burn in for warmup
+    _, bsa_idx, _ = qsa(
+        qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
+    )
+    _, bsa_idx_tree, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
+    )
+
+    _, bsa_idx, _ = qsa(
+        qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
+    )
+    _, bsa_idx_tree, _ = qsa(
+        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
+    )
+
+    rand_idx = torch.randperm(bsa_idx.size(2))[:4]
+    eq = bsa_idx[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_tree[
+        0, 0, rand_idx
+    ].unsqueeze(-2)
+    eq = eq.sum(-1).sum(-1)
+    print(f"heap and plain returned same indices: {eq=}")
+    print(
+        "winner tree / linear top-k indices ok! (should be 16 unless a very early block was selected)"
+    )
+    print(f"selected blocks: {rand_idx=}")
+
+    # 5. test forward/reverse latency with linear scan top-k
+    for topk in [2**i for i in range(4, 6)]:
+        fwd_latency = latency(
+            lambda: qsa(
+                qq, k, v, return_bsa_indices=True, reverse=False, mask=mask, K=topk
+            )
+        )
+        rev_latency = latency(
+            lambda: qsa(
+                qq, k, v, return_bsa_indices=True, reverse=True, mask=mask, K=topk
+            )
+        )
+        print(f"online top-k latency {topk=} {fwd_latency=} {rev_latency=}")
+
+    # 6. test forward/reverse latency with winner tree top-k
+    for topk in [2**i for i in range(4, 6)]:
+        fwd_latency = latency(
+            lambda: qsa(
+                qq,
+                k,
+                v,
+                heap=True,
                 return_bsa_indices=True,
-                bsa_top_block_k=bsa_top_block_k,
-                bsa_block_size_q=bsa_block_size_q,
-                bsa_block_size_k=bsa_block_size_k,
-            )
-            if debug:
-                print(f"debugging outputs for query sparse atttntion kernel")
-
-                print(f"{q.size()=} {k.size()=} {v.size()=}")
-                print(f"{bsa_idx.size()=}")
-                torch.set_printoptions(
-                    threshold=bsa_idx.size(2) * bsa_idx.size(3) + 1000
-                )
-                print(f"bsa index:  {bsa_idx[0, 0, :10]=} {bsa_idx[0, 0, -10:]}")
-                print(f"bsa sums:  {block_sums[0, 0, :10]=} {block_sums[0, 0, -10:]}")
-                print(f"bsa index:  {bsa_idx[0, 0]=}")
-        else:
-            out = query_sparse_attention(
-                q=q,
-                k=k,
-                v=v,
+                reverse=False,
                 mask=mask,
-                sm_scale=scale,
-                k_cache=None,
-                v_cache=None,
-                block_table=None,
-                return_bsa_indices=False,
+                K=topk,
             )
+        )
+        rev_latency = latency(
+            lambda: qsa(
+                qq,
+                k,
+                v,
+                heap=True,
+                return_bsa_indices=True,
+                reverse=True,
+                mask=mask,
+                K=topk,
+            )
+        )
+        print(f"winner tree top-k latency {topk=} {fwd_latency=} {rev_latency=}")
 
-    fwd(return_bsa_indices=True, debug=True)
-    print(f"[done] return_bsa_indices=True")
+    # 7. test no-bsa latency
+    fwd_latency = latency(
+        lambda: qsa(qq, k, v, return_bsa_indices=False, reverse=False, mask=mask)
+    )
+    print(f"no bsa indices latency {fwd_latency=}")
 
-    fwd(return_bsa_indices=False, debug=True)
-    print(f"[done] return_bsa_indices=False")
-
-    def latency(fn, n_sample=10):
-        elapsed = []
-        for i in range(n_sample):
-            start = torch.cuda.Event(True)
-            end = torch.cuda.Event(True)
-            start.record()
-            fn()
-            end.record()
-            end.synchronize()
-            if i > 3:
-                elapsed.append(start.elapsed_time(end))
-        return sum(elapsed) / len(elapsed)
-
-    latency_return_mask = latency(lambda: fwd(return_bsa_indices=True))
-    print(f"with mask: {latency_return_mask:.2f} ms took")
-    latency_original = latency(lambda: fwd(return_bsa_indices=False))
-    print(f"without mask: {latency_original:.2f} ms took")
+    # 8. test flash attention latency
+    latency_flash = latency(
+        lambda: flash_attn_func(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True
+        )
+    )
+    print(f"flash attn: {latency_flash:.2f}")
 
 
-def test_with_hip_bsa():
-    q_block, k_block = 128, 32
-    seq = 131072
+def test_with_hip_bsa() -> None:
+    q_block, k_block = 32, 32
+    seq = 4096 * 32
     device = 0
-    K = 256
-    window_size = 2048
+    K = 64
+    window_size, sink_tokens = 2048, 64
 
     d = torch.load(
         "/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu"
@@ -151,10 +277,7 @@ def test_with_hip_bsa():
         d["cos"].cuda(device),
         d["sin"].cuda(device),
     )
-
-    def rotate_half(x):
-        n = x.size(2) // 2
-        return torch.cat((-x[:, :, :n], x[:, :, n:]), dim=2)
+    print(f"after making q: {q.size()=}")
 
     b, h, s, d = k.size()
     k = (
@@ -171,17 +294,10 @@ def test_with_hip_bsa():
     q = q * cos[:, None] + rotate_half(q) * sin[:, None]
     k = k * cos[:, None] + rotate_half(k) * sin[:, None]
 
-    o = flash_attn_func(
-        q[:, :, :seq].transpose(1, 2),
-        k[:, :, :seq].transpose(1, 2),
-        v[:, :, :seq].transpose(1, 2),
-        causal=True,
-    )
-    o = o.transpose(1, 2)
-
     qp = q[:, :, :seq]
     kp = k[:, :, :seq]
     vp = v[:, :, :seq]
+    print(f"after making q: {qp.size()=}")
 
     qp, kp, vp = qp.contiguous(), kp.contiguous(), vp.contiguous()
 
@@ -198,14 +314,16 @@ def test_with_hip_bsa():
         block_size_q=q_block,
         block_size_k=k_block,
         position_ids=None,
-        sink_token_size=64,
+        sink_token_size=sink_tokens,
         sliding_window_size=window_size,
         logit_softcap=None,
         rope_range=[0, d],
         using_extend=False,
     )
 
-    def qsa(online_topk_method):
+    def qsa(
+        online_topk_method, heap=False, reverse=True, return_bsa_indices=True
+    ) -> Tuple[torch.Tensor, ...]:
         out, (bsa_idx, block_sums) = query_sparse_attention(
             q=qp,
             k=kp,
@@ -214,14 +332,16 @@ def test_with_hip_bsa():
             k_cache=None,
             v_cache=None,
             block_table=None,
-            return_bsa_indices=True,
+            return_bsa_indices=return_bsa_indices,
             sm_scale=math.sqrt(1 / q.size(-1)),
             bsa_top_block_k=K,
             bsa_block_size_k=k_block,
+            bsa_mask_sliding_window_size=window_size,
+            bsa_mask_sink_token_size=sink_tokens,
             online_topk_method=online_topk_method,
+            bsa_heap=heap,
+            reverse_iter=reverse,
         )
-
-        # bsa_idx = torch.where(bsa_idx == -1, 987654321, bsa_idx * k_block)
 
         ks = (bsa_idx < 987654321).sum(dim=-1)
         ks = ks.view(b * h, seq // q_block, 1).repeat(1, 1, q_block).reshape(b * h, seq)
@@ -243,12 +363,21 @@ def test_with_hip_bsa():
         )
         return out, bsa_out, bsa_idx, block_sums
 
-    out, bsa_out, block_idx, block_sums = qsa("naive")
-    print(f"naive {block_idx=} naive")
+    o = flash_attn_func(
+        q[:, :, :seq].transpose(1, 2),
+        k[:, :, :seq].transpose(1, 2),
+        v[:, :, :seq].transpose(1, 2),
+        causal=True,
+    )
+    o = o.transpose(1, 2)
+
+    # warmup burn-in. autotune has s dirty init so this is necessary right now
+    out, bsa_out, block_idx, block_sums = qsa("naive", heap=False)
     out_2, bsa_out_2, block_idx_2, block_sums_2 = qsa("estimate")
-    print(f"estimate {block_idx_2=} estimate")
     check_topk_selection("naive", block_idx, block_sums)
     check_topk_selection("estimate", block_idx_2, block_sums_2)
+
+    out, bsa_out, block_idx, _ = qsa("naive", heap=True)
 
     bsa_out = bsa_out.transpose(1, 2)
 
@@ -418,7 +547,7 @@ def test_with_hip_bsa():
     print(f"hip + delta/flash cos {hip_delta_cos_mean} +- {hip_delta_cos_std}")
     print(f"hip/flash cos: {hip_cos_mean} +- {hip_cos_std}")
 
-    def sllm():
+    def sllm() -> torch.Tensor:
         sllm_out = block_sparse_attention(
             q[:, :, :seq].transpose(1, 2) * math.sqrt(1 / q.size(-1)),
             k[:, :, :seq].transpose(1, 2),
@@ -457,19 +586,6 @@ def test_with_hip_bsa():
     print(f"{sllm_delta_cos_mean=} {sllm_delta_cos_std=}")
     print(f"{sllm_cos_mean=} {sllm_cos_std=}")
 
-    def latency(fn, n_sample=10):
-        elapsed = []
-        for i in range(n_sample):
-            start = torch.cuda.Event(True)
-            end = torch.cuda.Event(True)
-            start.record()
-            fn()
-            end.record()
-            end.synchronize()
-            if i > 3:
-                elapsed.append(start.elapsed_time(end))
-        return sum(elapsed) / len(elapsed)
-
     latency_sllm = latency(lambda: sllm())
     print(f"sllm: {latency_sllm:.2f} ms took")
     latency_hip = latency(
@@ -478,12 +594,17 @@ def test_with_hip_bsa():
         )
     )
     print(f"hip: {latency_hip:.2f} ms took")
-    latency_qsa = latency(lambda: qsa("nothing"))
-    print(f"qsa(nothing): {latency_qsa:.2f} ms took")
+    print("calling qsa latency")
+
+    # latency_qsa = latency(lambda: qsa("naive", return_bsa_indices=False))
+    # print(f"qsa no bsa indices: {latency_qsa:.2f} ms took")
     latency_qsa = latency(lambda: qsa("naive"))
-    print(f"qsa(naive): {latency_qsa:.2f} ms took")
+    print(f"qsa no heap: {latency_qsa:.2f} ms took")
+    latency_qsa = latency(lambda: qsa("naive", heap=True))
+    print(f"qsa heap: {latency_qsa:.2f} ms took")
     latency_qsa = latency(lambda: qsa("estimate"))
     print(f"qsa(estimate): {latency_qsa:.2f} ms took")
+
     latency_flash = latency(
         lambda: flash_attn_func(
             q[:, :, :seq].transpose(1, 2),
@@ -506,5 +627,5 @@ def check_topk_selection(
 
 
 if __name__ == "__main__":
-    # main()
     test_with_hip_bsa()
+    # test_qsa()
