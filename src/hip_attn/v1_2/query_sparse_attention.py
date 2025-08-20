@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from hip_attn.v1_2.attention_metadata import safe_stride
 from hip_attn.v1_2.triton_argsort import argsort
@@ -60,14 +61,22 @@ def convert_fp8_to_bf16(k: tl.tensor):
 
 @triton.jit
 def update_block_sums_idx(
+    BSA_INDICES,
+    BSA_BLOCK_SUMS,
+    start_m,
+    stride_bim,
+    stride_bik,
+    mask_m,
     block_sums,
     block_idx,
-    staging_sums,
-    staging_idx,
+    topk_idx,
+    running_mean,
+    running_m2,
+    num_tracking,
+    erf_pr,
     update_exp_sum,
     start_n,
     i_offset,
-    topk_idx,
     BSA_K: tl.constexpr,
     ONLINE_TOPK_METHOD: tl.constexpr,
 ):
@@ -92,32 +101,61 @@ def update_block_sums_idx(
         block_idx = tl.where(
             bsa_mask, (start_n + i_offset).to(block_idx.dtype), block_idx
         )
+    elif ONLINE_TOPK_METHOD == "estimate":
+        num_tracking += 1
 
-    elif ONLINE_TOPK_METHOD == "sort":
-        offset = topk_idx % BSA_K
+        # update running mean and std
+        delta = update_exp_sum - running_mean
+        running_mean = running_mean + delta / num_tracking
+        delta2 = update_exp_sum - running_mean
+        running_m2 = running_m2 + delta * delta2
 
-        # if offset == 0:
-        # sort the block sums and indices
-        M: tl.constexpr = block_sums.shape[0]
-        merge_block_sums = tl.reshape(tl.join(block_sums, staging_sums), (M, BSA_K * 2))
-        merge_block_idx = tl.reshape(tl.join(block_idx, staging_idx), (M, BSA_K * 2))
-        merge_block_sums, merge_block_idx = argsort(
-            merge_block_sums,
-            merge_block_idx,
-            descending=True,
-        )
-        block_sums, staging_sums = tl.split(tl.reshape(merge_block_sums, (M, BSA_K, 2)))
-        block_idx, staging_idx = tl.split(tl.reshape(merge_block_idx, (M, BSA_K, 2)))
+        est_std = tl.sqrt(running_m2 / (num_tracking - 1))
 
-        mask = offset == tl.arange(0, BSA_K)
-        staging_sums = tl.where(
-            mask, update_exp_sum[:, None].to(staging_sums.dtype), staging_sums
-        )
-        staging_idx = tl.where(
-            mask, (start_n + i_offset).to(staging_idx.dtype), staging_idx
-        )
+        # estimated threshold for top-k
+        est_th = tl.math.exp2(erf_pr * est_std + running_mean)
 
-    return block_sums, block_idx, staging_sums, staging_idx
+        # update block sums and indices
+        new_block_sum = update_exp_sum[:, None]
+        new_block_idx = start_n + i_offset
+
+        # 1. always add if num_tracking < BSA_K
+        # bsa_mask = num_tracking[:, None] == tl.arange(0, BSA_K)[None, :]
+        # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
+        # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
+        do_update = ((num_tracking - 1) < BSA_K) & (
+            update_exp_sum > 0
+        )  # skip masked values  # (M,)
+        BLOCK_M: tl.constexpr = block_sums.shape[0]
+        b_idx = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim + (
+            num_tracking - 1
+        ) * stride_bik  # (M,)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=update_exp_sum, mask=mask_m & do_update)
+        tl.store(BSA_INDICES + b_idx, value=new_block_idx, mask=mask_m & do_update)
+
+        # 2. otherwise, update if the new value is larger than the estimated threshold
+        do_update = (
+            (num_tracking >= BSA_K)
+            & (update_exp_sum > 0)  # skip masked values
+            & (update_exp_sum > est_th)
+            & (topk_idx < BSA_K)
+        )  # (M,)
+        # bsa_mask = (
+        #     do_update[:, None]
+        #     & (topk_idx[:, None] == tl.arange(0, BSA_K)[None, :])
+        #     & (block_sums < new_block_sum)  # only update if the new value is larger
+        # )  # (M, K)
+        # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
+        # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
+        b_idx = (
+            start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        ) * stride_bim + topk_idx * stride_bik  # (M,)
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=update_exp_sum, mask=mask_m & do_update)
+        tl.store(BSA_INDICES + b_idx, value=new_block_idx, mask=mask_m & do_update)
+
+        topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
+
+    return block_sums, block_idx, running_mean, running_m2, num_tracking, topk_idx
 
 
 @triton.jit
@@ -184,6 +222,7 @@ def _attn_fwd_inner(
     SELF_EXTEND_WINDOW,
     ONLINE_TOPK_METHOD: tl.constexpr = "naive",
 ):
+    SQRT2: tl.constexpr = 1.4142135623730951  # math.sqrt(2.0)
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
@@ -204,10 +243,15 @@ def _attn_fwd_inner(
     # idx_tsrc = tl.arange(0, BLOCK_N) + lo
     # mask_tsrc = idx_tsrc < hi
 
+    # probability of being below the top-k threshold
+    pr_below_th = 1 - BSA_K * BSA_BLOCK_SIZE_K / offs_m  # [BLOCK_M,]
+    erf_pr = libdevice.erfinv(2 * pr_below_th - 1) * SQRT2
+
     # loop over k, v and update accumulator
-    topk_idx = tl.zeros((), dtype=tl.int32)
-    staging_idx = tl.zeros_like(block_idx) - 1
-    staging_sums = tl.zeros_like(block_sums) - 10000.0
+    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    running_mean = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    running_m2 = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    num_tracking = tl.zeros((BLOCK_M,), dtype=tl.int32)
     for start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
@@ -490,77 +534,56 @@ def _attn_fwd_inner(
             if using_exp_sum:
                 # adjust previous sums for new normalization constant
                 block_sums = (block_sums * alpha[:, None]).to(tl.float16)
+                running_mean = running_mean * alpha
+                running_m2 = running_m2 * alpha * alpha
             else:
                 block_sums = (block_sums * 1.0).to(tl.float16)
+                running_mean = running_mean * 1.0
+                running_m2 = running_m2 * 1.0
 
-            if 0 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx, staging_sums, staging_idx = (
-                    update_block_sums_idx(
-                        block_sums=block_sums,
-                        block_idx=block_idx,
-                        staging_sums=staging_sums,
-                        staging_idx=staging_idx,
-                        update_exp_sum=l_ij_0,
-                        start_n=start_n,
-                        i_offset=0 * BSA_MASK_STEP_SIZE,
-                        topk_idx=topk_idx,
-                        BSA_K=BSA_K,
-                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
-                    )
+            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
+                if i_offset == 0 * BSA_MASK_STEP_SIZE:
+                    update = l_ij_0
+                elif i_offset == 1 * BSA_MASK_STEP_SIZE:
+                    update = l_ij_1
+                elif i_offset == 2 * BSA_MASK_STEP_SIZE:
+                    update = l_ij_2
+                else:
+                    update = l_ij_3
+                (
+                    block_sums,
+                    block_idx,
+                    running_mean,
+                    running_m2,
+                    num_tracking,
+                    topk_idx,
+                ) = update_block_sums_idx(
+                    BSA_INDICES=BSA_INDICES,
+                    BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                    start_m=start_m,
+                    stride_bim=stride_bim,
+                    stride_bik=stride_bik,
+                    mask_m=mask_m,
+                    block_sums=block_sums,
+                    block_idx=block_idx,
+                    topk_idx=topk_idx,
+                    running_mean=running_mean,
+                    running_m2=running_m2,
+                    num_tracking=num_tracking,
+                    erf_pr=erf_pr,
+                    update_exp_sum=update,
+                    start_n=start_n,
+                    i_offset=i_offset,
+                    BSA_K=BSA_K,
+                    ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
                 )
-                topk_idx += 1
-            if 1 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx, staging_sums, staging_idx = (
-                    update_block_sums_idx(
-                        block_sums=block_sums,
-                        block_idx=block_idx,
-                        staging_sums=staging_sums,
-                        staging_idx=staging_idx,
-                        update_exp_sum=l_ij_1,
-                        start_n=start_n,
-                        i_offset=1 * BSA_MASK_STEP_SIZE,
-                        topk_idx=topk_idx,
-                        BSA_K=BSA_K,
-                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
-                    )
-                )
-                topk_idx += 1
-            if 2 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx, staging_sums, staging_idx = (
-                    update_block_sums_idx(
-                        block_sums=block_sums,
-                        block_idx=block_idx,
-                        staging_sums=staging_sums,
-                        staging_idx=staging_idx,
-                        update_exp_sum=l_ij_2,
-                        start_n=start_n,
-                        i_offset=2 * BSA_MASK_STEP_SIZE,
-                        topk_idx=topk_idx,
-                        BSA_K=BSA_K,
-                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
-                    )
-                )
-                topk_idx += 1
-            if 3 * BSA_MASK_STEP_SIZE < BLOCK_N:
-                block_sums, block_idx, staging_sums, staging_idx = (
-                    update_block_sums_idx(
-                        block_sums=block_sums,
-                        block_idx=block_idx,
-                        staging_sums=staging_sums,
-                        staging_idx=staging_idx,
-                        update_exp_sum=l_ij_3,
-                        start_n=start_n,
-                        i_offset=3 * BSA_MASK_STEP_SIZE,
-                        topk_idx=topk_idx,
-                        BSA_K=BSA_K,
-                        ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
-                    )
-                )
-                topk_idx += 1
 
     if RETURN_BSA_MASK:
-        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=b_mask)
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=b_mask)
+        if ONLINE_TOPK_METHOD == "estimate":
+            pass
+        else:
+            tl.store(BSA_INDICES + b_idx, value=block_idx, mask=b_mask)
+            tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=b_mask)
 
     return acc, l_i, m_i
 

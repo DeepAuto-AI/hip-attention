@@ -241,10 +241,14 @@ def test_with_hip_bsa():
             access_counter,
             cache_miss_counter,
         )
-        return out, bsa_out, bsa_idx
+        return out, bsa_out, bsa_idx, block_sums
 
-    out, bsa_out, block_idx = qsa("sort")
-    print(f"{block_idx=}")
+    out, bsa_out, block_idx, block_sums = qsa("naive")
+    print(f"naive {block_idx=} naive")
+    out_2, bsa_out_2, block_idx_2, block_sums_2 = qsa("estimate")
+    print(f"estimate {block_idx_2=} estimate")
+    check_topk_selection("naive", block_idx, block_sums)
+    check_topk_selection("estimate", block_idx_2, block_sums_2)
 
     bsa_out = bsa_out.transpose(1, 2)
 
@@ -474,10 +478,12 @@ def test_with_hip_bsa():
         )
     )
     print(f"hip: {latency_hip:.2f} ms took")
+    latency_qsa = latency(lambda: qsa("nothing"))
+    print(f"qsa(nothing): {latency_qsa:.2f} ms took")
     latency_qsa = latency(lambda: qsa("naive"))
     print(f"qsa(naive): {latency_qsa:.2f} ms took")
-    latency_qsa = latency(lambda: qsa("sort"))
-    print(f"qsa(sort): {latency_qsa:.2f} ms took")
+    latency_qsa = latency(lambda: qsa("estimate"))
+    print(f"qsa(estimate): {latency_qsa:.2f} ms took")
     latency_flash = latency(
         lambda: flash_attn_func(
             q[:, :, :seq].transpose(1, 2),
@@ -487,6 +493,16 @@ def test_with_hip_bsa():
         )
     )
     print(f"flash attn: {latency_flash:.2f} ms took")
+
+
+def check_topk_selection(
+    name: str,
+    block_idx,  # (BSZ, HEAD, TDST, BSA_K)
+    block_sums,  # (BSZ, HEAD, TDST, BSA_K)
+):
+    block_sums = torch.where(block_sums < -100, 0, block_sums)
+    block_sums = block_sums.sum(dim=-1)
+    print(f"{name} block sums: {block_sums}")
 
 
 if __name__ == "__main__":
