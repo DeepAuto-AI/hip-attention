@@ -279,9 +279,12 @@ def _attn_fwd_inner(
     m_i,
     q,
     q_nope,
-    K_block_ptr,
-    K_NOPE_block_ptr,
-    V_block_ptr,
+    K_ZH,
+    stride_kn,
+    stride_kk,
+    V_ZH,
+    stride_vn,
+    stride_vk,
     mask_idx,
     start_m,
     qk_scale,
@@ -339,10 +342,6 @@ def _attn_fwd_inner(
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
 ):
-    # range of values handled by this stage
-    # lo, hi = 0, N_KV
-    # lo, hi = 0, tl.max(mask_idx) + 1
-
     if RETURN_BSA_MASK:
         if BSA_HEAP:
             b_idx = 1 * stride_bik + (start_m * BLOCK_M) + tl.arange(0, BLOCK_M) * stride_bim
@@ -372,14 +371,21 @@ def _attn_fwd_inner(
         if REVERSE_ITER:
             advance_init = last_start
             advance = -BLOCK_N
-        K_block_ptr = tl.advance(K_block_ptr, (0, advance_init))
-        V_block_ptr = tl.advance(V_block_ptr, (advance_init, 0))
-        if K_NOPE_block_ptr is not None:
-            K_NOPE_block_ptr = tl.advance(K_NOPE_block_ptr, (0, advance_init))
-    # else:
-    # idx_hid = tl.arange(0, HEAD_ROPE)
-    # idx_tsrc = tl.arange(0, BLOCK_N) + lo
-    # mask_tsrc = idx_tsrc < hi
+
+        V_ZHN = V_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[:, None] * stride_vk + \
+            tl.arange(0, HEAD_DIM)[None, :] * stride_vn
+
+        if HEAD_DIM == HEAD_ROPE:
+            K_ZHN = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
+                tl.arange(0, HEAD_DIM)[:, None] * stride_kk
+            K_ZHN_NOPE = None
+        else:
+            K_ZHN = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
+                tl.arange(0, HEAD_ROPE)[:, None] * stride_kk
+
+            K_ZHN_NOPE = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
+                tl.arange(0, HEAD_NOPE)[:, None] * stride_kk
+
 
     # loop over k, v and update accumulator
     for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
@@ -395,7 +401,7 @@ def _attn_fwd_inner(
 
         if not USING_PAGED_CACHE:
             tl.static_assert(EXTEND_BACKEND == "none")
-            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+            k = tl.load(K_ZHN, mask=mask_tsrc[None, :])
         else:
             idx_t = tl.load(
                 BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -412,9 +418,7 @@ def _attn_fwd_inner(
         if HEAD_DIM != HEAD_ROPE:
             if not USING_PAGED_CACHE:
                 tl.static_assert(EXTEND_BACKEND == "none")
-                k_nope = tl.load(
-                    K_NOPE_block_ptr, boundary_check=(1,), padding_option="zero"
-                )
+                k_nope = tl.load(K_ZHN_NOPE, mask=mask_tsrc[None, :])
             else:
                 idx_t = tl.load(
                     BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -693,11 +697,7 @@ def _attn_fwd_inner(
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
         if not USING_PAGED_CACHE:
-            v = tl.load(
-                V_block_ptr,
-                boundary_check=(0,),
-                padding_option="zero",
-            )
+            v = tl.load(V_ZHN, mask=mask_tsrc[:, None])
         else:
             v = tl.load(
                 V_CACHE
@@ -726,10 +726,11 @@ def _attn_fwd_inner(
         # update m_i and l_i
         m_i = m_ij
         if not USING_PAGED_CACHE:
-            V_block_ptr = tl.advance(V_block_ptr, (advance, 0))
-            K_block_ptr = tl.advance(K_block_ptr, (0, advance))
-            if K_NOPE_block_ptr is not None:
-                K_NOPE_block_ptr = tl.advance(K_NOPE_block_ptr, (0, advance))
+            K_ZHN += advance.to(tl.int64)[None, :] * stride_kn 
+            V_ZHN += advance.to(tl.int64)[:, None] * stride_vk 
+
+            if K_ZHN_NOPE is not None:
+                K_ZHN_NOPE += advance.to(tl.int64)[None, :] * stride_kn 
         else:
             # idx_tsrc = idx_tsrc + BLOCK_N
             # mask_tsrc = idx_tsrc < hi
@@ -919,34 +920,18 @@ def _attn_fwd(
 
     idx_split = pid_n_split.to(tl.int64)
 
-    # block pointers
+    Q_ZH = Q + q_offset
     if HEAD_DIM == HEAD_ROPE:
-        Q_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, HEAD_DIM),
-            order=(1, 0),
-        )
-        Q_NOPE_block_ptr = None
+        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
+                tl.arange(0, HEAD_DIM)[None, :] * stride_qk
+
+        Q_ZHT_NOPE = None
     else:
-        Q_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, HEAD_NOPE),
-            block_shape=(BLOCK_M, HEAD_ROPE),
-            order=(1, 0),
-        )
-        Q_NOPE_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, HEAD_NOPE),
-            order=(1, 0),
-        )
+        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
+                tl.arange(0, HEAD_ROPE)[None, :] * stride_qk
+
+        Q_ZHT_NOPE = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
+                tl.arange(0, HEAD_NOPE)[None, :] * stride_qk
 
     if RETURN_BSA_MASK:
         bs_offset = off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
@@ -956,58 +941,16 @@ def _attn_fwd(
             BSA_HEAP_INDICES += bs_offset
 
     if not USING_PAGED_CACHE:
-        v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
-        V_block_ptr = tl.make_block_ptr(
-            base=V + kv_offset,
-            shape=(N_KV, HEAD_DIM),
-            strides=(stride_vk, stride_vn),
-            offsets=(0, 0),
-            block_shape=(BLOCK_N, HEAD_DIM),
-            order=v_order,
-        )
-        if HEAD_DIM == HEAD_ROPE:
-            K_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(0, 0),
-                block_shape=(HEAD_DIM, BLOCK_N),
-                order=(0, 1),
-            )
-            K_NOPE_block_ptr = None
-        else:
-            K_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(HEAD_NOPE, 0),
-                block_shape=(HEAD_ROPE, BLOCK_N),
-                order=(0, 1),
-            )
-            K_NOPE_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(0, 0),
-                block_shape=(HEAD_NOPE, BLOCK_N),
-                order=(0, 1),
-            )
+        # WARNING: If you are using float8e5, this might need to change.
+        # v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
+        V_ZH = V + kv_offset
+        K_ZH = K + kv_offset
     else:
         K_CACHE = K_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_k_cache_head_kv
         V_CACHE = V_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_v_cache_head_kv
         BLOCK_TABLE = BLOCK_TABLE + off_z.to(tl.int64) * stride_block_table_bsz
-        K_block_ptr = None
-        K_NOPE_block_ptr = None
-        V_block_ptr = None
-
-    O_block_ptr = tl.make_block_ptr(
-        base=Out + q_offset,
-        shape=(N_CTX, HEAD_DIM),
-        strides=(stride_om, stride_on),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, HEAD_DIM),
-        order=(1, 0),
-    )
+        K_ZH = None
+        V_ZH = None
 
     # initialize offsets
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -1035,17 +978,9 @@ def _attn_fwd(
         v_descale = None
 
     # load q: it will stay in SRAM throughout
-    q = tl.load(
-        Q_block_ptr,
-        boundary_check=(0,),
-        padding_option="zero",
-    )
-    if Q_NOPE_block_ptr is not None:
-        q_nope = tl.load(
-            Q_NOPE_block_ptr,
-            boundary_check=(0,),
-            padding_option="zero",
-        )
+    q = tl.load(Q_ZHT, mask=mask_m[:, None])
+    if Q_ZHT_NOPE is not None:
+        q_nope = tl.load(Q_ZHT_NOPE, mask=mask_m[:, None])
     else:
         q_nope = None
 
@@ -1136,8 +1071,12 @@ def _attn_fwd(
                 l_i,
                 m_i,
                 q,
-                K_block_ptr,
-                V_block_ptr,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
                 BSA_IDX,
                 BLOCK_SUMS,
                 stride_bim,
@@ -1202,8 +1141,12 @@ def _attn_fwd(
                 l_i,
                 m_i,
                 q,
-                K_block_ptr,
-                V_block_ptr,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
                 BSA_IDX,
                 BLOCK_SUMS,
                 stride_bim,
@@ -1270,9 +1213,12 @@ def _attn_fwd(
             m_i,
             q,
             q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
+            K_ZH,
+            stride_kn,
+            stride_kk,
+            V_ZH,
+            stride_vn,
+            stride_vk,
             mask_idx,
             start_m,
             qk_scale,
@@ -1337,9 +1283,12 @@ def _attn_fwd(
             m_i,
             q,
             q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
+            K_ZH,
+            stride_kn,
+            stride_kk,
+            V_ZH,
+            stride_vn,
+            stride_vk,
             mask_idx,
             start_m,
             qk_scale,
@@ -1449,10 +1398,14 @@ def _attn_fwd(
             tl.store(m_ptrs, m_i, mask=mask_m)
 
         acc = acc / l_i[:, None]
+
         tl.store(
-            O_block_ptr,
+                Out + \
+                q_offset + \
+                (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]) * stride_om + \
+                tl.arange(0, HEAD_DIM)[None, :] * stride_on,
             acc.to(Out.type.element_ty),
-            boundary_check=(0,),
+            mask=mask_m[:, None]
         )
     else:
         tl.static_assert(M is None)
@@ -1684,7 +1637,7 @@ class _attention(torch.autograd.Function):
                 bsa_heap_indices = bsa_heap_indices.contiguous()
                 bsa_block_sums = bsa_block_sums.contiguous()
 
-                # print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
+                print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
                 # print(f"{bsa_indices.size()=} {bsa_block_sums.size()=} {bsa_heap_indices.size()=}")
                 assert bsa_indices.stride() == bsa_block_sums.stride() == bsa_heap_indices.stride()
 
@@ -1942,11 +1895,13 @@ class _attention(torch.autograd.Function):
             o = acc.to(o.dtype)
             """
         else:
-            grid = lambda args: (
-                triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
-            )
+            def grid(args):
+                return triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
 
             assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
+
+            # for tns, name in zip((q, k, v, o, bsa_indices), ("q", "k", "v", "o", "bsa indices")):
+            #     print(f"{name}: {tns.stride()}")
 
             _attn_fwd[grid](
                 q,
