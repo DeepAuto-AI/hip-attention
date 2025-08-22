@@ -344,7 +344,7 @@ def _attn_fwd_inner(
 ):
     if RETURN_BSA_MASK:
         if BSA_HEAP:
-            b_idx = 1 * stride_bik + (start_m * BLOCK_M) + tl.arange(0, BLOCK_M) * stride_bim
+            b_idx = 1 * stride_bik + (start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M).to(tl.int64) * stride_bim
             root_v  = tl.load(BSA_BLOCK_SUMS   + b_idx.to(tl.int64))            # node 1
             root_lf = tl.load(BSA_HEAP_INDICES + b_idx.to(tl.int64))
             root_idx = tl.load(BSA_INDICES + b_idx.to(tl.int64))
@@ -372,19 +372,19 @@ def _attn_fwd_inner(
             advance_init = last_start
             advance = -BLOCK_N
 
-        V_ZHN = V_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[:, None] * stride_vk + \
-            tl.arange(0, HEAD_DIM)[None, :] * stride_vn
+        V_ZHN = V_ZH + (advance_init + tl.arange(0, BLOCK_N))[:, None].to(tl.int64) * stride_vk + \
+            tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_vn
 
         if HEAD_DIM == HEAD_ROPE:
-            K_ZHN = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
-                tl.arange(0, HEAD_DIM)[:, None] * stride_kk
+            K_ZHN = K_ZH + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64) * stride_kn + \
+                tl.arange(0, HEAD_DIM)[:, None].to(tl.int64) * stride_kk
             K_ZHN_NOPE = None
         else:
-            K_ZHN = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
-                tl.arange(0, HEAD_ROPE)[:, None] * stride_kk
+            K_ZHN = K_ZH + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64) * stride_kn + \
+                tl.arange(0, HEAD_ROPE)[:, None].to(tl.int64) * stride_kk
 
-            K_ZHN_NOPE = K_ZH + (advance_init.to(tl.int64) + tl.arange(0, BLOCK_N))[None, :] * stride_kn + \
-                tl.arange(0, HEAD_NOPE)[:, None] * stride_kk
+            K_ZHN_NOPE = K_ZH + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64) * stride_kn + \
+                tl.arange(0, HEAD_NOPE)[:, None].to(tl.int64) * stride_kk
 
 
     # loop over k, v and update accumulator
@@ -726,11 +726,11 @@ def _attn_fwd_inner(
         # update m_i and l_i
         m_i = m_ij
         if not USING_PAGED_CACHE:
-            K_ZHN += advance.to(tl.int64)[None, :] * stride_kn 
-            V_ZHN += advance.to(tl.int64)[:, None] * stride_vk 
+            K_ZHN += advance.to(tl.int64) * stride_kn 
+            V_ZHN += advance.to(tl.int64) * stride_vk 
 
             if K_ZHN_NOPE is not None:
-                K_ZHN_NOPE += advance.to(tl.int64)[None, :] * stride_kn 
+                K_ZHN_NOPE += advance.to(tl.int64) * stride_kn 
         else:
             # idx_tsrc = idx_tsrc + BLOCK_N
             # mask_tsrc = idx_tsrc < hi
@@ -749,18 +749,10 @@ def _attn_fwd_inner(
 if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [
-            128,
-        ]
-        for BN in [
-            64,
-        ]
-        for s in [
-            3,
-        ]
-        for w in [
-            4,
-        ]
+        for BM in [128,]
+        for BN in [64,]
+        for s in [3,]
+        for w in [4,]
     ]
 else:
     configs = [
@@ -790,7 +782,7 @@ def keep(conf):
 #     ],
 #     do_autotune=True,
 # )
-@triton.autotune(configs=configs, key=['N_CTX, N_KV'])
+@triton.autotune(configs=configs, key=['N_CTX', 'N_KV'])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -922,16 +914,16 @@ def _attn_fwd(
 
     Q_ZH = Q + q_offset
     if HEAD_DIM == HEAD_ROPE:
-        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
-                tl.arange(0, HEAD_DIM)[None, :] * stride_qk
+        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)) * stride_qm + \
+                tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_qk
 
         Q_ZHT_NOPE = None
     else:
-        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
-                tl.arange(0, HEAD_ROPE)[None, :] * stride_qk
+        Q_ZHT = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)) * stride_qm + \
+                tl.arange(0, HEAD_ROPE)[None, :].to(tl.int64) * stride_qk
 
-        Q_ZHT_NOPE = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None]) * stride_qm + \
-                tl.arange(0, HEAD_NOPE)[None, :] * stride_qk
+        Q_ZHT_NOPE = Q_ZH + ((start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)) * stride_qm + \
+                tl.arange(0, HEAD_NOPE)[None, :].to(tl.int64) * stride_qk
 
     if RETURN_BSA_MASK:
         bs_offset = off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
@@ -953,9 +945,9 @@ def _attn_fwd(
         V_ZH = None
 
     # initialize offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask_m = offs_m < N_CTX
-    offs_n = tl.arange(0, BLOCK_N)
+    offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
 
     mask_idx = tl.load(
         MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
@@ -1402,8 +1394,8 @@ def _attn_fwd(
         tl.store(
                 Out + \
                 q_offset + \
-                (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]) * stride_om + \
-                tl.arange(0, HEAD_DIM)[None, :] * stride_on,
+                (start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)) * stride_om + \
+                tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_on,
             acc.to(Out.type.element_ty),
             mask=mask_m[:, None]
         )
@@ -1637,7 +1629,7 @@ class _attention(torch.autograd.Function):
                 bsa_heap_indices = bsa_heap_indices.contiguous()
                 bsa_block_sums = bsa_block_sums.contiguous()
 
-                print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
+                # print(f"{bsa_indices.stride()=} {bsa_block_sums.stride()=} {bsa_heap_indices.stride()=}")
                 # print(f"{bsa_indices.size()=} {bsa_block_sums.size()=} {bsa_heap_indices.size()=}")
                 assert bsa_indices.stride() == bsa_block_sums.stride() == bsa_heap_indices.stride()
 

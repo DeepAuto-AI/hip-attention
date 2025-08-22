@@ -8,15 +8,10 @@ from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
 from hip_attn.v1_2.delta.apply_delta import apply_delta
 import math
 from typing import Any, Tuple
+from flash_attn import flash_attn_varlen_kvpacked_func
 
 from flash_attn import flash_attn_func
-
-from hip_attn.v1_2.attention_extend import dual_stage_quadratic_hip_attention
-
-# from hip_research.utils.load_checkouts import load_checkouts
-from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
-from hip_attn.v1_2.attention_metadata import HiPAttentionArgs, ScanStage
-from hip_attn.v1_2.delta.apply_delta import apply_delta
+from flash_attn_interface import flash_attn_func as flash_attn3_func
 from hip_attn.v1_2.query_sparse_attention import query_sparse_attention
 
 
@@ -517,15 +512,14 @@ def test_with_hip_bsa() -> None:
 
 
 def winner_tree_vs_online() -> None:
-    for seq in [131072 * 2**i for i in range(0, 7)]:
-        if seq < 500000:
-            continue
+    for seq in [131072 * 2**i for i in range(0, 6)]:
 
         device = 0
         path = "/data/ainl/library/hip-attention/cache/llama/qkvout.pth"
         d = torch.load(path)
 
         q, k, v, cos, sin = d["q"].cuda(device), d["k"].cuda(device), d["v"].cuda(device), d["cos"].cuda(device), d["sin"].cuda(device)
+        q, k, v = q[:, :8], k[:, :8], v[:, :8]
         b, h, s, d = k.size()
         k = k.view(b, h, 1, s, d).repeat(1, 1, q.size(1) // k.size(1), 1, 1).view(b, -1, s, d)
         v = v.view(b, h, 1, s, d).repeat(1, 1, q.size(1) // v.size(1), 1, 1).view(b, -1, s, d)
@@ -548,10 +542,79 @@ def winner_tree_vs_online() -> None:
         k = k * cos[:, None] + rotate_half(k) * sin[:, None]
 
         latency_flash = latency(lambda: flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True))
-        l = f"flash:{seq=}:::::{latency_flash}"
+        l = f"flash2:{seq=}:::::{latency_flash}"
         print(l)
         with open("./qsa-latencies.txt", "a") as f:
             f.write(l + "\n")
+
+        if seq >= 2**22:
+            def fa3_chunked_prefill():
+                log2seq = math.log2(seq)
+                boundaries = [0]
+                while boundaries[-1] < seq:
+                    boundaries += [boundaries[-1] + 2**21]
+
+                q_chunks, kv_chunks = [], []
+                cu_q = [0]
+                cu_kv = [0]
+
+                for j in range(len(boundaries)-1):
+                    start, end = boundaries[j], boundaries[j+1]
+                    P, T = start, end - start
+
+                    # Q for this chunk
+                    q_chunks.append(q[:, :, start:end])                 # (B, H, T_i, d)
+
+                    # KV this chunk can see = prefix+chunk
+                    kv_chunks.append(
+                        torch.stack((k[:, :, :end], v[:, :, :end]), dim=3)   # (B, H, P+T, 2, nH, d)
+                    )
+
+                    cu_q.append(cu_q[-1] + T)
+                    cu_kv.append(cu_kv[-1] + end)                # end = P+T
+
+                q_packed = torch.cat(q_chunks, dim=2)            # (B, H, sum T_j, d)
+                q_packed = q_packed.transpose(1, 2)[0]
+                kv_packed = torch.cat(kv_chunks, dim=2)          # (B, H, sum (P_j+T_j), 2, d)
+                kv_packed = kv_packed.transpose(1, 2)[0]
+
+                cu_q = torch.tensor(cu_q, device=q.device, dtype=torch.int32)
+                cu_kv = torch.tensor(cu_kv, device=q.device, dtype=torch.int32)
+
+                out_packed = flash_attn_varlen_kvpacked_func(
+                    q_packed, kv_packed, cu_q, cu_kv,
+                    max_seqlen_q=max(end-start for start, end in zip(boundaries[:-1], boundaries[1:])),
+                    max_seqlen_k=max(boundaries[1:]),  # max(P_j+T_j)
+                    causal=True, dropout_p=0.0
+                )
+
+                L = boundaries[-1]
+                B = q.size(0)
+                nH, d = out_packed.shape[1], out_packed.shape[2]
+                out_full = torch.empty((L, nH, d),
+                                       device=out_packed.device,
+                                       dtype=out_packed.dtype)
+
+                # Each chunk j wrote T_j rows into out_packed[cu_q[j]:cu_q[j+1]]
+                # Put them back to [start:end] in the global sequence.
+                for j in range(len(boundaries) - 1):
+                    q0 = int(cu_q[j].item())
+                    q1 = int(cu_q[j + 1].item())
+                    start = boundaries[j]
+                    end   = boundaries[j + 1]
+                    # Sanity: (q1 - q0) should equal (end - start)
+                    out_full[start:end] = out_packed[q0:q1]
+
+                return out_full
+                
+            latency_flash = latency(lambda: fa3_chunked_prefill())
+        else:
+            latency_flash = latency(lambda: flash_attn3_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal=True))
+            l = f"flash3:{seq=}:::::{latency_flash}"
+            print(l)
+            with open("./qsa-latencies.txt", "a") as f:
+                f.write(l + "\n")
+
 
         for K in [16, 32, 64, 128, 256, 512, 1024]:
             for q_block in [8, 16, 32, 64]:
@@ -575,7 +638,7 @@ def winner_tree_vs_online() -> None:
                         seq_lens = torch.arange(1, seq + 1, dtype=torch.long, device=q.device)[None, :]
 
                         args = HiPAttentionArgs(
-                            block_size_q=q_block,
+                            block_size_q=128,
                             block_size_k=k_block,
                             position_ids=None,
                             sink_token_size=sink_tokens,
@@ -640,6 +703,6 @@ def winner_tree_vs_online() -> None:
 
 if __name__ == "__main__":
     with torch.no_grad():
-        test_qsa()
-        test_with_hip_bsa()
+        # test_qsa()
+        # test_with_hip_bsa()
         winner_tree_vs_online()
