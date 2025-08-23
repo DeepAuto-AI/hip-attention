@@ -532,8 +532,8 @@ def _attn_fwd_inner(
 
         q_dtype = q.dtype
 
-        # cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
-        # ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        cq = tl.sqrt(HEAD_DIM * 1.0) / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
+        ck = 1 / tl.sqrt(tl.sqrt(HEAD_DIM * 1.0))
 
         # qk = tl.dot(
         #     (q * cq).to(q_dtype),
@@ -757,9 +757,9 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
 else:
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128]
-        for BN in [32, 64]
-        for s in ([1] if is_hip() else [3, 4, 7])
+        for BM in [64, 128, 256]
+        for BN in [64]
+        for s in ([1] if is_hip() else [1, 3, 7])
         for w in [4, 8]
     ]
 
@@ -782,7 +782,7 @@ def keep(conf):
 #     ],
 #     do_autotune=True,
 # )
-@triton.autotune(configs=configs, key=['N_CTX', 'N_KV'])
+@triton.autotune(configs=configs, key=['N_CTX_AUTOTUNE', 'N_KV_AUTOTUNE'])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -1729,6 +1729,14 @@ class _attention(torch.autograd.Function):
         if bsa_indices is not None:
             assert bsa_block_sums is not None
             assert bsa_indices.stride() == bsa_block_sums.stride()
+        
+        N_KV=(
+            k.shape[2]
+            if not USING_PAGED_CACHE
+            else k_cache.shape[0] * k_cache.shape[1]
+        )
+        N_KV_AUTOTUNE = 1024 if N_KV > 1024 else 1
+        N_CTX_AUTOTUNE = 128 if N_CTX > 128 else 1
 
         if (N_SPLIT > 1) and (not ignore_n_split):
             raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")
@@ -2034,7 +2042,7 @@ def query_sparse_attention(
     bsa_top_block_k: int = 128,
     bsa_block_size_k: int = 32,
     bsa_heap: bool = False,
-    reverse_iter: bool = False,
+    reverse_iter: bool = True,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
