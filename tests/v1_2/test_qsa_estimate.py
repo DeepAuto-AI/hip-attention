@@ -118,7 +118,7 @@ def test() -> None:
     o = o.transpose(1, 2)
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    K = 64
+    K = 256
     out, MX, NC, block_idx, _ = qsa(
         K, "naive", heap=False, reverse=False, return_running_statistics=True
     )

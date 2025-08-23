@@ -258,7 +258,9 @@ def _attn_fwd_inner(
     running_m2=None,
     num_tracking=None,
     topk_idx=None,
+    EXACT_K: tl.constexpr = None,
 ):
+    VERBOSE: tl.constexpr = False
     SQRT2: tl.constexpr = 1.4142135623730951  # math.sqrt(2.0)
     # range of values handled by this stage
     # lo, hi = 0, N_KV
@@ -272,16 +274,20 @@ def _attn_fwd_inner(
             root_v = tl.load(BSA_BLOCK_SUMS + (b_idx + 1).to(tl.int64))  # node 1
             root_lf = tl.load(BSA_HEAP_INDICES + (b_idx + 1).to(tl.int64))
         else:
+            LOAD_K: tl.constexpr = (
+                EXACT_K if ONLINE_TOPK_METHOD == "estimate" else BSA_K
+            )
+
             b_idx = (
                 start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-            ) * stride_bim + tl.arange(0, BSA_K)[None, :].to(tl.int64) * stride_bik
+            ) * stride_bim + tl.arange(0, LOAD_K)[None, :].to(tl.int64) * stride_bik
 
             block_idx = tl.load(BSA_INDICES + b_idx, mask=mask_m[:, None])
             block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=mask_m[:, None])
             block_sums_min, block_sums_min_idx = tl.min(
                 block_sums, axis=-1, return_indices=True
             )  # (M, K) -> (M,)
-            col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K) will be used later
+            col_idx = tl.arange(0, LOAD_K)[None, :]  # (1, K) will be used later
 
     if not USING_PAGED_CACHE:
         advance_init = lo
@@ -617,6 +623,32 @@ def _attn_fwd_inner(
                         )  # (M, K) -> (M,)
 
                 elif ONLINE_TOPK_METHOD == "estimate":
+                    #### Exact top-k part ####
+                    block_update = (
+                        (update_exp_sum > block_sums_min)
+                        & (update_exp_sum > 0)  # skip masked values
+                        & mask_m
+                    )
+                    if tl.sum(block_update.to(tl.int32)) > 0:
+                        block_sums_max = tl.maximum(
+                            block_sums_min, update_exp_sum
+                        )  # (M,)
+
+                        # make a mask of the minimum indices
+                        bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
+                        bsa_mask = block_update[:, None] & bsa_mask  # (M, K)
+
+                        block_sums = tl.where(
+                            bsa_mask, block_sums_max[:, None], block_sums
+                        ).to(block_sums.dtype)
+                        block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+
+                        # calculate the new block sums min for the next iteration
+                        block_sums_min, block_sums_min_idx = tl.min(
+                            block_sums, axis=-1, return_indices=True
+                        )  # (M, K) -> (M,)
+
+                    #### Estimated top-k part ####
                     log_score = tl.math.log2(update_exp_sum)
 
                     # update running mean and std
@@ -632,29 +664,27 @@ def _attn_fwd_inner(
                     log_est_th = erf_pr * est_std + running_mean
 
                     # update block sums and indices
-                    new_block_sum = update_exp_sum[:, None]
                     new_block_idx = start_n + i_offset
 
                     # 1. always add if num_tracking < BSA_K
-                    # bsa_mask = num_tracking[:, None] == tl.arange(0, BSA_K)[None, :]
-                    # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
-                    # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
                     upd_idx_0 = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
-                    do_update = ((num_tracking - 1) < BSA_K) & (
-                        update_exp_sum > 0
-                    )  # skip masked values  # (M,)
-                    upd_idx = upd_idx_0 + (num_tracking - 1) * stride_bik  # (M,)
+                    ins_pos = EXACT_K + num_tracking - 1
+                    do_update = (
+                        (~block_update)
+                        & (ins_pos < BSA_K)
+                        & (update_exp_sum > 0)  # skip masked values
+                        & mask_m
+                    )  # (M,)
+                    upd_idx = upd_idx_0 + ins_pos * stride_bik  # (M,)
 
-                    VERBOSE: tl.constexpr = False
                     if VERBOSE:
                         pid = tl.program_id(0)
                         pid = pid // tl.cdiv(N_CTX, BLOCK_M)
-                        sliding_window_size = 64
                         idx0_block_idx = tl.where(
                             (tl.arange(0, BLOCK_M) == 0), new_block_idx, 0
                         ).sum()
                         idx0_topk_idx = tl.where(
-                            (tl.arange(0, BLOCK_M) == 0), (num_tracking - 1), 0
+                            (tl.arange(0, BLOCK_M) == 0), ins_pos, 0
                         ).sum()
                         idx0_updated = (do_update & (tl.arange(0, BLOCK_M) == 0)).to(
                             tl.int32
@@ -678,10 +708,12 @@ def _attn_fwd_inner(
 
                     # 2. otherwise, update if the new value is larger than the estimated threshold
                     do_update = (
-                        (num_tracking >= BSA_K)
+                        (~block_update)
+                        & (ins_pos >= BSA_K)
                         & (update_exp_sum > 0)  # skip masked values
                         & (log_score > log_est_th)
                         & (topk_idx < BSA_K)
+                        & mask_m
                     )  # (M,)
                     if VERBOSE:
                         idx0_updated = (do_update & (tl.arange(0, BLOCK_M) == 0)).to(
@@ -707,13 +739,6 @@ def _attn_fwd_inner(
                         value=new_block_idx,
                         mask=mask_m & do_update,
                     )
-                    # bsa_mask = (
-                    #     do_update[:, None]
-                    #     & (topk_idx[:, None] == tl.arange(0, BSA_K)[None, :])
-                    #     & (block_sums < new_block_sum)  # only update if the new value is larger
-                    # )  # (M, K)
-                    # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
-                    # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
 
                     topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
 
@@ -764,11 +789,8 @@ def _attn_fwd_inner(
             pass
 
     if RETURN_BSA_MASK and not BSA_HEAP:
-        if ONLINE_TOPK_METHOD == "estimate":
-            pass
-        else:
-            tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
-            tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
+        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
+        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
 
     return acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx
 
@@ -942,6 +964,7 @@ def _attn_fwd(
     ONLINE_TOPK_METHOD: tl.constexpr = "naive",
     N_KV_AUTOTUNE=0,
     N_CTX_AUTOTUNE=0,
+    EXACT_K: tl.constexpr = 8,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -1169,7 +1192,7 @@ def _attn_fwd(
     running_mean = tl.zeros((BLOCK_M,), dtype=tl.float32)
     running_m2 = tl.zeros((BLOCK_M,), dtype=tl.float32)
     num_tracking = tl.zeros((BLOCK_M,), dtype=tl.int32)
-    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int16) + EXACT_K
 
     if (N_SPLIT > 1) and False:
         k_chunk_size = tl.cdiv(hi, N_SPLIT)
@@ -1384,6 +1407,7 @@ def _attn_fwd(
                 running_m2=running_m2,
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
             )
         )
 
@@ -1458,6 +1482,7 @@ def _attn_fwd(
                 running_m2=running_m2,
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
             )
         )
 
