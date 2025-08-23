@@ -146,133 +146,6 @@ def winner_update_inline(
 
 
 @triton.jit
-def winner_update_inline(
-    update_exp_sum,  # (M,) float32 – candidate scores per query (lanes)
-    start_n,  # (1,) int64   – candidate key-block ids per query
-    BSA_BLOCK_SUMS,  # pointer to values
-    BSA_HEAP_INDICES,  # pointer to winner tree indices
-    BSA_INDICES,  # pointer to bsa block indices
-    b_idx,  # offset from base pointers
-    BSA_K,  # K in top-K
-    BSA_LOGK,  # log2(K)
-    BLOCK_M,  # query block size
-    mask_m,  # query mask
-    root_v,
-    root_lf,
-):
-
-    win_v, win_p = root_v, root_lf
-    beat = (update_exp_sum > root_v) & mask_m  # lanes that actually update
-    if tl.sum(beat.to(tl.int32)) > 0:
-        leaf_node = BSA_K + root_lf
-        leaf_off = b_idx + leaf_node
-
-        # Overwrite the losing leaf with the new candidate
-        tl.store(BSA_BLOCK_SUMS + leaf_off, update_exp_sum.to(tl.float32), mask=beat)
-        tl.store(BSA_INDICES + leaf_off, start_n, mask=beat)
-
-        # Climb and recompute winners up to the root (O(log K))
-        node = leaf_node >> 1
-        for j in tl.range(0, BSA_LOGK):
-            left = node << 1
-            right = left + 1
-
-            lv = tl.load(BSA_BLOCK_SUMS + (b_idx + left))
-            rv = tl.load(BSA_BLOCK_SUMS + (b_idx + right))
-            lp = tl.load(BSA_HEAP_INDICES + (b_idx + left))
-            rp = tl.load(BSA_HEAP_INDICES + (b_idx + right))
-
-            take_left = lv < rv
-            # print("take left: ", take_left)
-            win_v = tl.where(take_left, lv, rv)
-            win_p = tl.where(take_left, lp, rp)
-
-            tl.store(BSA_BLOCK_SUMS + (b_idx + node), win_v, mask=beat)
-            tl.store(BSA_HEAP_INDICES + (b_idx + node), win_p, mask=beat)
-
-            node = node >> 1
-    return win_v, win_p
-
-
-@triton.jit
-def winner_update_inline_efficient(
-    update_exp_sum,  # (M,) float32 – candidate scores per query (lanes)
-    start_n,  # (1,) int64   – candidate key-block ids per query
-    BSA_BLOCK_SUMS,  # pointer to values
-    BSA_HEAP_INDICES,  # pointer to winner tree indices
-    BSA_INDICES,  # pointer to bsa block indices
-    b_idx,  # offset from base pointers
-    BSA_K,  # K in top-K
-    BSA_LOGK,  # log2(K)
-    BLOCK_M,  # query block size
-    mask_m,  # query mask
-    root_v,  # root min value stored in smem
-    root_lf,  # root min index stored in smem
-):
-    # # K2 must be power-of-two, LOGK == log2(K2)
-    # tl.static_assert(((BSA_K & (BSA_K - 1)) == 0), "BSA_K must be power-of-two")
-    # tl.static_assert(((1 << BSA_LOGK) == BSA_K),    "BSA_LOGK must equal log2(BSA_K)")
-
-    # lanes that actually update (top-k max → min-winner tree)
-    beat = (update_exp_sum > root_v) & mask_m
-    path_v, path_p = root_v, root_lf
-    if tl.sum(beat.to(tl.int32)) > 0:
-        # --- write leaf value + payload (only for beating lanes) ---
-        leaf_idx = (BSA_K + root_lf).to(tl.int32)  # [BSA_K .. 2*BSA_K-1]
-        leaf_addr = b_idx + leaf_idx.to(tl.int64)
-        tl.store(BSA_BLOCK_SUMS + leaf_addr, update_exp_sum, mask=beat)
-        tl.store(BSA_INDICES + leaf_addr, start_n, mask=beat)
-
-        # --- climb: keep the path child (value, pointer, index) in registers ---
-        path_v = tl.where(beat, update_exp_sum.to(tl.float32), path_v)  # fp32
-        path_p = root_lf  # int64 leaf-id [0..BSA_K-1]
-        child = leaf_idx  # int64 node idx [BSA_K..2*BSA_K-1]
-        node = child >> 1  # parent idx [1..BSA_K-1]
-
-        # optional runtime guards (enable with TRITON_DEBUG=1)
-        # tl.device_assert((leaf_idx >= BSA_K) & (leaf_idx < 2*BSA_K), "leaf_idx OOR")
-
-        # for _ in tl.range(0, BSA_LOGK, num_stages=1):   # exactly BSA_LOGK steps; last write is root (node==1)
-        for _ in tl.static_range(
-            0, BSA_LOGK
-        ):  # exactly BSA_LOGK steps; last write is root (node==1)
-            left = (node << 1).to(tl.int32)
-            right = (left + 1).to(tl.int32)
-
-            # which side is our path child?
-            path_is_left = (child == left).to(tl.int1)
-            sib = tl.where(path_is_left, right, left)
-
-            # load ONLY sibling from memory (unmasked loads)
-            sib_v = tl.load(BSA_BLOCK_SUMS + (b_idx + sib.to(tl.int64)))
-            sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib.to(tl.int64)))
-
-            # min-winner with **left-tie** policy (match typical winner-tree)
-            take_path = path_v < sib_v  # | ((path_v == sib_v) & path_is_left)
-            # print(f"path v, sib v, take path: ", path_v, sib_v, take_path)
-            win_v = tl.where(take_path, path_v, sib_v)
-            win_p = tl.where(take_path, path_p, sib_p)
-
-            tl.store(
-                BSA_BLOCK_SUMS + (b_idx + node).to(tl.int32),
-                win_v.to(tl.float32),
-                mask=beat,
-            )
-            tl.store(
-                BSA_HEAP_INDICES + (b_idx + node).to(tl.int32),
-                win_p.to(tl.int32),
-                mask=beat,
-            )
-
-            # move up one level
-            child = node.to(tl.int32)
-            node = (node >> 1).to(tl.int32)
-            path_v = win_v.to(tl.float32)
-            path_p = win_p.to(tl.int32)
-    return path_v, path_p
-
-
-@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -1633,13 +1506,6 @@ class _attention(torch.autograd.Function):
                 # print(f"{bsa_indices.size()=} {bsa_block_sums.size()=} {bsa_heap_indices.size()=}")
                 assert bsa_indices.stride() == bsa_block_sums.stride() == bsa_heap_indices.stride()
 
-                print("before")
-                print(f"{q.size()=}")
-
-
-                # print(f"{bsa_heap_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_block_sums[0, 0, 61:65]=}")
             else:
                 # energy to split the strides and add more arguments :(
                 bsa_indices = torch.full( # for real block indices
@@ -1900,8 +1766,14 @@ class _attention(torch.autograd.Function):
 
             assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
 
-            # for tns, name in zip((q, k, v, o, bsa_indices), ("q", "k", "v", "o", "bsa indices")):
-            #     print(f"{name}: {tns.stride()}")
+            N_CTX=N_CTX
+            N_KV=(
+                k.shape[2]
+                if not USING_PAGED_CACHE
+                else k_cache.shape[0] * k_cache.shape[1]
+            )
+            N_CTX_AUTOTUNE=128 if N_CTX > 128 else 1
+            N_KV_AUTOTUNE=1024 if N_KV > 1024 else 1
 
             _attn_fwd[grid](
                 q,
@@ -1963,13 +1835,15 @@ class _attention(torch.autograd.Function):
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
-                N_KV=N_KV,
+                N_KV=(
+                    k.shape[2]
+                    if not USING_PAGED_CACHE
+                    else k_cache.shape[0] * k_cache.shape[1]
+                ),
                 HEAD_DIM=HEAD_DIM_K,
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
-                # BLOCK_M=64,
-                # BLOCK_N=32,
                 REVERSE_ITER=reverse_iter,
                 V_FP8=V_FP8,
                 # BLOCK_M=64,
@@ -1986,17 +1860,6 @@ class _attention(torch.autograd.Function):
                 N_KV_AUTOTUNE=N_KV_AUTOTUNE,
                 **extra_kern_args,
             )
-
-            if bsa_heap:
-                print("after")
-                # print(f"{bsa_heap_indices[0, 0, 60:64 + 1]=}")
-                # print(f"{bsa_indices[0, 0, 60:64 + 1]=}")
-                # print(f"{bsa_block_sums[0, 0, 60:64 + 1]=}")
-                rand_idx = torch.randperm(bsa_heap_indices.size(2))[:4]
-                print(f"{rand_idx=}")
-                print(f"{bsa_heap_indices[0, 0, rand_idx]=}")
-                print(f"{bsa_indices[0, 0, rand_idx]=}")
-                print(f"{bsa_block_sums[0, 0, rand_idx]=}")
 
         if return_running_statistics:
             return o, (MX, NC)

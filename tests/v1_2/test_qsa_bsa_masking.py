@@ -513,6 +513,8 @@ def test_with_hip_bsa() -> None:
 
 def winner_tree_vs_online() -> None:
     for seq in [131072 * 2**i for i in range(0, 6)]:
+        if seq < 4000000:
+            continue
 
         device = 0
         path = "/data/ainl/library/hip-attention/cache/llama/qkvout.pth"
@@ -616,7 +618,8 @@ def winner_tree_vs_online() -> None:
                 f.write(l + "\n")
 
 
-        for K in [16, 32, 64, 128, 256, 512, 1024]:
+        # for K in [16, 32, 64, 128, 256, 512, 1024]:
+        for K in [16, 32, 64, 128, 256, 512]:
             for q_block in [8, 16, 32, 64]:
                 for heap in [True, False]:
                     for reverse in [True, False]:
@@ -703,6 +706,6 @@ def winner_tree_vs_online() -> None:
 
 if __name__ == "__main__":
     with torch.no_grad():
-        # test_qsa()
+        test_qsa()
         # test_with_hip_bsa()
-        winner_tree_vs_online()
+        # winner_tree_vs_online()
