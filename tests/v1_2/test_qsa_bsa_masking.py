@@ -2,6 +2,7 @@ import math
 import os
 from typing import Any, Tuple
 
+import einx
 import torch
 from flash_attn import flash_attn_func
 
@@ -48,6 +49,7 @@ def test_qsa() -> None:
         reverse=False,
         K=64,
         mask=None,
+        online_topk_method="naive",
     ) -> Tuple[torch.Tensor, ...]:
         bsa_idx, block_sums = None, None
         if return_bsa_indices:
@@ -65,6 +67,7 @@ def test_qsa() -> None:
                 bsa_block_size_k=k_block,
                 bsa_mask_sliding_window_size=window_size,
                 bsa_mask_sink_token_size=sink_tokens,
+                online_topk_method=online_topk_method,
                 bsa_heap=heap,
                 reverse_iter=reverse,
             )
@@ -82,8 +85,11 @@ def test_qsa() -> None:
         )
         return out, None, None
 
-    path = "/home/jeff/python/delta2/checkout/qkvout.pth"
-    d = torch.load(path)
+    # path = "/home/jeff/python/delta2/checkout/qkvout.pth"
+    # d = torch.load(path)
+    d = torch.load(
+        "/data/ainl/library/hip-attention/cache/llama/qkvout.pth", map_location="cpu"
+    )
 
     q, k, v, cos, sin = (
         d["q"].cuda(device),
@@ -143,65 +149,88 @@ def test_qsa() -> None:
     print(f"{mask.size()=} {q.size()=} {seq=} {q_block=}")
     qq = q.view(b, h, seq // q_block, q_block, d)[:, :, :, 0]
 
-    # 2. test forward/reverse gives same indices scan top-k. One burn in for safety
-    _, bsa_idx_fwd, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=False, mask=mask)
-    _, bsa_idx_rev, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=True, mask=mask)
+    # 1.2 test topk estimation accuracy
+    # K = 64
+    # qq, k, v = qq.contiguous(), k.contiguous(), v.contiguous()
+    # _, gt_idxs, _ = qsa(qq, k, v, return_bsa_indices=True, mask=mask, K=64, online_topk_method='naive')
+    # _, est_idxs, _ = qsa(qq, k, v, return_bsa_indices=True, mask=mask, K=64, online_topk_method='estimate')
+    # print(f"{gt_idxs=}")
+    # gt_exp_sum = check_topk_selection("naive", gt_idxs, qq, k, v, K=64, k_block=k_block)
+    # print(f"{gt_exp_sum=}")
+    # est_exp_sum = check_topk_selection("estimate", est_idxs, qq, k, v, K=64, k_block=k_block)
+    # print(f"{est_exp_sum=}")
 
-    _, bsa_idx_fwd, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=False, mask=mask)
-    _, bsa_idx_rev, _ = qsa(qq, k, v, return_bsa_indices=True, reverse=True, mask=mask)
-    rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
-    eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
-        0, 0, rand_idx
-    ].unsqueeze(-2)
-    eq = eq.sum(-1).sum(-1)
-    print(f"linear scan fwd/rev indices match: {eq=}")
+    TEST_2_TO_4 = True
+    if TEST_2_TO_4:
+        # 2. test forward/reverse gives same indices scan top-k. One burn in for safety
+        print(qq.shape, k.shape, v.shape)
+        _, bsa_idx_fwd, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=False, mask=mask
+        )
+        _, bsa_idx_rev, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=True, mask=mask
+        )
 
-    # 3. test forward/reverse gives same indices winner tree top-k. One burn in for safety
-    _, bsa_idx_fwd, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
-    )
-    _, bsa_idx_rev, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
-    )
+        _, bsa_idx_fwd, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=False, mask=mask
+        )
+        _, bsa_idx_rev, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=True, mask=mask
+        )
+        print(f"{bsa_idx_fwd=}")
+        rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
+        eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
+            0, 0, rand_idx
+        ].unsqueeze(-2)
+        eq = eq.sum(-1).sum(-1)
+        print(f"linear scan fwd/rev indices match: {eq=}")
 
-    _, bsa_idx_fwd, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
-    )
-    _, bsa_idx_rev, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
-    )
-    rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
-    eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
-        0, 0, rand_idx
-    ].unsqueeze(-2)
-    eq = eq.sum(-1).sum(-1)
-    print(f"winner tree fwd/rev indices match {eq=}")
+        # 3. test forward/reverse gives same indices winner tree top-k. One burn in for safety
+        _, bsa_idx_fwd, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
+        )
+        _, bsa_idx_rev, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
+        )
 
-    # 4. test linear scan and heap give same indices. One burn in for warmup
-    _, bsa_idx, _ = qsa(
-        qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
-    )
-    _, bsa_idx_tree, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
-    )
+        _, bsa_idx_fwd, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=False, mask=mask
+        )
+        _, bsa_idx_rev, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=True, mask=mask
+        )
+        rand_idx = torch.randperm(bsa_idx_fwd.size(2))[:4]
+        eq = bsa_idx_fwd[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_rev[
+            0, 0, rand_idx
+        ].unsqueeze(-2)
+        eq = eq.sum(-1).sum(-1)
+        print(f"winner tree fwd/rev indices match {eq=}")
 
-    _, bsa_idx, _ = qsa(
-        qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
-    )
-    _, bsa_idx_tree, _ = qsa(
-        qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
-    )
+        # 4. test linear scan and heap give same indices. One burn in for warmup
+        _, bsa_idx, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
+        )
+        _, bsa_idx_tree, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
+        )
 
-    rand_idx = torch.randperm(bsa_idx.size(2))[:4]
-    eq = bsa_idx[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_tree[
-        0, 0, rand_idx
-    ].unsqueeze(-2)
-    eq = eq.sum(-1).sum(-1)
-    print(f"heap and plain returned same indices: {eq=}")
-    print(
-        "winner tree / linear top-k indices ok! (should be 16 unless a very early block was selected)"
-    )
-    print(f"selected blocks: {rand_idx=}")
+        _, bsa_idx, _ = qsa(
+            qq, k, v, return_bsa_indices=True, reverse=True, K=16, mask=mask
+        )
+        _, bsa_idx_tree, _ = qsa(
+            qq, k, v, heap=True, return_bsa_indices=True, reverse=True, K=16, mask=mask
+        )
+
+        rand_idx = torch.randperm(bsa_idx.size(2))[:4]
+        eq = bsa_idx[0, 0, rand_idx].unsqueeze(-1) == bsa_idx_tree[
+            0, 0, rand_idx
+        ].unsqueeze(-2)
+        eq = eq.sum(-1).sum(-1)
+        print(f"heap and plain returned same indices: {eq=}")
+        print(
+            "winner tree / linear top-k indices ok! (should be 16 unless a very early block was selected)"
+        )
+        print(f"selected blocks: {rand_idx=}")
 
     # 5. test forward/reverse latency with linear scan top-k
     for topk in [2**i for i in range(4, 6)]:
@@ -218,14 +247,44 @@ def test_qsa() -> None:
         print(f"online top-k latency {topk=} {fwd_latency=} {rev_latency=}")
 
     # 6. test forward/reverse latency with winner tree top-k
+    if TEST_2_TO_4:
+        for topk in [2**i for i in range(4, 6)]:
+            fwd_latency = latency(
+                lambda: qsa(
+                    qq,
+                    k,
+                    v,
+                    heap=True,
+                    return_bsa_indices=True,
+                    reverse=False,
+                    mask=mask,
+                    K=topk,
+                )
+            )
+            rev_latency = latency(
+                lambda: qsa(
+                    qq,
+                    k,
+                    v,
+                    heap=True,
+                    return_bsa_indices=True,
+                    reverse=True,
+                    mask=mask,
+                    K=topk,
+                )
+            )
+            print(f"winner tree top-k latency {topk=} {fwd_latency=} {rev_latency=}")
+
+    # 6.1 test forward/reverse latency with topk estimation
     for topk in [2**i for i in range(4, 6)]:
         fwd_latency = latency(
             lambda: qsa(
                 qq,
                 k,
                 v,
-                heap=True,
+                heap=False,
                 return_bsa_indices=True,
+                online_topk_method="estimate",
                 reverse=False,
                 mask=mask,
                 K=topk,
@@ -236,14 +295,15 @@ def test_qsa() -> None:
                 qq,
                 k,
                 v,
-                heap=True,
+                heap=False,
                 return_bsa_indices=True,
+                online_topk_method="estimate",
                 reverse=True,
                 mask=mask,
                 K=topk,
             )
         )
-        print(f"winner tree top-k latency {topk=} {fwd_latency=} {rev_latency=}")
+        print(f"estimate top-k latency {topk=} {fwd_latency=} {rev_latency=}")
 
     # 7. test no-bsa latency
     fwd_latency = latency(
@@ -324,6 +384,7 @@ def test_with_hip_bsa() -> None:
     def qsa(
         online_topk_method, heap=False, reverse=True, return_bsa_indices=True
     ) -> Tuple[torch.Tensor, ...]:
+        print(qp.shape, kp.shape, vp.shape)
         out, (bsa_idx, block_sums) = query_sparse_attention(
             q=qp,
             k=kp,
@@ -372,11 +433,8 @@ def test_with_hip_bsa() -> None:
     o = o.transpose(1, 2)
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    out, bsa_out, block_idx, block_sums = qsa("naive", heap=False)
-    out_2, bsa_out_2, block_idx_2, block_sums_2 = qsa("estimate")
-    check_topk_selection("naive", block_idx, block_sums)
-    check_topk_selection("estimate", block_idx_2, block_sums_2)
-
+    out, bsa_out, block_idx, _ = qsa("naive", heap=False)
+    print(f"{block_idx=}")
     out, bsa_out, block_idx, _ = qsa("naive", heap=True)
 
     bsa_out = bsa_out.transpose(1, 2)
@@ -614,16 +672,6 @@ def test_with_hip_bsa() -> None:
         )
     )
     print(f"flash attn: {latency_flash:.2f} ms took")
-
-
-def check_topk_selection(
-    name: str,
-    block_idx,  # (BSZ, HEAD, TDST, BSA_K)
-    block_sums,  # (BSZ, HEAD, TDST, BSA_K)
-):
-    block_sums = torch.where(block_sums < -100, 0, block_sums)
-    block_sums = block_sums.sum(dim=-1)
-    print(f"{name} block sums: {block_sums}")
 
 
 if __name__ == "__main__":

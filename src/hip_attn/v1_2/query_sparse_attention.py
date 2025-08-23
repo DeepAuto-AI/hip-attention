@@ -254,6 +254,10 @@ def _attn_fwd_inner(
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
     ONLINE_TOPK_METHOD: tl.constexpr = "naive",
+    running_mean=None,
+    running_m2=None,
+    num_tracking=None,
+    topk_idx=None,
 ):
     SQRT2: tl.constexpr = 1.4142135623730951  # math.sqrt(2.0)
     # range of values handled by this stage
@@ -295,14 +299,18 @@ def _attn_fwd_inner(
     # mask_tsrc = idx_tsrc < hi
 
     # probability of being below the top-k threshold
-    pr_below_th = 1 - BSA_K * BSA_BLOCK_SIZE_K / offs_m  # [BLOCK_M,]
-    erf_pr = libdevice.erfinv(2 * pr_below_th - 1) * SQRT2
+    pr_below_th = tl.where(
+        mask_idx > 0,
+        1 - tl.minimum(mask_idx, BSA_K * BSA_BLOCK_SIZE_K) / mask_idx,
+        0.0,
+    )  # [BLOCK_M,]
+    erf_pr = tl.where(
+        pr_below_th > 0,
+        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+        -3000.0,
+    )
 
     # loop over k, v and update accumulator
-    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int32)
-    running_mean = tl.zeros((BLOCK_M,), dtype=tl.float32)
-    running_m2 = tl.zeros((BLOCK_M,), dtype=tl.float32)
-    num_tracking = tl.zeros((BLOCK_M,), dtype=tl.int32)
     for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = _start_n
         if REVERSE_ITER:
@@ -551,6 +559,10 @@ def _attn_fwd_inner(
             if using_exp_sum and (not BSA_HEAP):
                 block_sums = (block_sums * alpha[:, None]).to(block_sums.dtype)
                 block_sums_min = (block_sums_min * alpha).to(block_sums_min.dtype)
+                running_mean = running_mean + tl.log2(
+                    alpha
+                )  # muliply alpha in log space
+                # Note: running_m2 does not need to be changed
 
             for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
                 if i_offset == (0 * BSA_BLOCK_SIZE_K):
@@ -579,7 +591,10 @@ def _attn_fwd_inner(
                         root_lf,
                     )
                 elif ONLINE_TOPK_METHOD == "naive":
-                    block_update = (update_exp_sum > block_sums_min) * mask_m
+                    block_update = (
+                        (update_exp_sum > block_sums_min)
+                        & (update_exp_sum > 0)  # skip masked values
+                    ) * mask_m
                     if tl.sum(block_update.to(tl.int32)) > 0:
                         block_sums_max = tl.maximum(
                             block_sums_min, update_exp_sum
@@ -602,18 +617,19 @@ def _attn_fwd_inner(
                         )  # (M, K) -> (M,)
 
                 elif ONLINE_TOPK_METHOD == "estimate":
-                    num_tracking += 1
+                    log_score = tl.math.log2(update_exp_sum)
 
                     # update running mean and std
-                    delta = update_exp_sum - running_mean
+                    num_tracking += 1
+                    delta = log_score - running_mean
                     running_mean = running_mean + delta / num_tracking
-                    delta2 = update_exp_sum - running_mean
+                    delta2 = log_score - running_mean
                     running_m2 = running_m2 + delta * delta2
 
                     est_std = tl.sqrt(running_m2 / (num_tracking - 1))
 
                     # estimated threshold for top-k
-                    est_th = tl.math.exp2(erf_pr * est_std + running_mean)
+                    log_est_th = erf_pr * est_std + running_mean
 
                     # update block sums and indices
                     new_block_sum = update_exp_sum[:, None]
@@ -623,14 +639,32 @@ def _attn_fwd_inner(
                     # bsa_mask = num_tracking[:, None] == tl.arange(0, BSA_K)[None, :]
                     # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
                     # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
+                    upd_idx_0 = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
                     do_update = ((num_tracking - 1) < BSA_K) & (
                         update_exp_sum > 0
                     )  # skip masked values  # (M,)
-                    upd_idx = (
-                        start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-                    ) * stride_bim + (
-                        num_tracking - 1
-                    ) * stride_bik  # (M,)
+                    upd_idx = upd_idx_0 + (num_tracking - 1) * stride_bik  # (M,)
+
+                    VERBOSE: tl.constexpr = False
+                    if VERBOSE:
+                        pid = tl.program_id(0)
+                        pid = pid // tl.cdiv(N_CTX, BLOCK_M)
+                        sliding_window_size = 64
+                        idx0_block_idx = tl.where(
+                            (tl.arange(0, BLOCK_M) == 0), new_block_idx, 0
+                        ).sum()
+                        idx0_topk_idx = tl.where(
+                            (tl.arange(0, BLOCK_M) == 0), (num_tracking - 1), 0
+                        ).sum()
+                        idx0_updated = (do_update & (tl.arange(0, BLOCK_M) == 0)).to(
+                            tl.int32
+                        ).sum() > 0
+                        if pid == 0 and start_m == 31 and idx0_updated:
+                            tl.device_print(
+                                "init [i] <- new_block_idx",
+                                idx0_topk_idx * 1000000 + idx0_block_idx,
+                            )
+
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
                         value=update_exp_sum,
@@ -646,19 +680,23 @@ def _attn_fwd_inner(
                     do_update = (
                         (num_tracking >= BSA_K)
                         & (update_exp_sum > 0)  # skip masked values
-                        & (update_exp_sum > est_th)
+                        & (log_score > log_est_th)
                         & (topk_idx < BSA_K)
                     )  # (M,)
-                    # bsa_mask = (
-                    #     do_update[:, None]
-                    #     & (topk_idx[:, None] == tl.arange(0, BSA_K)[None, :])
-                    #     & (block_sums < new_block_sum)  # only update if the new value is larger
-                    # )  # (M, K)
-                    # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
-                    # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
-                    upd_idx = (
-                        start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-                    ) * stride_bim + topk_idx * stride_bik  # (M,)
+                    if VERBOSE:
+                        idx0_updated = (do_update & (tl.arange(0, BLOCK_M) == 0)).to(
+                            tl.int32
+                        ).sum() > 0
+                        idx0_topk_idx = tl.where(
+                            (tl.arange(0, BLOCK_M) == 0), topk_idx, 0
+                        ).sum()
+                        if pid == 0 and start_m == 16 and idx0_updated:
+                            tl.device_print(
+                                "new [i] <- new_block_idx",
+                                idx0_topk_idx,
+                                idx0_block_idx,
+                            )
+                    upd_idx = upd_idx_0 + topk_idx * stride_bik  # (M,)
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
                         value=update_exp_sum,
@@ -669,6 +707,13 @@ def _attn_fwd_inner(
                         value=new_block_idx,
                         mask=mask_m & do_update,
                     )
+                    # bsa_mask = (
+                    #     do_update[:, None]
+                    #     & (topk_idx[:, None] == tl.arange(0, BSA_K)[None, :])
+                    #     & (block_sums < new_block_sum)  # only update if the new value is larger
+                    # )  # (M, K)
+                    # block_sums = tl.where(bsa_mask, new_block_sum.to(block_sums.dtype), block_sums)
+                    # block_idx = tl.where(bsa_mask, new_block_idx.to(block_idx.dtype), block_idx)
 
                     topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
 
@@ -725,7 +770,7 @@ def _attn_fwd_inner(
             tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
             tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
 
-    return acc, l_i, m_i
+    return acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx
 
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
@@ -1121,6 +1166,11 @@ def _attn_fwd(
     tl.multiple_of(mid, BLOCK_N)
     hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
 
+    running_mean = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    running_m2 = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    num_tracking = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int32)
+
     if (N_SPLIT > 1) and False:
         k_chunk_size = tl.cdiv(hi, N_SPLIT)
         start_k = k_chunk_size * idx_split
@@ -1263,140 +1313,152 @@ def _attn_fwd(
                 ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
             )
     else:
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
-            mask_idx,
-            start_m,
-            qk_scale,
-            k_descale,
-            v_descale,
-            BLOCK_M,
-            HEAD_DIM,
-            HEAD_NOPE,
-            HEAD_ROPE,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            mask_m,
-            N_CTX,
-            N_KV,
-            V_FP8,
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
-            RETURN_BSA_MASK=RETURN_BSA_MASK,
-            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
-            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
-            BSA_K=BSA_K,
-            BSA_LOGK=BSA_LOGK,
-            BSA_HEAP=BSA_HEAP,
-            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
-            BSA_INDICES=BSA_INDICES,
-            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
-            BSA_HEAP_INDICES=BSA_HEAP_INDICES,
-            stride_bim=stride_bim,
-            stride_bik=stride_bik,
-            COS=COS,
-            stride_cos_t=stride_cos_t,
-            stride_cos_hid=stride_cos_hid,
-            SIN=SIN,
-            stride_sin_t=stride_sin_t,
-            stride_sin_hid=stride_sin_hid,
-            K_ROT=K + kv_offset if K is not None else None,
-            stride_k_rot_tsrc=stride_kn,
-            stride_k_rot_hid=stride_kk,
-            lo=lo,
-            hi=mid,
-            REVERSE_ITER=REVERSE_ITER,
-            MASKING=False,
-            EXTEND_BACKEND=EXTEND_BACKEND,
-            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
-            ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+            _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                q_nope,
+                K_block_ptr,
+                K_NOPE_block_ptr,
+                V_block_ptr,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                HEAD_NOPE,
+                HEAD_ROPE,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+                BSA_K=BSA_K,
+                BSA_LOGK=BSA_LOGK,
+                BSA_HEAP=BSA_HEAP,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=lo,
+                hi=mid,
+                REVERSE_ITER=REVERSE_ITER,
+                MASKING=False,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+            )
         )
 
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
-            mask_idx,
-            start_m,
-            qk_scale,
-            k_descale,
-            v_descale,
-            BLOCK_M,
-            HEAD_DIM,
-            HEAD_NOPE,
-            HEAD_ROPE,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            mask_m,
-            N_CTX,
-            N_KV,
-            V_FP8,
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
-            RETURN_BSA_MASK=RETURN_BSA_MASK,
-            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
-            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
-            BSA_K=BSA_K,
-            BSA_LOGK=BSA_LOGK,
-            BSA_HEAP=BSA_HEAP,
-            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
-            BSA_INDICES=BSA_INDICES,
-            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
-            BSA_HEAP_INDICES=BSA_HEAP_INDICES,
-            stride_bim=stride_bim,
-            stride_bik=stride_bik,
-            COS=COS,
-            stride_cos_t=stride_cos_t,
-            stride_cos_hid=stride_cos_hid,
-            SIN=SIN,
-            stride_sin_t=stride_sin_t,
-            stride_sin_hid=stride_sin_hid,
-            K_ROT=K + kv_offset if K is not None else None,
-            stride_k_rot_tsrc=stride_kn,
-            stride_k_rot_hid=stride_kk,
-            lo=mid,
-            hi=hi,
-            REVERSE_ITER=REVERSE_ITER,
-            MASKING=True,
-            EXTEND_BACKEND=EXTEND_BACKEND,
-            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
-            ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+            _attn_fwd_inner(
+                acc,
+                l_i,
+                m_i,
+                q,
+                q_nope,
+                K_block_ptr,
+                K_NOPE_block_ptr,
+                V_block_ptr,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                HEAD_NOPE,
+                HEAD_ROPE,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+                BSA_K=BSA_K,
+                BSA_LOGK=BSA_LOGK,
+                BSA_HEAP=BSA_HEAP,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=mid,
+                hi=hi,
+                REVERSE_ITER=REVERSE_ITER,
+                MASKING=True,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+            )
         )
 
     # epilogue
@@ -1627,7 +1689,7 @@ class _attention(torch.autograd.Function):
         # )
         NC = MX = M = None
         if return_running_statistics:
-            assert not return_bsa_indices
+            # assert not return_bsa_indices
             MX = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
@@ -1641,7 +1703,7 @@ class _attention(torch.autograd.Function):
 
         bsa_indices = bsa_block_sums = bsa_heap_indices = None
         if return_bsa_indices:
-            assert not return_running_statistics
+            # assert not return_running_statistics
             assert not return_pooled_scores
             BSZ, HEAD, TDST = q.shape[:3]
 
@@ -1788,7 +1850,7 @@ class _attention(torch.autograd.Function):
             # warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
             N_SPLIT = 1
         else:
-            warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
+            # warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
             N_SPLIT = 1
 
         assert safe_stride(k, 4)[:2] == safe_stride(v, 4)[:2]
@@ -2061,17 +2123,18 @@ class _attention(torch.autograd.Function):
             #     print(f"{bsa_indices[0, 0, rand_idx]=}")
             #     print(f"{bsa_block_sums[0, 0, rand_idx]=}")
 
+        output = (o,)
         if return_running_statistics:
-            return o, (MX, NC)
-        elif return_bsa_indices:
+            output = output + (MX, NC)
+        if return_bsa_indices:
             if not bsa_heap:
-                return o, (bsa_indices, bsa_block_sums)
-            return o, (
-                bsa_indices[:, :, :, bsa_top_block_k:],
-                bsa_block_sums[:, :, :, bsa_top_block_k:],
-            )
-        else:
-            return o
+                output = output + (bsa_indices, bsa_block_sums)
+            else:
+                output = output + (
+                    bsa_indices[:, :, :, bsa_top_block_k:],
+                    bsa_block_sums[:, :, :, bsa_top_block_k:],
+                )
+        return o if len(output) == 1 else output
 
     @staticmethod
     def backward(ctx, do):
