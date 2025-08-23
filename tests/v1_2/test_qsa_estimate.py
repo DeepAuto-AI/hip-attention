@@ -119,10 +119,10 @@ def test() -> None:
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
     K = 256
-    out, MX, NC, block_idx, _ = qsa(
+    out, (MX, NC), (block_idx, _) = qsa(
         K, "naive", heap=False, reverse=False, return_running_statistics=True
     )
-    out, MX, NC, block_idx, _ = qsa(
+    out, (MX, NC), (block_idx, _) = qsa(
         K, "naive", heap=False, reverse=False, return_running_statistics=True
     )
     row_sums = MX + torch.log2(NC)
@@ -133,10 +133,10 @@ def test() -> None:
     )
     print(f"{gt_exp_sc=}")
 
-    out, MX, NC, block_idx, _ = qsa(
+    out, (MX, NC), (block_idx, _) = qsa(
         K, "estimate", heap=False, reverse=False, return_running_statistics=True
     )
-    out, MX, NC, block_idx, _ = qsa(
+    out, (MX, NC), (block_idx, _) = qsa(
         K, "estimate", heap=False, reverse=False, return_running_statistics=True
     )
     row_sums = MX + torch.log2(NC)

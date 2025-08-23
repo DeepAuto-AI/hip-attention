@@ -20,7 +20,7 @@ def get_chat_completion(prompt, reasoning_effort=None):
             },
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.0,
+        "temperature": 0.7,
         "max_tokens": 65536,
     }
 
