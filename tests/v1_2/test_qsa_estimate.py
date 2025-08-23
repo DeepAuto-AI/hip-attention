@@ -153,7 +153,7 @@ def test() -> None:
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:
         # 6.1 test forward/reverse latency with topk estimation
-        LATENCY_LOWER, LATENCY_UPPER = 4, 8
+        LATENCY_LOWER, LATENCY_UPPER = 4, 9
         for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:
             fwd_latency = latency(
                 lambda: qsa(
