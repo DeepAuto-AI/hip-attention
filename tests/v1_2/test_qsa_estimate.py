@@ -3,6 +3,7 @@ import os
 from typing import Any, Tuple
 
 import einx
+import numpy as np
 import torch
 from flash_attn import flash_attn_func
 
@@ -120,10 +121,10 @@ def test() -> None:
     # warmup burn-in. autotune has s dirty init so this is necessary right now
     K = 256
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "naive", heap=False, reverse=False, return_running_statistics=True
+        K, "naive", heap=True, reverse=True, return_running_statistics=True
     )
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "naive", heap=False, reverse=False, return_running_statistics=True
+        K, "naive", heap=True, reverse=True, return_running_statistics=True
     )
     row_sums = MX + torch.log2(NC)
     print(f"{block_idx=}")
@@ -131,7 +132,16 @@ def test() -> None:
     gt_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
-    print(f"{gt_exp_sc=}")
+
+    out, (MX, NC), (block_idx, _) = qsa(
+        32, "naive", heap=True, reverse=True, return_running_statistics=True
+    )
+    out, (MX, NC), (block_idx, _) = qsa(
+        32, "naive", heap=True, reverse=True, return_running_statistics=True
+    )
+    small_exp_sc = check_topk_selection(
+        block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
+    )
 
     out, (MX, NC), (block_idx, _) = qsa(
         K, "estimate", heap=False, reverse=False, return_running_statistics=True
@@ -145,10 +155,16 @@ def test() -> None:
     est_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
-    print(f"{est_exp_sc=}")
+    # with np.printoptions(threshold=np.inf, suppress=True, precision=4, linewidth=200):
+    #     print(f"{gt_exp_sc[gt_exp_sc > 0].cpu().detach().numpy()=}")
+    #     print(f"{est_exp_sc[gt_exp_sc > 0].cpu().detach().numpy()=}")
 
-    recall_rate = (est_exp_sc / (gt_exp_sc + 1e-6))[gt_exp_sc > 0].mean()
-    print(f"{recall_rate=}")
+    recall_rates = (est_exp_sc / (gt_exp_sc + 1e-6))[gt_exp_sc > 0]
+    recall_rates_small = (est_exp_sc / (small_exp_sc + 1e-6))[small_exp_sc > 0]
+    # with np.printoptions(threshold=np.inf, suppress=True, precision=4, linewidth=200):
+    #     print(f"{recall_rates.cpu().detach().numpy()=}")
+    print(f"{recall_rates.mean()=}")
+    print(f"{recall_rates_small.mean()=}")
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:

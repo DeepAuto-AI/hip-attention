@@ -152,7 +152,7 @@ def winner_update_inline(
         root_v = tl.where(beat, path_v, root_v)
         root_lf = tl.where(beat, path_p, root_lf)
         root_idx = tl.where(beat, path_idx, root_idx)
-    return root_v, root_lf, root_idx
+    return root_v, root_lf, root_idx, beat
 
 
 @triton.jit
@@ -315,6 +315,9 @@ def _attn_fwd_inner(
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
 
+    LOAD_K: tl.constexpr = EXACT_K if ONLINE_TOPK_METHOD == "estimate" else BSA_K
+    LOAD_LOGK: tl.constexpr = _log2(LOAD_K)
+
     if RETURN_BSA_MASK:
         if BSA_HEAP:
             b_idx = (
@@ -329,10 +332,6 @@ def _attn_fwd_inner(
             # THESE STRIDES LOOK LIKE THEY ARE REVERSED BUT THEY ARE NOT
             # IT IS DUE TO HEAP AND PLAIN NEEDING DIFFERENT MEMORY LAYOUT.
             # THE VARIABLE NAMES SUCK, BUT IT WAS THE EASIEST THING TO DO.
-            LOAD_K: tl.constexpr = (
-                EXACT_K if ONLINE_TOPK_METHOD == "estimate" else BSA_K
-            )
-
             b_idx = (
                 start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
             ) * stride_bik + tl.arange(0, LOAD_K)[None, :].to(tl.int64) * stride_bim
@@ -654,7 +653,7 @@ def _attn_fwd_inner(
                     update_exp_sum = l_ij_3
 
                 if BSA_HEAP:
-                    root_v, root_lf, root_idx = winner_update_inline(
+                    root_v, root_lf, root_idx, block_update = winner_update_inline(
                         update_exp_sum,
                         start_n + i_offset,
                         BSA_BLOCK_SUMS,
@@ -662,8 +661,8 @@ def _attn_fwd_inner(
                         BSA_INDICES,
                         stride_bik,
                         stride_bim,
-                        BSA_K,
-                        BSA_LOGK,
+                        LOAD_K,
+                        LOAD_LOGK,
                         BLOCK_M,
                         start_m,
                         mask_m,
@@ -741,7 +740,7 @@ def _attn_fwd_inner(
                     new_block_idx = start_n + i_offset
 
                     # 1. always add if num_tracking < BSA_K
-                    upd_idx_0 = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
+                    upd_idx_0 = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bik
                     ins_pos = EXACT_K + num_tracking - 1
                     do_update = (
                         (~block_update)
@@ -749,7 +748,7 @@ def _attn_fwd_inner(
                         & (update_exp_sum > 0)  # skip masked values
                         & mask_m
                     )  # (M,)
-                    upd_idx = upd_idx_0 + ins_pos * stride_bik  # (M,)
+                    upd_idx = upd_idx_0 + ins_pos * stride_bim  # (M,)
 
                     if VERBOSE:
                         pid = tl.program_id(0)
@@ -772,12 +771,12 @@ def _attn_fwd_inner(
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
                         value=update_exp_sum,
-                        mask=mask_m & do_update,
+                        mask=do_update,
                     )
                     tl.store(
                         BSA_INDICES + upd_idx,
                         value=new_block_idx,
-                        mask=mask_m & do_update,
+                        mask=do_update,
                     )
 
                     # 2. otherwise, update if the new value is larger than the estimated threshold
@@ -802,16 +801,16 @@ def _attn_fwd_inner(
                                 idx0_topk_idx,
                                 idx0_block_idx,
                             )
-                    upd_idx = upd_idx_0 + topk_idx * stride_bik  # (M,)
+                    upd_idx = upd_idx_0 + topk_idx * stride_bim  # (M,)
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
                         value=update_exp_sum,
-                        mask=mask_m & do_update,
+                        mask=do_update,
                     )
                     tl.store(
                         BSA_INDICES + upd_idx,
                         value=new_block_idx,
-                        mask=mask_m & do_update,
+                        mask=do_update,
                     )
 
                     topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
@@ -1024,7 +1023,7 @@ def _attn_fwd(
     ONLINE_TOPK_METHOD: tl.constexpr = "naive",
     N_KV_AUTOTUNE=0,
     N_CTX_AUTOTUNE=0,
-    EXACT_K: tl.constexpr = 8,
+    EXACT_K: tl.constexpr = 32,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
