@@ -1546,7 +1546,10 @@ def _forward_delta_attn(
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = 64
-                qsa_mask_block_top_k = 64
+                reverse_iter=bool(os.getenv("BSA_WINNER_TREE", "False"))
+                bsa_heap=bool(os.getenv("BSA_WINNER_TREE", "False"))
+                qsa_mask_block_top_k = int(os.environ.get("BSA_K"))
+                # print(f"{reverse_iter=} {bsa_heap=} {qsa_mask_block_top_k=}")
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
                 # using sum of block scores
