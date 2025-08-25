@@ -126,7 +126,7 @@ def test() -> None:
     out, (MX, NC), (block_idx, _) = qsa(
         K, "naive", heap=True, reverse=True, return_running_statistics=True
     )
-    row_sums = MX + torch.log2(NC)
+    row_sums = torch.exp2(MX + torch.log2(NC))
     print(f"{block_idx=}")
     print(f"{row_sums.size()=} {row_sums=}")
     gt_exp_sc = check_topk_selection(
@@ -149,7 +149,7 @@ def test() -> None:
     out, (MX, NC), (block_idx, _) = qsa(
         K, "estimate", heap=False, reverse=False, return_running_statistics=True
     )
-    row_sums = MX + torch.log2(NC)
+    row_sums = torch.exp2(MX + torch.log2(NC))
     print(f"{block_idx=}")
     print(f"{row_sums.size()=} {row_sums=}")
     est_exp_sc = check_topk_selection(

@@ -381,18 +381,6 @@ def _attn_fwd_inner(
                 + tl.arange(0, HEAD_NOPE)[:, None].to(tl.int64) * stride_kk
             )
 
-    # probability of being below the top-k threshold
-    pr_below_th = tl.where(
-        mask_idx > 0,
-        1 - tl.minimum(mask_idx, BSA_K * BSA_BLOCK_SIZE_K) / mask_idx,
-        0.0,
-    )  # [BLOCK_M,]
-    erf_pr = tl.where(
-        pr_below_th > 0,
-        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
-        -3000.0,
-    )
-
     # loop over k, v and update accumulator
     for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = _start_n
@@ -554,7 +542,7 @@ def _attn_fwd_inner(
         if HEAD_DIM != HEAD_ROPE:
             qk = tl.dot(q_nope, k_nope, acc=qk)
 
-        qk = qk * 1.44269504
+        qk = qk * 1.44269504  # 1 / ln(2)
 
         if MASKING:
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
@@ -568,7 +556,7 @@ def _attn_fwd_inner(
         # if we don't set it to 0 here, -inf - -inf will cause nans.
         qk -= tl.where(m_ij[:, None] == float("-inf"), 0, m_ij[:, None])
 
-        p = tl.math.exp2(qk)
+        p = tl.math.exp2(qk)  # 2^(x / ln(2)) == exp(x)
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
         # see note above about iterating backwards through keys
@@ -589,7 +577,7 @@ def _attn_fwd_inner(
 
             # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
             # USING EXP SUM IS INCOMPATIBLE WITH WINNER TREE UPDATES BECAUSE WE CANNOT UPDATE EACH TREE ENTRY FOR EVERY INSERT
-            using_exp_sum = False
+            using_exp_sum = not BSA_HEAP
             mask = None
             if MASKING:
                 mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
@@ -716,22 +704,61 @@ def _attn_fwd_inner(
                         )  # (M, K) -> (M,)
 
                 if ONLINE_TOPK_METHOD == "estimate":
-                    if (update_alpha is not None) and (using_exp_sum):
-                        running_mean = running_mean + tl.log2(
-                            update_alpha
-                        )  # muliply alpha in log space
-                        # Note: running_m2 does not need to be changed
+                    # if (update_alpha is not None) and (using_exp_sum):
+                    #     running_mean = running_mean + tl.log2(
+                    #         update_alpha
+                    #     )  # muliply alpha in log space
+                    #     # Note: running_m2 does not need to be changed
 
-                    log_score = tl.math.log2(update_exp_sum)
+                    log_score = tl.math.log2(update_exp_sum) + m_ij
+                    score = tl.math.exp2(log_score)
 
                     # update running mean and std
-                    num_tracking += 1
+                    update_stats = update_exp_sum > 0
+                    num_tracking += update_stats
                     delta = log_score - running_mean
-                    running_mean = running_mean + delta / num_tracking
+                    running_mean = tl.where(
+                        update_stats,
+                        running_mean + delta / num_tracking,
+                        running_mean,
+                    )
                     delta2 = log_score - running_mean
-                    running_m2 = running_m2 + delta * delta2
+                    running_m2 = tl.where(
+                        update_stats,
+                        running_m2 + delta * delta2,
+                        running_m2,
+                    )
+
+                    if VERBOSE:
+                        if ONLINE_TOPK_METHOD == "estimate":
+                            pid = tl.program_id(0)
+                            pid = pid // tl.cdiv(N_CTX, BLOCK_M)
+                            if (
+                                start_m == tl.cdiv(N_CTX, BLOCK_M) - 1
+                                and pid == 0
+                                and start_n < 256
+                            ):
+                                tl.device_print(
+                                    "running_mean",
+                                    start_n,
+                                    running_mean,
+                                    log_score,
+                                    m_ij,
+                                )
 
                     est_std = tl.sqrt(running_m2 / (num_tracking - 1))
+
+                    # probability of being below the top-k threshold
+                    remaining_slots = tl.maximum(BSA_K - topk_idx, 0)
+                    remaining_blocks = tl.maximum(
+                        tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K), 1
+                    )
+                    pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
+                    erf_pr = tl.where(
+                        pr_below_th > 0,
+                        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+                        -3000.0,
+                    )
 
                     # estimated threshold for top-k
                     log_est_th = erf_pr * est_std + running_mean
@@ -770,7 +797,7 @@ def _attn_fwd_inner(
 
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
-                        value=update_exp_sum,
+                        value=score,
                         mask=do_update,
                     )
                     tl.store(
@@ -804,7 +831,7 @@ def _attn_fwd_inner(
                     upd_idx = upd_idx_0 + topk_idx * stride_bim  # (M,)
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
-                        value=update_exp_sum,
+                        value=score,
                         mask=do_update,
                     )
                     tl.store(
@@ -1023,7 +1050,7 @@ def _attn_fwd(
     ONLINE_TOPK_METHOD: tl.constexpr = "naive",
     N_KV_AUTOTUNE=0,
     N_CTX_AUTOTUNE=0,
-    EXACT_K: tl.constexpr = 32,
+    EXACT_K: tl.constexpr = 8,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
@@ -1513,6 +1540,12 @@ def _attn_fwd(
                 EXACT_K=EXACT_K,
             )
         )
+
+    # if ONLINE_TOPK_METHOD == "estimate":
+    #     if start_m == tl.cdiv(N_CTX, BLOCK_M) - 1 and pid_bsz_head == 0 and idx_split == 0:
+    #         tl.device_print("final running_mean, running_std",
+    #                         (start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M).to(tl.int64),
+    #                         running_mean, tl.sqrt(running_m2 / (num_tracking - 1)))
 
     # epilogue
     if N_SPLIT > 1:
