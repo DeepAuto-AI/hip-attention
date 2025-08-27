@@ -156,84 +156,6 @@ def winner_update_inline(
 
 
 @triton.jit
-def winner_update_inline_efficient(
-    update_exp_sum,  # (M,) float32 – candidate scores per query (lanes)
-    start_n,  # (1,) int64   – candidate key-block ids per query
-    BSA_BLOCK_SUMS,  # pointer to values
-    BSA_HEAP_INDICES,  # pointer to winner tree indices
-    BSA_INDICES,  # pointer to bsa block indices
-    b_idx,  # offset from base pointers
-    BSA_K,  # K in top-K
-    BSA_LOGK,  # log2(K)
-    BLOCK_M,  # query block size
-    mask_m,  # query mask
-    root_v,  # root min value stored in smem
-    root_lf,  # root min index stored in smem
-):
-    # # K2 must be power-of-two, LOGK == log2(K2)
-    # tl.static_assert(((BSA_K & (BSA_K - 1)) == 0), "BSA_K must be power-of-two")
-    # tl.static_assert(((1 << BSA_LOGK) == BSA_K),    "BSA_LOGK must equal log2(BSA_K)")
-
-    # lanes that actually update (top-k max → min-winner tree)
-    beat = (update_exp_sum > root_v) & mask_m
-    path_v, path_p = root_v, root_lf
-    if tl.sum(beat.to(tl.int32)) > 0:
-        # --- write leaf value + payload (only for beating lanes) ---
-        leaf_idx = (BSA_K + root_lf).to(tl.int32)  # [BSA_K .. 2*BSA_K-1]
-        leaf_addr = b_idx + leaf_idx.to(tl.int64)
-        tl.store(BSA_BLOCK_SUMS + leaf_addr, update_exp_sum, mask=beat)
-        tl.store(BSA_INDICES + leaf_addr, start_n, mask=beat)
-
-        # --- climb: keep the path child (value, pointer, index) in registers ---
-        path_v = tl.where(beat, update_exp_sum.to(tl.float32), path_v)  # fp32
-        path_p = root_lf  # int64 leaf-id [0..BSA_K-1]
-        child = leaf_idx  # int64 node idx [BSA_K..2*BSA_K-1]
-        node = child >> 1  # parent idx [1..BSA_K-1]
-
-        # optional runtime guards (enable with TRITON_DEBUG=1)
-        # tl.device_assert((leaf_idx >= BSA_K) & (leaf_idx < 2*BSA_K), "leaf_idx OOR")
-
-        # for _ in tl.range(0, BSA_LOGK, num_stages=1):   # exactly BSA_LOGK steps; last write is root (node==1)
-        for _ in tl.static_range(
-            0, BSA_LOGK
-        ):  # exactly BSA_LOGK steps; last write is root (node==1)
-            left = (node << 1).to(tl.int32)
-            right = (left + 1).to(tl.int32)
-
-            # which side is our path child?
-            path_is_left = (child == left).to(tl.int1)
-            sib = tl.where(path_is_left, right, left)
-
-            # load ONLY sibling from memory (unmasked loads)
-            sib_v = tl.load(BSA_BLOCK_SUMS + (b_idx + sib.to(tl.int64)))
-            sib_p = tl.load(BSA_HEAP_INDICES + (b_idx + sib.to(tl.int64)))
-
-            # min-winner with **left-tie** policy (match typical winner-tree)
-            take_path = path_v < sib_v  # | ((path_v == sib_v) & path_is_left)
-            # print(f"path v, sib v, take path: ", path_v, sib_v, take_path)
-            win_v = tl.where(take_path, path_v, sib_v)
-            win_p = tl.where(take_path, path_p, sib_p)
-
-            tl.store(
-                BSA_BLOCK_SUMS + (b_idx + node).to(tl.int32),
-                win_v.to(tl.float32),
-                mask=beat,
-            )
-            tl.store(
-                BSA_HEAP_INDICES + (b_idx + node).to(tl.int32),
-                win_p.to(tl.int32),
-                mask=beat,
-            )
-
-            # move up one level
-            child = node.to(tl.int32)
-            node = (node >> 1).to(tl.int32)
-            path_v = win_v.to(tl.float32)
-            path_p = win_p.to(tl.int32)
-    return path_v, path_p
-
-
-@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -575,62 +497,37 @@ def _attn_fwd_inner(
                 | ((BSA_BLOCK_SIZE_K * 4) == BLOCK_N)
             )
 
-            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            # USING EXP SUM IS INCOMPATIBLE WITH WINNER TREE UPDATES BECAUSE WE CANNOT UPDATE EACH TREE ENTRY FOR EVERY INSERT
-            using_exp_sum = not BSA_HEAP
             mask = None
             if MASKING:
                 mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
                     start_n + offs_n[None, :]
                 )
 
-            if using_exp_sum:
-                if MASKING:
-                    p_split = tl.where(mask, p, 0.0)
-                else:
-                    p_split = p
-
-                if BLOCK_N == BSA_BLOCK_SIZE_K:
-                    l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.sum(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.sum(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
+            if MASKING:
+                p_split = tl.where(mask, p, 0.0)
             else:
-                if MASKING:
-                    p_split = tl.where(mask, qk + m_ij[:, None], float("-inf"))
-                else:
-                    p_split = qk + m_ij[:, None]
+                p_split = p
 
-                if BLOCK_N == BSA_BLOCK_SIZE_K:
-                    l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.max(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.max(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
+            if BLOCK_N == BSA_BLOCK_SIZE_K:
+                l_ij_0 = tl.math.log2(l_ij) + tl.where(m_ij == float("-inf"), 0, m_ij)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 2)) + tl.where(
+                    m_ij[:, None] == float("-inf"), 0, m_ij[:, None]
+                )
+                l_ij_0, l_ij_1 = tl.split(l_ij_all)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 3)) + tl.where(
+                    m_ij[:, None, None] == float("-inf"), 0, m_ij[:, None, None]
+                )
+                l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                l_ij_2, l_ij_3 = tl.split(l_ij_23)
+            else:
+                raise Exception()
 
             for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
-                if i_offset == 0:
-                    update_alpha = alpha
-                else:
-                    update_alpha = None
-
                 if i_offset == (0 * BSA_BLOCK_SIZE_K):
                     update_exp_sum = l_ij_0
                 elif i_offset == (1 * BSA_BLOCK_SIZE_K):
@@ -662,13 +559,6 @@ def _attn_fwd_inner(
                         REVERSE_ITER,
                     )
                 else:
-                    # NOTE: update indices and scores
-                    if (update_alpha is not None) and (using_exp_sum):
-                        block_sums *= update_alpha[:, None].to(
-                            block_sums.dtype
-                        )  # adjust previous sums for new normalization constant
-                        block_sums_min *= update_alpha.to(block_sums.dtype)
-
                     # update if current max greater than stored max
                     # if they are equal, only take current one if the current index is smaller (older)
                     # and query overflow mask allows it (mask_m)
@@ -710,21 +600,20 @@ def _attn_fwd_inner(
                     #     )  # muliply alpha in log space
                     #     # Note: running_m2 does not need to be changed
 
-                    log_score = tl.math.log2(update_exp_sum) + m_ij
-                    score = tl.math.exp2(log_score)
+                    causal_mask = l_ij > 0
+                    log_score = update_exp_sum
 
                     # update running mean and std
-                    update_stats = update_exp_sum > 0
-                    num_tracking += update_stats
+                    num_tracking += causal_mask
                     delta = log_score - running_mean
                     running_mean = tl.where(
-                        update_stats,
+                        causal_mask,
                         running_mean + delta / num_tracking,
                         running_mean,
                     )
                     delta2 = log_score - running_mean
                     running_m2 = tl.where(
-                        update_stats,
+                        causal_mask,
                         running_m2 + delta * delta2,
                         running_m2,
                     )
@@ -772,7 +661,7 @@ def _attn_fwd_inner(
                     do_update = (
                         (~block_update)
                         & (ins_pos < BSA_K)
-                        & (update_exp_sum > 0)  # skip masked values
+                        & causal_mask  # skip masked values
                         & mask_m
                     )  # (M,)
                     upd_idx = upd_idx_0 + ins_pos * stride_bim  # (M,)
@@ -797,7 +686,7 @@ def _attn_fwd_inner(
 
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
-                        value=score,
+                        value=log_score,
                         mask=do_update,
                     )
                     tl.store(
@@ -810,7 +699,7 @@ def _attn_fwd_inner(
                     do_update = (
                         (~block_update)
                         & (ins_pos >= BSA_K)
-                        & (update_exp_sum > 0)  # skip masked values
+                        & causal_mask  # skip masked values
                         & (log_score > log_est_th)
                         & (topk_idx < BSA_K)
                         & mask_m
@@ -831,7 +720,7 @@ def _attn_fwd_inner(
                     upd_idx = upd_idx_0 + topk_idx * stride_bim  # (M,)
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx,
-                        value=score,
+                        value=log_score,
                         mask=do_update,
                     )
                     tl.store(
@@ -1859,12 +1748,6 @@ class _attention(torch.autograd.Function):
                     == bsa_heap_indices.stride()
                 )
 
-                # print("before")
-                # print(f"{q.size()=}")
-
-                # print(f"{bsa_heap_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_indices[0, 0, 61:65]=}")
-                # print(f"{bsa_block_sums[0, 0, 61:65]=}")
             else:
                 # energy to split the strides and add more arguments :(
                 bsa_indices = torch.full(  # for real block indices
@@ -2124,8 +2007,14 @@ class _attention(torch.autograd.Function):
 
             assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
 
-            # for tns, name in zip((q, k, v, o, bsa_indices), ("q", "k", "v", "o", "bsa indices")):
-            #     print(f"{name}: {tns.stride()}")
+            N_CTX = N_CTX
+            N_KV = (
+                k.shape[2]
+                if not USING_PAGED_CACHE
+                else k_cache.shape[0] * k_cache.shape[1]
+            )
+            N_CTX_AUTOTUNE = 128 if N_CTX > 128 else 1
+            N_KV_AUTOTUNE = 1024 if N_KV > 1024 else 1
 
             _attn_fwd[grid](
                 q,
@@ -2187,13 +2076,15 @@ class _attention(torch.autograd.Function):
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
-                N_KV=N_KV,
+                N_KV=(
+                    k.shape[2]
+                    if not USING_PAGED_CACHE
+                    else k_cache.shape[0] * k_cache.shape[1]
+                ),
                 HEAD_DIM=HEAD_DIM_K,
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
-                # BLOCK_M=64,
-                # BLOCK_N=32,
                 REVERSE_ITER=reverse_iter,
                 V_FP8=V_FP8,
                 # BLOCK_M=64,
@@ -2209,31 +2100,20 @@ class _attention(torch.autograd.Function):
                 **extra_kern_args,
             )
 
-            # if bsa_heap:
-            #     print("after")
-            # print(f"{bsa_heap_indices[0, 0, 60:64 + 1]=}")
-            # print(f"{bsa_indices[0, 0, 60:64 + 1]=}")
-            # print(f"{bsa_block_sums[0, 0, 60:64 + 1]=}")
-            # rand_idx = torch.randperm(bsa_heap_indices.size(2))[:4]
-            # print(f"{rand_idx=}")
-            # print(f"{bsa_heap_indices[0, 0, rand_idx]=}")
-            # print(f"{bsa_indices[0, 0, rand_idx]=}")
-            # print(f"{bsa_block_sums[0, 0, rand_idx]=}")
-
-        output = (o,)
+        outputs = (o,)
         if return_running_statistics:
-            output = output + ((MX, NC),)
+            outputs = outputs + ((MX, NC),)
         if return_bsa_indices:
             if not bsa_heap:
-                output = output + ((bsa_indices, bsa_block_sums),)
+                outputs = outputs + ((bsa_indices, bsa_block_sums),)
             else:
-                output = output + (
+                outputs = outputs + (
                     (
                         bsa_indices[:, :, bsa_top_block_k:, :].transpose(-1, -2),
                         bsa_block_sums[:, :, bsa_top_block_k:, :].transpose(-1, -2),
                     ),
                 )
-        return o if len(output) == 1 else output
+        return o if len(outputs) == 1 else outputs
 
     @staticmethod
     def backward(ctx, do):
