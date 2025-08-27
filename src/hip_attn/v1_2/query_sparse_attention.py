@@ -244,6 +244,7 @@ def _attn_fwd_inner(
 
     SQRT2: tl.constexpr = 1.4142135623730951  # math.sqrt(2.0)
     EXACT_LOGK: tl.constexpr = _log2(EXACT_K)
+    EST_K: tl.constexpr = BSA_K - EXACT_K
 
     if RETURN_BSA_MASK:
         if ONLINE_TOPK_METHOD == "tree":
@@ -615,8 +616,6 @@ def _attn_fwd_inner(
                         )  # (M, K) -> (M,)
 
                 if EXACT_K < BSA_K:
-                    EST_K: tl.constexpr = BSA_K - EXACT_K
-
                     causal_mask = l_ij > 0
                     log_score = update_exp_sum
 
