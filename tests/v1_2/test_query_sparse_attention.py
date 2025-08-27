@@ -61,7 +61,9 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.bfloat16):
     ref_out = torch.matmul(p, v)
 
     # triton implementation
-    tri_out = query_sparse_attention(q, k, v, mask, sm_scale).to(dtype)
+    tri_out = query_sparse_attention(q, k, v, mask, sm_scale, None, None, None).to(
+        dtype
+    )
 
     diff = (ref_out - tri_out).abs()
     # print(f"{diff.amax()=} {diff.mean()=}")
@@ -107,7 +109,9 @@ def test_op_causal_block_irregular(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.bf
     ref_out = torch.matmul(p, v)
 
     # triton implementation
-    tri_out = query_sparse_attention(q, k, v, mask, sm_scale).to(dtype)
+    tri_out = query_sparse_attention(q, k, v, mask, sm_scale, None, None, None).to(
+        dtype
+    )
 
     diff = (ref_out - tri_out).abs()
     # print(f"{diff.amax()=} {diff.mean()=}")
@@ -153,7 +157,9 @@ def test_op_causal(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.bfloat16):
     ref_out = torch.matmul(p, v)
 
     # triton implementation
-    tri_out = query_sparse_attention(q, k, v, mask, sm_scale).to(dtype)
+    tri_out = query_sparse_attention(q, k, v, mask, sm_scale, None, None, None).to(
+        dtype
+    )
 
     diff = (ref_out - tri_out).abs()
     # print(f"{diff.amax()=} {diff.mean()=}")
@@ -196,7 +202,9 @@ def test_op_flash(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.bfloat16):
     ref_out = ref_out.transpose(1, 2)
 
     # triton implementation
-    tri_out = query_sparse_attention(q, k, v, mask, sm_scale).to(dtype)
+    tri_out = query_sparse_attention(q, k, v, mask, sm_scale, None, None, None).to(
+        dtype
+    )
 
     diff = (ref_out - tri_out).abs()
     # compare
@@ -269,7 +277,7 @@ def bench_flash_attention(
             v = v.permute(0, 1, 3, 2)
             v = v.to(torch.float8_e5m2)
         sm_scale = 1.3
-        fn = lambda: query_sparse_attention(q, k, v, causal, sm_scale)
+        fn = lambda: query_sparse_attention(q, k, v, causal, sm_scale, None, None, None)
         if mode == "bwd":
             o = fn()
             do = torch.randn_like(o)
