@@ -36,7 +36,7 @@ def latency(fn: Any, n_sample: int = 10) -> float:
 
 
 def test() -> None:
-    q_block, k_block = 32, 32
+    q_block, k_block = 16, 64
     seq = 4096 * 32
     device = 0
     window_size, sink_tokens = 2048, 64
@@ -119,7 +119,7 @@ def test() -> None:
     o = o.transpose(1, 2)
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    K = 256
+    K = 64
     out, (MX, NC), (block_idx, _) = qsa(
         K, "naive", heap=True, reverse=True, return_running_statistics=True
     )
@@ -168,6 +168,16 @@ def test() -> None:
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:
+        flash_latency = latency(
+            lambda: flash_attn_func(
+                q[:, :, :seq].transpose(1, 2),
+                k[:, :, :seq].transpose(1, 2),
+                v[:, :, :seq].transpose(1, 2),
+                causal=True,
+            )
+        )
+        print(f"flash: {flash_latency:.2f} ms took")
+
         # 6.1 test forward/reverse latency with topk estimation
         LATENCY_LOWER, LATENCY_UPPER = 4, 9
         for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:

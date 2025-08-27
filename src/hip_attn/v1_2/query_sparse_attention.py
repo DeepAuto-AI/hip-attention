@@ -1743,6 +1743,7 @@ class _attention(torch.autograd.Function):
         online_topk_method: Literal["naive", "sort"],
         bsa_heap: bool,
         reverse_iter: bool,
+        exact_k: int,
     ):
         q = (q * sm_scale).to(q.dtype)
 
@@ -2204,6 +2205,7 @@ class _attention(torch.autograd.Function):
                 ONLINE_TOPK_METHOD=online_topk_method,
                 N_CTX_AUTOTUNE=N_CTX_AUTOTUNE,
                 N_KV_AUTOTUNE=N_KV_AUTOTUNE,
+                EXACT_K=exact_k,
                 **extra_kern_args,
             )
 
@@ -2270,6 +2272,7 @@ def query_sparse_attention(
     online_topk_method: Literal["naive", "sort"] = "naive",
     bsa_heap: bool = False,
     reverse_iter: bool = True,
+    exact_k: int = 8,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     return _attention.apply(
         q,
@@ -2301,4 +2304,5 @@ def query_sparse_attention(
         online_topk_method,
         bsa_heap,
         reverse_iter,
+        exact_k,
     )
