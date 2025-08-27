@@ -453,55 +453,31 @@ def _attn_fwd_inner(
                 | ((BSA_BLOCK_SIZE_K * 2) == BLOCK_N)
                 | ((BSA_BLOCK_SIZE_K * 4) == BLOCK_N)
             )
-            
-            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            # USING EXP SUM IS INCOMPATIBLE WITH WINNER TREE UPDATES BECAUSE WE CANNOT UPDATE EACH TREE ENTRY FOR EVERY INSERT
-            using_exp_sum = False
+ 
             mask = None
             if MASKING:
                 mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (start_n + offs_n[None, :])
 
-            if using_exp_sum:
-                if MASKING:
-                    p_split = tl.where(mask, p, 0.0)
-                else:
-                    p_split = p
-                
-                if BLOCK_N == BSA_BLOCK_SIZE_K:
-                    l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.sum(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.sum(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
+            if MASKING:
+                p_split = tl.where(mask, p, 0.0)
             else:
-                if MASKING:
-                    p_split = tl.where(mask, qk + m_ij[:, None], float('-inf'))
-                else:
-                    p_split = qk + m_ij[:, None]
-
-                if BLOCK_N == BSA_BLOCK_SIZE_K:
-                    l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.max(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
-                    l_ij_all = tl.max(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
+                p_split = p
             
+            if BLOCK_N == BSA_BLOCK_SIZE_K:
+                l_ij_0 = tl.math.log2(l_i) + tl.where(m_ij == float("-inf"), 0, m_ij)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 2)) + tl.where(m_ij[:, None] == float("-inf"), 0, m_ij[:, None])
+                l_ij_0, l_ij_1 = tl.split(l_ij_all)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 3)) + tl.where(m_ij[:, None, None] == float("-inf"), 0, m_ij[:, None, None])
+                l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                l_ij_2, l_ij_3 = tl.split(l_ij_23)
+            else:
+                raise Exception()
+
             for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
                 if i_offset == 0:
                     update_alpha = alpha
@@ -539,11 +515,6 @@ def _attn_fwd_inner(
                         REVERSE_ITER,
                     )
                 else:
-                    # NOTE: update indices and scores
-                    if (update_alpha is not None) and (using_exp_sum):
-                        block_sums *= update_alpha[:, None].to(block_sums.dtype) # adjust previous sums for new normalization constant
-                        block_sums_min *= update_alpha.to(block_sums.dtype)
-
                     # update if current max greater than stored max
                     # if they are equal, only take current one if the current index is smaller (older)
                     # and query overflow mask allows it (mask_m)

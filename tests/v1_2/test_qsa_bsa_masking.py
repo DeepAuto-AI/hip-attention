@@ -707,5 +707,5 @@ def winner_tree_vs_online() -> None:
 if __name__ == "__main__":
     with torch.no_grad():
         test_qsa()
-        # test_with_hip_bsa()
-        # winner_tree_vs_online()
+        test_with_hip_bsa()
+        winner_tree_vs_online()
