@@ -145,10 +145,10 @@ def test() -> None:
     )
 
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "online", exact_k, reverse=False, return_running_statistics=True
+        K, "tree", exact_k, reverse=False, return_running_statistics=True
     )
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "online", exact_k, reverse=False, return_running_statistics=True
+        K, "tree", exact_k, reverse=False, return_running_statistics=True
     )
     row_sums = torch.exp2(MX + torch.log2(NC))
     print(f"{block_idx=}")
@@ -201,6 +201,29 @@ def test() -> None:
                 )
             )
             print(f"estimate top-k latency {topk=} {fwd_latency=} {rev_latency=}")
+
+        # 6.1 test forward/reverse latency with topk estimation
+        LATENCY_LOWER, LATENCY_UPPER = 4, 9
+        for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:
+            fwd_latency = latency(
+                lambda: qsa(
+                    topk,
+                    return_bsa_indices=True,
+                    reverse=False,
+                    online_topk_method="tree",
+                    exact_k=exact_k,
+                )
+            )
+            rev_latency = latency(
+                lambda: qsa(
+                    topk,
+                    return_bsa_indices=True,
+                    reverse=True,
+                    online_topk_method="tree",
+                    exact_k=exact_k,
+                )
+            )
+            print(f"estimate+tree top-k latency {topk=} {fwd_latency=} {rev_latency=}")
 
         # 6.2 test forward/reverse latency with naive topk
         for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:
