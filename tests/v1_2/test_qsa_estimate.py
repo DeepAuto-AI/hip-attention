@@ -185,7 +185,7 @@ def test() -> None:
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=True,
+                    heap=False,
                     reverse=False,
                     online_topk_method="estimate",
                 )
@@ -194,7 +194,7 @@ def test() -> None:
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=True,
+                    heap=False,
                     reverse=True,
                     online_topk_method="estimate",
                 )
