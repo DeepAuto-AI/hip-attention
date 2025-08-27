@@ -1546,41 +1546,15 @@ def _forward_delta_attn(
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = 64
-                reverse_iter = bool(os.getenv("BSA_WINNER_TREE", "False"))
-                bsa_heap = bool(os.getenv("BSA_WINNER_TREE", "False"))
+                reverse_iter = os.getenv("BSA_WINNER_TREE", "False") != "False"
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "1"))
-                # print(f"{reverse_iter=} {bsa_heap=} {qsa_mask_block_top_k=}")
+                online_topk_method = "tree" if os.getenv("BSA_WINNER_TREE", "False") != "False" else "online"
+                exact_k = int(os.getenv("BSA_EXACT_K", None))
+                print(f"{online_topk_method=} {exact_k=} {reverse_iter=} {qsa_mask_block_top_k=}")
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
                 # using sum of block scores
                 qsa_mask_post_trim = 4096
-                online_topk_method = "naive"
-                bsa_heap = False
-                reverse_iter = False
-                exact_k = 8
-
-                if os.environ.get("BSA_TOP_BLOCK_K_OVERRIDE") is not None:
-                    qsa_mask_block_top_k = int(
-                        os.environ.get("BSA_TOP_BLOCK_K_OVERRIDE")
-                    )
-                    print(f"overriding bsa_top_block_k to {qsa_mask_block_top_k}")
-                if os.environ.get("BSA_BLOCK_SIZE_K_OVERRIDE") is not None:
-                    qsa_mask_block_size_k = int(
-                        os.environ.get("BSA_BLOCK_SIZE_K_OVERRIDE")
-                    )
-                    print(f"overriding bsa_block_size_k to {qsa_mask_block_size_k}")
-                if os.environ.get("ONLINE_TOPK_METHOD_OVERRIDE") is not None:
-                    online_topk_method = os.environ.get("ONLINE_TOPK_METHOD_OVERRIDE")
-                    print(f"overriding online_topk_method to {online_topk_method}")
-                if os.environ.get("BSA_HEAP_OVERRIDE") is not None:
-                    bsa_heap = os.environ.get("BSA_HEAP_OVERRIDE") == "1"
-                    print(f"overriding bsa_heap to {bsa_heap}")
-                if os.environ.get("REVERSE_ITER_OVERRIDE") is not None:
-                    reverse_iter = os.environ.get("REVERSE_ITER_OVERRIDE") == "1"
-                    print(f"overriding reverse_iter to {reverse_iter}")
-                if os.environ.get("EXACT_K_OVERRIDE") is not None:
-                    exact_k = int(os.environ.get("EXACT_K_OVERRIDE"))
-                    print(f"overriding exact_k to {exact_k}")
 
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
@@ -1606,7 +1580,6 @@ def _forward_delta_attn(
                     bsa_mask_sliding_window_size=args.sliding_window_size,
                     return_bsa_indices=test_qsa_masking,
                     online_topk_method=online_topk_method,
-                    bsa_heap=bsa_heap,
                     reverse_iter=reverse_iter,
                     exact_k=exact_k,
                 )

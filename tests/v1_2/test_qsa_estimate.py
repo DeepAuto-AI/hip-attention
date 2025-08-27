@@ -83,7 +83,7 @@ def test() -> None:
     def qsa(
         K,
         online_topk_method,
-        heap=False,
+        exact_k=None,
         reverse=True,
         return_bsa_indices=True,
         return_running_statistics=False,
@@ -103,7 +103,7 @@ def test() -> None:
             bsa_mask_sliding_window_size=window_size,
             bsa_mask_sink_token_size=sink_tokens,
             online_topk_method=online_topk_method,
-            bsa_heap=heap,
+            exact_k=exact_k,
             reverse_iter=reverse,
             return_running_statistics=return_running_statistics,
         )
@@ -120,11 +120,12 @@ def test() -> None:
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
     K = 64
+    exact_k = 8  # for estimated topk
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "naive", heap=True, reverse=True, return_running_statistics=True
+        K, "tree", reverse=True, return_running_statistics=True
     )
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "naive", heap=True, reverse=True, return_running_statistics=True
+        K, "tree", reverse=True, return_running_statistics=True
     )
     row_sums = torch.exp2(MX + torch.log2(NC))
     print(f"{block_idx=}")
@@ -134,20 +135,20 @@ def test() -> None:
     )
 
     out, (MX, NC), (block_idx, _) = qsa(
-        32, "naive", heap=True, reverse=True, return_running_statistics=True
+        32, "tree", reverse=True, return_running_statistics=True
     )
     out, (MX, NC), (block_idx, _) = qsa(
-        32, "naive", heap=True, reverse=True, return_running_statistics=True
+        32, "tree", reverse=True, return_running_statistics=True
     )
     small_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
 
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "estimate", heap=False, reverse=False, return_running_statistics=True
+        K, "online", exact_k, reverse=False, return_running_statistics=True
     )
     out, (MX, NC), (block_idx, _) = qsa(
-        K, "estimate", heap=False, reverse=False, return_running_statistics=True
+        K, "online", exact_k, reverse=False, return_running_statistics=True
     )
     row_sums = torch.exp2(MX + torch.log2(NC))
     print(f"{block_idx=}")
@@ -185,18 +186,18 @@ def test() -> None:
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=False,
                     reverse=False,
-                    online_topk_method="estimate",
+                    online_topk_method="online",
+                    exact_k=exact_k,
                 )
             )
             rev_latency = latency(
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=False,
                     reverse=True,
-                    online_topk_method="estimate",
+                    online_topk_method="online",
+                    exact_k=exact_k,
                 )
             )
             print(f"estimate top-k latency {topk=} {fwd_latency=} {rev_latency=}")
@@ -207,18 +208,16 @@ def test() -> None:
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=False,
                     reverse=False,
-                    online_topk_method="naive",
+                    online_topk_method="online",
                 )
             )
             rev_latency = latency(
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=False,
                     reverse=True,
-                    online_topk_method="naive",
+                    online_topk_method="online",
                 )
             )
             print(f"naive top-k latency {topk=} {fwd_latency=} {rev_latency=}")
@@ -229,18 +228,16 @@ def test() -> None:
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=True,
                     reverse=False,
-                    online_topk_method="naive",
+                    online_topk_method="tree",
                 )
             )
             rev_latency = latency(
                 lambda: qsa(
                     topk,
                     return_bsa_indices=True,
-                    heap=True,
                     reverse=True,
-                    online_topk_method="naive",
+                    online_topk_method="tree",
                 )
             )
             print(f"heap top-k latency {topk=} {fwd_latency=} {rev_latency=}")

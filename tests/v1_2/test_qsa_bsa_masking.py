@@ -66,7 +66,7 @@ def test_qsa() -> None:
                 bsa_block_size_k=k_block,
                 bsa_mask_sliding_window_size=window_size,
                 bsa_mask_sink_token_size=sink_tokens,
-                bsa_heap=heap,
+                online_topk_method="tree" if heap else "online",
                 reverse_iter=reverse,
             )
             return out, bsa_idx, block_sums
@@ -382,7 +382,7 @@ def test_with_hip_bsa() -> None:
             bsa_block_size_k=k_block,
             bsa_mask_sliding_window_size=window_size,
             bsa_mask_sink_token_size=sink_tokens,
-            bsa_heap=heap,
+            online_topk_method="tree" if heap else "online",
             reverse_iter=reverse,
         )
 
@@ -854,7 +854,7 @@ def winner_tree_vs_online() -> None:
                                 bsa_block_size_k=k_block,
                                 bsa_mask_sliding_window_size=window_size,
                                 bsa_mask_sink_token_size=sink_tokens,
-                                bsa_heap=heap,
+                                online_topk_method="tree" if heap else "online",
                                 reverse_iter=reverse,
                             )
 
