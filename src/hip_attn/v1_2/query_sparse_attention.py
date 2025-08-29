@@ -164,6 +164,7 @@ def winner_update_inline(
 def _attn_fwd_inner(
     acc,
     l_i,
+    l_bsa,
     m_i,
     q,
     q_nope,
@@ -237,6 +238,7 @@ def _attn_fwd_inner(
     num_tracking=None,
     topk_idx=None,
     EXACT_K: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
@@ -321,7 +323,20 @@ def _attn_fwd_inner(
                 + tl.arange(0, HEAD_NOPE)[:, None].to(tl.int64) * stride_kk
             )
 
+    # probability of being below the top-k threshold
+    remaining_slots = tl.maximum(EST_K - topk_idx, 0)
+    remaining_blocks = tl.maximum(
+        tl.cdiv(mask_idx, BSA_BLOCK_SIZE_K), 1
+    )
+    pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
+    erf_pr = tl.where(
+        pr_below_th > 0,
+        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+        -3000.0,
+    )
+
     # loop over k, v and update accumulator
+    counter = tl.zeros((), tl.int32)
     for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = _start_n
         if REVERSE_ITER:
@@ -526,6 +541,8 @@ def _attn_fwd_inner(
             else:
                 p_split = p
 
+            l_bsa = (l_bsa * alpha + tl.sum(p_split, 1)).to(l_bsa.dtype)
+
             if BLOCK_N == BSA_BLOCK_SIZE_K:
                 l_ij_0 = tl.math.log2(l_ij) + tl.where(m_ij == float("-inf"), 0, m_ij)
             elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
@@ -636,17 +653,20 @@ def _attn_fwd_inner(
 
                     est_std = tl.sqrt(running_m2 / (num_tracking - 1))
 
-                    # probability of being below the top-k threshold
-                    remaining_slots = tl.maximum(EST_K - topk_idx, 0)
-                    remaining_blocks = tl.maximum(
-                        tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K), 1
-                    )
-                    pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
-                    erf_pr = tl.where(
-                        pr_below_th > 0,
-                        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
-                        -3000.0,
-                    )
+                    # recompute every THRESHOLD_REFRESH_INTERVAL steps because it's expensive
+                    counter = tl.where(counter + 1 >= THRESHOLD_REFRESH_INTERVAL, 0, counter + 1)
+                    if counter == 0:
+                        # probability of being below the top-k threshold
+                        remaining_slots = tl.maximum(EST_K - topk_idx, 0)
+                        remaining_blocks = tl.maximum(
+                            tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K), 1
+                        )
+                        pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
+                        erf_pr = tl.where(
+                            pr_below_th > 0,
+                            libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+                            -3000.0,
+                        )
 
                     # estimated threshold for top-k
                     log_est_th = erf_pr * est_std + running_mean
@@ -683,7 +703,7 @@ def _attn_fwd_inner(
 
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx_bs,
-                        value=log_score,
+                        value=update_exp_sum,
                         mask=do_update,
                     )
                     tl.store(
@@ -709,7 +729,7 @@ def _attn_fwd_inner(
                         upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsm
                     tl.store(
                         BSA_BLOCK_SUMS + upd_idx_bs,
-                        value=log_score,
+                        value=update_exp_sum,
                         mask=do_update,
                     )
                     tl.store(
@@ -719,6 +739,8 @@ def _attn_fwd_inner(
                     )
 
                     topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
+        else:
+            l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
 
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
@@ -767,7 +789,7 @@ def _attn_fwd_inner(
         tl.store(BSA_INDICES + bi_idx, value=block_idx, mask=mask_m[:, None])
         tl.store(BSA_BLOCK_SUMS + bs_idx, value=block_sums, mask=mask_m[:, None])
 
-    return acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx
+    return acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx
 
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
@@ -828,6 +850,7 @@ def _attn_fwd(
     SOFTMAX_SINK,
     sm_scale,
     M,
+    M_BSA,
     MX,
     NC,
     Out,
@@ -933,6 +956,7 @@ def _attn_fwd(
     SELF_EXTEND_WINDOW=1024,
     ONLINE_TOPK_METHOD: tl.constexpr = "online",
     EXACT_K_: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
     N_KV_AUTOTUNE=0,
     N_CTX_AUTOTUNE=0,
 ):
@@ -1020,6 +1044,7 @@ def _attn_fwd(
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float("-inf"))
     l_i = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
+    l_bsa = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     # load scales
     qk_scale = sm_scale
@@ -1197,6 +1222,7 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         # (start_k, end_k) (mid, hi)
         if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -1271,12 +1297,14 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
     else:
-        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
             _attn_fwd_inner(
                 acc,
                 l_i,
+                l_bsa,
                 m_i,
                 q,
                 q_nope,
@@ -1350,13 +1378,15 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         )
 
-        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
             _attn_fwd_inner(
                 acc,
                 l_i,
+                l_bsa,
                 m_i,
                 q,
                 q_nope,
@@ -1430,6 +1460,7 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         )
 
@@ -1485,9 +1516,14 @@ def _attn_fwd(
             tl.store(l_ptrs, l_i, mask=mask_m)
 
         if M is not None:
-            m_i += tl.math.log2(l_i)
             m_ptrs = M + off_hz * N_CTX + offs_m
-            tl.store(m_ptrs, m_i, mask=mask_m)
+            rowsum = tl.math.exp2(m_i + tl.math.log2(l_i))
+            tl.store(m_ptrs, rowsum, mask=mask_m)
+
+        if M_BSA is not None:
+            m_ptrs = M_BSA + off_hz * N_CTX + offs_m
+            rowsum_bsa = tl.math.exp2(m_i + tl.math.log2(l_bsa))
+            tl.store(m_ptrs, rowsum_bsa, mask=mask_m)
 
         acc = acc / l_i[:, None]
 
@@ -1635,6 +1671,8 @@ class _attention(torch.autograd.Function):
         online_topk_method: Literal["online", "tree"],
         reverse_iter: bool,
         exact_k: Optional[int],
+        threshold_refresh_interval: int,
+        return_row_sums: bool,
     ):
         exact_k = bsa_top_block_k if exact_k is None else exact_k
         est_k = bsa_top_block_k - exact_k
@@ -1670,12 +1708,7 @@ class _attention(torch.autograd.Function):
         )
 
         # NOTE: this is for backward
-        # M = torch.empty(
-        #     (q.shape[0], q.shape[1], q.shape[2]),
-        #     device=q.device,
-        #     dtype=torch.float32,
-        # )
-        NC = MX = M = None
+        NC = MX = None
         if return_running_statistics:
             # assert not return_bsa_indices
             MX = torch.empty(
@@ -1684,6 +1717,19 @@ class _attention(torch.autograd.Function):
                 dtype=torch.float32,
             )
             NC = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
+                device=q.device,
+                dtype=torch.float32,
+            )
+
+        M = M_BSA = None
+        if return_row_sums:
+            M = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
+                device=q.device,
+                dtype=torch.float32,
+            )
+            M_BSA = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
                 dtype=torch.float32,
@@ -1919,6 +1965,7 @@ class _attention(torch.autograd.Function):
                 SELF_EXTEND_SCALE=self_extend_scale,
                 BSA_K=bsa_top_block_k,
                 ONLINE_TOPK_METHOD=online_topk_method,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
@@ -2017,6 +2064,7 @@ class _attention(torch.autograd.Function):
                 softmax_sink.contiguous() if softmax_sink is not None else None,
                 sm_scale,
                 M,
+                M_BSA,
                 MX,
                 NC,
                 o,
@@ -2089,12 +2137,15 @@ class _attention(torch.autograd.Function):
                 N_CTX_AUTOTUNE=N_CTX_AUTOTUNE,
                 N_KV_AUTOTUNE=N_KV_AUTOTUNE,
                 EXACT_K_=exact_k,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
         outputs = (o,)
         if return_running_statistics:
             outputs = outputs + ((MX, NC),)
+        if return_row_sums:
+            outputs = outputs + ((M, M_BSA),)
         if return_bsa_indices:
             if online_topk_method != "tree":
                 outputs = outputs + ((bsa_indices, bsa_block_sums),)
@@ -2144,6 +2195,8 @@ def query_sparse_attention(
     online_topk_method: Literal["online", "tree"] = "online",
     reverse_iter: bool = True,
     exact_k: int = None,
+    threshold_refresh_interval: int = 64,
+    return_row_sums: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     assert online_topk_method in {"online", "tree"}
     return _attention.apply(
@@ -2176,4 +2229,6 @@ def query_sparse_attention(
         online_topk_method,
         reverse_iter,
         exact_k,
+        threshold_refresh_interval,
+        return_row_sums,
     )

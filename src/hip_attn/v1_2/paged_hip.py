@@ -1552,6 +1552,7 @@ def _forward_delta_attn(
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "1"))
                 online_topk_method = "tree" if os.getenv("BSA_WINNER_TREE", "False") != "False" else "online"
                 exact_k = int(os.getenv("BSA_EXACT_K", None))
+                threshold_refresh_interval = int(os.getenv("BSA_THRESHOLD_REFRESH", "64"))
                 # print(f"{online_topk_method=} {qsa_mask_block_size_k=} {exact_k=} {reverse_iter=} {qsa_mask_block_top_k=}")
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
@@ -1584,6 +1585,7 @@ def _forward_delta_attn(
                     online_topk_method=online_topk_method,
                     reverse_iter=reverse_iter,
                     exact_k=exact_k,
+                    threshold_refresh_interval=threshold_refresh_interval,
                 )
 
                 if test_qsa_masking:
