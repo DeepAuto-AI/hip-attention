@@ -665,9 +665,14 @@ def _attn_fwd_inner(
                         # recompute every THRESHOLD_REFRESH_INTERVAL steps because it's expensive
                         if counter == 0:
                             # probability of being below the top-k threshold
-                            remaining_slots = tl.maximum(EST_K - topk_idx, 0)
+                            OVERESTIMATE_FACTOR = 1.5
+                            remaining_slots = tl.maximum(
+                                OVERESTIMATE_FACTOR * (EST_K - topk_idx),
+                                0,
+                            )
                             remaining_blocks = tl.maximum(
-                                tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K), 1
+                                tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K),
+                                1,
                             )
                             pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
                             erf_pr = tl.where(
@@ -698,10 +703,9 @@ def _attn_fwd_inner(
                         # 2. otherwise, update if the new value is larger than the estimated threshold
                         do_update = (
                             (~block_update)
-                            #& (topk_idx >= EST_K)
                             & causal_mask  # skip masked values
                             & (log_score > log_est_th)
-                            & (topk_idx < EST_K)
+                            # & (topk_idx < EST_K)
                             & mask_m
                         )  # (M,)
                         if ONLINE_TOPK_METHOD == "tree":
@@ -710,6 +714,15 @@ def _attn_fwd_inner(
                         else:
                             upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bim  # (M,)
                             upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsm
+
+                        # only update if the new value is larger
+                        prev_val = tl.load(
+                            BSA_BLOCK_SUMS + upd_idx_bs,
+                            mask=do_update & (topk_idx >= EST_K),
+                            other=float("-inf"),
+                        )
+                        do_update &= update_exp_sum > prev_val
+
                         tl.store(
                             BSA_BLOCK_SUMS + upd_idx_bs,
                             value=update_exp_sum,
@@ -722,6 +735,7 @@ def _attn_fwd_inner(
                         )
 
                         topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
+                        topk_idx = tl.where(topk_idx >= EST_K, 0, topk_idx)
         else:
             l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
 
