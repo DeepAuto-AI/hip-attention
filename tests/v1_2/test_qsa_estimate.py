@@ -36,7 +36,7 @@ def latency(fn: Any, n_sample: int = 10) -> float:
 
 
 def test() -> None:
-    q_block, k_block, exact_k = 16, 64, 8
+    q_block, k_block, exact_k = 16, 64, 16
     seq = 4096 * 32
     device = 0
     window_size, sink_tokens = 2048, 64
@@ -135,6 +135,13 @@ def test() -> None:
     )
     print(f"{block_idx=}")
 
+    # torch.save({
+    #     'row_sums': row_sums,
+    #     'row_sums_bsa': row_sums_bsa,
+    #     'block_idx': block_idx,
+    #     'block_sums': block_sums,
+    # }, "row_sums_64.pth")
+
     out, (row_sums, row_sums_bsa), (block_idx, _) = qsa(
         SMALL_K, "tree", reverse=True, return_row_sums=True
     )
@@ -145,12 +152,13 @@ def test() -> None:
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
 
+    overestimate_K = 512
     test_k_block = 64
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        64, "online", exact_k=8, k_block=test_k_block, reverse=False, return_row_sums=True
+        overestimate_K, "tree", exact_k=exact_k, k_block=test_k_block, reverse=False, return_row_sums=True
     )
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        64, "online", exact_k=8, k_block=test_k_block, reverse=False, return_row_sums=True
+        overestimate_K, "tree", exact_k=exact_k, k_block=test_k_block, reverse=False, return_row_sums=True
     )
     est_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, test_k_block, math.sqrt(1 / q.size(-1))
@@ -161,6 +169,13 @@ def test() -> None:
     recall_rates_small = (est_exp_sc / (small_exp_sc + 1e-6))[small_exp_sc > 0]
     print(f"{recall_rates.mean()=} ({K=})")
     print(f"{recall_rates_small.mean()=} ({SMALL_K=})")
+
+    torch.save({
+        'row_sums': row_sums,
+        'row_sums_bsa': row_sums_bsa,
+        'block_idx': block_idx,
+        'block_sums': block_sums,
+    }, "row_sums_512.pth")
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:
@@ -175,7 +190,7 @@ def test() -> None:
         print(f"flash: {flash_latency:.2f} ms took")
 
         # 6.1 test forward/reverse latency with topk estimation
-        LATENCY_LOWER, LATENCY_UPPER = 4, 9
+        LATENCY_LOWER, LATENCY_UPPER = 4, 10
         for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:
             fwd_latency = latency(
                 lambda: qsa(
