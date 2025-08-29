@@ -85,6 +85,7 @@ def test() -> None:
         online_topk_method,
         exact_k=None,
         reverse=True,
+        k_block=k_block,
         return_bsa_indices=True,
         return_running_statistics=False,
         return_row_sums=False,
@@ -107,7 +108,7 @@ def test() -> None:
             exact_k=exact_k,
             reverse_iter=reverse,
             return_running_statistics=return_running_statistics,
-            threshold_refresh_interval=1,
+            threshold_refresh_interval=4,
             return_row_sums=return_row_sums,
         )
 
@@ -122,7 +123,7 @@ def test() -> None:
     o = o.transpose(1, 2)
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    K, SMALL_K = 256, 64
+    K, SMALL_K = 64, 32
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
         K, "online", reverse=False, return_row_sums=True
     )
@@ -132,6 +133,7 @@ def test() -> None:
     gt_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
+    print(f"{block_idx=}")
 
     out, (row_sums, row_sums_bsa), (block_idx, _) = qsa(
         SMALL_K, "tree", reverse=True, return_row_sums=True
@@ -143,14 +145,15 @@ def test() -> None:
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
 
+    test_k_block = 64
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        K, "online", exact_k, reverse=False, return_row_sums=True
+        64, "online", exact_k=8, k_block=test_k_block, reverse=False, return_row_sums=True
     )
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        K, "online", exact_k, reverse=False, return_row_sums=True
+        64, "online", exact_k=8, k_block=test_k_block, reverse=False, return_row_sums=True
     )
     est_exp_sc = check_topk_selection(
-        block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
+        block_idx, qp, kp, vp, row_sums, test_k_block, math.sqrt(1 / q.size(-1))
     )
     print(f"{block_idx=}")
     print(f"{row_sums.size()=} {row_sums=}")
