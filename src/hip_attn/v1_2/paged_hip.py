@@ -1549,9 +1549,9 @@ def _forward_delta_attn(
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
                 reverse_iter = os.getenv("BSA_WINNER_TREE", "False") != "False"
-                qsa_mask_block_top_k = int(os.environ.get("BSA_K", "1"))
+                qsa_mask_block_top_k = int(os.environ.get("BSA_K", "512"))
                 online_topk_method = "tree" if os.getenv("BSA_WINNER_TREE", "False") != "False" else "online"
-                exact_k = int(os.getenv("BSA_EXACT_K", None))
+                exact_k = int(os.getenv("BSA_EXACT_K", "16"))
                 threshold_refresh_interval = int(os.getenv("BSA_THRESHOLD_REFRESH", "4"))
                 # print(f"{online_topk_method=} {qsa_mask_block_size_k=} {exact_k=} {reverse_iter=} {qsa_mask_block_top_k=}")
                 # using each block scores
@@ -2666,7 +2666,6 @@ def _forward_paged_hip(
     using_delta_attention = (delta_attention_args is not None) and (
         delta_attention_args != ""
     )
-    print(f"using delta: {using_delta_attention=} {delta_attention_args=}")
 
     delta_attention_args_smooth = False
     delta_attention_args_just_return = False
