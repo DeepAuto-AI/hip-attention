@@ -36,7 +36,7 @@ def latency(fn: Any, n_sample: int = 10) -> float:
 
 
 def test() -> None:
-    q_block, k_block = 16, 64
+    q_block, k_block, exact_k = 16, 64, 16
     seq = 4096 * 32
     device = 0
     window_size, sink_tokens = 2048, 64
@@ -85,8 +85,10 @@ def test() -> None:
         online_topk_method,
         exact_k=None,
         reverse=True,
+        k_block=k_block,
         return_bsa_indices=True,
         return_running_statistics=False,
+        return_row_sums=False,
     ) -> Tuple[torch.Tensor, ...]:
         results = query_sparse_attention(
             q=qp,
@@ -106,6 +108,8 @@ def test() -> None:
             exact_k=exact_k,
             reverse_iter=reverse,
             return_running_statistics=return_running_statistics,
+            threshold_refresh_interval=4,
+            return_row_sums=return_row_sums,
         )
 
         return results
@@ -119,53 +123,72 @@ def test() -> None:
     o = o.transpose(1, 2)
 
     # warmup burn-in. autotune has s dirty init so this is necessary right now
-    K = 64
-    exact_k = 8  # for estimated topk
-    out, (MX, NC), (block_idx, _) = qsa(
-        K, "tree", reverse=True, return_running_statistics=True
+    K, SMALL_K = 64, 32
+    out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
+        K, "online", reverse=False, return_row_sums=True
     )
-    out, (MX, NC), (block_idx, _) = qsa(
-        K, "tree", reverse=True, return_running_statistics=True
+    out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
+        K, "online", reverse=False, return_row_sums=True
     )
-    row_sums = torch.exp2(MX + torch.log2(NC))
-    print(f"{block_idx=}")
-    print(f"{row_sums.size()=} {row_sums=}")
     gt_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
+    print(f"{block_idx=}")
 
-    out, (MX, NC), (block_idx, _) = qsa(
-        32, "tree", reverse=True, return_running_statistics=True
+    # torch.save({
+    #     'row_sums': row_sums,
+    #     'row_sums_bsa': row_sums_bsa,
+    #     'block_idx': block_idx,
+    #     'block_sums': block_sums,
+    # }, "row_sums_64.pth")
+
+    out, (row_sums, row_sums_bsa), (block_idx, _) = qsa(
+        SMALL_K, "tree", reverse=True, return_row_sums=True
     )
-    out, (MX, NC), (block_idx, _) = qsa(
-        32, "tree", reverse=True, return_running_statistics=True
+    out, (row_sums, row_sums_bsa), (block_idx, _) = qsa(
+        SMALL_K, "tree", reverse=True, return_row_sums=True
     )
     small_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
 
-    out, (MX, NC), (block_idx, _) = qsa(
-        K, "tree", exact_k, reverse=False, return_running_statistics=True
+    overestimate_K = 512
+    test_k_block = 64
+    out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
+        overestimate_K,
+        "tree",
+        exact_k=exact_k,
+        k_block=test_k_block,
+        reverse=False,
+        return_row_sums=True,
     )
-    out, (MX, NC), (block_idx, _) = qsa(
-        K, "tree", exact_k, reverse=False, return_running_statistics=True
+    out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
+        overestimate_K,
+        "tree",
+        exact_k=exact_k,
+        k_block=test_k_block,
+        reverse=False,
+        return_row_sums=True,
     )
-    row_sums = torch.exp2(MX + torch.log2(NC))
+    est_exp_sc = check_topk_selection(
+        block_idx, qp, kp, vp, row_sums, test_k_block, math.sqrt(1 / q.size(-1))
+    )
     print(f"{block_idx=}")
     print(f"{row_sums.size()=} {row_sums=}")
-    est_exp_sc = check_topk_selection(
-        block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
-    )
-    # with np.printoptions(threshold=np.inf, suppress=True, precision=4, linewidth=200):
-    #     print(f"{gt_exp_sc[gt_exp_sc > 0].cpu().detach().numpy()=}")
-    #     print(f"{est_exp_sc[gt_exp_sc > 0].cpu().detach().numpy()=}")
-
     recall_rates = (est_exp_sc / (gt_exp_sc + 1e-6))[gt_exp_sc > 0]
     recall_rates_small = (est_exp_sc / (small_exp_sc + 1e-6))[small_exp_sc > 0]
-    # with np.printoptions(threshold=np.inf, suppress=True, precision=4, linewidth=200):
-    #     print(f"{recall_rates.cpu().detach().numpy()=}")
-    print(f"{recall_rates.mean()=}")
-    print(f"{recall_rates_small.mean()=}")
+    print(f"{recall_rates.mean()=} ({K=})")
+    print(f"{recall_rates_small.mean()=} ({SMALL_K=})")
+
+    torch.save(
+        {
+            "row_sums": row_sums,
+            "row_sums_bsa": row_sums_bsa,
+            "block_idx": block_idx,
+            "block_sums": block_sums,
+        },
+        "row_sums_512.pth",
+    )
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:
@@ -180,7 +203,7 @@ def test() -> None:
         print(f"flash: {flash_latency:.2f} ms took")
 
         # 6.1 test forward/reverse latency with topk estimation
-        LATENCY_LOWER, LATENCY_UPPER = 4, 9
+        LATENCY_LOWER, LATENCY_UPPER = 4, 10
         for topk in [2**i for i in range(LATENCY_LOWER, LATENCY_UPPER)]:
             fwd_latency = latency(
                 lambda: qsa(
@@ -275,11 +298,11 @@ def check_topk_selection(
     k_block: int,
     sm_scale: float,
 ):
-    block_idxi = block_idx[0, 0]
-    qqi = qq[0, 0] * sm_scale
+    r = slice(-1024, None)
+    block_idxi = block_idx[0, 0, r]
+    qqi = qq[0, 0, r] * sm_scale
     ki = k[0, 0]
-    vi = v[0, 0]
-    row_sums = row_sums[0, 0]
+    row_sums = row_sums[0, 0, r]
 
     mask = block_idxi < 987654321  # q, K
     block_idxi = torch.where(mask, block_idxi, 0)

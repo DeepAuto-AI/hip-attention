@@ -143,9 +143,21 @@ def winner_update_inline(
             win_p = tl.where(take_path, path_p, sib_p)
             win_idx = tl.where(take_path, path_idx, sib_idx)
 
-            tl.store(BSA_BLOCK_SUMS + (node * stride_bsk + row_bs).to(tl.int64), win_v, mask=beat)
-            tl.store(BSA_HEAP_INDICES + (node * stride_hik + row_hi).to(tl.int64), win_p, mask=beat)
-            tl.store(BSA_INDICES + (node * stride_bik + row_bi).to(tl.int64), win_idx, mask=beat)
+            tl.store(
+                BSA_BLOCK_SUMS + (node * stride_bsk + row_bs).to(tl.int64),
+                win_v,
+                mask=beat,
+            )
+            tl.store(
+                BSA_HEAP_INDICES + (node * stride_hik + row_hi).to(tl.int64),
+                win_p,
+                mask=beat,
+            )
+            tl.store(
+                BSA_INDICES + (node * stride_bik + row_bi).to(tl.int64),
+                win_idx,
+                mask=beat,
+            )
 
             # move up one level
             child = node
@@ -164,6 +176,7 @@ def winner_update_inline(
 def _attn_fwd_inner(
     acc,
     l_i,
+    l_bsa,
     m_i,
     q,
     q_nope,
@@ -237,6 +250,7 @@ def _attn_fwd_inner(
     num_tracking=None,
     topk_idx=None,
     EXACT_K: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
@@ -321,7 +335,11 @@ def _attn_fwd_inner(
                 + tl.arange(0, HEAD_NOPE)[:, None].to(tl.int64) * stride_kk
             )
 
+    # probability of being below the top-k threshold
+    erf_pr = tl.zeros((BLOCK_M,), dtype=tl.float32)
+
     # loop over k, v and update accumulator
+    counter = tl.zeros((), tl.int32)
     for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
         start_n = _start_n
         if REVERSE_ITER:
@@ -505,7 +523,7 @@ def _attn_fwd_inner(
 
         # -- update block sums and indices for block sparse attention
         # if RETURN_BSA_MASK:
-        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+        if RETURN_BSA_MASK and (EXACT_K < BSA_K or start_n >= BSA_MASK_SINK_TOKEN_SIZE):
             # FIXME How can i this thing more dynamic?
             tl.static_assert(BLOCK_N >= BSA_BLOCK_SIZE_K)
             tl.static_assert(BLOCK_N <= (BSA_BLOCK_SIZE_K * 4))
@@ -526,6 +544,11 @@ def _attn_fwd_inner(
             else:
                 p_split = p
 
+            if start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+                l_bsa = (l_bsa * alpha + tl.sum(p_split, 1)).to(l_bsa.dtype)
+            else:
+                l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
+
             if BLOCK_N == BSA_BLOCK_SIZE_K:
                 l_ij_0 = tl.math.log2(l_ij) + tl.where(m_ij == float("-inf"), 0, m_ij)
             elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
@@ -545,77 +568,17 @@ def _attn_fwd_inner(
             else:
                 raise Exception()
 
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
-                if i_offset == (0 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_0
-                elif i_offset == (1 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_1
-                elif i_offset == (2 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_2
-                elif i_offset == (3 * BSA_BLOCK_SIZE_K):
-                    update_exp_sum = l_ij_3
+            if EXACT_K < BSA_K:
+                for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
+                    if i_offset == (0 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_0
+                    elif i_offset == (1 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_1
+                    elif i_offset == (2 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_2
+                    elif i_offset == (3 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_3
 
-                if ONLINE_TOPK_METHOD == "tree":
-                    root_v, root_lf, root_idx, block_update = winner_update_inline(
-                        update_exp_sum,
-                        start_n + i_offset,
-                        BSA_BLOCK_SUMS,
-                        stride_bsk,
-                        stride_bsm,
-                        BSA_HEAP_INDICES,
-                        stride_hik,
-                        stride_him,
-                        BSA_INDICES,
-                        stride_bik,
-                        stride_bim,
-                        EXACT_K,
-                        EXACT_LOGK,
-                        BLOCK_M,
-                        start_m,
-                        mask_m,
-                        root_v,
-                        root_lf,
-                        root_idx,
-                        MASKING,
-                        mask,
-                        REVERSE_ITER,
-                    )
-                else:
-                    # update if current max greater than stored max
-                    # if they are equal, only take current one if the current index is smaller (older)
-                    # and query overflow mask allows it (mask_m)
-                    # and there is at least one unmasked element in this row (mask from causal and window)
-                    min_mask = col_idx == block_sums_min_idx[:, None]
-                    idx_at_min = tl.sum(block_idx * min_mask, 1)
-
-                    block_update = update_exp_sum > block_sums_min
-                    block_update |= (update_exp_sum == block_sums_min) & (
-                        (start_n + i_offset) < idx_at_min
-                    )
-                    block_update &= mask_m & (update_exp_sum > float("-inf"))
-                    if MASKING:
-                        block_update &= tl.max(mask, 1) > 0
-
-                    if tl.max(block_update) > 0:
-                        block_sums_max = tl.maximum(
-                            block_sums_min, update_exp_sum
-                        )  # (M,)
-                        # make a mask of the minimum indices
-                        bsa_mask = block_update[:, None] & (
-                            col_idx == block_sums_min_idx[:, None]
-                        )  # (M, K)
-                        block_sums = tl.where(
-                            bsa_mask,
-                            block_sums_max[:, None].to(block_sums.dtype),
-                            block_sums,
-                        )
-                        block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
-                        # calculate the new block sums min for the next iteration
-                        block_sums_min, block_sums_min_idx = tl.min(
-                            block_sums, axis=-1, return_indices=True
-                        )  # (M, K) -> (M,)
-
-                if EXACT_K < BSA_K:
                     causal_mask = l_ij > 0
                     log_score = update_exp_sum
 
@@ -634,91 +597,177 @@ def _attn_fwd_inner(
                         running_m2,
                     )
 
-                    est_std = tl.sqrt(running_m2 / (num_tracking - 1))
-
-                    # probability of being below the top-k threshold
-                    remaining_slots = tl.maximum(EST_K - topk_idx, 0)
-                    remaining_blocks = tl.maximum(
-                        tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K), 1
-                    )
-                    pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
-                    erf_pr = tl.where(
-                        pr_below_th > 0,
-                        libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
-                        -3000.0,
-                    )
-
-                    # estimated threshold for top-k
-                    log_est_th = erf_pr * est_std + running_mean
-
-                    # update block sums and indices
-                    new_block_idx = start_n + i_offset
-
-                    # 1. always add if num_tracking < EST_K
-                    if ONLINE_TOPK_METHOD == "tree":
-                        upd_idx_0_bi = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
-                        upd_idx_0_bi += (EXACT_K * 2) * stride_bik
-                        upd_idx_0_bs = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bsm
-                        upd_idx_0_bs += (EXACT_K * 2) * stride_bsk
-                    else:
-                        upd_idx_0_bi = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bik
-                        upd_idx_0_bi += EXACT_K * stride_bim
-                        upd_idx_0_bs = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bsk
-                        upd_idx_0_bs += EXACT_K * stride_bsm
-
-                    ins_pos = num_tracking - 1
-                    do_update = (
-                        (~block_update)
-                        & (ins_pos < EST_K)
-                        & causal_mask  # skip masked values
-                        & mask_m
-                    )  # (M,)
+            if start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+                for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
+                    if i_offset == (0 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_0
+                    elif i_offset == (1 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_1
+                    elif i_offset == (2 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_2
+                    elif i_offset == (3 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_3
 
                     if ONLINE_TOPK_METHOD == "tree":
-                        upd_idx_bi = upd_idx_0_bi + ins_pos * stride_bik  # (M,)
-                        upd_idx_bs = upd_idx_0_bs + ins_pos * stride_bsk  # (M,)
+                        root_v, root_lf, root_idx, block_update = winner_update_inline(
+                            update_exp_sum,
+                            start_n + i_offset,
+                            BSA_BLOCK_SUMS,
+                            stride_bsk,
+                            stride_bsm,
+                            BSA_HEAP_INDICES,
+                            stride_hik,
+                            stride_him,
+                            BSA_INDICES,
+                            stride_bik,
+                            stride_bim,
+                            EXACT_K,
+                            EXACT_LOGK,
+                            BLOCK_M,
+                            start_m,
+                            mask_m,
+                            root_v,
+                            root_lf,
+                            root_idx,
+                            MASKING,
+                            mask,
+                            REVERSE_ITER,
+                        )
                     else:
-                        upd_idx_bi = upd_idx_0_bi + ins_pos * stride_bim  # (M,)
-                        upd_idx_bs = upd_idx_0_bs + ins_pos * stride_bsm
+                        # update if current max greater than stored max
+                        # if they are equal, only take current one if the current index is smaller (older)
+                        # and query overflow mask allows it (mask_m)
+                        # and there is at least one unmasked element in this row (mask from causal and window)
+                        min_mask = col_idx == block_sums_min_idx[:, None]
+                        idx_at_min = tl.sum(block_idx * min_mask, 1)
 
-                    tl.store(
-                        BSA_BLOCK_SUMS + upd_idx_bs,
-                        value=log_score,
-                        mask=do_update,
-                    )
-                    tl.store(
-                        BSA_INDICES + upd_idx_bi,
-                        value=new_block_idx,
-                        mask=do_update,
-                    )
+                        block_update = update_exp_sum > block_sums_min
+                        block_update |= (update_exp_sum == block_sums_min) & (
+                            (start_n + i_offset) < idx_at_min
+                        )
+                        block_update &= mask_m & (update_exp_sum > float("-inf"))
+                        if MASKING:
+                            block_update &= tl.max(mask, 1) > 0
 
-                    # 2. otherwise, update if the new value is larger than the estimated threshold
-                    do_update = (
-                        (~block_update)
-                        & (ins_pos >= EST_K)
-                        & causal_mask  # skip masked values
-                        & (log_score > log_est_th)
-                        & (topk_idx < EST_K)
-                        & mask_m
-                    )  # (M,)
-                    if ONLINE_TOPK_METHOD == "tree":
-                        upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bik  # (M,)
-                        upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsk
-                    else:
-                        upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bim  # (M,)
-                        upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsm
-                    tl.store(
-                        BSA_BLOCK_SUMS + upd_idx_bs,
-                        value=log_score,
-                        mask=do_update,
-                    )
-                    tl.store(
-                        BSA_INDICES + upd_idx_bi,
-                        value=new_block_idx,
-                        mask=do_update,
-                    )
+                        if tl.max(block_update) > 0:
+                            block_sums_max = tl.maximum(
+                                block_sums_min, update_exp_sum
+                            )  # (M,)
+                            # make a mask of the minimum indices
+                            bsa_mask = block_update[:, None] & (
+                                col_idx == block_sums_min_idx[:, None]
+                            )  # (M, K)
+                            block_sums = tl.where(
+                                bsa_mask,
+                                block_sums_max[:, None].to(block_sums.dtype),
+                                block_sums,
+                            )
+                            block_idx = tl.where(
+                                bsa_mask, start_n + i_offset, block_idx
+                            )
+                            # calculate the new block sums min for the next iteration
+                            block_sums_min, block_sums_min_idx = tl.min(
+                                block_sums, axis=-1, return_indices=True
+                            )  # (M, K) -> (M,)
 
-                    topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
+                    if EXACT_K < BSA_K:
+                        causal_mask = l_ij > 0
+                        log_score = update_exp_sum
+
+                        est_std = tl.sqrt(running_m2 / (num_tracking - 1))
+
+                        # recompute every THRESHOLD_REFRESH_INTERVAL steps because it's expensive
+                        if counter == 0:
+                            # probability of being below the top-k threshold
+                            OVERESTIMATE_FACTOR = 1.5
+                            remaining_slots = tl.maximum(
+                                OVERESTIMATE_FACTOR * (EST_K - topk_idx),
+                                0,
+                            )
+                            remaining_blocks = tl.maximum(
+                                tl.cdiv(
+                                    mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K
+                                ),
+                                1,
+                            )
+                            pr_below_th = (
+                                1 - remaining_slots / remaining_blocks
+                            )  # [BLOCK_M,]
+                            erf_pr = tl.where(
+                                pr_below_th > 0,
+                                libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+                                -3000.0,
+                            )
+                        counter = tl.where(
+                            counter + 1 >= THRESHOLD_REFRESH_INTERVAL, 0, counter + 1
+                        )
+
+                        # estimated threshold for top-k
+                        log_est_th = erf_pr * est_std + running_mean
+
+                        # update block sums and indices
+                        new_block_idx = start_n + i_offset
+
+                        # 1. always add if num_tracking < EST_K
+                        if ONLINE_TOPK_METHOD == "tree":
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bim
+                            upd_idx_0_bi += (EXACT_K * 2) * stride_bik
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsm
+                            upd_idx_0_bs += (EXACT_K * 2) * stride_bsk
+                        else:
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bik
+                            upd_idx_0_bi += EXACT_K * stride_bim
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsk
+                            upd_idx_0_bs += EXACT_K * stride_bsm
+
+                        # 2. otherwise, update if the new value is larger than the estimated threshold
+                        do_update = (
+                            (~block_update)
+                            & causal_mask  # skip masked values
+                            & (log_score > log_est_th)
+                            # & (topk_idx < EST_K)
+                            & mask_m
+                        )  # (M,)
+                        if ONLINE_TOPK_METHOD == "tree":
+                            upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bik  # (M,)
+                            upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsk
+                        else:
+                            upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bim  # (M,)
+                            upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsm
+
+                        # only update if the new value is larger
+                        prev_val = tl.load(
+                            BSA_BLOCK_SUMS + upd_idx_bs,
+                            mask=do_update & (topk_idx >= EST_K),
+                            other=float("-inf"),
+                        )
+                        do_update &= update_exp_sum > prev_val
+
+                        tl.store(
+                            BSA_BLOCK_SUMS + upd_idx_bs,
+                            value=update_exp_sum,
+                            mask=do_update,
+                        )
+                        tl.store(
+                            BSA_INDICES + upd_idx_bi,
+                            value=new_block_idx,
+                            mask=do_update,
+                        )
+
+                        topk_idx += do_update.to(
+                            topk_idx.dtype
+                        )  # increment end pointer
+                        topk_idx = tl.where(topk_idx >= EST_K, 0, topk_idx)
+        else:
+            l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
 
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
@@ -767,7 +816,7 @@ def _attn_fwd_inner(
         tl.store(BSA_INDICES + bi_idx, value=block_idx, mask=mask_m[:, None])
         tl.store(BSA_BLOCK_SUMS + bs_idx, value=block_sums, mask=mask_m[:, None])
 
-    return acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx
+    return acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx
 
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
@@ -828,6 +877,7 @@ def _attn_fwd(
     SOFTMAX_SINK,
     sm_scale,
     M,
+    M_BSA,
     MX,
     NC,
     Out,
@@ -933,6 +983,7 @@ def _attn_fwd(
     SELF_EXTEND_WINDOW=1024,
     ONLINE_TOPK_METHOD: tl.constexpr = "online",
     EXACT_K_: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
     N_KV_AUTOTUNE=0,
     N_CTX_AUTOTUNE=0,
 ):
@@ -991,9 +1042,13 @@ def _attn_fwd(
 
     if RETURN_BSA_MASK:
         BSA_INDICES += off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
-        BSA_BLOCK_SUMS += off_z.to(tl.int64) * stride_bsz + off_h.to(tl.int64) * stride_bsh
+        BSA_BLOCK_SUMS += (
+            off_z.to(tl.int64) * stride_bsz + off_h.to(tl.int64) * stride_bsh
+        )
         if ONLINE_TOPK_METHOD == "tree":
-            BSA_HEAP_INDICES += off_z.to(tl.int64) * stride_hiz + off_h.to(tl.int64) * stride_hih
+            BSA_HEAP_INDICES += (
+                off_z.to(tl.int64) * stride_hiz + off_h.to(tl.int64) * stride_hih
+            )
 
     if not USING_PAGED_CACHE:
         # WARNING: If you are using float8e5, this might need to change.
@@ -1020,6 +1075,7 @@ def _attn_fwd(
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float("-inf"))
     l_i = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
+    l_bsa = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     # load scales
     qk_scale = sm_scale
@@ -1197,6 +1253,7 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         # (start_k, end_k) (mid, hi)
         if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -1271,12 +1328,14 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
     else:
-        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
             _attn_fwd_inner(
                 acc,
                 l_i,
+                l_bsa,
                 m_i,
                 q,
                 q_nope,
@@ -1350,13 +1409,15 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         )
 
-        acc, l_i, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
             _attn_fwd_inner(
                 acc,
                 l_i,
+                l_bsa,
                 m_i,
                 q,
                 q_nope,
@@ -1430,6 +1491,7 @@ def _attn_fwd(
                 num_tracking=num_tracking,
                 topk_idx=topk_idx,
                 EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         )
 
@@ -1485,9 +1547,14 @@ def _attn_fwd(
             tl.store(l_ptrs, l_i, mask=mask_m)
 
         if M is not None:
-            m_i += tl.math.log2(l_i)
             m_ptrs = M + off_hz * N_CTX + offs_m
-            tl.store(m_ptrs, m_i, mask=mask_m)
+            rowsum = tl.math.exp2(m_i + tl.math.log2(l_i))
+            tl.store(m_ptrs, rowsum, mask=mask_m)
+
+        if M_BSA is not None:
+            m_ptrs = M_BSA + off_hz * N_CTX + offs_m
+            rowsum_bsa = tl.math.exp2(m_i + tl.math.log2(l_bsa))
+            tl.store(m_ptrs, rowsum_bsa, mask=mask_m)
 
         acc = acc / l_i[:, None]
 
@@ -1635,8 +1702,10 @@ class _attention(torch.autograd.Function):
         online_topk_method: Literal["online", "tree"],
         reverse_iter: bool,
         exact_k: Optional[int],
+        threshold_refresh_interval: int,
+        return_row_sums: bool,
     ):
-        exact_k = bsa_top_block_k if exact_k is None else exact_k
+        exact_k = bsa_top_block_k if exact_k in [None, -1] else exact_k
         est_k = bsa_top_block_k - exact_k
         q = (q * sm_scale).to(q.dtype)
 
@@ -1670,12 +1739,7 @@ class _attention(torch.autograd.Function):
         )
 
         # NOTE: this is for backward
-        # M = torch.empty(
-        #     (q.shape[0], q.shape[1], q.shape[2]),
-        #     device=q.device,
-        #     dtype=torch.float32,
-        # )
-        NC = MX = M = None
+        NC = MX = None
         if return_running_statistics:
             # assert not return_bsa_indices
             MX = torch.empty(
@@ -1684,6 +1748,19 @@ class _attention(torch.autograd.Function):
                 dtype=torch.float32,
             )
             NC = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
+                device=q.device,
+                dtype=torch.float32,
+            )
+
+        M = M_BSA = None
+        if return_row_sums:
+            M = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
+                device=q.device,
+                dtype=torch.float32,
+            )
+            M_BSA = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
                 dtype=torch.float32,
@@ -1919,6 +1996,7 @@ class _attention(torch.autograd.Function):
                 SELF_EXTEND_SCALE=self_extend_scale,
                 BSA_K=bsa_top_block_k,
                 ONLINE_TOPK_METHOD=online_topk_method,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
@@ -2017,6 +2095,7 @@ class _attention(torch.autograd.Function):
                 softmax_sink.contiguous() if softmax_sink is not None else None,
                 sm_scale,
                 M,
+                M_BSA,
                 MX,
                 NC,
                 o,
@@ -2089,12 +2168,15 @@ class _attention(torch.autograd.Function):
                 N_CTX_AUTOTUNE=N_CTX_AUTOTUNE,
                 N_KV_AUTOTUNE=N_KV_AUTOTUNE,
                 EXACT_K_=exact_k,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
         outputs = (o,)
         if return_running_statistics:
             outputs = outputs + ((MX, NC),)
+        if return_row_sums:
+            outputs = outputs + ((M, M_BSA),)
         if return_bsa_indices:
             if online_topk_method != "tree":
                 outputs = outputs + ((bsa_indices, bsa_block_sums),)
@@ -2144,6 +2226,8 @@ def query_sparse_attention(
     online_topk_method: Literal["online", "tree"] = "online",
     reverse_iter: bool = True,
     exact_k: int = None,
+    threshold_refresh_interval: int = 4,
+    return_row_sums: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     assert online_topk_method in {"online", "tree"}
     return _attention.apply(
@@ -2176,4 +2260,6 @@ def query_sparse_attention(
         online_topk_method,
         reverse_iter,
         exact_k,
+        threshold_refresh_interval,
+        return_row_sums,
     )
