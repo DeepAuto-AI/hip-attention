@@ -1549,9 +1549,9 @@ def _forward_delta_attn(
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
                 reverse_iter = os.getenv("BSA_WINNER_TREE", "False") != "False"
-                qsa_mask_block_top_k = int(os.environ.get("BSA_K", "512"))
+                qsa_mask_block_top_k = int(os.environ.get("BSA_K", "128"))
                 online_topk_method = "tree" if os.getenv("BSA_WINNER_TREE", "False") != "False" else "online"
-                exact_k = int(os.getenv("BSA_EXACT_K", "16"))
+                exact_k = int(os.getenv("BSA_EXACT_K", "8"))
                 threshold_refresh_interval = int(os.getenv("BSA_THRESHOLD_REFRESH", "4"))
                 # print(f"{online_topk_method=} {qsa_mask_block_size_k=} {exact_k=} {reverse_iter=} {qsa_mask_block_top_k=}")
                 # using each block scores
@@ -2787,8 +2787,6 @@ def _forward_paged_hip(
     elif using_delta_attention and (
         (not is_decode)  # or (is_decode and delta_attention_args_dense_decode)
     ):
-        print("making forward delta func")
-
         def __forward_delta_attn_wrapper(
             q: torch.Tensor,
             k: torch.Tensor,

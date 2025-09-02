@@ -1671,7 +1671,7 @@ class _attention(torch.autograd.Function):
         threshold_refresh_interval: int,
         return_row_sums: bool,
     ):
-        exact_k = bsa_top_block_k if exact_k in [None, -1] else None
+        exact_k = bsa_top_block_k if exact_k in [None, -1] else exact_k
         est_k = bsa_top_block_k - exact_k
         q = (q * sm_scale).to(q.dtype)
 
