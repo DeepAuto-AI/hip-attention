@@ -1550,9 +1550,15 @@ def _forward_delta_attn(
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
                 reverse_iter = os.getenv("BSA_WINNER_TREE", "False") != "False"
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "128"))
-                online_topk_method = "tree" if os.getenv("BSA_WINNER_TREE", "False") != "False" else "online"
+                online_topk_method = (
+                    "tree"
+                    if os.getenv("BSA_WINNER_TREE", "False") != "False"
+                    else "online"
+                )
                 exact_k = int(os.getenv("BSA_EXACT_K", "8"))
-                threshold_refresh_interval = int(os.getenv("BSA_THRESHOLD_REFRESH", "4"))
+                threshold_refresh_interval = int(
+                    os.getenv("BSA_THRESHOLD_REFRESH", "4")
+                )
                 # print(f"{online_topk_method=} {qsa_mask_block_size_k=} {exact_k=} {reverse_iter=} {qsa_mask_block_top_k=}")
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
@@ -2787,6 +2793,7 @@ def _forward_paged_hip(
     elif using_delta_attention and (
         (not is_decode)  # or (is_decode and delta_attention_args_dense_decode)
     ):
+
         def __forward_delta_attn_wrapper(
             q: torch.Tensor,
             k: torch.Tensor,
@@ -3009,7 +3016,7 @@ def _forward_paged_hip(
             if is_decode and (layer_id == max(layers_to_capture)):
                 _CHECKOUT_COUNTER += 1
             print(f"saved {filename}")
-    
+
     context = context.to(query.dtype)
     assert context.dtype == query.dtype, f"{context.dtype} == {query.dtype}"
     return context.view(N, num_heads, context.shape[-1]), metadata, args

@@ -143,9 +143,21 @@ def winner_update_inline(
             win_p = tl.where(take_path, path_p, sib_p)
             win_idx = tl.where(take_path, path_idx, sib_idx)
 
-            tl.store(BSA_BLOCK_SUMS + (node * stride_bsk + row_bs).to(tl.int64), win_v, mask=beat)
-            tl.store(BSA_HEAP_INDICES + (node * stride_hik + row_hi).to(tl.int64), win_p, mask=beat)
-            tl.store(BSA_INDICES + (node * stride_bik + row_bi).to(tl.int64), win_idx, mask=beat)
+            tl.store(
+                BSA_BLOCK_SUMS + (node * stride_bsk + row_bs).to(tl.int64),
+                win_v,
+                mask=beat,
+            )
+            tl.store(
+                BSA_HEAP_INDICES + (node * stride_hik + row_hi).to(tl.int64),
+                win_p,
+                mask=beat,
+            )
+            tl.store(
+                BSA_INDICES + (node * stride_bik + row_bi).to(tl.int64),
+                win_idx,
+                mask=beat,
+            )
 
             # move up one level
             child = node
@@ -650,7 +662,9 @@ def _attn_fwd_inner(
                                 block_sums_max[:, None].to(block_sums.dtype),
                                 block_sums,
                             )
-                            block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
+                            block_idx = tl.where(
+                                bsa_mask, start_n + i_offset, block_idx
+                            )
                             # calculate the new block sums min for the next iteration
                             block_sums_min, block_sums_min_idx = tl.min(
                                 block_sums, axis=-1, return_indices=True
@@ -671,16 +685,22 @@ def _attn_fwd_inner(
                                 0,
                             )
                             remaining_blocks = tl.maximum(
-                                tl.cdiv(mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K),
+                                tl.cdiv(
+                                    mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K
+                                ),
                                 1,
                             )
-                            pr_below_th = 1 - remaining_slots / remaining_blocks  # [BLOCK_M,]
+                            pr_below_th = (
+                                1 - remaining_slots / remaining_blocks
+                            )  # [BLOCK_M,]
                             erf_pr = tl.where(
                                 pr_below_th > 0,
                                 libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
                                 -3000.0,
                             )
-                        counter = tl.where(counter + 1 >= THRESHOLD_REFRESH_INTERVAL, 0, counter + 1)
+                        counter = tl.where(
+                            counter + 1 >= THRESHOLD_REFRESH_INTERVAL, 0, counter + 1
+                        )
 
                         # estimated threshold for top-k
                         log_est_th = erf_pr * est_std + running_mean
@@ -690,14 +710,22 @@ def _attn_fwd_inner(
 
                         # 1. always add if num_tracking < EST_K
                         if ONLINE_TOPK_METHOD == "tree":
-                            upd_idx_0_bi = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bim
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bim
                             upd_idx_0_bi += (EXACT_K * 2) * stride_bik
-                            upd_idx_0_bs = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bsm
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsm
                             upd_idx_0_bs += (EXACT_K * 2) * stride_bsk
                         else:
-                            upd_idx_0_bi = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bik
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bik
                             upd_idx_0_bi += EXACT_K * stride_bim
-                            upd_idx_0_bs = (start_m * BLOCK_M + tl.arange(0, BLOCK_M)) * stride_bsk
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsk
                             upd_idx_0_bs += EXACT_K * stride_bsm
 
                         # 2. otherwise, update if the new value is larger than the estimated threshold
@@ -734,7 +762,9 @@ def _attn_fwd_inner(
                             mask=do_update,
                         )
 
-                        topk_idx += do_update.to(topk_idx.dtype)  # increment end pointer
+                        topk_idx += do_update.to(
+                            topk_idx.dtype
+                        )  # increment end pointer
                         topk_idx = tl.where(topk_idx >= EST_K, 0, topk_idx)
         else:
             l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
@@ -1012,9 +1042,13 @@ def _attn_fwd(
 
     if RETURN_BSA_MASK:
         BSA_INDICES += off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
-        BSA_BLOCK_SUMS += off_z.to(tl.int64) * stride_bsz + off_h.to(tl.int64) * stride_bsh
+        BSA_BLOCK_SUMS += (
+            off_z.to(tl.int64) * stride_bsz + off_h.to(tl.int64) * stride_bsh
+        )
         if ONLINE_TOPK_METHOD == "tree":
-            BSA_HEAP_INDICES += off_z.to(tl.int64) * stride_hiz + off_h.to(tl.int64) * stride_hih
+            BSA_HEAP_INDICES += (
+                off_z.to(tl.int64) * stride_hiz + off_h.to(tl.int64) * stride_hih
+            )
 
     if not USING_PAGED_CACHE:
         # WARNING: If you are using float8e5, this might need to change.

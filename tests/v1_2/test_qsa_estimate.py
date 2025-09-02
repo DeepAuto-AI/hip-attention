@@ -155,10 +155,20 @@ def test() -> None:
     overestimate_K = 512
     test_k_block = 64
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        overestimate_K, "tree", exact_k=exact_k, k_block=test_k_block, reverse=False, return_row_sums=True
+        overestimate_K,
+        "tree",
+        exact_k=exact_k,
+        k_block=test_k_block,
+        reverse=False,
+        return_row_sums=True,
     )
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        overestimate_K, "tree", exact_k=exact_k, k_block=test_k_block, reverse=False, return_row_sums=True
+        overestimate_K,
+        "tree",
+        exact_k=exact_k,
+        k_block=test_k_block,
+        reverse=False,
+        return_row_sums=True,
     )
     est_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, test_k_block, math.sqrt(1 / q.size(-1))
@@ -170,12 +180,15 @@ def test() -> None:
     print(f"{recall_rates.mean()=} ({K=})")
     print(f"{recall_rates_small.mean()=} ({SMALL_K=})")
 
-    torch.save({
-        'row_sums': row_sums,
-        'row_sums_bsa': row_sums_bsa,
-        'block_idx': block_idx,
-        'block_sums': block_sums,
-    }, "row_sums_512.pth")
+    torch.save(
+        {
+            "row_sums": row_sums,
+            "row_sums_bsa": row_sums_bsa,
+            "block_idx": block_idx,
+            "block_sums": block_sums,
+        },
+        "row_sums_512.pth",
+    )
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"
     if TEST_LATENCY:
