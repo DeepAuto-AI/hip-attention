@@ -1460,6 +1460,8 @@ def _forward_delta_attn(
                     torch.arange(num_sparse, num_queries, device=query.device),
                 )
             )
+            if delta_attention_args_diff == 2:
+                idx = torch.arange(num_sparse, num_queries, device=query.device)
             query_for_dense = query[:, idx]
 
         if (args.need_apply_rope and args.using_extend) and (
@@ -1852,6 +1854,10 @@ def _forward_delta_attn(
             context = torch.zeros_like(query)
             context[:, :num_sparse] = context_sparse
             context[:, idx] = context_dense
+        elif delta_attention_args_diff == 2:
+            context = torch.zeros_like(query)
+            context[:, idx] = context_dense
+            context[:, :num_sparse] = context_sparse
         else:
             from .delta.apply_delta import apply_delta
 
@@ -3004,8 +3010,9 @@ def _forward_paged_hip(
             if is_decode and (layer_id == max(layers_to_capture)):
                 _CHECKOUT_COUNTER += 1
             print(f"saved {filename}")
-
-    assert context.dtype == query.dtype
+    
+    context = context.to(query.dtype)
+    assert context.dtype == query.dtype, f"{context.dtype} == {query.dtype}"
     return context.view(N, num_heads, context.shape[-1]), metadata, args
 
 
