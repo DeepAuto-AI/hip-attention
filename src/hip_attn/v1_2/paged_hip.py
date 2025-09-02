@@ -1548,7 +1548,7 @@ def _forward_delta_attn(
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
-                reverse_iter = os.getenv("BSA_WINNER_TREE", "False") != "False"
+                reverse_iter = os.getenv("REVERSE_ITER", "False") != "False"
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "128"))
                 online_topk_method = (
                     "tree"
