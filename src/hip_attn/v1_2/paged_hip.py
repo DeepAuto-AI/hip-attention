@@ -1460,7 +1460,7 @@ def _forward_delta_attn(
                     torch.arange(num_sparse, num_queries, device=query.device),
                 )
             )
-            if delta_attention_args_diff == 2:
+            if (not test_qsa_masking) and (delta_attention_args_diff == 2):
                 idx = torch.arange(num_sparse, num_queries, device=query.device)
             query_for_dense = query[:, idx]
 
@@ -1543,7 +1543,9 @@ def _forward_delta_attn(
                 #     args.position_ids[:, idx].shape,
                 # )
 
+                # NOTE: using Delta 2
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
+                # NOTE: save mask image
                 debug_qsa_masking = False
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = 128
@@ -1563,7 +1565,7 @@ def _forward_delta_attn(
                 # using each block scores
                 qsa_mask_pre_trim = 40960000
                 # using sum of block scores
-                qsa_mask_post_trim = 4096
+                qsa_mask_post_trim = int(os.getenv("BSA_TRIM", "4096"))
 
                 context_dense = query_sparse_attention(
                     query_for_recomp.permute(0, 2, 1, 3).contiguous(),
@@ -1722,24 +1724,39 @@ def _forward_delta_attn(
                         block_scores = block_scores.gather(dim=-1, index=t_sort)
 
                         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
-                        block_scores_cumsum = block_scores.cumsum(-1)
-                        block_scores_cumsum_block = (
-                            block_scores_cumsum * unique_mask
+                        block_scores_cumsum = torch.exp(
+                            block_scores - block_scores.amax(-1, keepdim=True)
                         ).cumsum(-1)
+                        block_scores_cumsum_base = (
+                            block_scores_cumsum * unique_mask
+                        ).cummax(-1).values
+                        # block_scores_cumsum_base = torch.roll(block_scores_cumsum_base, 1, -1)
+                        # block_scores_cumsum_base[..., 0] = 0.0
                         block_scores_cumsum = (
-                            block_scores_cumsum
-                            + (block_scores * unique_mask).cumsum(-1)
-                        ) - block_scores_cumsum_block
-                        unique_mask = torch.roll(indices, shifts=-1, dims=-1) != indices
-                        block_scores = torch.where(
-                            unique_mask,
-                            block_scores,
-                            torch.finfo(block_scores.dtype).min,
+                            block_scores_cumsum 
+                            - block_scores_cumsum_base
+                            + block_scores
+                        )
+                        unique_mask_last = torch.roll(indices, shifts=-1, dims=-1) != indices
+                        block_scores_cumsum = torch.where(
+                            unique_mask_last,
+                            block_scores_cumsum,
+                            torch.finfo(block_scores_cumsum.dtype).min,
+                        )
+                        counter_start = torch.arange(0, block_scores_cumsum.shape[-1], device=block_scores_cumsum.device)
+                        counter_end = counter_start.clone()
+                        counter_start = (counter_start[None, None, :] * unique_mask).cummax(dim=-1).values
+                        counter_end = (counter_end[None, None, :] * unique_mask_last).cummax(dim=-1).values
+                        counter = (counter_end - counter_start + 1) * unique_mask_last
+                        block_scores_cumsum = torch.where(
+                            unique_mask_last,
+                            block_scores_cumsum / counter,
+                            torch.finfo(block_scores_cumsum.dtype).min,
                         )
                         indices = torch.where(
-                            unique_mask, indices, torch.iinfo(indices.dtype).max
+                            unique_mask_last, indices, torch.iinfo(indices.dtype).max
                         )
-                        t_sort = block_scores.argsort(dim=-1, descending=True)
+                        t_sort = block_scores_cumsum.argsort(dim=-1, descending=True)
                         indices = indices.gather(
                             index=t_sort[..., :num_blocks_to_trim], dim=-1
                         )
@@ -1881,6 +1898,8 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
+            
+            # context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
 
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]
