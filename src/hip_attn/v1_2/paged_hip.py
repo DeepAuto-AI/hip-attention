@@ -1548,7 +1548,7 @@ def _forward_delta_attn(
                 # NOTE: save mask image
                 debug_qsa_masking = False
                 mask_idx = args.position_ids[:, idx]
-                qsa_mask_block_size_q = 128
+                qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
                 reverse_iter = os.getenv("REVERSE_ITER", "False") != "False"
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "128"))
@@ -1913,7 +1913,7 @@ def _forward_delta_attn(
                 delta_attention_args_smooth,
             )
 
-            # context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
+            context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
 
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]
