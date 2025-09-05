@@ -182,6 +182,6 @@ def test_latency_fa3():
 
 if __name__ == "__main__":
     with torch.no_grad():
-        # test_latency_delta()
+        test_latency_delta()
         # test_latency_hip()
-        test_latency_fa3()
+        # test_latency_fa3()
