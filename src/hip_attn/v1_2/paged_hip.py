@@ -1728,25 +1728,39 @@ def _forward_delta_attn(
                             block_scores - block_scores.amax(-1, keepdim=True)
                         ).cumsum(-1)
                         block_scores_cumsum_base = (
-                            block_scores_cumsum * unique_mask
-                        ).cummax(-1).values
+                            (block_scores_cumsum * unique_mask).cummax(-1).values
+                        )
                         # block_scores_cumsum_base = torch.roll(block_scores_cumsum_base, 1, -1)
                         # block_scores_cumsum_base[..., 0] = 0.0
                         block_scores_cumsum = (
-                            block_scores_cumsum 
+                            block_scores_cumsum
                             - block_scores_cumsum_base
                             + block_scores
                         )
-                        unique_mask_last = torch.roll(indices, shifts=-1, dims=-1) != indices
+                        unique_mask_last = (
+                            torch.roll(indices, shifts=-1, dims=-1) != indices
+                        )
                         block_scores_cumsum = torch.where(
                             unique_mask_last,
                             block_scores_cumsum,
                             torch.finfo(block_scores_cumsum.dtype).min,
                         )
-                        counter_start = torch.arange(0, block_scores_cumsum.shape[-1], device=block_scores_cumsum.device)
+                        counter_start = torch.arange(
+                            0,
+                            block_scores_cumsum.shape[-1],
+                            device=block_scores_cumsum.device,
+                        )
                         counter_end = counter_start.clone()
-                        counter_start = (counter_start[None, None, :] * unique_mask).cummax(dim=-1).values
-                        counter_end = (counter_end[None, None, :] * unique_mask_last).cummax(dim=-1).values
+                        counter_start = (
+                            (counter_start[None, None, :] * unique_mask)
+                            .cummax(dim=-1)
+                            .values
+                        )
+                        counter_end = (
+                            (counter_end[None, None, :] * unique_mask_last)
+                            .cummax(dim=-1)
+                            .values
+                        )
                         counter = (counter_end - counter_start + 1) * unique_mask_last
                         block_scores_cumsum = torch.where(
                             unique_mask_last,
@@ -1898,7 +1912,7 @@ def _forward_delta_attn(
                 delta_attention_args_w,
                 delta_attention_args_smooth,
             )
-            
+
             # context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
 
             if delta_attention_args_extend == "nope":
