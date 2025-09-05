@@ -36,7 +36,7 @@ def latency(fn: Any, n_sample: int = 10) -> float:
 
 
 def test() -> None:
-    q_block, k_block, exact_k = 16, 64, 16
+    q_block, k_block, exact_k = 16, 64, 8
     seq = 4096 * 32
     device = 0
     window_size, sink_tokens = 2048, 64
@@ -125,22 +125,25 @@ def test() -> None:
     # warmup burn-in. autotune has s dirty init so this is necessary right now
     K, SMALL_K = 64, 32
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        K, "online", reverse=False, return_row_sums=True
+        K, "tree", reverse=False, return_row_sums=True
     )
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
-        K, "online", reverse=False, return_row_sums=True
+        K, "tree", reverse=False, return_row_sums=True
     )
     gt_exp_sc = check_topk_selection(
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
     print(f"{block_idx=}")
 
-    # torch.save({
-    #     'row_sums': row_sums,
-    #     'row_sums_bsa': row_sums_bsa,
-    #     'block_idx': block_idx,
-    #     'block_sums': block_sums,
-    # }, "row_sums_64.pth")
+    torch.save(
+        {
+            "row_sums": row_sums,
+            "row_sums_bsa": row_sums_bsa,
+            "block_idx": block_idx,
+            "block_sums": block_sums,
+        },
+        "row_sums_exact_tree.pth",
+    )
 
     out, (row_sums, row_sums_bsa), (block_idx, _) = qsa(
         SMALL_K, "tree", reverse=True, return_row_sums=True
@@ -152,11 +155,11 @@ def test() -> None:
         block_idx, qp, kp, vp, row_sums, k_block, math.sqrt(1 / q.size(-1))
     )
 
-    overestimate_K = 512
+    overestimate_K = 128
     test_k_block = 64
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
         overestimate_K,
-        "tree",
+        "online",
         exact_k=exact_k,
         k_block=test_k_block,
         reverse=False,
@@ -164,7 +167,7 @@ def test() -> None:
     )
     out, (row_sums, row_sums_bsa), (block_idx, block_sums) = qsa(
         overestimate_K,
-        "tree",
+        "online",
         exact_k=exact_k,
         k_block=test_k_block,
         reverse=False,
@@ -187,7 +190,7 @@ def test() -> None:
             "block_idx": block_idx,
             "block_sums": block_sums,
         },
-        "row_sums_512.pth",
+        "row_sums_128.pth",
     )
 
     TEST_LATENCY = os.getenv("TEST_LATENCY", "0") == "1"

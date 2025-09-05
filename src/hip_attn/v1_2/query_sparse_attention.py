@@ -671,7 +671,8 @@ def _attn_fwd_inner(
                             )  # (M, K) -> (M,)
 
                     if EXACT_K < BSA_K:
-                        causal_mask = l_ij > 0
+                        new_block_idx = start_n + i_offset
+                        causal_mask = (mask_idx - BSA_MASK_SW_SIZE) >= new_block_idx
                         log_score = update_exp_sum
 
                         est_std = tl.sqrt(running_m2 / (num_tracking - 1))
@@ -704,9 +705,6 @@ def _attn_fwd_inner(
 
                         # estimated threshold for top-k
                         log_est_th = erf_pr * est_std + running_mean
-
-                        # update block sums and indices
-                        new_block_idx = start_n + i_offset
 
                         # 1. always add if num_tracking < EST_K
                         if ONLINE_TOPK_METHOD == "tree":
