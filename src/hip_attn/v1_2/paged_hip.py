@@ -1913,7 +1913,7 @@ def _forward_delta_attn(
                 delta_attention_args_smooth,
             )
 
-            context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
+            # context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
 
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]

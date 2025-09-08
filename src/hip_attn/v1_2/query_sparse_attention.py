@@ -834,12 +834,13 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
         ]
     ]
 else:
-    qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
+    # NOTE: BSA GQ = BQ // DeltaW
+    qsa_mask_group_size_q = int(os.getenv("BSA_GROUP_Q", "64"))
     qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
 
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in filter(lambda x: x >= qsa_mask_block_size_q, [64, 128, 256])
+        for BM in filter(lambda x: x >= qsa_mask_group_size_q, [32, 64, 128, 256])
         for BN in [qsa_mask_block_size_k]
         for s in ([1] if is_hip() else [1, 3, 7])
         for w in [4, 8]
