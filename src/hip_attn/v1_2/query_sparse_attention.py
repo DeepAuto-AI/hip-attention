@@ -33,9 +33,6 @@ from hip_attn.v1_2.attention_metadata import safe_stride
 from hip_attn.v1_2.triton_argsort import argsort
 from hip_attn.v1_2.utils import capture, triton_jit
 
-# DEVICE = triton.runtime.driver.active.get_active_torch_device()
-DEVICE = "cuda:0"
-
 
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
@@ -854,17 +851,11 @@ def keep(conf):
     return True
 
 
-# @triton_jit(
-#     configs=list(filter(keep, configs)),
-#     key=[
-#         "N_CTX",
-#         "N_KV",
-#         "HEAD_DIM",
-#         "USING_PAGED_CACHE",
-#     ],
-#     do_autotune=True,
-# )
-@triton.autotune(configs=configs, key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"])
+@triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"]
+)
 @triton.jit
 def _attn_fwd(
     Q,
@@ -1821,6 +1812,11 @@ class _attention(torch.autograd.Function):
 
             else:
                 # energy to split the strides and add more arguments :(
+                bsa_heap_indices = torch.empty(
+                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                    device=q.device,
+                    dtype=q.dtype
+                )
                 bsa_indices = torch.full(  # for real block indices
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     987654321,
