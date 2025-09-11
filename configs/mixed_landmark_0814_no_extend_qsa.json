@@ -2,10 +2,11 @@
     "__head_reduce": 0,
     "__last_dense": -1,
     "__using_landmark": false,
-    "__seq_thresh_fa3": 131072,
+    "__using_dense_prefill": true,
+    "__seq_thresh_fa3": 0,
     "__delta_attention_args": "window_0-diff_1-w_16-dense_decode-smooth",
     "using_extend": false,
-    "dense_layers": [0],
+    "dense_layers": [0, 1, 2, 47, 46, 45],
     "mask_refresh_interval": [96],
     "layers": [
         {
@@ -62,7 +63,7 @@
             ]
         },
         {
-            "sliding_window_size": 512,
+            "sliding_window_size": 4096,
             "second_stage_k": 1024,
             "sink_token_size": 256,
             "landmark_stage_k": [1, 1, 1],

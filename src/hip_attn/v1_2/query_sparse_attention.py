@@ -834,10 +834,14 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
         ]
     ]
 else:
+    # NOTE: BSA GQ = BQ // DeltaW
+    qsa_mask_group_size_q = int(os.getenv("BSA_GROUP_Q", "64"))
+    qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
+
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128, 256]
-        for BN in [64]
+        for BM in filter(lambda x: x >= qsa_mask_group_size_q, [32, 64, 128, 256])
+        for BN in [qsa_mask_block_size_k]
         for s in ([1] if is_hip() else [1, 3, 7])
         for w in [4, 8]
     ]
@@ -851,10 +855,20 @@ def keep(conf):
     return True
 
 
+# @triton_jit(
+#     configs=list(filter(keep, configs)),
+#     key=[
+#         "N_CTX",
+#         "N_KV",
+#         "HEAD_DIM",
+#         "USING_PAGED_CACHE",
+#     ],
+#     do_autotune=True,
+# )
 @triton.autotune(
     configs=configs,
     key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
-    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"]
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
 )
 @triton.jit
 def _attn_fwd(
@@ -1815,7 +1829,7 @@ class _attention(torch.autograd.Function):
                 bsa_heap_indices = torch.empty(
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     device=q.device,
-                    dtype=q.dtype
+                    dtype=q.dtype,
                 )
                 bsa_indices = torch.full(  # for real block indices
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),

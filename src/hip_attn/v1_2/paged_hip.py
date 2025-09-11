@@ -21,6 +21,7 @@ from hip_attn.v1_2.utils import capture
 def convert_qsa_mask_to_img(
     bsa_indices: np.ndarray,
     bsa_scores: Optional[np.ndarray],
+    seq_len: np.ndarray,
     tdst: np.ndarray,
     TDST: int,
     TSRC: int,
@@ -30,6 +31,8 @@ def convert_qsa_mask_to_img(
     N_BLOCK = bsa_indices.shape[1]
     img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 3), dtype=np.int32)
     img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
+
+    px_cnt = 0
 
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
@@ -44,6 +47,7 @@ def convert_qsa_mask_to_img(
                 img[pty // POOL_SIZE, ptx // POOL_SIZE, 1] += int(255 * score)
                 img[pty // POOL_SIZE, ptx // POOL_SIZE, 2] += int(255 * (1 - score))
                 img_cnt[pty // POOL_SIZE, ptx // POOL_SIZE] += 1
+                px_cnt += 1
 
     for i in numba.prange(img.shape[0]):
         for j in range(img.shape[1]):
@@ -1546,9 +1550,9 @@ def _forward_delta_attn(
                 # NOTE: using Delta 2
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 # NOTE: save mask image
-                debug_qsa_masking = False
+                debug_qsa_masking = True
                 mask_idx = args.position_ids[:, idx]
-                qsa_mask_block_size_q = 128
+                qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
                 reverse_iter = os.getenv("REVERSE_ITER", "False") != "False"
                 qsa_mask_block_top_k = int(os.environ.get("BSA_K", "128"))
@@ -1606,7 +1610,9 @@ def _forward_delta_attn(
                         scores = (scores - scores_min) / (scores_max - scores_min)
                         mask = convert_qsa_mask_to_img(
                             bsa_indices[0, 0].cpu().numpy(),
-                            scores.cpu().float().numpy(),
+                            # scores.cpu().float().numpy(),
+                            None,
+                            idx.cpu().numpy(),
                             idx.cpu().numpy(),
                             query.shape[1],
                             int(mask_idx.amax().item()) + 256,
@@ -1798,21 +1804,6 @@ def _forward_delta_attn(
 
                     # print(ks.float().mean().item() * args_sparse.block_size_k)
 
-                    if debug_qsa_masking and (get_local_rank() == 0):
-                        mask = convert_qsa_mask_to_img(
-                            indices[0].cpu().numpy(),
-                            None,
-                            args_sparse.position_ids[0, :: args_sparse.block_size_q]
-                            .cpu()
-                            .numpy(),
-                            query.shape[1],
-                            int(args_sparse.position_ids.amax().item()) + 256,
-                            256,
-                        )
-                        cv2.imwrite(
-                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
-                        )
-
                     bsa_block_size_q = 128
                     if args_sparse.block_size_q > bsa_block_size_q:
                         assert (args_sparse.block_size_q % bsa_block_size_q) == 0
@@ -1823,6 +1814,22 @@ def _forward_delta_attn(
                         ks_start_end = ks_start_end.repeat_interleave(nrepeat, 1)
                         args_sparse.block_size_q = bsa_block_size_q
                         args_sparse.block_sparse_block_size_q = bsa_block_size_q
+
+                    if debug_qsa_masking and (get_local_rank() == 0):
+                        mask = convert_qsa_mask_to_img(
+                            indices[0].cpu().numpy(),
+                            None,
+                            torch.arange(0, indices.shape[1]).numpy()
+                            * bsa_block_size_q,
+                            torch.arange(0, indices.shape[1]).numpy()
+                            * bsa_block_size_q,
+                            query.shape[1],
+                            int(mask_idx.amax().item()) + 256,
+                            256,
+                        )
+                        cv2.imwrite(
+                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                        )
 
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
