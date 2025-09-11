@@ -122,10 +122,9 @@ class StructuredStreamingClient:
                         "strict": True,
                     },
                 },
-                temperature=1,
+                temperature=0.7,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             # Parse the JSON response
@@ -169,11 +168,10 @@ class StructuredStreamingClient:
                         "strict": True,
                     },
                 },
-                temperature=1,
+                temperature=0.7,
                 stream=True,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             collected_content = ""
@@ -229,11 +227,10 @@ class StructuredStreamingClient:
                         "strict": True,
                     },
                 },
-                temperature=1,
+                temperature=0.7,
                 stream=True,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             collected_content = ""
@@ -275,11 +272,10 @@ class StructuredStreamingClient:
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=1,
+                temperature=0.7,
                 stream=True,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             collected_content = ""
@@ -398,10 +394,9 @@ class StructuredStreamingClient:
                 ],
                 functions=functions,
                 function_call="auto",
-                temperature=1,
+                temperature=0.7,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             message = response.choices[0].message
@@ -438,11 +433,10 @@ class StructuredStreamingClient:
                             "content": result.model_dump_json(),
                         },
                     ],
-                    temperature=1,
+                    temperature=0.7,
                     stream=True,
                     top_p=0.9,
                     seed=42,
-                    stop=["die"],
                 )
 
                 print("\nStreaming response with function result:")
@@ -592,11 +586,10 @@ class StructuredStreamingClient:
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=1,
+                temperature=0.7,
                 stream=True,
                 top_p=0.9,
                 seed=42,
-                stop=["die"],
             )
 
             collected_content = ""
@@ -768,10 +761,9 @@ def demo_advanced_features():
                     "strict": True,
                 },
             },
-            temperature=1,
+            temperature=0.7,
             top_p=0.9,
             seed=42,
-            stop=["die"],
         )
 
         if response.choices[0].message.content:

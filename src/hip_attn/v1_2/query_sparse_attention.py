@@ -865,11 +865,13 @@ def keep(conf):
 #     ],
 #     do_autotune=True,
 # )
-@triton.autotune(
-    configs=configs,
-    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
-    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
-)
+
+# @triton.autotune(
+#     configs=configs,
+#     key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+#     restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
+# )
+
 @triton.jit
 def _attn_fwd(
     Q,
@@ -1579,6 +1581,24 @@ def _attn_fwd(
         tl.static_assert(NC is None)
 
 
+_ATTN_FWD_NO_RESTORE = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+)(_attn_fwd)
+
+_ATTN_FWD_RESTORE_BSA_IND_SUM = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS",],
+)(_attn_fwd)
+
+_ATTN_FWD_RESTORE_BSA_HEAP = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
+)(_attn_fwd)
+
+
 @triton.jit
 def _attn_merge(
     O,
@@ -1919,6 +1939,12 @@ class _attention(torch.autograd.Function):
         )
         N_KV_AUTOTUNE = 1024 if N_KV > 1024 else 1
         N_CTX_AUTOTUNE = 128 if N_CTX > 128 else 1
+        
+        _attn_fwd = _ATTN_FWD_NO_RESTORE
+        if bsa_indices is not None and bsa_heap_indices is not None:
+            _attn_fwd = _ATTN_FWD_RESTORE_BSA_HEAP
+        elif bsa_indices is not None:
+            _attn_fwd = _ATTN_FWD_RESTORE_BSA_IND_SUM
 
         if (N_SPLIT > 1) and (not ignore_n_split):
             raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")

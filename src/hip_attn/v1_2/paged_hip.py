@@ -1487,6 +1487,7 @@ def _forward_delta_attn(
                         ],
                         dim=1,
                     )
+                    query_for_dense_non_pooled = query[:, idx].clone()
                 else:
                     query_for_dense = query[:, idx]
 
@@ -1624,6 +1625,36 @@ def _forward_delta_attn(
                     exact_k=exact_k,
                     threshold_refresh_interval=threshold_refresh_interval,
                 )
+                
+                if delta_pool_q:
+                    context_dense_non_pooled = query_sparse_attention(
+                        query_for_dense_non_pooled.permute(0, 2, 1, 3).contiguous(),
+                        None,
+                        None,
+                        mask_idx,
+                        sm_scale,
+                        k_cache,
+                        v_cache,
+                        args.block_table,
+                        return_running_statistics=False,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        extend_backend=delta_attention_args_extend,
+                        rope_cos=rope_cos,
+                        rope_sin=rope_sin,
+                        model_context_length=args.model_context_length,
+                        self_extend_scale=args.self_extend_scale,
+                        softmax_sink=args.softmax_sink,
+                        bsa_top_block_k=qsa_mask_block_top_k,
+                        bsa_block_size_k=qsa_mask_block_size_k,
+                        bsa_mask_sink_token_size=max(1, args.sink_token_size),
+                        bsa_mask_sliding_window_size=args.sliding_window_size,
+                        return_bsa_indices=False,
+                        online_topk_method=online_topk_method,
+                        reverse_iter=reverse_iter,
+                        exact_k=exact_k,
+                        threshold_refresh_interval=threshold_refresh_interval,
+                    )
 
                 if test_qsa_masking:
                     context_dense, (bsa_indices, bsa_block_sums) = context_dense
@@ -1953,7 +1984,34 @@ def _forward_delta_attn(
             # if delta_attention_args_extend == "self_extend":
             #     # FIXME this is surely bug...
             #     last_context_sparse = context_sparse_raw[:, -1024:].clone()
+            
+            # context_dense, context_last_dense = context_dense[:, :-(num_queries-num_sparse):], context_dense[:, -(num_queries-num_sparse):]
+            # context_dense, context_last_dense = context_dense_non_pooled.permute(0, 2, 1, 3)[:, :-(num_queries-num_sparse):], context_dense_non_pooled.permute(0, 2, 1, 3)[:, -(num_queries-num_sparse):]
+            # context_sparse_mean = context_sparse[:, :num_sparse]\
+            #     .reshape(
+            #         context_sparse.shape[0],
+            #         num_sparse // delta_attention_args_w,
+            #         delta_attention_args_w,
+            #         context_sparse.shape[2],
+            #         context_sparse.shape[3],
+            #     )[:,:,0,:,:]
+            #     # .mean(dim=2)
+            # context_delta = context_dense - context_sparse_mean
+            # context = torch.cat([
+            #     context_sparse[:, :num_sparse] \
+            #         + torch.repeat_interleave(context_delta, delta_attention_args_w, 1),
+            #     context_last_dense,
+            # ], dim=1)
+            
+            # context[:, idx[:-(num_queries-num_sparse)]] = context_dense_non_pooled.permute(0, 2, 1, 3)
 
+            if delta_pool_q:
+                # context_dense = torch.cat([
+                #     context_dense_non_pooled.permute(0, 2, 1, 3),
+                #     context_dense[:, -(num_queries-num_sparse):],
+                # ], dim=1)
+                context_dense = context_dense_non_pooled.permute(0, 2, 1, 3)
+            
             context = apply_delta(
                 context_dense,
                 context_sparse,
@@ -1963,7 +2021,8 @@ def _forward_delta_attn(
                 delta_attention_args_smooth,
             )
 
-            # context[:, idx[:-(num_queries-num_sparse)]] = context_sparse_raw[:, idx[:-(num_queries-num_sparse)]]
+            # if delta_pool_q:
+            #     context[:, idx[:-(num_queries-num_sparse)]] = context_dense_non_pooled.permute(0, 2, 1, 3)
 
             if delta_attention_args_extend == "nope":
                 context[:, idx] = context_sparse_raw[:, idx]
