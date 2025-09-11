@@ -33,7 +33,7 @@ def convert_qsa_mask_to_img(
     img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
 
     px_cnt = 0
-    
+
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
             pty = tdst[i_q]
@@ -1814,13 +1814,15 @@ def _forward_delta_attn(
                         ks_start_end = ks_start_end.repeat_interleave(nrepeat, 1)
                         args_sparse.block_size_q = bsa_block_size_q
                         args_sparse.block_sparse_block_size_q = bsa_block_size_q
-                    
+
                     if debug_qsa_masking and (get_local_rank() == 0):
                         mask = convert_qsa_mask_to_img(
                             indices[0].cpu().numpy(),
                             None,
-                            torch.arange(0, indices.shape[1]).numpy() * bsa_block_size_q, 
-                            torch.arange(0, indices.shape[1]).numpy() * bsa_block_size_q,
+                            torch.arange(0, indices.shape[1]).numpy()
+                            * bsa_block_size_q,
+                            torch.arange(0, indices.shape[1]).numpy()
+                            * bsa_block_size_q,
                             query.shape[1],
                             int(mask_idx.amax().item()) + 256,
                             256,

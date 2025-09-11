@@ -1,14 +1,11 @@
+import json
 import math
 import os
 from typing import Any, Tuple
-import json
-
-import torch
-
 
 # from hip_research.utils.load_checkouts import load_checkouts
 import sglang as sgl
-
+import torch
 import transformers
 
 try:
@@ -23,15 +20,16 @@ except:
 
 
 # MODEL_PATH="meta-llama/Meta-Llama-3.1-8B-Instruct"
-MODEL_PATH="Qwen/Qwen3-30B-A3B-Instruct-2507"
+MODEL_PATH = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
-HIP_ROOT="/data/jeff/delta/hip-attention"
+HIP_ROOT = "/data/jeff/delta/hip-attention"
 QWEN3_1M_CONFIG = "/data/jeff/.tmp/huggingface/hub/models--Qwen--Qwen3-30B-A3B-Instruct-2507/snapshots/61082d4deaa4785f64943b443cbc2b5de7524fad/config_1m.json"
 OUTFILE_PATH = "/data/jeff/delta/latency"
 
-HIP_ROOT="/home/ain/library/hip-attention"
+HIP_ROOT = "/home/ain/library/hip-attention"
 QWEN3_1M_CONFIG = "/home/ain/library/hip-attention/configs/qwen3_30b_a3b_config_1m.json"
 OUTFILE_PATH = "/home/ain/library/hip-attention/saves/latency"
+
 
 def latency(fn: Any, n_sample: int = 10) -> float:
     elapsed = []
@@ -56,6 +54,7 @@ def get_llama31_text(length):
     string = tokenizer.decode(tokens)
     return string
 
+
 log_level = "INFO"
 gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "")
 n_gpu = 8 if gpus == "" else len(gpus.split(","))
@@ -63,9 +62,12 @@ tp_size = n_gpu
 ep_size = n_gpu
 os.environ["HIP_DISABLE_AUTOTUNE"] = "0"
 
+
 def test_latency_delta(bsa_k, bsa_exact_k):
-    hip_config_path=os.path.join(HIP_ROOT, "configs/mixed_landmark_0814_no_extend_qsa.json")
-    hip_attention_config_override_json='{"__seq_thresh_fa3": 0}'
+    hip_config_path = os.path.join(
+        HIP_ROOT, "configs/mixed_landmark_0814_no_extend_qsa.json"
+    )
+    hip_attention_config_override_json = '{"__seq_thresh_fa3": 0}'
 
     os.environ["BSA_BLOCK_K"] = "64"
     os.environ["BSA_K"] = str(bsa_k)
@@ -79,7 +81,7 @@ def test_latency_delta(bsa_k, bsa_exact_k):
     )
 
     original_pos = 131072
-    extended_pos = 2**20 + 16384 # plus a little extra in case it overflows
+    extended_pos = 2**20 + 16384  # plus a little extra in case it overflows
     extend_factor = extended_pos / original_pos
 
     model = sgl.Engine(
@@ -92,15 +94,15 @@ def test_latency_delta(bsa_k, bsa_exact_k):
         hip_attention_config=hip_attention_config,
         disable_radix_cache=True,
         context_length=extended_pos,
-        max_total_tokens=1024*1024,
+        max_total_tokens=1024 * 1024,
         chunked_prefill_size=131072,
         log_level=log_level,
         cuda_graph_max_bs=1,
         cuda_graph_bs=[1],
         show_time_cost=True,
         json_model_override_args=(
-            '{"rope_scaling":{"rope_type":"yarn","factor":' + f'{extend_factor},'
-            '"original_max_position_embeddings":' + f'{original_pos}' + '}}'
+            '{"rope_scaling":{"rope_type":"yarn","factor":' + f"{extend_factor},"
+            '"original_max_position_embeddings":' + f"{original_pos}" + "}}"
         ),
     )
 
@@ -111,15 +113,16 @@ def test_latency_delta(bsa_k, bsa_exact_k):
         out += [(2**i, lat)]
         print(f"delta latency: {lat} for {2**i}")
 
-
     with open(os.path.join(OUTFILE_PATH, f"delta.jsonl"), "w") as f:
         json.dump(out, f)
 
 
 def test_latency_hip():
     # for running plain hip
-    hip_config_path=os.path.join(HIP_ROOT, "configs/mixed_landmark_0801_extend_fast.json")
-    hip_attention_config_override_json='{"using_extend": false, "__delta_attention_args": "window_0-diff_2-w_256-dense_decode", "__seq_thresh_fa3": 0}'
+    hip_config_path = os.path.join(
+        HIP_ROOT, "configs/mixed_landmark_0801_extend_fast.json"
+    )
+    hip_attention_config_override_json = '{"using_extend": false, "__delta_attention_args": "window_0-diff_2-w_256-dense_decode", "__seq_thresh_fa3": 0}'
 
     os.environ["HIP_DEBUG_DELTA_QSA"] = "0"
 
@@ -129,7 +132,7 @@ def test_latency_hip():
     )
 
     original_pos = 262144
-    extended_pos = 2**20 + 16384 # plus a little extra in case it overflows
+    extended_pos = 2**20 + 16384  # plus a little extra in case it overflows
     extend_factor = extended_pos / original_pos
 
     model = sgl.Engine(
@@ -142,15 +145,15 @@ def test_latency_hip():
         hip_attention_config=hip_attention_config,
         disable_radix_cache=True,
         context_length=extended_pos,
-        max_total_tokens=1024*1024,
+        max_total_tokens=1024 * 1024,
         chunked_prefill_size=131072,
         log_level=log_level,
         cuda_graph_max_bs=1,
         cuda_graph_bs=[1],
         show_time_cost=True,
         json_model_override_args=(
-            '{"rope_scaling":{"rope_type":"yarn","factor":' + f'{extend_factor},'
-            '"original_max_position_embeddings":' + f'{original_pos}' + '}}'
+            '{"rope_scaling":{"rope_type":"yarn","factor":' + f"{extend_factor},"
+            '"original_max_position_embeddings":' + f"{original_pos}" + "}}"
         ),
     )
 
@@ -166,9 +169,9 @@ def test_latency_hip():
 
 
 def test_latency_minference():
-    with open(QWEN3_1M_CONFIG, "r") as f: 
+    with open(QWEN3_1M_CONFIG, "r") as f:
         config = json.load(f)
-        config["max_position_embeddings"] = 1024*1024
+        config["max_position_embeddings"] = 1024 * 1024
         print(config)
         config = json.dumps(config)
 
@@ -179,8 +182,8 @@ def test_latency_minference():
         ep_size=ep_size,
         attention_backend="dual_chunk_flash_attn",
         disable_radix_cache=True,
-        context_length=1024*1024,
-        max_total_tokens=1024*1024,
+        context_length=1024 * 1024,
+        max_total_tokens=1024 * 1024,
         chunked_prefill_size=131072,
         log_level=log_level,
         enable_mixed_chunk=False,
@@ -203,7 +206,7 @@ def test_latency_minference():
 def test_latency_fa3():
 
     original_pos = 262144
-    extended_pos = 2**20 + 16384 # plus a little extra in case it overflows
+    extended_pos = 2**20 + 16384  # plus a little extra in case it overflows
     extend_factor = extended_pos / original_pos
 
     model = sgl.Engine(
@@ -214,15 +217,15 @@ def test_latency_fa3():
         attention_backend="fa3",
         disable_radix_cache=True,
         context_length=extended_pos,
-        max_total_tokens=1024*1024,
+        max_total_tokens=1024 * 1024,
         chunked_prefill_size=131072,
         log_level=log_level,
         cuda_graph_max_bs=1,
         cuda_graph_bs=[1],
         show_time_cost=True,
         json_model_override_args=(
-            '{"rope_scaling":{"rope_type":"yarn","factor":' + f'{extend_factor},'
-            '"original_max_position_embeddings":' + f'{original_pos}' + '}}'
+            '{"rope_scaling":{"rope_type":"yarn","factor":' + f"{extend_factor},"
+            '"original_max_position_embeddings":' + f"{original_pos}" + "}}"
         ),
     )
 
@@ -236,10 +239,11 @@ def test_latency_fa3():
     with open(os.path.join(OUTFILE_PATH, f"fa3.jsonl"), "w") as f:
         json.dump(out, f)
 
+
 def test_latency_fa2():
 
     original_pos = 262144
-    extended_pos = 2**20 + 16384 # plus a little extra in case it overflows
+    extended_pos = 2**20 + 16384  # plus a little extra in case it overflows
     extend_factor = extended_pos / original_pos
 
     model = sgl.Engine(
@@ -250,15 +254,15 @@ def test_latency_fa2():
         attention_backend="flashinfer",
         disable_radix_cache=True,
         context_length=extended_pos,
-        max_total_tokens=1024*1024,
+        max_total_tokens=1024 * 1024,
         chunked_prefill_size=131072,
         log_level=log_level,
         cuda_graph_max_bs=1,
         cuda_graph_bs=[1],
         show_time_cost=True,
         json_model_override_args=(
-            '{"rope_scaling":{"rope_type":"yarn","factor":' + f'{extend_factor},'
-            '"original_max_position_embeddings":' + f'{original_pos}' + '}}'
+            '{"rope_scaling":{"rope_type":"yarn","factor":' + f"{extend_factor},"
+            '"original_max_position_embeddings":' + f"{original_pos}" + "}}"
         ),
     )
 
@@ -272,12 +276,14 @@ def test_latency_fa2():
     with open(os.path.join(OUTFILE_PATH, f"fa2.jsonl"), "w") as f:
         json.dump(out, f)
 
+
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, required=True)
     args = parser.parse_args()
-    
+
     with torch.no_grad():
         if args.method == "minf":
             test_latency_minference()
@@ -291,5 +297,5 @@ if __name__ == "__main__":
             test_latency_fa3()
         elif args.method == "fa2":
             test_latency_fa2()
-        else: 
+        else:
             raise Exception()

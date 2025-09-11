@@ -52,7 +52,9 @@ class AnalysisResult(BaseModel):
 
     summary: str = Field(description="Brief summary of the analysis")
     key_points: List[str] = Field(description="List of key points identified")
-    sentiment: str = Field(description="Overall sentiment: positive, negative, or neutral")
+    sentiment: str = Field(
+        description="Overall sentiment: positive, negative, or neutral"
+    )
     confidence: float = Field(description="Confidence score between 0 and 1")
     recommendations: List[str] = Field(description="List of actionable recommendations")
 
@@ -89,7 +91,9 @@ class StructuredStreamingClient:
         self.client = OpenAI()
         self.async_client = AsyncOpenAI()
 
-    def generate_structured_output(self, prompt: str, response_model: Type[BaseModel]) -> BaseModel:
+    def generate_structured_output(
+        self, prompt: str, response_model: Type[BaseModel]
+    ) -> BaseModel:
         """
         Generate structured output using JSON schema.
 
@@ -104,7 +108,10 @@ class StructuredStreamingClient:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that generates structured data."},
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that generates structured data.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 response_format={
@@ -131,7 +138,9 @@ class StructuredStreamingClient:
             print(f"Error generating structured output: {e}")
             raise
 
-    def stream_structured_output(self, prompt: str, response_model: Type[BaseModel]) -> BaseModel:
+    def stream_structured_output(
+        self, prompt: str, response_model: Type[BaseModel]
+    ) -> BaseModel:
         """
         Stream structured output and parse the final result.
 
@@ -146,7 +155,10 @@ class StructuredStreamingClient:
             stream = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that generates structured data."},
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that generates structured data.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 response_format={
@@ -186,7 +198,9 @@ class StructuredStreamingClient:
             print(f"Error streaming structured output: {e}")
             raise
 
-    async def async_stream_structured_output(self, prompt: str, response_model: Type[BaseModel]) -> BaseModel:
+    async def async_stream_structured_output(
+        self, prompt: str, response_model: Type[BaseModel]
+    ) -> BaseModel:
         """
         Asynchronously stream structured output.
 
@@ -201,7 +215,10 @@ class StructuredStreamingClient:
             stream = await self.async_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that generates structured data."},
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that generates structured data.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 response_format={
@@ -317,7 +334,12 @@ class StructuredStreamingClient:
         else:
             raise ValueError(f"Unsupported operation: {operation}")
 
-        return CalculatorResult(operation=operation, operands=operands, result=round(result, 2), expression=expression)
+        return CalculatorResult(
+            operation=operation,
+            operands=operands,
+            result=round(result, 2),
+            expression=expression,
+        )
 
     def function_calling_with_streaming(self, prompt: str) -> str:
         """Demonstrate function calling with streaming."""
@@ -395,7 +417,9 @@ class StructuredStreamingClient:
                 if function_name == "get_weather":
                     result = self.get_weather(function_args["location"])
                 elif function_name == "calculate":
-                    result = self.calculate(function_args["operation"], function_args["operands"])
+                    result = self.calculate(
+                        function_args["operation"], function_args["operands"]
+                    )
                 else:
                     return f"Unknown function: {function_name}"
 
@@ -408,7 +432,11 @@ class StructuredStreamingClient:
                             "content": "You are a helpful assistant that can get weather information and perform calculations.",
                         },
                         {"role": "user", "content": prompt},
-                        {"role": "function", "name": function_name, "content": result.model_dump_json()},
+                        {
+                            "role": "function",
+                            "name": function_name,
+                            "content": result.model_dump_json(),
+                        },
                     ],
                     temperature=1,
                     stream=True,
@@ -510,7 +538,9 @@ class StructuredStreamingClient:
                 if function_name == "get_weather":
                     result = self.get_weather(function_args["location"])
                 elif function_name == "calculate":
-                    result = self.calculate(function_args["operation"], function_args["operands"])
+                    result = self.calculate(
+                        function_args["operation"], function_args["operands"]
+                    )
                 else:
                     return f"Unknown function: {function_name}"
 
@@ -523,7 +553,11 @@ class StructuredStreamingClient:
                             "content": "You are a helpful assistant that can get weather information and perform calculations.",
                         },
                         {"role": "user", "content": prompt},
-                        {"role": "function", "name": function_name, "content": result.model_dump_json()},
+                        {
+                            "role": "function",
+                            "name": function_name,
+                            "content": result.model_dump_json(),
+                        },
                     ],
                     stream=True,
                 )
@@ -596,7 +630,7 @@ def main():
     # Example 1: Generate structured output for a person
     print("\n1. Generating structured output for a person...")
     person_prompt = """
-    Create a profile for a fictional software engineer. Include their name, age, 
+    Create a profile for a fictional software engineer. Include their name, age,
     occupation, skills, and location. Make it realistic and detailed.
     """
 
@@ -609,7 +643,7 @@ def main():
     # Example 2: Stream structured output for a company
     print("\n2. Streaming structured output for a company...")
     company_prompt = """
-    Create a profile for a fictional tech startup company. Include the company name, 
+    Create a profile for a fictional tech startup company. Include the company name,
     industry, founding year, employee count, headquarters location, and CEO information.
     Make it realistic and inspiring.
     """
@@ -633,13 +667,15 @@ def main():
     # Example 4: Async structured streaming
     print("\n4. Async structured streaming...")
     analysis_prompt = """
-    Analyze the current state of artificial intelligence in healthcare. Provide a summary, 
+    Analyze the current state of artificial intelligence in healthcare. Provide a summary,
     key points, sentiment analysis, confidence score, and recommendations.
     """
 
     async def run_async_example():
         try:
-            analysis = await client.async_stream_structured_output(analysis_prompt, AnalysisResult)
+            analysis = await client.async_stream_structured_output(
+                analysis_prompt, AnalysisResult
+            )
             print(f"\nGenerated Analysis: {analysis.model_dump_json(indent=2)}")
         except Exception as e:
             print(f"Error: {e}")
@@ -697,7 +733,11 @@ def demo_advanced_features():
         "properties": {
             "title": {"type": "string", "description": "Article title"},
             "word_count": {"type": "integer", "description": "Estimated word count"},
-            "topics": {"type": "array", "items": {"type": "string"}, "description": "Main topics covered"},
+            "topics": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Main topics covered",
+            },
             "difficulty": {
                 "type": "string",
                 "enum": ["beginner", "intermediate", "advanced"],
@@ -709,7 +749,9 @@ def demo_advanced_features():
     }
 
     print("\n5. Using custom JSON schema...")
-    custom_prompt = "Analyze this article about machine learning and provide structured metadata."
+    custom_prompt = (
+        "Analyze this article about machine learning and provide structured metadata."
+    )
 
     try:
         response = client.client.chat.completions.create(
@@ -720,7 +762,11 @@ def demo_advanced_features():
             ],
             response_format={
                 "type": "json_schema",
-                "json_schema": {"name": "ArticleAnalysis", "schema": custom_schema, "strict": True},
+                "json_schema": {
+                    "name": "ArticleAnalysis",
+                    "schema": custom_schema,
+                    "strict": True,
+                },
             },
             temperature=1,
             top_p=0.9,

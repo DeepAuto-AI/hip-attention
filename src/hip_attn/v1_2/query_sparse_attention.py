@@ -866,7 +866,7 @@ def keep(conf):
 #     do_autotune=True,
 # )
 @triton.autotune(
-    configs=configs, 
+    configs=configs,
     key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
     restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
 )
@@ -1829,7 +1829,7 @@ class _attention(torch.autograd.Function):
                 bsa_heap_indices = torch.empty(
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
                     device=q.device,
-                    dtype=q.dtype
+                    dtype=q.dtype,
                 )
                 bsa_indices = torch.full(  # for real block indices
                     (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
