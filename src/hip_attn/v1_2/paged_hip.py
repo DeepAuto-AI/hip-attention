@@ -21,6 +21,7 @@ from hip_attn.v1_2.utils import capture
 def convert_qsa_mask_to_img(
     bsa_indices: np.ndarray,
     bsa_scores: Optional[np.ndarray],
+    seq_len: np.ndarray,
     tdst: np.ndarray,
     TDST: int,
     TSRC: int,
@@ -31,6 +32,8 @@ def convert_qsa_mask_to_img(
     img = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 3), dtype=np.int32)
     img_cnt = np.zeros((TDST // POOL_SIZE, TSRC // POOL_SIZE, 1), dtype=np.int32)
 
+    px_cnt = 0
+    
     for i_q in numba.prange(N_SPARSE_Q):
         for k in range(N_BLOCK):
             pty = tdst[i_q]
@@ -44,6 +47,7 @@ def convert_qsa_mask_to_img(
                 img[pty // POOL_SIZE, ptx // POOL_SIZE, 1] += int(255 * score)
                 img[pty // POOL_SIZE, ptx // POOL_SIZE, 2] += int(255 * (1 - score))
                 img_cnt[pty // POOL_SIZE, ptx // POOL_SIZE] += 1
+                px_cnt += 1
 
     for i in numba.prange(img.shape[0]):
         for j in range(img.shape[1]):
@@ -52,6 +56,8 @@ def convert_qsa_mask_to_img(
                 img[i, j] = (img[i, j] / c).astype(np.int32)
 
     img = img.astype(np.uint8)
+    
+    print(px_cnt)
 
     return img
 
@@ -1546,7 +1552,7 @@ def _forward_delta_attn(
                 # NOTE: using Delta 2
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 # NOTE: save mask image
-                debug_qsa_masking = False
+                debug_qsa_masking = True
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
@@ -1606,7 +1612,9 @@ def _forward_delta_attn(
                         scores = (scores - scores_min) / (scores_max - scores_min)
                         mask = convert_qsa_mask_to_img(
                             bsa_indices[0, 0].cpu().numpy(),
-                            scores.cpu().float().numpy(),
+                            # scores.cpu().float().numpy(),
+                            None,
+                            idx.cpu().numpy(),
                             idx.cpu().numpy(),
                             query.shape[1],
                             int(mask_idx.amax().item()) + 256,
@@ -1802,9 +1810,8 @@ def _forward_delta_attn(
                         mask = convert_qsa_mask_to_img(
                             indices[0].cpu().numpy(),
                             None,
-                            args_sparse.position_ids[0, :: args_sparse.block_size_q]
-                            .cpu()
-                            .numpy(),
+                            args_sparse.position_ids[0, :: args_sparse.block_size_q].cpu().numpy(),
+                            idx,
                             query.shape[1],
                             int(args_sparse.position_ids.amax().item()) + 256,
                             256,

@@ -855,10 +855,20 @@ def keep(conf):
     return True
 
 
+# @triton_jit(
+#     configs=list(filter(keep, configs)),
+#     key=[
+#         "N_CTX",
+#         "N_KV",
+#         "HEAD_DIM",
+#         "USING_PAGED_CACHE",
+#     ],
+#     do_autotune=True,
+# )
 @triton.autotune(
-    configs=configs,
+    configs=configs, 
     key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
-    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"]
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
 )
 @triton.jit
 def _attn_fwd(

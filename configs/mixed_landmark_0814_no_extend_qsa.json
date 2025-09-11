@@ -4,7 +4,7 @@
     "__using_landmark": false,
     "__using_dense_prefill": true,
     "__seq_thresh_fa3": 0,
-    "__delta_attention_args": "window_0-diff_1-w_16-dense_decode",
+    "__delta_attention_args": "window_0-diff_1-w_16-dense_decode-smooth",
     "using_extend": false,
     "dense_layers": [0, 1, 2, 47, 46, 45],
     "mask_refresh_interval": [96],
