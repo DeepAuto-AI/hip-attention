@@ -1458,6 +1458,7 @@ def _forward_delta_attn(
                 sparse_mx_for_diff = sparse_mx[:, idx]
                 sparse_nc_for_diff = sparse_nc[:, idx]
 
+            idx_sparse = idx
             idx = torch.cat(
                 (
                     idx,
@@ -1466,7 +1467,27 @@ def _forward_delta_attn(
             )
             if (not test_qsa_masking) and (delta_attention_args_diff == 2):
                 idx = torch.arange(num_sparse, num_queries, device=query.device)
-            query_for_dense = query[:, idx]
+                query_for_dense = query[:, idx]
+            else:
+                delta_pool_q = os.getenv("DELTA_POOL_Q", "0") == "1"
+                if delta_pool_q:
+                    query_for_dense = torch.cat(
+                        [
+                            query[:, :num_sparse]
+                            .reshape(
+                                query.shape[0],
+                                num_sparse // delta_attention_args_w,
+                                delta_attention_args_w,
+                                query.shape[2],
+                                query.shape[3],
+                            )
+                            .mean(dim=2),
+                            query[:, idx[idx_sparse.shape[0] :]],
+                        ],
+                        dim=1,
+                    )
+                else:
+                    query_for_dense = query[:, idx]
 
         if (args.need_apply_rope and args.using_extend) and (
             delta_attention_args_extend == "none"
@@ -1551,6 +1572,9 @@ def _forward_delta_attn(
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 # NOTE: save mask image
                 debug_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA_IMSAVE", "0") == "1"
+                debug_qsa_masking_state = (
+                    os.getenv("HIP_DEBUG_DELTA_QSA_IMSAVE_STATE", "0") == "1"
+                )
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
@@ -1830,6 +1854,23 @@ def _forward_delta_attn(
                         cv2.imwrite(
                             f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
                         )
+
+                        if debug_qsa_masking_state:
+                            torch.save(
+                                {
+                                    "q": query[:, :-num_last_dense],
+                                    "k": k,
+                                    "v": k,
+                                    "using_paged_cache": args.using_paged_cache,
+                                    "k_paged": args.gather_k_from_paged_cache(),
+                                    "v_paged": args.gather_v_from_paged_cache(),
+                                    "seq_lens": args_sparse.position_ids + 1,
+                                    "indices": indices,
+                                    "ks": ks,
+                                    "sm_scale": sm_scale,
+                                },
+                                f"dummy_qsa_mask_ilayer_{args.layer_id}_state.pth",
+                            )
 
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
