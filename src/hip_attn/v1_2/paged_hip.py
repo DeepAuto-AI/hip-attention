@@ -1550,7 +1550,7 @@ def _forward_delta_attn(
                 # NOTE: using Delta 2
                 test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
                 # NOTE: save mask image
-                debug_qsa_masking = True
+                debug_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA_IMSAVE", "0") == "1"
                 mask_idx = args.position_ids[:, idx]
                 qsa_mask_block_size_q = int(os.getenv("BSA_BLOCK_Q", "128"))
                 qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
