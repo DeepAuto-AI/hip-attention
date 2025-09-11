@@ -1625,7 +1625,7 @@ def _forward_delta_attn(
                     exact_k=exact_k,
                     threshold_refresh_interval=threshold_refresh_interval,
                 )
-                
+
                 if delta_pool_q:
                     context_dense_non_pooled = query_sparse_attention(
                         query_for_dense_non_pooled.permute(0, 2, 1, 3).contiguous(),
@@ -1984,7 +1984,6 @@ def _forward_delta_attn(
             # if delta_attention_args_extend == "self_extend":
             #     # FIXME this is surely bug...
             #     last_context_sparse = context_sparse_raw[:, -1024:].clone()
-            
             # context_dense, context_last_dense = context_dense[:, :-(num_queries-num_sparse):], context_dense[:, -(num_queries-num_sparse):]
             # context_dense, context_last_dense = context_dense_non_pooled.permute(0, 2, 1, 3)[:, :-(num_queries-num_sparse):], context_dense_non_pooled.permute(0, 2, 1, 3)[:, -(num_queries-num_sparse):]
             # context_sparse_mean = context_sparse[:, :num_sparse]\
@@ -2002,7 +2001,6 @@ def _forward_delta_attn(
             #         + torch.repeat_interleave(context_delta, delta_attention_args_w, 1),
             #     context_last_dense,
             # ], dim=1)
-            
             # context[:, idx[:-(num_queries-num_sparse)]] = context_dense_non_pooled.permute(0, 2, 1, 3)
 
             if delta_pool_q:
@@ -2011,7 +2009,7 @@ def _forward_delta_attn(
                 #     context_dense[:, -(num_queries-num_sparse):],
                 # ], dim=1)
                 context_dense = context_dense_non_pooled.permute(0, 2, 1, 3)
-            
+
             context = apply_delta(
                 context_dense,
                 context_sparse,
