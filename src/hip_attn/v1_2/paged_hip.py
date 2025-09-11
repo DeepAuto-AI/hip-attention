@@ -56,8 +56,6 @@ def convert_qsa_mask_to_img(
                 img[i, j] = (img[i, j] / c).astype(np.int32)
 
     img = img.astype(np.uint8)
-    
-    print(px_cnt)
 
     return img
 
@@ -1806,20 +1804,6 @@ def _forward_delta_attn(
 
                     # print(ks.float().mean().item() * args_sparse.block_size_k)
 
-                    if debug_qsa_masking and (get_local_rank() == 0):
-                        mask = convert_qsa_mask_to_img(
-                            indices[0].cpu().numpy(),
-                            None,
-                            args_sparse.position_ids[0, :: args_sparse.block_size_q].cpu().numpy(),
-                            idx,
-                            query.shape[1],
-                            int(args_sparse.position_ids.amax().item()) + 256,
-                            256,
-                        )
-                        cv2.imwrite(
-                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
-                        )
-
                     bsa_block_size_q = 128
                     if args_sparse.block_size_q > bsa_block_size_q:
                         assert (args_sparse.block_size_q % bsa_block_size_q) == 0
@@ -1830,6 +1814,20 @@ def _forward_delta_attn(
                         ks_start_end = ks_start_end.repeat_interleave(nrepeat, 1)
                         args_sparse.block_size_q = bsa_block_size_q
                         args_sparse.block_sparse_block_size_q = bsa_block_size_q
+                    
+                    if debug_qsa_masking and (get_local_rank() == 0):
+                        mask = convert_qsa_mask_to_img(
+                            indices[0].cpu().numpy(),
+                            None,
+                            torch.arange(0, indices.shape[1]).numpy() * bsa_block_size_q, 
+                            torch.arange(0, indices.shape[1]).numpy() * bsa_block_size_q,
+                            query.shape[1],
+                            int(mask_idx.amax().item()) + 256,
+                            256,
+                        )
+                        cv2.imwrite(
+                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                        )
 
                     context_sparse = bsa_fn(
                         q=(query[:, :-num_last_dense] * sm_scale).to(query.dtype),
