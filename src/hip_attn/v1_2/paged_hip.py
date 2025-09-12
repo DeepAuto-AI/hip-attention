@@ -2466,11 +2466,11 @@ def _forward_bsa_meanpool(
         warnings.warn(info_msg)
 
     ratio = int(args.block_size_q / args.block_size_k)
-    mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
+    # mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
 
     mask = (
         torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :] * args.block_size_k
-        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * args.block_size_q - args.sliding_window_size + max(args.block_size_k, args.block_size_q))
+        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * args.block_size_q - args.sliding_window_size)
     ).expand(*qk.shape)
 
     qk += mask * torch.finfo(qk.dtype).min
@@ -2481,7 +2481,6 @@ def _forward_bsa_meanpool(
     # do topk =====================================================
     topk = qk.topk(K, dim=-1).indices * args.block_size_k
     topk = topk.sort(dim=-1).values
-    topk = torch.where(topk > mask_n.view(1, 1, -1, 1), 987654321, topk) # (b, h, s, k)
 
     args = args.clone()
     if args.rope_range is None:
@@ -3255,7 +3254,7 @@ def _forward_paged_hip(
             (not is_decode)
             and (dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
         ):
-            if os.path.exists(filename):
+            while os.path.exists(filename):
                 pre, post = filename.split(".")
                 filename = pre[:-1] + f"{int(pre[-1]) + 1}." + post
 
