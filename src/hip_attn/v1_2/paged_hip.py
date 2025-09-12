@@ -2467,9 +2467,11 @@ def _forward_bsa_meanpool(
 
     ratio = int(args.block_size_q / args.block_size_k)
     mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
-    mask = torch.ones_like(qk)
-    for qr in range(qk.size(2)):
-        mask[:, :, qr, :mask_n[qr]] = 0
+
+    mask = (
+        torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :] * block_size_k
+        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * block_size_q - sliding_window_size + max(block_size_k, block_size_q))
+    ).expand(*qk.shape)
 
     qk += mask * torch.finfo(qk.dtype).min
     qk = qk.softmax(dim=-1)
@@ -2477,7 +2479,7 @@ def _forward_bsa_meanpool(
     assert K != 0, "you should set BSA_K"
 
     # do topk =====================================================
-    topk = qk.topk(K, dim=-1).indices
+    topk = qk.topk(K, dim=-1).indices * args.block_size_k
     topk = topk.sort(dim=-1).values
     topk = torch.where(topk > mask_n.view(1, 1, -1, 1), 987654321, topk) # (b, h, s, k)
 
@@ -3046,7 +3048,7 @@ def _forward_paged_hip(
             max_context_len=max_batch_context_len,
             k_descale=k_descale,
             v_descale=v_descale,
-            inner_function_do_scale=False,
+            inner_function_do_scale=True,
             inner_function=__forward_bsa_meanpool_attn_wrapper,
         )
     elif using_delta_attention and (
@@ -3242,7 +3244,7 @@ def _forward_paged_hip(
         and (layer_id in layers_to_capture)
     ):
         # root = "./saves/sglang_decode"
-        root = "/data/jeff/delta/datasave/fa3"
+        root = os.environ.get("HIP_DEBUG_NEED_CHECKOUT_ROOT", "./saves")
         os.makedirs(root, exist_ok=True)
         if not os.path.exists(root):
             _CHECKOUT_COUNTER = 0
