@@ -2486,9 +2486,9 @@ def _forward_bsa_meanpool(
     if args.rope_range is None:
         args.rope_range = (0, HID)
 
-    args.block_size_q = args.block_sparse_block_size_q
-    args.block_size_k = args.stages[-1].stage_chunk_size
-    args.second_stage_k = 0
+    # args.block_size_q = args.block_sparse_block_size_q
+    # args.block_size_k = args.stages[-1].stage_chunk_size
+    # args.second_stage_k = 0
     args.sink_token_size = sliding_window_sink
     args.sliding_window_size = (
         sliding_window_size if sliding_window_size is not None else 1024
@@ -2509,14 +2509,13 @@ def _forward_bsa_meanpool(
     args_sparse.block_size_q = args.block_size_q
     args_sparse.block_sparse_block_size_q = args.block_size_q
     args_sparse.block_size_k = args.block_size_k
-    args_sparse.sliding_window_size = (args.sliding_window_size)
+    args_sparse.sliding_window_size = args.sliding_window_size
 
     indices = topk.flatten(0, 1)
     active_mask = indices < (
         args_sparse.position_ids[
             :, :: args_sparse.block_size_q, None
         ].repeat_interleave(query.shape[2], 0)
-        + args.block_size_q
     )
     ks = active_mask.int().sum(-1)
     ks_count = ks.unsqueeze(-1)
