@@ -2,6 +2,7 @@ import copy
 import os
 import warnings
 from typing import Any, List, Optional
+import math
 
 import cv2
 import numba
@@ -1840,6 +1841,7 @@ def _forward_delta_attn(
                         args_sparse.block_sparse_block_size_q = bsa_block_size_q
 
                     if debug_qsa_masking and (get_local_rank() == 0):
+                        root = "/data/jeff/delta/datasave"
                         mask = convert_qsa_mask_to_img(
                             indices[0].cpu().numpy(),
                             None,
@@ -1852,7 +1854,7 @@ def _forward_delta_attn(
                             256,
                         )
                         cv2.imwrite(
-                            f"dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                            f"{root}/dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
                         )
 
                         if debug_qsa_masking_state:
@@ -1869,7 +1871,7 @@ def _forward_delta_attn(
                                     "ks": ks,
                                     "sm_scale": sm_scale,
                                 },
-                                f"dummy_qsa_mask_ilayer_{args.layer_id}_state.pth",
+                                f"{root}/dummy_qsa_mask_ilayer_{args.layer_id}_state.pth",
                             )
 
                     context_sparse = bsa_fn(
@@ -2413,6 +2415,140 @@ def _forward_partial_fa3(
 
 
 @capture
+def _forward_bsa_meanpool(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    args: HiPAttentionArgs,
+    sliding_window_size: int,
+    sliding_window_sink: int,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+):
+    query = q
+    key = args.gather_k_from_paged_cache()
+    value = args.gather_v_from_paged_cache()
+    bsa_fn = get_block_sparse_backend(query, args.disable_flashdecode)
+
+    # dist.barrier()
+    # if get_tensor_model_parallel_rank() == 0:
+    #     print(bsa_fn, args.using_extend, sliding_window_size, args.using_chunked_sliding_window)
+
+    # if (get_local_rank() == 0):
+    #     info_msg = f"{query.size()=} {key.size()=} {value.size()} "
+    #     warnings.warn(info_msg)
+
+    # trim excess off of q,k,v =====================================================
+    BSZ, TDST, HEAD, HID = query.shape
+    _, TSRC, HEAD_KV, _ = key.shape
+    assert TDST > 1, f"this should not be used in decode: {TDST=}"
+
+    if TSRC != TDST:
+        TSRC = TDST
+        key = key[:, :TSRC]
+        value = value[:, :TSRC]
+
+    to_trim = TDST % args.block_size_q
+    q_trimmed, k_trimmed = query, key
+    if to_trim > 0:
+        q_trimmed = query[:, :-to_trim]
+        k_trimmed = key[:, :-to_trim]
+
+    # repeat GQA, meanpool, attn =====================================================
+    q_trimmed = q_trimmed.reshape(BSZ, TDST // args.block_size_q, args.block_size_q, HEAD, HID).mean(dim=2)
+    k_trimmed = k_trimmed.reshape(BSZ, TSRC // args.block_size_k, args.block_size_k, HEAD_KV, HID).mean(dim=2, keepdim=True)
+    k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(BSZ, TSRC // args.block_size_k, HEAD, HID)
+
+    qk = torch.einsum("bqhd,bkhd->bhqk", q_trimmed, k_trimmed / math.sqrt(HID))
+
+    if (get_local_rank() == 0):
+        info_msg = f"{qk.size()=} "
+        warnings.warn(info_msg)
+
+    ratio = int(args.block_size_q / args.block_size_k)
+    mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
+    mask = torch.ones_like(qk)
+    for qr in range(qk.size(2)):
+        mask[:, :, qr, :mask_n[qr]] = 0
+
+    qk += mask * torch.finfo(qk.dtype).min
+    qk = qk.softmax(dim=-1)
+    K = int(os.environ.get("BSA_K", "0"))
+    assert K != 0, "you should set BSA_K"
+
+    # do topk =====================================================
+    topk = qk.topk(K, dim=-1).indices
+    topk = topk.sort(dim=-1).values
+    topk = torch.where(topk > mask_n.view(1, 1, -1, 1), 987654321, topk) # (b, h, s, k)
+
+    args = args.clone()
+    if args.rope_range is None:
+        args.rope_range = (0, HID)
+
+    args.block_size_q = args.block_sparse_block_size_q
+    args.block_size_k = args.stages[-1].stage_chunk_size
+    args.second_stage_k = 0
+    args.sink_token_size = sliding_window_sink
+    args.sliding_window_size = (
+        sliding_window_size if sliding_window_size is not None else 1024
+    )
+    args.sliding_window_indices = None
+
+    BDST = triton.cdiv(TDST, args.block_size_q)
+    BH = BSZ * HEAD
+
+    # indices = torch.zeros((BH, BDST, 0), dtype=torch.int64, device=query.device)
+    # ks_count = ks.unsqueeze(-1)
+    # ks_start_end = torch.zeros((BH, BDST, 2), dtype=torch.int64, device=query.device)
+    # ks = torch.zeros((BH, BDST), dtype=torch.int64, device=query.device)
+
+    args_sparse = args.clone()
+    args_sparse.rope_range = (0, query.shape[-1])
+    args_sparse.position_ids = args_sparse.position_ids[:, :-to_trim]
+    args_sparse.block_size_q = args.block_size_q
+    args_sparse.block_sparse_block_size_q = args.block_size_q
+    args_sparse.block_size_k = args.block_size_k
+    args_sparse.sliding_window_size = (args.sliding_window_size)
+
+    indices = topk.flatten(0, 1)
+    active_mask = indices < (
+        args_sparse.position_ids[
+            :, :: args_sparse.block_size_q, None
+        ].repeat_interleave(query.shape[2], 0)
+        + args.block_size_q
+    )
+    ks = active_mask.int().sum(-1)
+    ks_count = ks.unsqueeze(-1)
+    ks_start_end = torch.zeros(
+        (ks.shape[0], ks.shape[1], 2),
+        dtype=torch.int32,
+        device=query.device,
+    )
+    ks_start_end[:, :, -1] = ks
+
+    context = bsa_fn(
+        q=query,
+        k=key,
+        v=value,
+        seq_lens=args.position_ids + 1,
+        indices=indices,
+        ks=ks,
+        ks_count=ks_count,
+        ks_start_end=ks_start_end,
+        access_counter=None,
+        cache_miss_counter=None,
+        EXTEND_BACKEND=args.sa_extend_backend,
+        model_context_length=args.model_context_length,
+        extend_context_length=args.extend_context_length,
+        offload_update_cache=False,
+        args=args_sparse,
+        k_descale=k_descale,
+        v_descale=v_descale,
+    )
+    context = context.to(query.dtype)
+    return context, None
+
+@capture
 def _forward_sliding_window(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2767,6 +2903,7 @@ def _forward_paged_hip(
     delta_attention_args_iter_corr = False
     # delta_attention_args_adjust_norm_const = False
     delta_attention_args_extend = "none"
+    bsa_meanpool = False
 
     if using_delta_attention:
         for word in delta_attention_args.split("-"):
@@ -2783,6 +2920,8 @@ def _forward_paged_hip(
                 delta_attention_args_dense_decode = True
             elif word == "recompute_dense":
                 pass  # backward compat.
+            elif word == "bsa_meanpool":
+                bsa_meanpool = True
             elif word == "iter_corr":
                 delta_attention_args_iter_corr = True
             # elif word == "adjust_norm_const":
@@ -2826,6 +2965,7 @@ def _forward_paged_hip(
                 f"{delta_attention_args_exp_w=} "
                 # f"{delta_attention_args_adjust_norm_const=} "
                 f"{delta_attention_args_extend=} "
+                f"{bsa_meanpool=} "
             )
             warnings.warn(info_msg)
 
@@ -2870,6 +3010,44 @@ def _forward_paged_hip(
             v_descale=v_descale,
             inner_function_do_scale=True,
             inner_function=__forward_sliding_window_wrapper,
+        )
+    elif bsa_meanpool and (
+        (not is_decode)
+    ):
+        def __forward_bsa_meanpool_attn_wrapper(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            args: HiPAttentionArgs,
+            cached_metadata: HiPAttentionOutputMetadata,
+        ):
+            return _forward_bsa_meanpool(
+                q,
+                k,
+                v,
+                args=args,
+                sliding_window_size=sliding_window_size,
+                sliding_window_sink=sliding_window_sink,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+
+        context, metadata = _forward_partial_fa3(
+            q=query,
+            k=k,
+            v=v,
+            sm_scale=sm_scale,
+            rope_is_neox_style=rope_is_neox_style,
+            cached_metadata=cached_metadata,
+            is_decode=is_decode,
+            seq_thresh_fa3=seq_thresh_fa3,
+            mixing_len=mixing_len,
+            args=args,
+            max_context_len=max_batch_context_len,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            inner_function_do_scale=False,
+            inner_function=__forward_bsa_meanpool_attn_wrapper,
         )
     elif using_delta_attention and (
         (not is_decode)  # or (is_decode and delta_attention_args_dense_decode)
@@ -3055,48 +3233,52 @@ def _forward_paged_hip(
         context = torch.cat([context_sparse[:, :-last_dense], context_dense], dim=1)
         context = context[:, -query.shape[1] :, :, :].contiguous()
 
-    layers_to_capture = [0, 1, 2, 3, 4, 8, 12, 16, 24, 31]
+    # layers_to_capture = [0, 1, 2, 3, 4, 8, 12, 16, 24, 31]
+    layers_to_capture = [i for i in range(32)]
     NEED_CHECKOUT = os.getenv("HIP_DEBUG_NEED_CHECKOUT", "0") == "1"
     if (
         NEED_CHECKOUT
         and (get_tensor_model_parallel_rank() == 0)
         and (layer_id in layers_to_capture)
     ):
-        root = "./saves/sglang_decode"
+        # root = "./saves/sglang_decode"
+        root = "/data/jeff/delta/datasave/fa3"
+        os.makedirs(root, exist_ok=True)
         if not os.path.exists(root):
             _CHECKOUT_COUNTER = 0
         filename = f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer_id}_is_decode_{1 if is_decode else 0}.pth"
         os.makedirs(root, exist_ok=True)
 
-        if is_decode or (
+        if (
             (not is_decode)
             and (dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
         ):
-            torch.save(
-                {
-                    "q": query,
-                    "sm_scale": sm_scale,
-                    "k": (
-                        k
-                        if k is not None
-                        else args.gather_k_from_paged_cache(chunk_size=1)
-                    ),
-                    "v": (
-                        v
-                        if k is not None
-                        else args.gather_v_from_paged_cache(chunk_size=1)
-                    ),
-                    "block_table": block_table,
-                    "cos": rope_cos,
-                    "sin": rope_sin,
-                    "out": context,
-                    "metadata": metadata,
-                },
-                filename,
-            )
-            if is_decode and (layer_id == max(layers_to_capture)):
-                _CHECKOUT_COUNTER += 1
-            print(f"saved {filename}")
+            if not os.path.exists(filename):
+                torch.save(
+                    {
+                        "q": query,
+                        "sm_scale": sm_scale,
+                        "k": (
+                            k
+                            if k is not None
+                            else args.gather_k_from_paged_cache(chunk_size=1)
+                        ),
+                        "v": (
+                            v
+                            if k is not None
+                            else args.gather_v_from_paged_cache(chunk_size=1)
+                        ),
+                        "block_table": block_table,
+                        "cos": rope_cos,
+                        "sin": rope_sin,
+                        "out": context,
+                        "metadata": metadata,
+                    },
+                    filename,
+                )
+                if is_decode and (layer_id == max(layers_to_capture)):
+                    _CHECKOUT_COUNTER += 1
+                print(f"saved {filename}")
 
     context = context.to(query.dtype)
     assert context.dtype == query.dtype, f"{context.dtype} == {query.dtype}"
