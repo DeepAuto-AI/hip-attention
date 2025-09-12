@@ -2459,7 +2459,7 @@ def _forward_bsa_meanpool(
     k_trimmed = k_trimmed.reshape(BSZ, TSRC // args.block_size_k, args.block_size_k, HEAD_KV, HID).mean(dim=2, keepdim=True)
     k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(BSZ, TSRC // args.block_size_k, HEAD, HID)
 
-    qk = torch.einsum("bqhd,bkhd->bhqk", q_trimmed, k_trimmed / math.sqrt(HID))
+    qk = torch.einsum("bqhd,bkhd->bhqk", q_trimmed, k_trimmed)
 
     if (get_local_rank() == 0):
         info_msg = f"{qk.size()=} "
@@ -2469,8 +2469,8 @@ def _forward_bsa_meanpool(
     mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
 
     mask = (
-        torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :] * block_size_k
-        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * block_size_q - sliding_window_size + max(block_size_k, block_size_q))
+        torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :] * args.block_size_k
+        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * args.block_size_q - args.sliding_window_size + max(args.block_size_k, args.block_size_q))
     ).expand(*qk.shape)
 
     qk += mask * torch.finfo(qk.dtype).min
@@ -3248,39 +3248,42 @@ def _forward_paged_hip(
         os.makedirs(root, exist_ok=True)
         if not os.path.exists(root):
             _CHECKOUT_COUNTER = 0
-        filename = f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer_id}_is_decode_{1 if is_decode else 0}.pth"
+        filename = f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer_id}_is_decode_{1 if is_decode else 0}-0.pth"
         os.makedirs(root, exist_ok=True)
 
         if (
             (not is_decode)
             and (dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
         ):
-            if not os.path.exists(filename):
-                torch.save(
-                    {
-                        "q": query,
-                        "sm_scale": sm_scale,
-                        "k": (
-                            k
-                            if k is not None
-                            else args.gather_k_from_paged_cache(chunk_size=1)
-                        ),
-                        "v": (
-                            v
-                            if k is not None
-                            else args.gather_v_from_paged_cache(chunk_size=1)
-                        ),
-                        "block_table": block_table,
-                        "cos": rope_cos,
-                        "sin": rope_sin,
-                        "out": context,
-                        "metadata": metadata,
-                    },
-                    filename,
-                )
-                if is_decode and (layer_id == max(layers_to_capture)):
-                    _CHECKOUT_COUNTER += 1
-                print(f"saved {filename}")
+            if os.path.exists(filename):
+                pre, post = filename.split(".")
+                filename = pre[:-1] + f"{int(pre[-1]) + 1}." + post
+
+            torch.save(
+                {
+                    "q": query,
+                    "sm_scale": sm_scale,
+                    "k": (
+                        k
+                        if k is not None
+                        else args.gather_k_from_paged_cache(chunk_size=1)
+                    ),
+                    "v": (
+                        v
+                        if k is not None
+                        else args.gather_v_from_paged_cache(chunk_size=1)
+                    ),
+                    "block_table": block_table,
+                    "cos": rope_cos,
+                    "sin": rope_sin,
+                    "out": context,
+                    "metadata": metadata,
+                },
+                filename,
+            )
+            if is_decode and (layer_id == max(layers_to_capture)):
+                _CHECKOUT_COUNTER += 1
+            print(f"saved {filename}")
 
     context = context.to(query.dtype)
     assert context.dtype == query.dtype, f"{context.dtype} == {query.dtype}"
