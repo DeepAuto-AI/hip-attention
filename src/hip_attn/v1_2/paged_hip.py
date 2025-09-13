@@ -2514,6 +2514,9 @@ def _forward_bsa_meanpool(
     if to_trim > 0:
         to_pad = args.block_size_q - to_trim
         q_trimmed = torch.cat((query, query[:, -to_pad:]), dim=1)
+    to_trim = TSRC % args.block_size_k
+    if to_trim > 0:
+        to_pad = args.block_size_k - to_trim
         k_trimmed = torch.cat((key, key[:, -to_pad:]), dim=1)
 
     # old version
@@ -2524,9 +2527,9 @@ def _forward_bsa_meanpool(
     #     k_trimmed = key[:, :-to_trim]
 
     # repeat GQA, meanpool, attn =====================================================
-    q_trimmed = q_trimmed.reshape(BSZ, TDST // args.block_size_q, args.block_size_q, HEAD, HID).mean(dim=2)
-    k_trimmed = k_trimmed.reshape(BSZ, TSRC // args.block_size_k, args.block_size_k, HEAD_KV, HID).mean(dim=2, keepdim=True)
-    k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(BSZ, TSRC // args.block_size_k, HEAD, HID)
+    q_trimmed = q_trimmed.reshape(BSZ, triton.cdiv(TDST, args.block_size_q), args.block_size_q, HEAD, HID).mean(dim=2)
+    k_trimmed = k_trimmed.reshape(BSZ, triton.cdiv(TSRC, args.block_size_k), args.block_size_k, HEAD_KV, HID).mean(dim=2, keepdim=True)
+    k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(BSZ, triton.cdiv(TSRC, args.block_size_k), HEAD, HID)
 
     qk = torch.einsum("bqhd,bkhd->bhqk", q_trimmed, k_trimmed)
 
