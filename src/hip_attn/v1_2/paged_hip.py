@@ -2500,6 +2500,9 @@ def _forward_bsa_meanpool(
     _, TSRC, HEAD_KV, _ = key.shape
     assert TDST > 1, f"this should not be used in decode: {TDST=}"
 
+    args.block_size_q = 128
+    args.block_size_k = 64
+
     if TSRC != TDST:
         TSRC = TDST
         key = key[:, :TSRC]
@@ -2532,7 +2535,8 @@ def _forward_bsa_meanpool(
 
     qk += mask * torch.finfo(qk.dtype).min
     qk = qk.softmax(dim=-1)
-    K = int(os.environ.get("BSA_K", "0"))
+    # K = int(os.environ.get("BSA_K", "0"))
+    K = 4096 // args.block_size_k
     assert K != 0, "you should set BSA_K"
 
     # do topk =====================================================
@@ -2562,13 +2566,16 @@ def _forward_bsa_meanpool(
 
     args_sparse = args.clone()
     args_sparse.rope_range = (0, query.shape[-1])
-    args_sparse.position_ids = args_sparse.position_ids[:, :-to_trim]
+    args_sparse.position_ids = args_sparse.position_ids[:, :]
     args_sparse.block_size_q = args.block_size_q
     args_sparse.block_sparse_block_size_q = args.block_size_q
     args_sparse.block_size_k = args.block_size_k
     args_sparse.sliding_window_size = args.sliding_window_size
 
     indices = topk.flatten(0, 1)
+    if math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q) > indices.shape[1]:
+        n_repeat = math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q) - indices.shape[1]
+        indices = torch.cat([indices, torch.repeat_interleave(indices[:, -1:, :], n_repeat, 1)], dim=1)
     active_mask = indices < (
         args_sparse.position_ids[
             :, :: args_sparse.block_size_q, None
@@ -3083,8 +3090,8 @@ def _forward_paged_hip(
                 k,
                 v,
                 args=args,
-                sliding_window_size=sliding_window_size,
-                sliding_window_sink=sliding_window_sink,
+                sliding_window_size=max(args.sliding_window_size, sliding_window_size),
+                sliding_window_sink=max(args.sink_token_size, sliding_window_sink),
                 k_descale=k_descale,
                 v_descale=v_descale,
             )
