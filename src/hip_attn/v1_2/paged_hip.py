@@ -2508,11 +2508,20 @@ def _forward_bsa_meanpool(
         key = key[:, :TSRC]
         value = value[:, :TSRC]
 
-    to_trim = TDST % args.block_size_q
+    # new version, passkey is wrong for some reason
+    to_trim, to_pad = TDST % args.block_size_q, 0
     q_trimmed, k_trimmed = query, key
     if to_trim > 0:
-        q_trimmed = query[:, :-to_trim]
-        k_trimmed = key[:, :-to_trim]
+        to_pad = args.block_size_q - to_trim
+        q_trimmed = torch.cat((query, query[:, -to_pad:]), dim=1)
+        k_trimmed = torch.cat((key, key[:, -to_pad:]), dim=1)
+
+    # old version
+    # to_trim = TDST % args.block_size_q
+    # q_trimmed, k_trimmed = query, key
+    # if to_trim > 0:
+    #     q_trimmed = query[:, :-to_trim]
+    #     k_trimmed = key[:, :-to_trim]
 
     # repeat GQA, meanpool, attn =====================================================
     q_trimmed = q_trimmed.reshape(BSZ, TDST // args.block_size_q, args.block_size_q, HEAD, HID).mean(dim=2)
