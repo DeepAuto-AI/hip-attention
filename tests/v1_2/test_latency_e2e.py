@@ -167,6 +167,56 @@ def test_latency_hip():
     with open(os.path.join(OUTFILE_PATH, f"hip.jsonl"), "w") as f:
         json.dump(out, f)
 
+def test_latency_delta1():
+    # for running plain hip
+    hip_config_path = os.path.join(
+        HIP_ROOT, "configs/mixed_landmark_0801_extend_fast.json"
+    )
+    hip_attention_config_override_json = '{"using_extend": false, "__delta_attention_args": "window_0-diff_1-w_16-dense_decode", "__seq_thresh_fa3": 0}'
+
+    os.environ["HIP_DEBUG_DELTA_QSA"] = "0"
+
+    hip_attention_config = HiPAttentionConfig(
+        json_or_path=hip_config_path,
+        json_override=hip_attention_config_override_json,
+    )
+
+    original_pos = 262144
+    extended_pos = 2**20 + 16384  # plus a little extra in case it overflows
+    extend_factor = extended_pos / original_pos
+
+    model = sgl.Engine(
+        model_path=MODEL_PATH,
+        dtype="auto",
+        tp_size=tp_size,
+        ep_size=ep_size,
+        enable_hip_attention=True,
+        attention_backend="hip_attention",
+        hip_attention_config=hip_attention_config,
+        disable_radix_cache=True,
+        context_length=extended_pos,
+        max_total_tokens=1024 * 1024,
+        chunked_prefill_size=131072,
+        log_level=log_level,
+        cuda_graph_max_bs=1,
+        cuda_graph_bs=[1],
+        show_time_cost=True,
+        json_model_override_args=(
+            '{"rope_scaling":{"rope_type":"yarn","factor":' + f"{extend_factor},"
+            '"original_max_position_embeddings":' + f"{original_pos}" + "}}"
+        ),
+    )
+
+    out = []
+    for i in range(15, 21):
+        prompt = get_llama31_text(2**i)
+        lat = latency(lambda: model.generate(prompt, {"max_new_tokens": 1}))
+        out += [(2**i, lat)]
+        print(f"hip latency: {lat} for {2**i}")
+
+    with open(os.path.join(OUTFILE_PATH, f"delta1.jsonl"), "w") as f:
+        json.dump(out, f)
+
 
 def test_latency_minference():
     with open(QWEN3_1M_CONFIG, "r") as f:
@@ -293,6 +343,8 @@ if __name__ == "__main__":
             test_latency_delta(64, 64)
         elif args.method == "hip":
             test_latency_hip()
+        elif args.method == "delta1":
+            test_latency_delta1()
         elif args.method == "fa3":
             test_latency_fa3()
         elif args.method == "fa2":

@@ -955,6 +955,7 @@ def _forward_delta_attn(
     assert not torch.cuda.is_current_stream_capturing()
 
     test_qsa_masking = os.getenv("HIP_DEBUG_DELTA_QSA", "0") == "1"
+    delta_pool_q = os.getenv("DELTA_POOL_Q", "0") == "1"
 
     # NOTE: sample sparse context
     assert isinstance(delta_attention_args_window, int)
@@ -1470,7 +1471,6 @@ def _forward_delta_attn(
                 idx = torch.arange(num_sparse, num_queries, device=query.device)
                 query_for_dense = query[:, idx]
             else:
-                delta_pool_q = os.getenv("DELTA_POOL_Q", "0") == "1"
                 if delta_pool_q:
                     query_for_dense = torch.cat(
                         [

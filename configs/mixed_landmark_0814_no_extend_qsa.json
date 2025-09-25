@@ -63,7 +63,7 @@
             ]
         },
         {
-            "sliding_window_size": 4096,
+            "sliding_window_size": 512,
             "second_stage_k": 1024,
             "sink_token_size": 256,
             "landmark_stage_k": [1, 1, 1],
