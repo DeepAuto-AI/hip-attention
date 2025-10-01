@@ -1,8 +1,8 @@
 import copy
+import math
 import os
 import warnings
 from typing import Any, List, Optional
-import math
 
 import cv2
 import numba
@@ -1885,7 +1885,8 @@ def _forward_delta_attn(
                             256,
                         )
                         cv2.imwrite(
-                            f"{root}/dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png", mask
+                            f"{root}/dummy_qsa_mask_ilayer_{args.layer_id}_bsa.png",
+                            mask,
                         )
 
                         if debug_qsa_masking_state:
@@ -2527,13 +2528,19 @@ def _forward_bsa_meanpool(
     #     k_trimmed = key[:, :-to_trim]
 
     # repeat GQA, meanpool, attn =====================================================
-    q_trimmed = q_trimmed.reshape(BSZ, triton.cdiv(TDST, args.block_size_q), args.block_size_q, HEAD, HID).mean(dim=2)
-    k_trimmed = k_trimmed.reshape(BSZ, triton.cdiv(TSRC, args.block_size_k), args.block_size_k, HEAD_KV, HID).mean(dim=2, keepdim=True)
-    k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(BSZ, triton.cdiv(TSRC, args.block_size_k), HEAD, HID)
+    q_trimmed = q_trimmed.reshape(
+        BSZ, triton.cdiv(TDST, args.block_size_q), args.block_size_q, HEAD, HID
+    ).mean(dim=2)
+    k_trimmed = k_trimmed.reshape(
+        BSZ, triton.cdiv(TSRC, args.block_size_k), args.block_size_k, HEAD_KV, HID
+    ).mean(dim=2, keepdim=True)
+    k_trimmed = k_trimmed.repeat(1, 1, HEAD // HEAD_KV, 1, 1).reshape(
+        BSZ, triton.cdiv(TSRC, args.block_size_k), HEAD, HID
+    )
 
     qk = torch.einsum("bqhd,bkhd->bhqk", q_trimmed, k_trimmed)
 
-    if (get_local_rank() == 0):
+    if get_local_rank() == 0:
         info_msg = f"{qk.size()=} "
         warnings.warn(info_msg)
 
@@ -2541,8 +2548,13 @@ def _forward_bsa_meanpool(
     # mask_n = (torch.arange(qk.size(2)).to(qk.device) + 1) * ratio
 
     mask = (
-        torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :] * args.block_size_k
-        >= (torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None] * args.block_size_q - args.sliding_window_size)
+        torch.arange(0, qk.shape[3], device=qk.device)[None, None, None, :]
+        * args.block_size_k
+        >= (
+            torch.arange(0, qk.shape[2], device=qk.device)[None, None, :, None]
+            * args.block_size_q
+            - args.sliding_window_size
+        )
     ).expand(*qk.shape)
 
     qk += mask * torch.finfo(qk.dtype).min
@@ -2585,9 +2597,17 @@ def _forward_bsa_meanpool(
     args_sparse.sliding_window_size = args.sliding_window_size
 
     indices = topk.flatten(0, 1)
-    if math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q) > indices.shape[1]:
-        n_repeat = math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q) - indices.shape[1]
-        indices = torch.cat([indices, torch.repeat_interleave(indices[:, -1:, :], n_repeat, 1)], dim=1)
+    if (
+        math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q)
+        > indices.shape[1]
+    ):
+        n_repeat = (
+            math.ceil(args_sparse.position_ids.shape[-1] / args_sparse.block_size_q)
+            - indices.shape[1]
+        )
+        indices = torch.cat(
+            [indices, torch.repeat_interleave(indices[:, -1:, :], n_repeat, 1)], dim=1
+        )
     active_mask = indices < (
         args_sparse.position_ids[
             :, :: args_sparse.block_size_q, None
@@ -2623,6 +2643,7 @@ def _forward_bsa_meanpool(
     )
     context = context.to(query.dtype)
     return context, None
+
 
 @capture
 def _forward_sliding_window(
@@ -3087,9 +3108,8 @@ def _forward_paged_hip(
             inner_function_do_scale=True,
             inner_function=__forward_sliding_window_wrapper,
         )
-    elif bsa_meanpool and (
-        (not is_decode)
-    ):
+    elif bsa_meanpool and ((not is_decode)):
+
         def __forward_bsa_meanpool_attn_wrapper(
             q: torch.Tensor,
             k: torch.Tensor,
@@ -3325,9 +3345,8 @@ def _forward_paged_hip(
         filename = f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer_id}_is_decode_{1 if is_decode else 0}-0.pth"
         os.makedirs(root, exist_ok=True)
 
-        if (
-            (not is_decode)
-            and (dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
+        if (not is_decode) and (
+            dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
         ):
             while os.path.exists(filename):
                 pre, post = filename.split(".")

@@ -167,6 +167,7 @@ def test_latency_hip():
     with open(os.path.join(OUTFILE_PATH, f"hip.jsonl"), "w") as f:
         json.dump(out, f)
 
+
 def test_latency_delta1():
     # for running plain hip
     hip_config_path = os.path.join(
