@@ -5,7 +5,7 @@
     "__seq_thresh_fa3": 0,
     "using_extend": true,
     "self_extend_scale": 36,
-    "dense_layers": [0,1,2],
+    "dense_layers": [0, 1, 2],
     "mask_refresh_interval": [32, 16, 8],
     "layers": [
         {

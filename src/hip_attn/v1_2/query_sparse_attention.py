@@ -13,7 +13,9 @@ Extra Credits:
 
 """
 
+import math
 import os
+import sys
 import warnings
 from typing import Callable, Literal, Optional, Tuple, Union
 
@@ -23,12 +25,13 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import triton.language.core as core
+from triton.language.extra import libdevice
+from triton.language.standard import _log2, sum, zeros_like
 
 from hip_attn.v1_2.attention_metadata import safe_stride
+from hip_attn.v1_2.triton_argsort import argsort
 from hip_attn.v1_2.utils import capture, triton_jit
-
-# DEVICE = triton.runtime.driver.active.get_active_torch_device()
-DEVICE = "cuda:0"
 
 
 def is_hip():
@@ -58,15 +61,128 @@ def convert_fp8_to_bf16(k: tl.tensor):
 
 
 @triton.jit
+def winner_update_inline(
+    update_exp_sum,  # (M,) float32 – candidate scores per query (lanes)
+    start_n,  # (1,) int64   – candidate key-block ids per query
+    BSA_BLOCK_SUMS,  # pointer to values
+    stride_bsk,
+    stride_bsm,
+    BSA_HEAP_INDICES,  # pointer to winner tree indices
+    stride_hik,
+    stride_him,
+    BSA_INDICES,  # pointer to bsa block indices
+    stride_bik,
+    stride_bim,
+    BSA_K,  # K in top-K
+    BSA_LOGK,  # log2(K)
+    BLOCK_M,  # query block size
+    start_m,
+    mask_m,  # query mask
+    root_v,  # root min value stored in smem
+    root_lf,  # root min index stored in smem
+    root_idx,
+    MASKING,
+    mask,
+    REVERSE_ITER,
+):
+
+    row_bs = ((start_m * BLOCK_M) + tl.arange(0, BLOCK_M)) * stride_bsm
+    row_hi = ((start_m * BLOCK_M) + tl.arange(0, BLOCK_M)) * stride_him
+    row_bi = ((start_m * BLOCK_M) + tl.arange(0, BLOCK_M)) * stride_bim
+    # lanes that actually update (top-k max → min-winner tree)
+    # we update when the sum is greater than root and the index is smaller
+    # and query overflow mask allows it (mask_m)
+    # and there is at least one unmasked element in this row (mask from causal and window)
+
+    beat = update_exp_sum > root_v
+    beat |= (update_exp_sum == root_v) & (start_n < root_idx)
+    beat &= mask_m & (update_exp_sum > float("-inf"))
+    if MASKING:
+        beat &= tl.sum(mask, 1) > 0
+
+    if tl.max(beat) > 0:
+        root_leaf = BSA_K + root_lf
+        leaf_off_bs = root_leaf * stride_bsk + row_bs
+        tl.store(
+            BSA_BLOCK_SUMS + leaf_off_bs.to(tl.int64),
+            update_exp_sum.to(root_v.dtype),
+            mask=beat,
+        )
+        leaf_off_bi = root_leaf * stride_bik + row_bi
+        tl.store(BSA_INDICES + leaf_off_bi, start_n.to(tl.int32), mask=beat)
+
+        # --- climb: keep the path child (value, pointer, index) in registers ---
+        path_v = tl.where(beat, update_exp_sum, root_v).to(root_v.dtype)  # fp32
+        path_p = root_lf  # int64 leaf-id [0..BSA_K-1]
+        path_idx = tl.where(beat, start_n.to(tl.int32), root_idx)
+        child = root_leaf  # int64 node idx [BSA_K..2*BSA_K-1]
+        node = child >> 1  # parent idx [1..BSA_K-1]
+
+        for i in tl.static_range(
+            0, BSA_LOGK
+        ):  # exactly BSA_LOGK steps; last write is root (node==1)
+            # which side is our path child?
+            sib = (
+                child ^ 1
+            )  # even == left odd == right, so just flip the bit to get sibling
+
+            # load ONLY sibling from memory (unmasked loads)
+            sib_v = tl.load(BSA_BLOCK_SUMS + (sib * stride_bsk + row_bs).to(tl.int64))
+            sib_p = tl.load(BSA_HEAP_INDICES + (sib * stride_hik + row_hi).to(tl.int64))
+            sib_idx = tl.load(BSA_INDICES + (sib * stride_bik + row_bi).to(tl.int64))
+
+            # path with lower value bubles up as min. If there is a tie, break in favor
+            # of keeping the older token
+            take_path = (path_v < sib_v) | ((path_v == sib_v) & (path_idx < sib_idx))
+
+            # print(f"path v, sib v, take path: ", path_v, sib_v, take_path)
+            win_v = tl.where(take_path, path_v, sib_v)
+            win_p = tl.where(take_path, path_p, sib_p)
+            win_idx = tl.where(take_path, path_idx, sib_idx)
+
+            tl.store(
+                BSA_BLOCK_SUMS + (node * stride_bsk + row_bs).to(tl.int64),
+                win_v,
+                mask=beat,
+            )
+            tl.store(
+                BSA_HEAP_INDICES + (node * stride_hik + row_hi).to(tl.int64),
+                win_p,
+                mask=beat,
+            )
+            tl.store(
+                BSA_INDICES + (node * stride_bik + row_bi).to(tl.int64),
+                win_idx,
+                mask=beat,
+            )
+
+            # move up one level
+            child = node
+            node = node >> 1
+            path_v = win_v
+            path_p = win_p
+            path_idx = win_idx
+
+        root_v = tl.where(beat, path_v, root_v)
+        root_lf = tl.where(beat, path_p, root_lf)
+        root_idx = tl.where(beat, path_idx, root_idx)
+    return root_v, root_lf, root_idx, beat
+
+
+@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
+    l_bsa,
     m_i,
     q,
     q_nope,
-    K_block_ptr,
-    K_NOPE_block_ptr,
-    V_block_ptr,
+    K_ZH,
+    stride_kn,
+    stride_kk,
+    V_ZH,
+    stride_vn,
+    stride_vk,
     mask_idx,
     start_m,
     qk_scale,
@@ -100,9 +216,14 @@ def _attn_fwd_inner(
     BSA_K: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
     BSA_INDICES,
-    BSA_BLOCK_SUMS,
-    stride_bim,
     stride_bik,
+    stride_bim,
+    BSA_BLOCK_SUMS,
+    stride_bsk,
+    stride_bsm,
+    BSA_HEAP_INDICES,
+    stride_hik,
+    stride_him,
     COS,
     stride_cos_t,
     stride_cos_hid,
@@ -114,33 +235,114 @@ def _attn_fwd_inner(
     stride_k_rot_hid,
     lo,
     hi,
+    REVERSE_ITER: tl.constexpr,
     MASKING: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH,
     SELF_EXTEND_SCALE,
     SELF_EXTEND_WINDOW,
+    ONLINE_TOPK_METHOD: tl.constexpr = "online",
+    running_mean=None,
+    running_m2=None,
+    num_tracking=None,
+    topk_idx=None,
+    EXACT_K: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
 ):
     # range of values handled by this stage
     # lo, hi = 0, N_KV
     # lo, hi = 0, tl.max(mask_idx) + 1
 
-    if RETURN_BSA_MASK:
-        b_idx = (
-            start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-        ) * stride_bim + tl.arange(0, BSA_K)[None, :] * stride_bik
-        block_idx = tl.load(BSA_INDICES + b_idx, mask=mask_m[:, None])
-        block_sums = tl.load(BSA_BLOCK_SUMS + b_idx, mask=mask_m[:, None])
+    SQRT2: tl.constexpr = 1.4142135623730951  # math.sqrt(2.0)
+    EXACT_LOGK: tl.constexpr = _log2(EXACT_K)
+    EST_K: tl.constexpr = BSA_K - EXACT_K
 
+    if RETURN_BSA_MASK:
+        if ONLINE_TOPK_METHOD == "tree":
+            bs_idx = (
+                1 * stride_bsk
+                + (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M).to(tl.int64) * stride_bsm
+            )
+            root_v = tl.load(BSA_BLOCK_SUMS + bs_idx.to(tl.int64))  # node 1
+            hi_idx = (
+                1 * stride_hik
+                + (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M).to(tl.int64) * stride_him
+            )
+            root_lf = tl.load(BSA_HEAP_INDICES + hi_idx.to(tl.int64))
+            bi_idx = (
+                1 * stride_bik
+                + (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M).to(tl.int64) * stride_bim
+            )
+            root_idx = tl.load(BSA_INDICES + bi_idx.to(tl.int64))
+        else:
+            # THESE STRIDES LOOK LIKE THEY ARE REVERSED BUT THEY ARE NOT
+            # IT IS DUE TO HEAP AND PLAIN NEEDING DIFFERENT MEMORY LAYOUT.
+            # THE VARIABLE NAMES SUCK, BUT IT WAS THE EASIEST THING TO DO.
+            bi_idx = (
+                start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+            ) * stride_bik + tl.arange(0, EXACT_K)[None, :].to(tl.int64) * stride_bim
+            block_idx = tl.load(BSA_INDICES + bi_idx, mask=mask_m[:, None])
+            bs_idx = (
+                start_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+            ) * stride_bsk + tl.arange(0, EXACT_K)[None, :].to(tl.int64) * stride_bsm
+            block_sums = tl.load(BSA_BLOCK_SUMS + bs_idx, mask=mask_m[:, None])
+            block_sums_min, block_sums_min_idx = tl.min(
+                block_sums, axis=-1, return_indices=True
+            )  # (M, K) -> (M,)
+            col_idx = tl.arange(0, EXACT_K)[None, :]  # (1, K) will be used later
+
+    nblocks = tl.cdiv(hi - lo, BLOCK_N)
+    last_start = lo + (nblocks - 1) * BLOCK_N
     if not USING_PAGED_CACHE:
-        K_block_ptr = tl.advance(K_block_ptr, (0, lo))
-        V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
-    # else:
-    # idx_hid = tl.arange(0, HEAD_ROPE)
-    # idx_tsrc = tl.arange(0, BLOCK_N) + lo
-    # mask_tsrc = idx_tsrc < hi
+        advance_init = lo
+        advance = BLOCK_N
+        if REVERSE_ITER:
+            advance_init = last_start
+            advance = -BLOCK_N
+
+        V_ZHN = (
+            V_ZH
+            + (advance_init + tl.arange(0, BLOCK_N))[:, None].to(tl.int64) * stride_vk
+            + tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_vn
+        )
+
+        if HEAD_DIM == HEAD_ROPE:
+            K_ZHN = (
+                K_ZH
+                + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64)
+                * stride_kn
+                + tl.arange(0, HEAD_DIM)[:, None].to(tl.int64) * stride_kk
+            )
+            K_ZHN_NOPE = None
+        else:
+            K_ZHN = (
+                K_ZH
+                + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64)
+                * stride_kn
+                + tl.arange(0, HEAD_ROPE)[:, None].to(tl.int64) * stride_kk
+            )
+
+            K_ZHN_NOPE = (
+                K_ZH
+                + (advance_init + tl.arange(0, BLOCK_N))[None, :].to(tl.int64)
+                * stride_kn
+                + tl.arange(0, HEAD_NOPE)[:, None].to(tl.int64) * stride_kk
+            )
+
+    # probability of being below the top-k threshold
+    erf_pr = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
     # loop over k, v and update accumulator
-    for start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
+    counter = tl.zeros((), tl.int32)
+    for _start_n in tl.range(lo, hi, BLOCK_N, num_stages=3):
+        start_n = _start_n
+        if REVERSE_ITER:
+            # if we start at something nonzero, we need to subtract lo to get the right block
+            start_n = last_start - (_start_n - lo)
+
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         idx_tsrc = offs_n + start_n
@@ -148,7 +350,7 @@ def _attn_fwd_inner(
 
         if not USING_PAGED_CACHE:
             tl.static_assert(EXTEND_BACKEND == "none")
-            k = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
+            k = tl.load(K_ZHN, mask=mask_tsrc[None, :])
         else:
             idx_t = tl.load(
                 BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -165,9 +367,7 @@ def _attn_fwd_inner(
         if HEAD_DIM != HEAD_ROPE:
             if not USING_PAGED_CACHE:
                 tl.static_assert(EXTEND_BACKEND == "none")
-                k_nope = tl.load(
-                    K_NOPE_block_ptr, boundary_check=(1,), padding_option="zero"
-                )
+                k_nope = tl.load(K_ZHN_NOPE, mask=mask_tsrc[None, :])
             else:
                 idx_t = tl.load(
                     BLOCK_TABLE + idx_tsrc.to(tl.int64) * stride_block_table_tsrc,
@@ -297,32 +497,278 @@ def _attn_fwd_inner(
         if HEAD_DIM != HEAD_ROPE:
             qk = tl.dot(q_nope, k_nope, acc=qk)
 
-        qk = qk * 1.44269504
+        qk = qk * 1.44269504  # 1 / ln(2)
 
         if MASKING:
             mask = (mask_idx[:, None]) >= (start_n + offs_n[None, :])
             qk = tl.where(mask, qk, float("-inf"))
-        qk = tl.where(qk == 0, float("-inf"), qk)
 
-        qk_original = qk
+        # qk = tl.where(qk == 0, float("-inf"), qk)
+
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        qk -= m_ij[:, None]
+        # if we go backwards through the keys, some blocks may be totally masked
+        # if block_m > block_n and the max will be at the init value -inf.
+        # if we don't set it to 0 here, -inf - -inf will cause nans.
+        qk -= tl.where(m_ij[:, None] == float("-inf"), 0, m_ij[:, None])
 
-        p = tl.math.exp2(qk)
+        p = tl.math.exp2(qk)  # 2^(x / ln(2)) == exp(x)
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
-        alpha = tl.math.exp2(m_i - m_ij)
+        # see note above about iterating backwards through keys
+        alpha = tl.where(m_ij == float("-inf"), 1, tl.math.exp2(m_i - m_ij))
         l_i = (l_i * alpha + l_ij).to(l_i.dtype)
+
+        # -- update block sums and indices for block sparse attention
+        # if RETURN_BSA_MASK:
+        if RETURN_BSA_MASK and (EXACT_K < BSA_K or start_n >= BSA_MASK_SINK_TOKEN_SIZE):
+            # FIXME How can i this thing more dynamic?
+            tl.static_assert(BLOCK_N >= BSA_BLOCK_SIZE_K)
+            tl.static_assert(BLOCK_N <= (BSA_BLOCK_SIZE_K * 4))
+            tl.static_assert(
+                (BSA_BLOCK_SIZE_K == BLOCK_N)
+                | ((BSA_BLOCK_SIZE_K * 2) == BLOCK_N)
+                | ((BSA_BLOCK_SIZE_K * 4) == BLOCK_N)
+            )
+
+            mask = None
+            if MASKING:
+                mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
+                    start_n + offs_n[None, :]
+                )
+
+            if MASKING:
+                p_split = tl.where(mask, p, 0.0)
+            else:
+                p_split = p
+
+            if start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+                l_bsa = (l_bsa * alpha + tl.sum(p_split, 1)).to(l_bsa.dtype)
+            else:
+                l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
+
+            if BLOCK_N == BSA_BLOCK_SIZE_K:
+                l_ij_0 = tl.math.log2(l_ij) + tl.where(m_ij == float("-inf"), 0, m_ij)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 2):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 2)) + tl.where(
+                    m_ij[:, None] == float("-inf"), 0, m_ij[:, None]
+                )
+                l_ij_0, l_ij_1 = tl.split(l_ij_all)
+            elif BLOCK_N == (BSA_BLOCK_SIZE_K * 4):
+                p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_BLOCK_SIZE_K)
+                l_ij_all = tl.math.log2(tl.sum(p_split, 3)) + tl.where(
+                    m_ij[:, None, None] == float("-inf"), 0, m_ij[:, None, None]
+                )
+                l_ij_01, l_ij_23 = tl.split(l_ij_all)
+                l_ij_0, l_ij_1 = tl.split(l_ij_01)
+                l_ij_2, l_ij_3 = tl.split(l_ij_23)
+            else:
+                raise Exception()
+
+            if EXACT_K < BSA_K:
+                for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
+                    if i_offset == (0 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_0
+                    elif i_offset == (1 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_1
+                    elif i_offset == (2 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_2
+                    elif i_offset == (3 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_3
+
+                    causal_mask = l_ij > 0
+                    log_score = update_exp_sum
+
+                    # update running mean and std
+                    num_tracking += causal_mask
+                    delta = log_score - running_mean
+                    running_mean = tl.where(
+                        causal_mask,
+                        running_mean + delta / num_tracking,
+                        running_mean,
+                    )
+                    delta2 = log_score - running_mean
+                    running_m2 = tl.where(
+                        causal_mask,
+                        running_m2 + delta * delta2,
+                        running_m2,
+                    )
+
+            if start_n >= BSA_MASK_SINK_TOKEN_SIZE:
+                for i_offset in tl.static_range(0, BLOCK_N, BSA_BLOCK_SIZE_K):
+                    if i_offset == (0 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_0
+                    elif i_offset == (1 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_1
+                    elif i_offset == (2 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_2
+                    elif i_offset == (3 * BSA_BLOCK_SIZE_K):
+                        update_exp_sum = l_ij_3
+
+                    if ONLINE_TOPK_METHOD == "tree":
+                        root_v, root_lf, root_idx, block_update = winner_update_inline(
+                            update_exp_sum,
+                            start_n + i_offset,
+                            BSA_BLOCK_SUMS,
+                            stride_bsk,
+                            stride_bsm,
+                            BSA_HEAP_INDICES,
+                            stride_hik,
+                            stride_him,
+                            BSA_INDICES,
+                            stride_bik,
+                            stride_bim,
+                            EXACT_K,
+                            EXACT_LOGK,
+                            BLOCK_M,
+                            start_m,
+                            mask_m,
+                            root_v,
+                            root_lf,
+                            root_idx,
+                            MASKING,
+                            mask,
+                            REVERSE_ITER,
+                        )
+                    else:
+                        # update if current max greater than stored max
+                        # if they are equal, only take current one if the current index is smaller (older)
+                        # and query overflow mask allows it (mask_m)
+                        # and there is at least one unmasked element in this row (mask from causal and window)
+                        min_mask = col_idx == block_sums_min_idx[:, None]
+                        idx_at_min = tl.sum(block_idx * min_mask, 1)
+
+                        block_update = update_exp_sum > block_sums_min
+                        block_update |= (update_exp_sum == block_sums_min) & (
+                            (start_n + i_offset) < idx_at_min
+                        )
+                        block_update &= mask_m & (update_exp_sum > float("-inf"))
+                        if MASKING:
+                            block_update &= tl.max(mask, 1) > 0
+
+                        if tl.max(block_update) > 0:
+                            block_sums_max = tl.maximum(
+                                block_sums_min, update_exp_sum
+                            )  # (M,)
+                            # make a mask of the minimum indices
+                            bsa_mask = block_update[:, None] & (
+                                col_idx == block_sums_min_idx[:, None]
+                            )  # (M, K)
+                            block_sums = tl.where(
+                                bsa_mask,
+                                block_sums_max[:, None].to(block_sums.dtype),
+                                block_sums,
+                            )
+                            block_idx = tl.where(
+                                bsa_mask, start_n + i_offset, block_idx
+                            )
+                            # calculate the new block sums min for the next iteration
+                            block_sums_min, block_sums_min_idx = tl.min(
+                                block_sums, axis=-1, return_indices=True
+                            )  # (M, K) -> (M,)
+
+                    if EXACT_K < BSA_K:
+                        new_block_idx = start_n + i_offset
+                        causal_mask = (mask_idx - BSA_MASK_SW_SIZE) >= new_block_idx
+                        log_score = update_exp_sum
+
+                        est_std = tl.sqrt(running_m2 / (num_tracking - 1))
+
+                        # recompute every THRESHOLD_REFRESH_INTERVAL steps because it's expensive
+                        if counter == 0:
+                            # probability of being below the top-k threshold
+                            OVERESTIMATE_FACTOR = 1.5
+                            remaining_slots = tl.maximum(
+                                OVERESTIMATE_FACTOR * (EST_K - topk_idx),
+                                0,
+                            )
+                            remaining_blocks = tl.maximum(
+                                tl.cdiv(
+                                    mask_idx - (start_n + i_offset), BSA_BLOCK_SIZE_K
+                                ),
+                                1,
+                            )
+                            pr_below_th = (
+                                1 - remaining_slots / remaining_blocks
+                            )  # [BLOCK_M,]
+                            erf_pr = tl.where(
+                                pr_below_th > 0,
+                                libdevice.erfinv(2 * pr_below_th - 1) * SQRT2,
+                                -3000.0,
+                            )
+                        counter = tl.where(
+                            counter + 1 >= THRESHOLD_REFRESH_INTERVAL, 0, counter + 1
+                        )
+
+                        # estimated threshold for top-k
+                        log_est_th = erf_pr * est_std + running_mean
+
+                        # 1. always add if num_tracking < EST_K
+                        if ONLINE_TOPK_METHOD == "tree":
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bim
+                            upd_idx_0_bi += (EXACT_K * 2) * stride_bik
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsm
+                            upd_idx_0_bs += (EXACT_K * 2) * stride_bsk
+                        else:
+                            upd_idx_0_bi = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bik
+                            upd_idx_0_bi += EXACT_K * stride_bim
+                            upd_idx_0_bs = (
+                                start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+                            ) * stride_bsk
+                            upd_idx_0_bs += EXACT_K * stride_bsm
+
+                        # 2. otherwise, update if the new value is larger than the estimated threshold
+                        do_update = (
+                            (~block_update)
+                            & causal_mask  # skip masked values
+                            & (log_score > log_est_th)
+                            # & (topk_idx < EST_K)
+                            & mask_m
+                        )  # (M,)
+                        if ONLINE_TOPK_METHOD == "tree":
+                            upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bik  # (M,)
+                            upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsk
+                        else:
+                            upd_idx_bi = upd_idx_0_bi + topk_idx * stride_bim  # (M,)
+                            upd_idx_bs = upd_idx_0_bs + topk_idx * stride_bsm
+
+                        # only update if the new value is larger
+                        prev_val = tl.load(
+                            BSA_BLOCK_SUMS + upd_idx_bs,
+                            mask=do_update & (topk_idx >= EST_K),
+                            other=float("-inf"),
+                        )
+                        do_update &= update_exp_sum > prev_val
+
+                        tl.store(
+                            BSA_BLOCK_SUMS + upd_idx_bs,
+                            value=update_exp_sum,
+                            mask=do_update,
+                        )
+                        tl.store(
+                            BSA_INDICES + upd_idx_bi,
+                            value=new_block_idx,
+                            mask=do_update,
+                        )
+
+                        topk_idx += do_update.to(
+                            topk_idx.dtype
+                        )  # increment end pointer
+                        topk_idx = tl.where(topk_idx >= EST_K, 0, topk_idx)
+        else:
+            l_bsa = (l_bsa * alpha).to(l_bsa.dtype)
 
         # -- update output accumulator --
         acc = acc * alpha.to(acc.dtype)[:, None]
         # update acc
         if not USING_PAGED_CACHE:
-            v = tl.load(
-                V_block_ptr,
-                boundary_check=(0,),
-                padding_option="zero",
-            )
+            v = tl.load(V_ZHN, mask=mask_tsrc[:, None])
         else:
             v = tl.load(
                 V_CACHE
@@ -342,123 +788,30 @@ def _attn_fwd_inner(
         # else:
         #     p = p.to(v.dtype)
 
-        acc = tl.dot(
+        acc = acc + tl.dot(
             p.to(q_dtype),
             v.to(q_dtype),
-            acc=acc,
+            out_dtype=tl.float32,
+            allow_tf32=True,
         )
         # update m_i and l_i
         m_i = m_ij
         if not USING_PAGED_CACHE:
-            V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-            K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+            K_ZHN += advance.to(tl.int64) * stride_kn
+            V_ZHN += advance.to(tl.int64) * stride_vk
+
+            if K_ZHN_NOPE is not None:
+                K_ZHN_NOPE += advance.to(tl.int64) * stride_kn
         else:
             # idx_tsrc = idx_tsrc + BLOCK_N
             # mask_tsrc = idx_tsrc < hi
             pass
 
-        # -- update block sums and indices for block sparse attention
-        if RETURN_BSA_MASK and start_n >= BSA_MASK_SINK_TOKEN_SIZE:
-            # FIXME How can i this thing more dynamic?
-            BSA_MASK_STEP_SIZE: tl.constexpr = BSA_BLOCK_SIZE_K
-            tl.static_assert(BLOCK_N >= BSA_MASK_STEP_SIZE)
-            tl.static_assert(BLOCK_N <= (BSA_MASK_STEP_SIZE * 4))
-            tl.static_assert(
-                (BSA_MASK_STEP_SIZE == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 2) == BLOCK_N)
-                | ((BSA_MASK_STEP_SIZE * 4) == BLOCK_N)
-            )
+    if RETURN_BSA_MASK and ONLINE_TOPK_METHOD != "tree":
+        tl.store(BSA_INDICES + bi_idx, value=block_idx, mask=mask_m[:, None])
+        tl.store(BSA_BLOCK_SUMS + bs_idx, value=block_sums, mask=mask_m[:, None])
 
-            # NOTE: if true, use expsum of scores (with normalization) / else, use max of scores (w/o normalization)
-            using_exp_sum: tl.constexpr = True
-            if using_exp_sum:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
-                        start_n + offs_n[None, :]
-                    )
-                    p_split = tl.where(mask.to(tl.int1), p, 0.0)
-                else:
-                    p_split = p
-
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = l_ij
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.sum(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-            else:
-                if MASKING:
-                    mask = (mask_idx[:, None] - BSA_MASK_SW_SIZE) >= (
-                        start_n + offs_n[None, :]
-                    )
-                    p_split = tl.where(mask.to(tl.int1), qk_original, float("-inf"))
-                else:
-                    p_split = qk_original
-
-                if BLOCK_N == BSA_MASK_STEP_SIZE:
-                    l_ij_0 = tl.max(p_split, 1)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 2):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 2)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_all)
-                elif BLOCK_N == (BSA_MASK_STEP_SIZE * 4):
-                    p_split = tl.reshape(p_split, BLOCK_M, 2, 2, BSA_MASK_STEP_SIZE)
-                    l_ij_all = tl.max(p_split, 3)
-                    l_ij_01, l_ij_23 = tl.split(l_ij_all)
-                    l_ij_0, l_ij_1 = tl.split(l_ij_01)
-                    l_ij_2, l_ij_3 = tl.split(l_ij_23)
-                else:
-                    raise Exception()
-
-            if using_exp_sum:
-                # adjust previous sums for new normalization constant
-                block_sums *= alpha[:, None]
-
-            for i_offset in tl.static_range(0, BLOCK_N, BSA_MASK_STEP_SIZE):
-                if i_offset == (0 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_0
-                elif i_offset == (1 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_1
-                elif i_offset == (2 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_2
-                elif i_offset == (3 * BSA_MASK_STEP_SIZE):
-                    update_exp_sum = l_ij_3
-
-                # NOTE: update indices and scores
-                block_sums_min, block_sums_min_idx = tl.min(
-                    block_sums,
-                    axis=-1,
-                    return_indices=True,
-                    # FIXME tie_break_left=False not working
-                    return_indices_tie_break_left=True,
-                )  # (M, K) -> (M,)
-                block_sums_max = tl.maximum(block_sums_min, update_exp_sum)  # (M,)
-
-                # if these two are equal, it means that the maximum is equal
-                # to the old value (i.e no change necessary)
-                block_update = block_sums_min != block_sums_max  # (M,)
-                col_idx = tl.arange(0, BSA_K)[None, :]  # (1, K)
-
-                # make a mask of the minimum indices
-                bsa_mask = col_idx == block_sums_min_idx[:, None]  # (M, K)
-                bsa_mask = (block_update[:, None] & bsa_mask).to(tl.int1)  # (M, K)
-
-                block_sums = tl.where(bsa_mask, block_sums_max[:, None], block_sums)
-                block_idx = tl.where(bsa_mask, start_n + i_offset, block_idx)
-
-    if RETURN_BSA_MASK:
-        tl.store(BSA_INDICES + b_idx, value=block_idx, mask=mask_m[:, None])
-        tl.store(BSA_BLOCK_SUMS + b_idx, value=block_sums, mask=mask_m[:, None])
-
-    return acc, l_i, m_i
+    return acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx
 
 
 # We don't run auto-tuning every time to keep the tutorial fast. Keeping
@@ -481,13 +834,15 @@ if os.getenv("HIP_DISABLE_AUTOTUNE", "0") == "1":
         ]
     ]
 else:
+    # NOTE: BSA GQ = BQ // DeltaW
+    qsa_mask_group_size_q = int(os.getenv("BSA_GROUP_Q", "64"))
+    qsa_mask_block_size_k = int(os.getenv("BSA_BLOCK_K", "64"))
+
     configs = [
         triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
-        for BM in [64, 128, 256]
-        for BN in [
-            64,
-        ]
-        for s in ([1] if is_hip() else [3, 4, 7])
+        for BM in filter(lambda x: x >= qsa_mask_group_size_q, [32, 64, 128, 256])
+        for BN in [qsa_mask_block_size_k]
+        for s in ([1] if is_hip() else [1, 3, 7])
         for w in [4, 8]
     ]
 
@@ -500,15 +855,25 @@ def keep(conf):
     return True
 
 
-@triton_jit(
-    configs=list(filter(keep, configs)),
-    key=[
-        # "N_CTX",
-        # "N_KV",
-        "HEAD_DIM",
-        "USING_PAGED_CACHE",
-    ],
-)
+# @triton_jit(
+#     configs=list(filter(keep, configs)),
+#     key=[
+#         "N_CTX",
+#         "N_KV",
+#         "HEAD_DIM",
+#         "USING_PAGED_CACHE",
+#     ],
+#     do_autotune=True,
+# )
+
+# @triton.autotune(
+#     configs=configs,
+#     key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+#     restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
+# )
+
+
+@triton.jit
 def _attn_fwd(
     Q,
     K,
@@ -518,6 +883,7 @@ def _attn_fwd(
     SOFTMAX_SINK,
     sm_scale,
     M,
+    M_BSA,
     MX,
     NC,
     Out,
@@ -591,11 +957,20 @@ def _attn_fwd(
     BSA_K: tl.constexpr,
     BSA_BLOCK_SIZE_K: tl.constexpr,
     BSA_INDICES,
-    BSA_BLOCK_SUMS,
     stride_biz,
     stride_bih,
-    stride_bim,
     stride_bik,
+    stride_bim,
+    BSA_BLOCK_SUMS,
+    stride_bsz,
+    stride_bsh,
+    stride_bsk,
+    stride_bsm,
+    BSA_HEAP_INDICES,
+    stride_hiz,
+    stride_hih,
+    stride_hik,
+    stride_him,
     Z,
     H,
     N_CTX,
@@ -606,12 +981,19 @@ def _attn_fwd(
     N_SPLIT,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    REVERSE_ITER: tl.constexpr,
     V_FP8: tl.constexpr,
     EXTEND_BACKEND: tl.constexpr,
     MODEL_CONTEXT_LENGTH=32768,
     SELF_EXTEND_SCALE=12,
     SELF_EXTEND_WINDOW=1024,
+    ONLINE_TOPK_METHOD: tl.constexpr = "online",
+    EXACT_K_: tl.constexpr = None,
+    THRESHOLD_REFRESH_INTERVAL: tl.constexpr = None,
+    N_KV_AUTOTUNE=0,
+    N_CTX_AUTOTUNE=0,
 ):
+    EXACT_K: tl.constexpr = BSA_K if EXACT_K_ is None else EXACT_K_
     tl.static_assert(BLOCK_N <= HEAD_DIM)
 
     pid = tl.program_id(0)
@@ -630,98 +1012,66 @@ def _attn_fwd(
 
     idx_split = pid_n_split.to(tl.int64)
 
-    # block pointers
+    Q_ZH = Q + q_offset
     if HEAD_DIM == HEAD_ROPE:
-        Q_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, HEAD_DIM),
-            order=(1, 0),
+        Q_ZHT = (
+            Q_ZH
+            + (
+                (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)
+            )
+            * stride_qm
+            + tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_qk
         )
-        Q_NOPE_block_ptr = None
+
+        Q_ZHT_NOPE = None
     else:
-        Q_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, HEAD_NOPE),
-            block_shape=(BLOCK_M, HEAD_ROPE),
-            order=(1, 0),
+        Q_ZHT = (
+            Q_ZH
+            + (
+                (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)
+            )
+            * stride_qm
+            + tl.arange(0, HEAD_ROPE)[None, :].to(tl.int64) * stride_qk
         )
-        Q_NOPE_block_ptr = tl.make_block_ptr(
-            base=Q + q_offset,
-            shape=(N_CTX, HEAD_DIM),
-            strides=(stride_qm, stride_qk),
-            offsets=(start_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, HEAD_NOPE),
-            order=(1, 0),
+
+        Q_ZHT_NOPE = (
+            Q_ZH
+            + (
+                (start_m * BLOCK_M).to(tl.int64)
+                + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)
+            )
+            * stride_qm
+            + tl.arange(0, HEAD_NOPE)[None, :].to(tl.int64) * stride_qk
         )
 
     if RETURN_BSA_MASK:
-        bs_offset = off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
-        BSA_INDICES += bs_offset
-        BSA_BLOCK_SUMS += bs_offset
+        BSA_INDICES += off_z.to(tl.int64) * stride_biz + off_h.to(tl.int64) * stride_bih
+        BSA_BLOCK_SUMS += (
+            off_z.to(tl.int64) * stride_bsz + off_h.to(tl.int64) * stride_bsh
+        )
+        if ONLINE_TOPK_METHOD == "tree":
+            BSA_HEAP_INDICES += (
+                off_z.to(tl.int64) * stride_hiz + off_h.to(tl.int64) * stride_hih
+            )
 
     if not USING_PAGED_CACHE:
-        v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
-        V_block_ptr = tl.make_block_ptr(
-            base=V + kv_offset,
-            shape=(N_KV, HEAD_DIM),
-            strides=(stride_vk, stride_vn),
-            offsets=(0, 0),
-            block_shape=(BLOCK_N, HEAD_DIM),
-            order=v_order,
-        )
-        if HEAD_DIM == HEAD_ROPE:
-            K_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(0, 0),
-                block_shape=(HEAD_DIM, BLOCK_N),
-                order=(0, 1),
-            )
-            K_NOPE_block_ptr = None
-        else:
-            K_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(HEAD_NOPE, 0),
-                block_shape=(HEAD_ROPE, BLOCK_N),
-                order=(0, 1),
-            )
-            K_NOPE_block_ptr = tl.make_block_ptr(
-                base=K + kv_offset,
-                shape=(HEAD_DIM, N_KV),
-                strides=(stride_kk, stride_kn),
-                offsets=(0, 0),
-                block_shape=(HEAD_NOPE, BLOCK_N),
-                order=(0, 1),
-            )
+        # WARNING: If you are using float8e5, this might need to change.
+        # v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
+        V_ZH = V + kv_offset
+        K_ZH = K + kv_offset
     else:
         K_CACHE = K_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_k_cache_head_kv
         V_CACHE = V_CACHE + (off_h.to(tl.int64) // HEAD_REPEAT) * stride_v_cache_head_kv
         BLOCK_TABLE = BLOCK_TABLE + off_z.to(tl.int64) * stride_block_table_bsz
-        K_block_ptr = None
-        K_NOPE_block_ptr = None
-        V_block_ptr = None
-
-    O_block_ptr = tl.make_block_ptr(
-        base=Out + q_offset,
-        shape=(N_CTX, HEAD_DIM),
-        strides=(stride_om, stride_on),
-        offsets=(start_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, HEAD_DIM),
-        order=(1, 0),
-    )
+        K_ZH = None
+        V_ZH = None
 
     # initialize offsets
-    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask_m = offs_m < N_CTX
-    offs_n = tl.arange(0, BLOCK_N)
+    offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
 
     mask_idx = tl.load(
         MaskIdx + off_z.to(tl.int64) * stride_mz + offs_m.to(tl.int64) * stride_mm,
@@ -731,6 +1081,7 @@ def _attn_fwd(
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], dtype=tl.float32, value=float("-inf"))
     l_i = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
+    l_bsa = tl.full([BLOCK_M], dtype=tl.float32, value=1.0)
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     # load scales
     qk_scale = sm_scale
@@ -744,17 +1095,9 @@ def _attn_fwd(
         v_descale = None
 
     # load q: it will stay in SRAM throughout
-    q = tl.load(
-        Q_block_ptr,
-        boundary_check=(0,),
-        padding_option="zero",
-    )
-    if Q_NOPE_block_ptr is not None:
-        q_nope = tl.load(
-            Q_NOPE_block_ptr,
-            boundary_check=(0,),
-            padding_option="zero",
-        )
+    q = tl.load(Q_ZHT, mask=mask_m[:, None])
+    if Q_ZHT_NOPE is not None:
+        q_nope = tl.load(Q_ZHT_NOPE, mask=mask_m[:, None])
     else:
         q_nope = None
 
@@ -822,8 +1165,8 @@ def _attn_fwd(
         0,
         tl.min(
             tl.where(
-                (mask_m - BSA_MASK_SW_SIZE) if RETURN_BSA_MASK else mask_m,
-                mask_idx,
+                mask_m,
+                tl.maximum(0, mask_idx - (BSA_MASK_SW_SIZE if RETURN_BSA_MASK else 0)),
                 987654321,
             )
         )
@@ -832,6 +1175,11 @@ def _attn_fwd(
     ).to(tl.int32)
     tl.multiple_of(mid, BLOCK_N)
     hi = (tl.max(tl.where(mask_m, mask_idx, 0)) + 1).to(tl.int32)
+
+    running_mean = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    running_m2 = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    num_tracking = tl.zeros((BLOCK_M,), dtype=tl.int32)
+    topk_idx = tl.zeros((BLOCK_M,), dtype=tl.int16)
 
     if (N_SPLIT > 1) and False:
         k_chunk_size = tl.cdiv(hi, N_SPLIT)
@@ -845,12 +1193,12 @@ def _attn_fwd(
                 l_i,
                 m_i,
                 q,
-                K_block_ptr,
-                V_block_ptr,
-                BSA_IDX,
-                BLOCK_SUMS,
-                stride_bim,
-                stride_bik,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
                 mask_idx,
                 start_m,
                 qk_scale,
@@ -881,9 +1229,14 @@ def _attn_fwd(
                 BSA_K=BSA_K,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
                 BSA_INDICES=BSA_INDICES,
-                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
                 stride_bim=stride_bim,
                 stride_bik=stride_bik,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bsk=stride_bsk,
+                stride_bsm=stride_bsm,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_hik=stride_hik,
+                stride_him=stride_him,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -895,10 +1248,18 @@ def _attn_fwd(
                 stride_k_rot_hid=stride_kk,
                 lo=tl.maximum(start_k, lo).to(tl.int32),
                 hi=tl.minimum(end_k, mid).to(tl.int32),
+                REVERSE_ITER=REVERSE_ITER,
                 MASKING=False,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
         # (start_k, end_k) (mid, hi)
         if tl.maximum(start_k, mid) < tl.minimum(end_k, hi):
@@ -907,14 +1268,12 @@ def _attn_fwd(
                 l_i,
                 m_i,
                 q,
-                K_block_ptr,
-                V_block_ptr,
-                BSA_IDX,
-                BLOCK_SUMS,
-                stride_bim,
-                stride_bik,
-                stride_bim,
-                stride_bik,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
                 mask_idx,
                 start_m,
                 qk_scale,
@@ -945,9 +1304,14 @@ def _attn_fwd(
                 BSA_K=BSA_K,
                 BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
                 BSA_INDICES=BSA_INDICES,
-                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
                 stride_bim=stride_bim,
                 stride_bik=stride_bik,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bsk=stride_bsk,
+                stride_bsm=stride_bsm,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_hik=stride_hik,
+                stride_him=stride_him,
                 COS=COS,
                 stride_cos_t=stride_cos_t,
                 stride_cos_hid=stride_cos_hid,
@@ -959,137 +1323,189 @@ def _attn_fwd(
                 stride_k_rot_hid=stride_kk,
                 lo=tl.maximum(start_k, mid).to(tl.int32),
                 hi=tl.minimum(end_k, hi).to(tl.int32),
+                REVERSE_ITER=REVERSE_ITER,
                 MASKING=True,
                 EXTEND_BACKEND=EXTEND_BACKEND,
                 MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
                 SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
             )
     else:
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
-            mask_idx,
-            start_m,
-            qk_scale,
-            k_descale,
-            v_descale,
-            BLOCK_M,
-            HEAD_DIM,
-            HEAD_NOPE,
-            HEAD_ROPE,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            mask_m,
-            N_CTX,
-            N_KV,
-            V_FP8,
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
-            RETURN_BSA_MASK=RETURN_BSA_MASK,
-            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
-            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
-            BSA_K=BSA_K,
-            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
-            BSA_INDICES=BSA_INDICES,
-            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
-            stride_bim=stride_bim,
-            stride_bik=stride_bik,
-            COS=COS,
-            stride_cos_t=stride_cos_t,
-            stride_cos_hid=stride_cos_hid,
-            SIN=SIN,
-            stride_sin_t=stride_sin_t,
-            stride_sin_hid=stride_sin_hid,
-            K_ROT=K + kv_offset if K is not None else None,
-            stride_k_rot_tsrc=stride_kn,
-            stride_k_rot_hid=stride_kk,
-            lo=lo,
-            hi=mid,
-            MASKING=False,
-            EXTEND_BACKEND=EXTEND_BACKEND,
-            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+            _attn_fwd_inner(
+                acc,
+                l_i,
+                l_bsa,
+                m_i,
+                q,
+                q_nope,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                HEAD_NOPE,
+                HEAD_ROPE,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bsk=stride_bsk,
+                stride_bsm=stride_bsm,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_hik=stride_hik,
+                stride_him=stride_him,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=lo,
+                hi=mid,
+                REVERSE_ITER=REVERSE_ITER,
+                MASKING=False,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
+            )
         )
 
-        acc, l_i, m_i = _attn_fwd_inner(
-            acc,
-            l_i,
-            m_i,
-            q,
-            q_nope,
-            K_block_ptr,
-            K_NOPE_block_ptr,
-            V_block_ptr,
-            mask_idx,
-            start_m,
-            qk_scale,
-            k_descale,
-            v_descale,
-            BLOCK_M,
-            HEAD_DIM,
-            HEAD_NOPE,
-            HEAD_ROPE,
-            BLOCK_N,
-            offs_m,
-            offs_n,
-            mask_m,
-            N_CTX,
-            N_KV,
-            V_FP8,
-            USING_PAGED_CACHE=USING_PAGED_CACHE,
-            K_CACHE=K_CACHE,
-            stride_k_cache_t=stride_k_cache_t,
-            stride_k_cache_page=stride_k_cache_page,
-            stride_k_cache_hid=stride_k_cache_hid,
-            V_CACHE=V_CACHE,
-            stride_v_cache_t=stride_v_cache_t,
-            stride_v_cache_page=stride_v_cache_page,
-            stride_v_cache_hid=stride_v_cache_hid,
-            BLOCK_TABLE=BLOCK_TABLE,
-            stride_block_table_tsrc=stride_block_table_tsrc,
-            RETURN_BSA_MASK=RETURN_BSA_MASK,
-            BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
-            BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
-            BSA_K=BSA_K,
-            BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
-            BSA_INDICES=BSA_INDICES,
-            BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
-            stride_bim=stride_bim,
-            stride_bik=stride_bik,
-            COS=COS,
-            stride_cos_t=stride_cos_t,
-            stride_cos_hid=stride_cos_hid,
-            SIN=SIN,
-            stride_sin_t=stride_sin_t,
-            stride_sin_hid=stride_sin_hid,
-            K_ROT=K + kv_offset if K is not None else None,
-            stride_k_rot_tsrc=stride_kn,
-            stride_k_rot_hid=stride_kk,
-            lo=mid,
-            hi=hi,
-            MASKING=True,
-            EXTEND_BACKEND=EXTEND_BACKEND,
-            MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
-            SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+        acc, l_i, l_bsa, m_i, running_mean, running_m2, num_tracking, topk_idx = (
+            _attn_fwd_inner(
+                acc,
+                l_i,
+                l_bsa,
+                m_i,
+                q,
+                q_nope,
+                K_ZH,
+                stride_kn,
+                stride_kk,
+                V_ZH,
+                stride_vn,
+                stride_vk,
+                mask_idx,
+                start_m,
+                qk_scale,
+                k_descale,
+                v_descale,
+                BLOCK_M,
+                HEAD_DIM,
+                HEAD_NOPE,
+                HEAD_ROPE,
+                BLOCK_N,
+                offs_m,
+                offs_n,
+                mask_m,
+                N_CTX,
+                N_KV,
+                V_FP8,
+                USING_PAGED_CACHE=USING_PAGED_CACHE,
+                K_CACHE=K_CACHE,
+                stride_k_cache_t=stride_k_cache_t,
+                stride_k_cache_page=stride_k_cache_page,
+                stride_k_cache_hid=stride_k_cache_hid,
+                V_CACHE=V_CACHE,
+                stride_v_cache_t=stride_v_cache_t,
+                stride_v_cache_page=stride_v_cache_page,
+                stride_v_cache_hid=stride_v_cache_hid,
+                BLOCK_TABLE=BLOCK_TABLE,
+                stride_block_table_tsrc=stride_block_table_tsrc,
+                RETURN_BSA_MASK=RETURN_BSA_MASK,
+                BSA_MASK_SINK_TOKEN_SIZE=BSA_MASK_SINK_TOKEN_SIZE,
+                BSA_MASK_SW_SIZE=BSA_MASK_SW_SIZE,
+                BSA_K=BSA_K,
+                BSA_BLOCK_SIZE_K=BSA_BLOCK_SIZE_K,
+                BSA_INDICES=BSA_INDICES,
+                stride_bim=stride_bim,
+                stride_bik=stride_bik,
+                BSA_BLOCK_SUMS=BSA_BLOCK_SUMS,
+                stride_bsk=stride_bsk,
+                stride_bsm=stride_bsm,
+                BSA_HEAP_INDICES=BSA_HEAP_INDICES,
+                stride_hik=stride_hik,
+                stride_him=stride_him,
+                COS=COS,
+                stride_cos_t=stride_cos_t,
+                stride_cos_hid=stride_cos_hid,
+                SIN=SIN,
+                stride_sin_t=stride_sin_t,
+                stride_sin_hid=stride_sin_hid,
+                K_ROT=K + kv_offset if K is not None else None,
+                stride_k_rot_tsrc=stride_kn,
+                stride_k_rot_hid=stride_kk,
+                lo=mid,
+                hi=hi,
+                REVERSE_ITER=REVERSE_ITER,
+                MASKING=True,
+                EXTEND_BACKEND=EXTEND_BACKEND,
+                MODEL_CONTEXT_LENGTH=MODEL_CONTEXT_LENGTH,
+                SELF_EXTEND_SCALE=SELF_EXTEND_SCALE,
+                SELF_EXTEND_WINDOW=SELF_EXTEND_WINDOW,
+                ONLINE_TOPK_METHOD=ONLINE_TOPK_METHOD,
+                running_mean=running_mean,
+                running_m2=running_m2,
+                num_tracking=num_tracking,
+                topk_idx=topk_idx,
+                EXACT_K=EXACT_K,
+                THRESHOLD_REFRESH_INTERVAL=THRESHOLD_REFRESH_INTERVAL,
+            )
         )
+
+    # if ONLINE_TOPK_METHOD == "estimate":
+    #     if start_m == tl.cdiv(N_CTX, BLOCK_M) - 1 and pid_bsz_head == 0 and idx_split == 0:
+    #         tl.device_print("final running_mean, running_std",
+    #                         (start_m * BLOCK_M).to(tl.int64) + tl.arange(0, BLOCK_M).to(tl.int64),
+    #                         running_mean, tl.sqrt(running_m2 / (num_tracking - 1)))
 
     # epilogue
     if N_SPLIT > 1:
@@ -1137,20 +1553,54 @@ def _attn_fwd(
             tl.store(l_ptrs, l_i, mask=mask_m)
 
         if M is not None:
-            m_i += tl.math.log2(l_i)
             m_ptrs = M + off_hz * N_CTX + offs_m
-            tl.store(m_ptrs, m_i, mask=mask_m)
+            rowsum = tl.math.exp2(m_i + tl.math.log2(l_i))
+            tl.store(m_ptrs, rowsum, mask=mask_m)
+
+        if M_BSA is not None:
+            m_ptrs = M_BSA + off_hz * N_CTX + offs_m
+            rowsum_bsa = tl.math.exp2(m_i + tl.math.log2(l_bsa))
+            tl.store(m_ptrs, rowsum_bsa, mask=mask_m)
 
         acc = acc / l_i[:, None]
+
         tl.store(
-            O_block_ptr,
+            Out
+            + q_offset
+            + (
+                start_m.to(tl.int64) * BLOCK_M
+                + tl.arange(0, BLOCK_M)[:, None].to(tl.int64)
+            )
+            * stride_om
+            + tl.arange(0, HEAD_DIM)[None, :].to(tl.int64) * stride_on,
             acc.to(Out.type.element_ty),
-            boundary_check=(0,),
+            mask=mask_m[:, None],
         )
     else:
         tl.static_assert(M is None)
         tl.static_assert(MX is None)
         tl.static_assert(NC is None)
+
+
+_ATTN_FWD_NO_RESTORE = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+)(_attn_fwd)
+
+_ATTN_FWD_RESTORE_BSA_IND_SUM = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+    restore_value=[
+        "BSA_INDICES",
+        "BSA_BLOCK_SUMS",
+    ],
+)(_attn_fwd)
+
+_ATTN_FWD_RESTORE_BSA_HEAP = triton.autotune(
+    configs=configs,
+    key=["N_CTX_AUTOTUNE", "N_KV_AUTOTUNE"],
+    restore_value=["BSA_INDICES", "BSA_BLOCK_SUMS", "BSA_HEAP_INDICES"],
+)(_attn_fwd)
 
 
 @triton.jit
@@ -1247,7 +1697,6 @@ def _attn_merge(
 
 class _attention(torch.autograd.Function):
 
-    @capture
     @staticmethod
     def forward(
         ctx,
@@ -1277,7 +1726,14 @@ class _attention(torch.autograd.Function):
         self_extend_scale: int,
         bsa_top_block_k: int,
         bsa_block_size_k: int,
+        online_topk_method: Literal["online", "tree"],
+        reverse_iter: bool,
+        exact_k: Optional[int],
+        threshold_refresh_interval: int,
+        return_row_sums: bool,
     ):
+        exact_k = bsa_top_block_k if exact_k in [None, -1] else exact_k
+        est_k = bsa_top_block_k - exact_k
         q = (q * sm_scale).to(q.dtype)
 
         USING_PAGED_CACHE = k_cache is not None
@@ -1310,14 +1766,9 @@ class _attention(torch.autograd.Function):
         )
 
         # NOTE: this is for backward
-        # M = torch.empty(
-        #     (q.shape[0], q.shape[1], q.shape[2]),
-        #     device=q.device,
-        #     dtype=torch.float32,
-        # )
-        NC = MX = M = None
+        NC = MX = None
         if return_running_statistics:
-            assert not return_bsa_indices
+            # assert not return_bsa_indices
             MX = torch.empty(
                 (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
@@ -1329,24 +1780,93 @@ class _attention(torch.autograd.Function):
                 dtype=torch.float32,
             )
 
-        bsa_indices = bsa_block_sums = None
-        if return_bsa_indices:
-            assert not return_running_statistics
-            assert not return_pooled_scores
-            BSZ, HEAD, TDST = q.shape[:3]
-            bsa_indices = torch.full(
-                (BSZ, HEAD, TDST, bsa_top_block_k),
-                987654321,
-                device=q.device,
-                dtype=torch.int64,
-            )
-            bsa_block_sums = torch.full(
-                (BSZ, HEAD, TDST, bsa_top_block_k),
-                fill_value=-3200.0,
+        M = M_BSA = None
+        if return_row_sums:
+            M = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
                 device=q.device,
                 dtype=torch.float32,
             )
-            assert bsa_indices.stride() == bsa_block_sums.stride()
+            M_BSA = torch.empty(
+                (q.shape[0], q.shape[1], q.shape[2]),
+                device=q.device,
+                dtype=torch.float32,
+            )
+
+        bsa_indices = bsa_block_sums = bsa_heap_indices = None
+        if return_bsa_indices:
+            # assert not return_running_statistics
+            assert not return_pooled_scores
+            BSZ, HEAD, TDST = q.shape[:3]
+
+            k_factor = 1
+            if online_topk_method == "tree":
+                k_factor = 2
+
+                # FIXME: this doesn't need to be 2K but I could not find the
+                # energy to split the strides and add more arguments :(
+                bsa_indices = torch.full(  # for real block indices
+                    (BSZ, HEAD, exact_k * k_factor + est_k, TDST),
+                    987654321,
+                    device=q.device,
+                    dtype=torch.int32,
+                )
+                bsa_block_sums = torch.full(  # for real block indices
+                    (exact_k * k_factor + est_k,),
+                    float("-inf"),
+                    device=q.device,
+                    dtype=torch.float32,
+                )
+
+                # need to initialize the heap in the proper order
+                bsa_heap_indices = torch.zeros(
+                    exact_k * 2, device=q.device, dtype=torch.int32
+                )
+                bsa_heap_indices[exact_k:] = torch.arange(
+                    0, exact_k, device=q.device, dtype=torch.int32
+                )
+
+                for node in range(exact_k - 1, 0, -1):
+                    l = node << 1
+                    r = l + 1
+
+                    lv = bsa_block_sums[l]
+                    rv = bsa_block_sums[r]
+                    lp = bsa_heap_indices[l]
+                    rp = bsa_heap_indices[r]
+
+                    take_left = lv < rv
+                    bsa_heap_indices[node] = torch.where(take_left, lp, rp)
+                    bsa_block_sums[node] = torch.where(take_left, lv, rv)
+
+                bsa_heap_indices = bsa_heap_indices.view(1, 1, -1, 1).repeat(
+                    BSZ, HEAD, 1, TDST
+                )
+                bsa_block_sums = bsa_block_sums.view(1, 1, -1, 1).repeat(
+                    BSZ, HEAD, 1, TDST
+                )
+                bsa_heap_indices = bsa_heap_indices.contiguous()
+                bsa_block_sums = bsa_block_sums.contiguous()
+
+            else:
+                # energy to split the strides and add more arguments :(
+                bsa_heap_indices = torch.empty(
+                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                bsa_indices = torch.full(  # for real block indices
+                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                    987654321,
+                    device=q.device,
+                    dtype=torch.int32,
+                )
+                bsa_block_sums = torch.full(  # for
+                    (BSZ, HEAD, TDST, bsa_top_block_k * k_factor),
+                    fill_value=float("-inf"),
+                    device=q.device,
+                    dtype=torch.float32,
+                )
 
         if return_pooled_scores:
             assert not return_running_statistics
@@ -1368,7 +1888,7 @@ class _attention(torch.autograd.Function):
                     triton.cdiv(q.shape[2], score_pooling_block_size_q),
                     triton.cdiv(MAX_TSRC, score_pooling_block_size_k),
                 ),
-                fill_value=float("-inf"),
+                fill_value=-3200.0,
                 dtype=torch.float32,
                 device=q.shape,
             )
@@ -1409,7 +1929,7 @@ class _attention(torch.autograd.Function):
             # warnings.warn("N_SPLIT is ignored when returning bsa indices. this should be fixed")
             N_SPLIT = 1
         else:
-            warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
+            # warnings.warn("N_SPLIT is ignored during researching. this should be fixed")
             N_SPLIT = 1
 
         assert safe_stride(k, 4)[:2] == safe_stride(v, 4)[:2]
@@ -1417,6 +1937,18 @@ class _attention(torch.autograd.Function):
         if bsa_indices is not None:
             assert bsa_block_sums is not None
             assert bsa_indices.stride() == bsa_block_sums.stride()
+
+        N_KV = (
+            k.shape[2] if not USING_PAGED_CACHE else k_cache.shape[0] * k_cache.shape[1]
+        )
+        N_KV_AUTOTUNE = 1024 if N_KV > 1024 else 1
+        N_CTX_AUTOTUNE = 128 if N_CTX > 128 else 1
+
+        _attn_fwd = _ATTN_FWD_NO_RESTORE
+        if bsa_indices is not None and bsa_heap_indices is not None:
+            _attn_fwd = _ATTN_FWD_RESTORE_BSA_HEAP
+        elif bsa_indices is not None:
+            _attn_fwd = _ATTN_FWD_RESTORE_BSA_IND_SUM
 
         if (N_SPLIT > 1) and (not ignore_n_split):
             raise Exception("WIP: QSA-BSA masking, fill argument correctly after work.")
@@ -1495,11 +2027,14 @@ class _attention(torch.autograd.Function):
                 ),
                 HEAD_DIM=HEAD_DIM_K,
                 N_SPLIT=N_SPLIT,
+                REVERSE_ITER=reverse_iter,
                 V_FP8=V_FP8,
                 EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
                 BSA_K=bsa_top_block_k,
+                ONLINE_TOPK_METHOD=online_topk_method,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
@@ -1574,9 +2109,20 @@ class _attention(torch.autograd.Function):
             o = acc.to(o.dtype)
             """
         else:
-            grid = lambda args: (
-                triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,
+
+            def grid(args):
+                return (triton.cdiv(N_CTX, args["BLOCK_M"]) * 1 * N_BATCH * N_HEAD,)
+
+            assert math.log2(bsa_top_block_k) == int(math.log2(bsa_top_block_k))
+
+            N_CTX = N_CTX
+            N_KV = (
+                k.shape[2]
+                if not USING_PAGED_CACHE
+                else k_cache.shape[0] * k_cache.shape[1]
             )
+            N_CTX_AUTOTUNE = 128 if N_CTX > 128 else 1
+            N_KV_AUTOTUNE = 1024 if N_KV > 1024 else 1
 
             _attn_fwd[grid](
                 q,
@@ -1587,6 +2133,7 @@ class _attention(torch.autograd.Function):
                 softmax_sink.contiguous() if softmax_sink is not None else None,
                 sm_scale,
                 M,
+                M_BSA,
                 MX,
                 NC,
                 o,
@@ -1630,8 +2177,11 @@ class _attention(torch.autograd.Function):
                 bsa_top_block_k,
                 bsa_block_size_k,
                 bsa_indices,
-                bsa_block_sums,
                 *safe_stride(bsa_indices, 4),
+                bsa_block_sums,
+                *safe_stride(bsa_block_sums, 4),
+                bsa_heap_indices,
+                *safe_stride(bsa_heap_indices, 4),
                 q.shape[0],
                 q.shape[1],
                 N_CTX=N_CTX,
@@ -1644,22 +2194,38 @@ class _attention(torch.autograd.Function):
                 HEAD_NOPE=HEAD_DIM_K_NOPE,
                 HEAD_ROPE=HEAD_DIM_K_ROPE,
                 N_SPLIT=1,
+                REVERSE_ITER=reverse_iter,
+                V_FP8=V_FP8,
                 # BLOCK_M=64,
                 # BLOCK_N=32,
-                V_FP8=V_FP8,
                 EXTEND_BACKEND=("none" if extend_backend == "nope" else extend_backend),
                 # EXTEND_BACKEND=extend_backend,
                 MODEL_CONTEXT_LENGTH=model_context_length,
                 SELF_EXTEND_SCALE=self_extend_scale,
+                ONLINE_TOPK_METHOD=online_topk_method,
+                N_CTX_AUTOTUNE=N_CTX_AUTOTUNE,
+                N_KV_AUTOTUNE=N_KV_AUTOTUNE,
+                EXACT_K_=exact_k,
+                THRESHOLD_REFRESH_INTERVAL=threshold_refresh_interval,
                 **extra_kern_args,
             )
 
+        outputs = (o,)
         if return_running_statistics:
-            return o, (MX, NC)
-        elif return_bsa_indices:
-            return o, (bsa_indices, bsa_block_sums)
-        else:
-            return o
+            outputs = outputs + ((MX, NC),)
+        if return_row_sums:
+            outputs = outputs + ((M, M_BSA),)
+        if return_bsa_indices:
+            if online_topk_method != "tree":
+                outputs = outputs + ((bsa_indices, bsa_block_sums),)
+            else:
+                outputs = outputs + (
+                    (
+                        bsa_indices[:, :, exact_k:, :].transpose(-1, -2),
+                        bsa_block_sums[:, :, exact_k:, :].transpose(-1, -2),
+                    ),
+                )
+        return o if len(outputs) == 1 else outputs
 
     @staticmethod
     def backward(ctx, do):
@@ -1667,6 +2233,7 @@ class _attention(torch.autograd.Function):
 
 
 # for typing wrapper and provide kwargs
+@capture
 def query_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1690,11 +2257,17 @@ def query_sparse_attention(
     model_context_length: int = 131072,
     self_extend_scale: int = 12,
     return_bsa_indices: bool = False,
-    bsa_mask_sink_token_size: int = 0,
+    bsa_mask_sink_token_size: int = 64,
     bsa_mask_sliding_window_size: int = 0,
     bsa_top_block_k: int = 128,
-    bsa_block_size_k: int = 2,
+    bsa_block_size_k: int = 32,
+    online_topk_method: Literal["online", "tree"] = "online",
+    reverse_iter: bool = True,
+    exact_k: int = None,
+    threshold_refresh_interval: int = 4,
+    return_row_sums: bool = False,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    assert online_topk_method in {"online", "tree"}
     return _attention.apply(
         q,
         k,
@@ -1722,4 +2295,9 @@ def query_sparse_attention(
         self_extend_scale,
         bsa_top_block_k,
         bsa_block_size_k,
+        online_topk_method,
+        reverse_iter,
+        exact_k,
+        threshold_refresh_interval,
+        return_row_sums,
     )
