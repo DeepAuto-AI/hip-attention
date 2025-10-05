@@ -44,15 +44,8 @@ class Watchdog:
         log(f"Finish kill subprocess")
 
     def wait_for_health(self, timeout: int):
-        t_start = time.time()
-        while (time.time() - t_start) < timeout:
-            try:
-                response = requests.get(self.health_endpoint, timeout=timeout)
-                response.raise_for_status()
-                return
-            except requests.ConnectionError:
-                time.sleep(self.sleep_step)
-        raise TimeoutError()
+        response = requests.get(self.health_endpoint, timeout=timeout)
+        response.raise_for_status()
 
     def main_watchdog(self):
         while True:
@@ -66,8 +59,9 @@ class Watchdog:
                 ):
                     try:
                         self.wait_for_health(timeout=self.timeout_bootup)
+                        log("Server booted successfully.")
                         booted = True
-                    except (TimeoutError, requests.HTTPError):
+                    except (TimeoutError, requests.HTTPError, requests.ConnectionError):
                         # NOTE: may process is not started yet
                         pass
                     time.sleep(self.sleep_step)
@@ -75,8 +69,10 @@ class Watchdog:
                 if not booted: raise TimeoutError()
             
                 while True:
+                    log("Try watch dog.")
                     self.wait_for_health(timeout=self.timeout_tick)
-                    time.sleep(self.sleep_step)
+                    log("Done watch dog successfully.")
+                    time.sleep(self.timeout_tick)
             
             except (TimeoutError, requests.HTTPError):
                 self.kill_subprocess()
@@ -111,8 +107,9 @@ class Watchdog:
             daemon=True
         )
 
-        self.thread_watchdog.start()
         self.thread_starter.start()
+        time.sleep(self.sleep_step)
+        self.thread_watchdog.start()
 
         self.thread_watchdog.join()
         self.thread_starter.join()
