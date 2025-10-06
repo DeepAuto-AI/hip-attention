@@ -4,6 +4,7 @@ import os
 import subprocess
 import threading
 import time
+import traceback
 import requests
 
 def log(*args):
@@ -52,6 +53,9 @@ class Watchdog:
             try:
                 t_boot = time.time()
                 booted = False
+                while self.proc is None:
+                    log("Watchdog is waiting for process started...")
+                    time.sleep(self.sleep_step)
                 while (
                     (time.time() - t_boot) < self.timeout_bootup
                     and self.proc.returncode is None
@@ -76,6 +80,12 @@ class Watchdog:
             
             except (TimeoutError, requests.HTTPError):
                 self.kill_subprocess()
+            except Exception as ex:
+                trace = traceback.format_exc()
+                log(f"Traceback:\n{trace}")
+                log(f"Unexpected error on watchdog thread: {ex}")
+                self.kill_subprocess()
+            
             time.sleep(self.sleep_step)
 
     def main_starter(self):
