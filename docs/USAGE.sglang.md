@@ -57,14 +57,18 @@
     - [Multi GPU with original context length](#multi-gpu-with-original-context-length)
       - [Local](#local-14)
       - [Docker](#docker-12)
-  - [`Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`](#qwenqwen3-235b-a22b-thinking-2507-fp8)
-    - [Multi GPU with extended 512k context length](#multi-gpu-with-extended-512k-context-length)
+  - [`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`](#qwenqwen3-235b-a22b-instruct-2507-fp8)
+    - [Multi GPU with original 256k context length](#multi-gpu-with-original-256k-context-length)
       - [Local](#local-15)
       - [Docker](#docker-13)
-  - [`openai/gpt-oss-120b`](#openaigpt-oss-120b)
-    - [Multi GPU with extended 1M context length](#multi-gpu-with-extended-1m-context-length)
+  - [`Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`](#qwenqwen3-235b-a22b-thinking-2507-fp8)
+    - [Multi GPU with extended 512k context length](#multi-gpu-with-extended-512k-context-length)
       - [Local](#local-16)
       - [Docker](#docker-14)
+  - [`openai/gpt-oss-120b`](#openaigpt-oss-120b)
+    - [Multi GPU with extended 1M context length](#multi-gpu-with-extended-1m-context-length)
+      - [Local](#local-17)
+      - [Docker](#docker-15)
 
 ## Prerequisites
 
@@ -1257,6 +1261,113 @@ python \
 --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
 --max-running-requests 8 \
 --trust-remote-code
+```
+
+## `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`
+
+### Multi GPU with original 256k context length
+
+- 256k context length (without context extension)
+- Cache offloading disabled
+- Tested model: [`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8)
+- Tested GPU: 8x H100 80GB
+- Tested at: 2025-10-08
+- Tested version:
+  - `hip-attention`: `3192b974685791ab08f9278a4e23be4618a227fc`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `eb1197fd7ad372de83a1589ec99c101054c25cf1`
+
+#### Local
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+BSA_K=32 \
+BSA_EXACT_K=32 \
+BSA_BLOCK_K=64 \
+HIP_DEBUG_DELTA_QSA=1 \
+HIP_DEBUG_RECOMPUTE_SPLIT=0 \
+TRITON_PRINT_AUTOTUNING=1 \
+SRT_WARMUP_ALL_SEQ_LENS=0 \
+HIP_DEBUG_FA3_MIXING_LEN=0 \
+PASSKEY_DECODE_LEN=128 \
+PASSKEY_LEN=150 \
+SA_BLOCK_SIZE=128 \
+SA_DECODE_BLOCK_SIZE=128 \
+HIP_DISABLE_AUTOTUNE=0 \
+HIP_DEBUG=0 \
+HIP_DEBUG_BENCH=0 \
+HIP_DEBUG_CAPTURE_DECORATOR=1 \
+CUDA_LAUNCH_BLOCKING=0 \
+uv run \
+--env-file .env \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8000 \
+--model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+--kv-cache-dtype auto \
+--ep-size 8 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 16 24 32 48 64 96 128 160 192 256 \
+--context-length 256000 \
+--max-total-tokens 256000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0814_no_extend_qsa.json \
+--hip-attention-config-override-json '{"__seq_thresh_fa3": 65536}' \
+--json-model-override-args  '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 64 \
+--trust-remote-code \
+--tool-call-parser qwen25
+```
+
+#### Docker
+
+```bash
+docker run --rm \
+--gpus all \
+--name deepauto-qwen3-235b-a22b-instruct-2507-fp8-8gpu \
+-p 8000:8000 \
+--ipc=host \
+-v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
+--env "HF_TOKEN=${HF_TOKEN}" \
+--env "BSA_K=32" \
+--env "BSA_EXACT_K=32" \
+--env "BSA_BLOCK_K=64" \
+--env "HIP_DEBUG_DELTA_QSA=1" \
+--env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
+--env "TRITON_PRINT_AUTOTUNING=1" \
+--env "SRT_WARMUP_ALL_SEQ_LENS=0" \
+--env "HIP_DEBUG_FA3_MIXING_LEN=0" \
+--env "PASSKEY_DECODE_LEN=128" \
+--env "PASSKEY_LEN=150" \
+--env "SA_BLOCK_SIZE=128" \
+--env "SA_DECODE_BLOCK_SIZE=128" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
+--env "HIP_DEBUG=0" \
+--env "HIP_DEBUG_BENCH=0" \
+--env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
+--env "CUDA_LAUNCH_BLOCKING=0" \
+deepauto/hip-attention:v1.2.9-sglang \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port 8000 \
+--model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+--kv-cache-dtype auto \
+--ep-size 8 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 16 24 32 48 64 96 128 160 192 256 \
+--context-length 256000 \
+--max-total-tokens 256000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0814_no_extend_qsa.json \
+--hip-attention-config-override-json '{"__seq_thresh_fa3": 65536}' \
+--json-model-override-args  '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 64 \
+--trust-remote-code \
+--tool-call-parser qwen25
 ```
 
 ## `Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`
