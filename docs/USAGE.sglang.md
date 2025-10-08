@@ -1491,7 +1491,7 @@ python \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-SRT_DEFAULT_REASONING_EFFORT=high \
+SRT_DEFAULT_REASONING_EFFORT=medium \
 SA_BLOCKWISE_MASKING=0 \
 SRT_FORCE_SPECIAL_TOKENS=1 \
 HIP_DEBUG_RECOMPUTE_SPLIT=0 \
@@ -1512,16 +1512,15 @@ uv run -m sglang.launch_server \
 --model-path lmsys/gpt-oss-120b-bf16 \
 --kv-cache-dtype fp8_e4m3 \
 --tp-size 8 \
---chunked-prefill-size 131072 \
---max-prefill-tokens 131072 \
---cuda-graph-bs 1 2 4 8 12 16 20 24 28 32 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 12 16 \
 --context-length 1024000 \
---max-total-tokens 6144000 \
+--max-total-tokens 4096000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0806_gptoss.json \
---hip-attention-config-override-json '{"self_extend_scale": 20}' \
---chat-template ./configs/gptoss.jinja \
---max-running-requests 32 \
+--chat-template configs/gptoss.jinja \
+--max-running-requests 16 \
 --reasoning-parser gpt-oss \
 --tool-call-parser gpt-oss
 ```
@@ -1536,7 +1535,7 @@ docker run --rm \
 --ipc=host \
 -v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
---env "SRT_DEFAULT_REASONING_EFFORT=high" \
+--env "SRT_DEFAULT_REASONING_EFFORT=medium" \
 --env "SA_BLOCKWISE_MASKING=0" \
 --env "SRT_FORCE_SPECIAL_TOKENS=1" \
 --env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
@@ -1559,15 +1558,15 @@ python \
 --model-path lmsys/gpt-oss-120b-bf16 \
 --kv-cache-dtype fp8_e4m3 \
 --tp-size 8 \
---chunked-prefill-size 131072 \
---max-prefill-tokens 131072 \
---cuda-graph-bs 1 2 4 8 12 16 20 24 28 32 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 12 16 \
 --context-length 1024000 \
---max-total-tokens 6144000 \
+--max-total-tokens 4096000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0806_gptoss.json \
---chat-template ./configs/gptoss.jinja \
---max-running-requests 32 \
+--chat-template configs/gptoss.jinja \
+--max-running-requests 16 \
 --reasoning-parser gpt-oss \
 --tool-call-parser gpt-oss
 ```
