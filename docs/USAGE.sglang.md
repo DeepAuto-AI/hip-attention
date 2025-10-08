@@ -72,14 +72,9 @@
 
 ## Prerequisites
 
-- Export the `HF_TOKEN` environment variable.
-
-```bash
-export HF_TOKEN=<secret>
-
-# Optional
-export HF_HOME="<path-to-your-huggingface-cache>"
-```
+- Create environment file
+  - Copy [`.env.example`](/.env.example) to `.env` in the project root
+  - Edit `.env` to your needs
 
 ## Testing
 
@@ -1323,13 +1318,25 @@ uv run \
 #### Docker
 
 ```bash
-docker run --rm \
+# Load env
+export $(grep -v '^#' .env | xargs)
+
+# Start
+name=deepauto-qwen3-235b-a22b-instruct-2507-fp8-8gpu
+version=v1.2.9-sglang
+
+docker run \
+--rm \
 --gpus all \
---name deepauto-qwen3-235b-a22b-instruct-2507-fp8-8gpu \
+--name ${name}-${version} \
+--env-file .env \
+--mount type=volume,src=cache-${name}-${version},target=/root/.cache \
+--mount type=bind,source=${HF_HOME:-"$HOME/.cache/huggingface"},target=/root/.cache/huggingface \
+--env "HF_HOME=/root/.cache/huggingface" \
+--env "SGL_DG_CACHE_DIR=/root/.cache/deep_gemm" \
+--env "TRITON_HOME=/root/.cache" \
 -p 8000:8000 \
 --ipc=host \
--v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
---env "HF_TOKEN=${HF_TOKEN}" \
 --env "BSA_K=32" \
 --env "BSA_EXACT_K=32" \
 --env "BSA_BLOCK_K=64" \
@@ -1347,7 +1354,7 @@ docker run --rm \
 --env "HIP_DEBUG_BENCH=0" \
 --env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
 --env "CUDA_LAUNCH_BLOCKING=0" \
-deepauto/hip-attention:v1.2.9-sglang \
+deepauto/hip-attention:${version} \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
