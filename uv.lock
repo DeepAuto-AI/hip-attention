@@ -3597,7 +3597,7 @@ wheels = [
 [[package]]
 name = "sglang"
 version = "0.5.3rc0"
-source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#eb1197fd7ad372de83a1589ec99c101054c25cf1" }
+source = { git = "https://github.com/DeepAuto-AI/sglang.git?subdirectory=python&rev=deepauto%2Fdev#a2e22f83f39645d13b40f663ddc7f9fb199f5d13" }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
