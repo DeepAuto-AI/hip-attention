@@ -57,25 +57,24 @@
     - [Multi GPU with original context length](#multi-gpu-with-original-context-length)
       - [Local](#local-14)
       - [Docker](#docker-12)
-  - [`Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`](#qwenqwen3-235b-a22b-thinking-2507-fp8)
-    - [Multi GPU with extended 768k context length](#multi-gpu-with-extended-768k-context-length)
+  - [`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`](#qwenqwen3-235b-a22b-instruct-2507-fp8)
+    - [Multi GPU with original 256k context length](#multi-gpu-with-original-256k-context-length)
       - [Local](#local-15)
       - [Docker](#docker-13)
-  - [`openai/gpt-oss-120b`](#openaigpt-oss-120b)
-    - [Multi GPU with extended 2M context length](#multi-gpu-with-extended-2m-context-length)
+  - [`Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`](#qwenqwen3-235b-a22b-thinking-2507-fp8)
+    - [Multi GPU with extended 512k context length](#multi-gpu-with-extended-512k-context-length)
       - [Local](#local-16)
       - [Docker](#docker-14)
+  - [`openai/gpt-oss-120b`](#openaigpt-oss-120b)
+    - [Multi GPU with extended 1M context length](#multi-gpu-with-extended-1m-context-length)
+      - [Local](#local-17)
+      - [Docker](#docker-15)
 
 ## Prerequisites
 
-- Export the `HF_TOKEN` environment variable.
-
-```bash
-export HF_TOKEN=<secret>
-
-# Optional
-export HF_HOME="<path-to-your-huggingface-cache>"
-```
+- Create environment file
+  - Copy [`.env.example`](/.env.example) to `.env` in the project root
+  - Edit `.env` to your needs
 
 ## Testing
 
@@ -1259,11 +1258,139 @@ python \
 --trust-remote-code
 ```
 
+## `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`
+
+### Multi GPU with original 256k context length
+
+- 256k context length (without context extension)
+- Cache offloading disabled
+- Tested model: [`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8)
+- Tested GPU: 8x H100 80GB
+- Tested at: 2025-10-08
+- Tested version:
+  - `hip-attention`: `3192b974685791ab08f9278a4e23be4618a227fc`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `a2e22f83f39645d13b40f663ddc7f9fb199f5d13`
+
+#### Local
+
+```bash
+# Start
+port=8000
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+BSA_K=32 \
+BSA_EXACT_K=32 \
+BSA_BLOCK_K=64 \
+HIP_DEBUG_DELTA_QSA=1 \
+HIP_DEBUG_RECOMPUTE_SPLIT=0 \
+TRITON_PRINT_AUTOTUNING=1 \
+SRT_WARMUP_ALL_SEQ_LENS=0 \
+HIP_DEBUG_FA3_MIXING_LEN=0 \
+PASSKEY_DECODE_LEN=128 \
+PASSKEY_LEN=150 \
+SA_BLOCK_SIZE=128 \
+SA_DECODE_BLOCK_SIZE=128 \
+HIP_DISABLE_AUTOTUNE=0 \
+HIP_DEBUG=0 \
+HIP_DEBUG_BENCH=0 \
+HIP_DEBUG_CAPTURE_DECORATOR=1 \
+CUDA_LAUNCH_BLOCKING=0 \
+uv run \
+--env-file .env \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port ${port} \
+--model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+--kv-cache-dtype auto \
+--ep-size 8 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 16 24 32 48 64 96 128 160 192 256 \
+--context-length 256000 \
+--max-total-tokens 256000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0814_no_extend_qsa.json \
+--hip-attention-config-override-json '{"__seq_thresh_fa3": 65536}' \
+--json-model-override-args  '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 64 \
+--trust-remote-code \
+--tool-call-parser qwen25
+```
+
+#### Docker
+
+```bash
+# Load env
+export $(grep -v '^#' .env | xargs)
+
+# Start
+name=deepauto-qwen3-235b-a22b-instruct-2507-fp8-8gpu
+version=v1.2.9-sglang
+port=8000
+
+docker run \
+--rm \
+--gpus all \
+--name ${name}-${version} \
+--env-file .env \
+--mount type=volume,src=cache-${name}-${version},target=/root/.cache \
+--mount type=bind,source=${HF_HOME:-"$HOME/.cache/huggingface"},target=/root/.cache/huggingface \
+--env "HF_HOME=/root/.cache/huggingface" \
+--env "SGL_DG_CACHE_DIR=/root/.cache/deep_gemm" \
+--env "TRITON_HOME=/root/.cache" \
+-p ${port}:${port} \
+--ipc=host \
+--health-cmd "curl -f http://localhost:${port}/health || exit 1" \
+--health-interval 5s \
+--health-timeout 60s \
+--health-retries 1 \
+--health-start-period 1800s \
+--env "BSA_K=32" \
+--env "BSA_EXACT_K=32" \
+--env "BSA_BLOCK_K=64" \
+--env "HIP_DEBUG_DELTA_QSA=1" \
+--env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
+--env "TRITON_PRINT_AUTOTUNING=1" \
+--env "SRT_WARMUP_ALL_SEQ_LENS=0" \
+--env "HIP_DEBUG_FA3_MIXING_LEN=0" \
+--env "PASSKEY_DECODE_LEN=128" \
+--env "PASSKEY_LEN=150" \
+--env "SA_BLOCK_SIZE=128" \
+--env "SA_DECODE_BLOCK_SIZE=128" \
+--env "HIP_DISABLE_AUTOTUNE=0" \
+--env "HIP_DEBUG=0" \
+--env "HIP_DEBUG_BENCH=0" \
+--env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
+--env "CUDA_LAUNCH_BLOCKING=0" \
+deepauto/hip-attention:${version} \
+python \
+-m sglang.launch_server \
+--host 0.0.0.0 \
+--port ${port} \
+--model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+--kv-cache-dtype auto \
+--ep-size 8 \
+--tp-size 8 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 16 24 32 48 64 96 128 160 192 256 \
+--context-length 256000 \
+--max-total-tokens 256000 \
+--attention-backend hip_attention \
+--hip-attention-config ./configs/mixed_landmark_0814_no_extend_qsa.json \
+--hip-attention-config-override-json '{"__seq_thresh_fa3": 65536}' \
+--json-model-override-args  '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
+--max-running-requests 64 \
+--trust-remote-code \
+--tool-call-parser qwen25
+```
+
 ## `Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`
 
-### Multi GPU with extended 768k context length
+### Multi GPU with extended 512k context length
 
-- 768k context length (with context extension)
+- 512k context length (with context extension)
 - Cache offloading disabled
 - Tested model: [`Qwen/Qwen3-235B-A22B-Thinking-2507-FP8`](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507-FP8)
 - Tested GPU: 8x H100 80GB
@@ -1281,7 +1408,7 @@ TRITON_PRINT_AUTOTUNING=1 \
 SRT_WARMUP_ALL_SEQ_LENS=0 \
 HIP_DEBUG_FA3_MIXING_LEN=0 \
 PASSKEY_DECODE_LEN=128 \
-PASSKEY_LEN=500 \
+PASSKEY_LEN=450 \
 SA_BLOCK_SIZE=128 \
 SA_DECODE_BLOCK_SIZE=128 \
 HIP_DISABLE_AUTOTUNE=0 \
@@ -1299,14 +1426,15 @@ uv run -m sglang.launch_server \
 --chunked-prefill-size 65536 \
 --max-prefill-tokens 65536 \
 --cuda-graph-bs 1 2 4 8 \
---context-length 768000 \
---max-total-tokens 768000 \
+--context-length 512000 \
+--max-total-tokens 512000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0722_no_extend_fast.json \
 --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
 --max-running-requests 8 \
 --trust-remote-code \
---reasoning-parser qwen3-thinking
+--reasoning-parser qwen3-thinking \
+--tool-call-parser qwen25
 ```
 
 #### Docker
@@ -1324,7 +1452,7 @@ docker run --rm \
 --env "SRT_WARMUP_ALL_SEQ_LENS=0" \
 --env "HIP_DEBUG_FA3_MIXING_LEN=0" \
 --env "PASSKEY_DECODE_LEN=128" \
---env "PASSKEY_LEN=500" \
+--env "PASSKEY_LEN=450" \
 --env "SA_BLOCK_SIZE=128" \
 --env "SA_DECODE_BLOCK_SIZE=128" \
 --env "HIP_DISABLE_AUTOTUNE=0" \
@@ -1332,7 +1460,7 @@ docker run --rm \
 --env "HIP_DEBUG_BENCH=0" \
 --env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
 --env "CUDA_LAUNCH_BLOCKING=0" \
-deepauto/hip-attention:v1.2.8-sglang \
+deepauto/hip-attention:v1.2.9-sglang \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
@@ -1344,21 +1472,22 @@ python \
 --chunked-prefill-size 65536 \
 --max-prefill-tokens 65536 \
 --cuda-graph-bs 1 2 4 8 \
---context-length 768000 \
---max-total-tokens 768000 \
+--context-length 512000 \
+--max-total-tokens 512000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0722_no_extend_fast.json \
 --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}' \
 --max-running-requests 8 \
 --trust-remote-code \
---reasoning-parser qwen3-thinking
+--reasoning-parser qwen3-thinking \
+--tool-call-parser qwen25
 ```
 
 ## `openai/gpt-oss-120b`
 
-### Multi GPU with extended 2M context length
+### Multi GPU with extended 1M context length
 
-- 2M context length (with context extension)
+- 1M context length (with context extension)
 - Cache offloading disabled
 - Tested model: [`lmsys/gpt-oss-120b-bf16`](https://huggingface.co/lmsys/gpt-oss-120b-bf16)
 - Tested GPU: 8x H100 80GB
@@ -1371,6 +1500,7 @@ python \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+SRT_DEFAULT_REASONING_EFFORT=medium \
 SA_BLOCKWISE_MASKING=0 \
 SRT_FORCE_SPECIAL_TOKENS=1 \
 HIP_DEBUG_RECOMPUTE_SPLIT=0 \
@@ -1391,17 +1521,17 @@ uv run -m sglang.launch_server \
 --model-path lmsys/gpt-oss-120b-bf16 \
 --kv-cache-dtype fp8_e4m3 \
 --tp-size 8 \
---chunked-prefill-size 262144 \
---max-prefill-tokens 262144 \
---cuda-graph-bs 1 2 4 8 \
---context-length 2048000 \
---max-total-tokens 2048000 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 12 16 \
+--context-length 1024000 \
+--max-total-tokens 4096000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0806_gptoss.json \
---max-running-requests 8 \
---trust-remote-code \
---chat-template ./configs/gptoss.jinja \
---reasoning-parser gpt-oss
+--chat-template configs/gptoss.jinja \
+--max-running-requests 16 \
+--reasoning-parser gpt-oss \
+--tool-call-parser gpt-oss
 ```
 
 #### Docker
@@ -1414,6 +1544,7 @@ docker run --rm \
 --ipc=host \
 -v ${HF_HOME:-"$HOME/.cache/huggingface"}:/root/.cache/huggingface \
 --env "HF_TOKEN=${HF_TOKEN}" \
+--env "SRT_DEFAULT_REASONING_EFFORT=medium" \
 --env "SA_BLOCKWISE_MASKING=0" \
 --env "SRT_FORCE_SPECIAL_TOKENS=1" \
 --env "HIP_DEBUG_RECOMPUTE_SPLIT=0" \
@@ -1428,7 +1559,7 @@ docker run --rm \
 --env "HIP_DEBUG=0" \
 --env "HIP_DEBUG_BENCH=0" \
 --env "HIP_DEBUG_CAPTURE_DECORATOR=1" \
-deepauto/hip-attention:v1.2.8-sglang \
+deepauto/hip-attention:v1.2.9-sglang \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
@@ -1436,15 +1567,15 @@ python \
 --model-path lmsys/gpt-oss-120b-bf16 \
 --kv-cache-dtype fp8_e4m3 \
 --tp-size 8 \
---chunked-prefill-size 262144 \
---max-prefill-tokens 262144 \
---cuda-graph-bs 1 2 4 8 \
---context-length 2048000 \
---max-total-tokens 2048000 \
+--chunked-prefill-size 65536 \
+--max-prefill-tokens 65536 \
+--cuda-graph-bs 1 2 4 8 12 16 \
+--context-length 1024000 \
+--max-total-tokens 4096000 \
 --attention-backend hip_attention \
 --hip-attention-config ./configs/mixed_landmark_0806_gptoss.json \
---max-running-requests 8 \
---trust-remote-code \
---chat-template ./configs/gptoss.jinja \
---reasoning-parser gpt-oss
+--chat-template configs/gptoss.jinja \
+--max-running-requests 16 \
+--reasoning-parser gpt-oss \
+--tool-call-parser gpt-oss
 ```
