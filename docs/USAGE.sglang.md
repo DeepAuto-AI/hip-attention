@@ -1269,11 +1269,14 @@ python \
 - Tested at: 2025-10-08
 - Tested version:
   - `hip-attention`: `3192b974685791ab08f9278a4e23be4618a227fc`
-  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `eb1197fd7ad372de83a1589ec99c101054c25cf1`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `a2e22f83f39645d13b40f663ddc7f9fb199f5d13`
 
 #### Local
 
 ```bash
+# Start
+port=8000
+
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 BSA_K=32 \
 BSA_EXACT_K=32 \
@@ -1296,7 +1299,7 @@ uv run \
 --env-file .env \
 -m sglang.launch_server \
 --host 0.0.0.0 \
---port 8000 \
+--port ${port} \
 --model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
 --kv-cache-dtype auto \
 --ep-size 8 \
@@ -1324,6 +1327,7 @@ export $(grep -v '^#' .env | xargs)
 # Start
 name=deepauto-qwen3-235b-a22b-instruct-2507-fp8-8gpu
 version=v1.2.9-sglang
+port=8000
 
 docker run \
 --rm \
@@ -1335,8 +1339,13 @@ docker run \
 --env "HF_HOME=/root/.cache/huggingface" \
 --env "SGL_DG_CACHE_DIR=/root/.cache/deep_gemm" \
 --env "TRITON_HOME=/root/.cache" \
--p 8000:8000 \
+-p ${port}:${port} \
 --ipc=host \
+--health-cmd "curl -f http://localhost:${port}/health || exit 1" \
+--health-interval 5s \
+--health-timeout 60s \
+--health-retries 1 \
+--health-start-period 1800s \
 --env "BSA_K=32" \
 --env "BSA_EXACT_K=32" \
 --env "BSA_BLOCK_K=64" \
@@ -1358,7 +1367,7 @@ deepauto/hip-attention:${version} \
 python \
 -m sglang.launch_server \
 --host 0.0.0.0 \
---port 8000 \
+--port ${port} \
 --model-path Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
 --kv-cache-dtype auto \
 --ep-size 8 \
