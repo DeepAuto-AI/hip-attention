@@ -771,12 +771,13 @@ wheels = [
 
 [[package]]
 name = "flash-attn"
-version = "2.8.2"
-source = { git = "https://github.com/Dao-AILab/flash-attention.git?rev=8c348fd79f423923710cb5a949c8e79f6aa29f7f#8c348fd79f423923710cb5a949c8e79f6aa29f7f" }
+version = "2.8.3"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
     { name = "torch" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz", hash = "sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d", size = 8447812, upload-time = "2025-08-15T08:28:12.911Z" }
 
 [[package]]
 name = "flashinfer-python"
@@ -1007,7 +1008,7 @@ dev = [
 requires-dist = [
     { name = "bitsandbytes" },
     { name = "cupy-cuda12x" },
-    { name = "flash-attn", marker = "extra == 'sglang'", git = "https://github.com/Dao-AILab/flash-attention.git?rev=8c348fd79f423923710cb5a949c8e79f6aa29f7f" },
+    { name = "flash-attn", marker = "extra == 'sglang'", specifier = ">=2.8.3" },
     { name = "flashinfer-python", marker = "extra == 'sglang'" },
     { name = "numba" },
     { name = "nvtx" },
