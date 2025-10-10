@@ -138,7 +138,7 @@ See the following pages for more details:
 
 ### Docker Compose
 
-Docker compose examples are available in [`docker-compose`](#docker-compose) folder.
+Docker compose examples are available in [`docker-compose`](/docker-compose) folder.
 
 ```bash
 # First copy .env.example to .env
