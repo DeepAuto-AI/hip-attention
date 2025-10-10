@@ -37,4 +37,7 @@ services:
     - --prometheus-port
     - "10091"
     ports:
+    # Router port
     - 10090:10090
+    # Monitoring port
+    - 10091:10091
