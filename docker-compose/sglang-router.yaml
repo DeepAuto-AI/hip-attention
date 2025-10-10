@@ -1,0 +1,40 @@
+services:
+  sglang-router:
+    # https://hub.docker.com/r/lmsysorg/sglang-router/tags
+    image: deepauto/sglang-router:v1.2.9-sglang
+    # Host Network to use Tailscale
+    network_mode: host
+    command:
+    - --host
+    - "0.0.0.0"
+    - --port
+    - "10090"
+    # Worker Configuration
+    - --worker-urls
+    - http://h100-80-1:10080
+    # - http://h100-80-2:10080
+    - --worker-startup-timeout-secs
+    - "300"
+    # Algorithm
+    - --policy
+    - "cache_aware"
+    # Retry Policy
+    - --retry-backoff-multiplier
+    - "2.0"
+    - --retry-initial-backoff-ms
+    - "100"
+    - --retry-max-backoff-ms
+    - "10000"
+    # Retry for 10 sec * 360 = 3600 sec = 1 hour
+    - --retry-max-retries
+    - "360"
+    # Request timeout for 2 hour
+    - --request-timeout-secs
+    - "7200"
+    # Monitor the router
+    - --prometheus-host
+    - "0.0.0.0"
+    - --prometheus-port
+    - "10091"
+    ports:
+    - 10090:10090

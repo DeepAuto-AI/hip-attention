@@ -136,6 +136,29 @@ See the following pages for more details:
 
 - [Running OpenAI API server examples (SGlang)](docs/USAGE.sglang.md)
 
+### Docker Compose
+
+Docker compose examples are available in [`docker-compose`](#docker-compose) folder.
+
+```bash
+# First copy .env.example to .env
+cp .env.example .env
+vim .env
+
+# Start sglang server
+docker compose \
+--env-file .env \
+-f docker-compose/sglang-server.yaml \
+--project-name hip-attention-sglang-server-local \
+up
+
+# Start sglang router
+docker compose \
+-f docker-compose/sglang-router.yaml \
+--project-name hip-attention-sglang-router-local \
+up
+```
+
 ## Experiment Reproduce
 
 Check [how to reproduce experiment](docs/REPRODUCE.md) page
