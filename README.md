@@ -223,27 +223,38 @@ cd hip-attention
 docker login
 
 tag_git_short=$(git rev-parse --short HEAD)-sglang
-tag_hip_attention=v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
+tag_hip_attention_sglang=v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
 
 # Build sglang server image
-docker build -t deepauto/hip-attention:latest -t deepauto/hip-attention:latest-sglang -t deepauto/hip-attention:${tag_git_short} -t deepauto/hip-attention:${tag_hip_attention}-sglang -f Dockerfile.sglang .
+docker build . \
+-f Dockerfile.sglang \
+-t deepauto/hip-attention:latest \
+-t deepauto/hip-attention:latest-sglang \
+-t deepauto/hip-attention:${tag_git_short} \
+-t deepauto/hip-attention:${tag_hip_attention_sglang}
 
 # Publish sglang server image
 docker push deepauto/hip-attention:latest
 docker push deepauto/hip-attention:latest-sglang
 docker push deepauto/hip-attention:${tag_git_short}
-docker push deepauto/hip-attention:${tag_hip_attention}-sglang
+docker push deepauto/hip-attention:${tag_hip_attention_sglang}
 
 # Build sglang router image
 cd ../sglang
 
-docker build . -f docker/Dockerfile.router -t deepauto/sglang-router:latest -t deepauto/sglang-router:latest-sglang -t deepauto/sglang-router:${tag_git_short} -t deepauto/sglang-router:${tag_hip_attention} --no-cache
+docker build . \
+-f docker/Dockerfile.router \
+--no-cache \
+-t deepauto/sglang-router:latest \
+-t deepauto/sglang-router:latest-sglang \
+-t deepauto/sglang-router:${tag_git_short} \
+-t deepauto/sglang-router:${tag_hip_attention_sglang}
 
 # Publish sglang router image
 docker push deepauto/sglang-router:latest
 docker push deepauto/sglang-router:latest-sglang
 docker push deepauto/sglang-router:${tag_git_short}
-docker push deepauto/sglang-router:${tag_hip_attention}
+docker push deepauto/sglang-router:${tag_hip_attention_sglang}
 
 cd -
 ```
