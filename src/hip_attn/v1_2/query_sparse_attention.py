@@ -1907,7 +1907,7 @@ class _attention(torch.autograd.Function):
             assert rope_cos.ndim == 2
             assert extend_backend in ["self_extend", "nope"]
 
-        if rope_sin is not None:
+        if (rope_sin is not None) and (extend_backend in ["self_extend"]):
             HEAD_DIM_K_ROPE = rope_sin.shape[-1]
             HEAD_DIM_K_NOPE = HEAD_DIM_K - HEAD_DIM_K_ROPE
         else:

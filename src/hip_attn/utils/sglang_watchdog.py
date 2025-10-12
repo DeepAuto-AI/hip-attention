@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import sys
 import os
@@ -15,9 +16,8 @@ def log(*args):
 class Watchdog:
     def __init__(
         self,
-        timeout_bootup = 300,
     ):
-        self.timeout_bootup = 300
+        self.timeout_bootup = 600
         self.timeout_tick = 60
         self.sleep_step = 1
         self.proc: subprocess.Popen = None
@@ -95,9 +95,21 @@ class Watchdog:
     
     def start(self):
         if "--" in sys.argv:
+            my_args = sys.argv[1:sys.argv.index("--")]
             argv = sys.argv[sys.argv.index("--") + 1:]
         else:
+            my_args = []
             argv = sys.argv[1:]
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--timeout-bootup", default=self.timeout_bootup, type=int)
+        parser.add_argument("--timeout", default=self.timeout_tick, type=int)
+        parser.add_argument("--sleep-step", default=self.sleep_step, type=int)
+
+        args = parser.parse_args(my_args)
+        self.timeout_bootup = args.timeout_bootup
+        self.timeout_tick = args.timeout
+        self.sleep_step = args.sleep_step
         
         assert "--host" in argv
         assert "--port" in argv

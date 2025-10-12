@@ -2,7 +2,7 @@ import copy
 import math
 import os
 import warnings
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 import cv2
 import numba
@@ -25,7 +25,62 @@ except ImportError:
     IS_AMD = True
     
     from flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
-    from flash_attn import flash_attn_with_kvcache
+    from flash_attn import flash_attn_with_kvcache as __flash_attn_with_kvcache
+
+    def flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k=None,
+        v=None,
+        qv=None,
+        rotary_cos=None,
+        rotary_sin=None,
+        cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
+        cache_batch_idx: Optional[torch.Tensor] = None,
+        cache_leftpad: Optional[torch.Tensor] = None,
+        page_table: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_k_new: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        rotary_seqlens: Optional[torch.Tensor] = None,
+        q_descale: Optional[torch.Tensor] = None,
+        k_descale: Optional[torch.Tensor] = None,
+        v_descale: Optional[torch.Tensor] = None,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),  # -1 means infinite context window
+        softcap=0.0,  # 0.0 means deactivated
+        rotary_interleaved=True,
+        scheduler_metadata=None,
+        num_splits=0,  # Can be tuned for speed
+        pack_gqa=None,  # Can be tuned for speed
+        sm_margin=0,  # Can be tuned if some SMs are used for communication
+        return_softmax_lse=False,
+        sinks=None,
+        ver=3,
+    ):
+        return flash_attn_with_kvcache(
+            q,
+            k_cache,
+            v_cache,
+            k=k,
+            v=v,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
+            cache_seqlens=cache_seqlens,
+            cache_batch_idx=cache_batch_idx,
+            cache_leftpad=cache_leftpad,
+            block_table=page_table,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,  # -1 means infinite context window
+            softcap=softcap, # 0.0 means deactivated
+            rotary_interleaved=rotary_interleaved,
+            alibi_slopes=None,
+            num_splits=num_splits,
+            return_softmax_lse=return_softmax_lse,
+        )
 
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
