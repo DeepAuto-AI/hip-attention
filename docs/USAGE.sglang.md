@@ -1269,7 +1269,7 @@ python \
 - Tested at: 2025-10-08
 - Tested version:
   - `hip-attention`: `3192b974685791ab08f9278a4e23be4618a227fc`
-  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `a2e22f83f39645d13b40f663ddc7f9fb199f5d13`
+  - `sglang` ([DeepAuto-AI/sglang](https://github.com/DeepAuto-AI/sglang)): `eb1197fd7ad372de83a1589ec99c101054c25cf1`
 
 #### Local
 
@@ -1337,8 +1337,9 @@ docker run \
 --mount type=volume,src=cache-${name}-${version},target=/root/.cache \
 --mount type=bind,source=${HF_HOME:-"$HOME/.cache/huggingface"},target=/root/.cache/huggingface \
 --env "HF_HOME=/root/.cache/huggingface" \
---env "SGL_DG_CACHE_DIR=/root/.cache/deep_gemm" \
+--env "SGLANG_DG_CACHE_DIR=/root/.cache/deep_gemm" \
 --env "TRITON_HOME=/root/.cache" \
+--env "TILELANG_CACHE_DIR=/root/.cache/tilelang" \
 -p ${port}:${port} \
 --ipc=host \
 --health-cmd "curl -f http://localhost:${port}/health || exit 1" \

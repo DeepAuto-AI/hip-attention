@@ -136,6 +136,29 @@ See the following pages for more details:
 
 - [Running OpenAI API server examples (SGlang)](docs/USAGE.sglang.md)
 
+### Docker Compose
+
+Docker compose examples are available in [`docker-compose`](/docker-compose) folder.
+
+```bash
+# First copy .env.example to .env
+cp .env.example .env
+vim .env
+
+# Start sglang server
+docker compose \
+--env-file .env \
+-f docker-compose/sglang-server.yaml \
+--project-name hip-attention-sglang-server-local \
+up
+
+# Start sglang router
+docker compose \
+-f docker-compose/sglang-router.yaml \
+--project-name hip-attention-sglang-router-local \
+up
+```
+
 ## Experiment Reproduce
 
 Check [how to reproduce experiment](docs/REPRODUCE.md) page
@@ -199,10 +222,39 @@ git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
 docker login
 
-docker build -t deepauto/hip-attention:latest -t deepauto/hip-attention:latest-sglang -t deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang -t deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang -f Dockerfile.sglang .
+tag_git_short=$(git rev-parse --short HEAD)-sglang
+tag_hip_attention_sglang=v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
 
+# Build sglang server image
+docker build . \
+-f Dockerfile.sglang \
+-t deepauto/hip-attention:latest \
+-t deepauto/hip-attention:latest-sglang \
+-t deepauto/hip-attention:${tag_git_short} \
+-t deepauto/hip-attention:${tag_hip_attention_sglang}
+
+# Publish sglang server image
 docker push deepauto/hip-attention:latest
 docker push deepauto/hip-attention:latest-sglang
-docker push deepauto/hip-attention:$(git rev-parse --short HEAD)-sglang
-docker push deepauto/hip-attention:v$(uv run python -c 'import importlib.metadata; print(importlib.metadata.version("hip-attn"))')-sglang
+docker push deepauto/hip-attention:${tag_git_short}
+docker push deepauto/hip-attention:${tag_hip_attention_sglang}
+
+# Build sglang router image
+cd ../sglang
+
+docker build . \
+-f docker/Dockerfile.router \
+--no-cache \
+-t deepauto/sglang-router:latest \
+-t deepauto/sglang-router:latest-sglang \
+-t deepauto/sglang-router:${tag_git_short} \
+-t deepauto/sglang-router:${tag_hip_attention_sglang}
+
+# Publish sglang router image
+docker push deepauto/sglang-router:latest
+docker push deepauto/sglang-router:latest-sglang
+docker push deepauto/sglang-router:${tag_git_short}
+docker push deepauto/sglang-router:${tag_hip_attention_sglang}
+
+cd -
 ```

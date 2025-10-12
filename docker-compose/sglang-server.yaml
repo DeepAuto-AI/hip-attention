@@ -1,0 +1,106 @@
+services:
+  sglang-server:
+    # https://hub.docker.com/r/deepauto/hip-attention/tags
+    image: deepauto/hip-attention:v1.2.9-sglang
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids: ['0', '1', '2', '3', '4', '5', '6', '7']
+            capabilities: [gpu]
+    volumes:
+    - type: volume
+      source: sglang-cache
+      target: /root/.cache
+    - type: bind
+      source: ${HF_HOME:?error}
+      target: /root/.cache/huggingface
+    command:
+    - python
+    - -m
+    - sglang.launch_server
+    - --host
+    - "0.0.0.0"
+    - --port
+    - "10080"
+    - --model-path
+    - Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+    - --kv-cache-dtype
+    - auto
+    - --ep-size
+    - "8"
+    - --tp-size
+    - "8"
+    - --chunked-prefill-size
+    - "65536"
+    - --max-prefill-tokens
+    - "65536"
+    - --cuda-graph-bs
+    - "1"
+    - "2"
+    - "4"
+    - "8"
+    - "16"
+    - "24"
+    - "32"
+    - "48"
+    - "64"
+    - "96"
+    - "128"
+    - "160"
+    - "192"
+    - "256"
+    - --context-length
+    - "256000"
+    - --max-total-tokens
+    - "256000"
+    - --attention-backend
+    - hip_attention
+    - --hip-attention-config
+    - ./configs/mixed_landmark_0814_no_extend_qsa.json
+    - --hip-attention-config-override-json
+    - '{"__seq_thresh_fa3": 65536}'
+    - --json-model-override-args
+    - '{"rope_scaling":{"rope_type":"yarn","factor":1.0,"original_max_position_embeddings":262144}, "max_position_embeddings": 262144}'
+    - --max-running-requests
+    - "64"
+    - --trust-remote-code
+    - --tool-call-parser
+    - qwen25
+    environment:
+    - HF_HOME=/root/.cache/huggingface
+    - SGLANG_DG_CACHE_DIR=/root/.cache/deep_gemm
+    - TRITON_HOME=/root/.cache
+    - TILELANG_CACHE_DIR=/root/.cache/tilelang
+    - BSA_K=32
+    - BSA_EXACT_K=32
+    - BSA_BLOCK_K=64
+    - HIP_DEBUG_DELTA_QSA=1
+    - HIP_DEBUG_RECOMPUTE_SPLIT=0
+    - TRITON_PRINT_AUTOTUNING=1
+    - SRT_WARMUP_ALL_SEQ_LENS=0
+    - HIP_DEBUG_FA3_MIXING_LEN=0
+    - PASSKEY_DECODE_LEN=128
+    - PASSKEY_LEN=150
+    - SA_BLOCK_SIZE=128
+    - SA_DECODE_BLOCK_SIZE=128
+    - HIP_DISABLE_AUTOTUNE=0
+    - HIP_DEBUG=0
+    - HIP_DEBUG_BENCH=0
+    - HIP_DEBUG_CAPTURE_DECORATOR=1
+    - CUDA_LAUNCH_BLOCKING=0
+    ports:
+    - 10080:10080
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:10080/health || exit 1"]
+      interval: 5s
+      timeout: 60s
+      retries: 1
+      start_period: 1800s
+
+volumes:
+  sglang-cache:
+    driver: local
