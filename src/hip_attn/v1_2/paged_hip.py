@@ -60,7 +60,7 @@ except ImportError:
         sinks=None,
         ver=3,
     ):
-        return flash_attn_with_kvcache(
+        return __flash_attn_with_kvcache(
             q,
             k_cache,
             v_cache,
