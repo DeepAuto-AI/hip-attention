@@ -9,10 +9,23 @@ import numba
 import numpy as np
 import torch
 import triton
-from flash_attn import flash_attn_func
 from matplotlib import pyplot as plt
-from sgl_kernel.flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
-from sgl_kernel.flash_attn import flash_attn_with_kvcache
+
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
+
+try:
+    from sgl_kernel.flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
+    from sgl_kernel.flash_attn import flash_attn_with_kvcache
+    IS_AMD = False
+except ImportError:
+    # FIXME: better AMD detection algorithm
+    IS_AMD = True
+    
+    from flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
+    from flash_attn import flash_attn_with_kvcache
 
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
