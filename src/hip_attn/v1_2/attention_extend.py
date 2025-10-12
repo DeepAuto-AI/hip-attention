@@ -19,7 +19,7 @@ from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
 
 try:
     from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention_tilelang
-except ImportError, OSError:
+except (ImportError, OSError):
     block_sparse_attention_tilelang = None
 
 from hip_attn.v1_2.attention_metadata import (
