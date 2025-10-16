@@ -40,8 +40,10 @@ class Watchdog:
 
     def kill_subprocess(self):
         log(f"Start kill subprocess")
-        self.proc.kill()
-        self.proc = None
+        if self.proc is not None:
+            self.proc.kill()
+            self.proc = None
+        subprocess.call(["pkill", "sglang"])
         log(f"Finish kill subprocess")
 
     def wait_for_health(self, timeout: int):
@@ -94,49 +96,52 @@ class Watchdog:
             time.sleep(self.sleep_step)
     
     def start(self):
-        if "--" in sys.argv:
-            my_args = sys.argv[1:sys.argv.index("--")]
-            argv = sys.argv[sys.argv.index("--") + 1:]
-        else:
-            my_args = []
-            argv = sys.argv[1:]
-        
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--timeout-bootup", default=self.timeout_bootup, type=int)
-        parser.add_argument("--timeout", default=self.timeout_tick, type=int)
-        parser.add_argument("--sleep-step", default=self.sleep_step, type=int)
+        try:
+            if "--" in sys.argv:
+                my_args = sys.argv[1:sys.argv.index("--")]
+                argv = sys.argv[sys.argv.index("--") + 1:]
+            else:
+                my_args = []
+                argv = sys.argv[1:]
+            
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--timeout-bootup", default=self.timeout_bootup, type=int)
+            parser.add_argument("--timeout", default=self.timeout_tick, type=int)
+            parser.add_argument("--sleep-step", default=self.sleep_step, type=int)
 
-        args = parser.parse_args(my_args)
-        self.timeout_bootup = args.timeout_bootup
-        self.timeout_tick = args.timeout
-        self.sleep_step = args.sleep_step
-        
-        assert "--host" in argv
-        assert "--port" in argv
-        self.host = argv[argv.index("--host") + 1]
-        self.port = argv[argv.index("--port") + 1]
-        self.health_endpoint = f"http://{self.host}:{self.port}/health"
-        log(f"Watching: {self.health_endpoint}")
+            args = parser.parse_args(my_args)
+            self.timeout_bootup = args.timeout_bootup
+            self.timeout_tick = args.timeout
+            self.sleep_step = args.sleep_step
+            
+            assert "--host" in argv
+            assert "--port" in argv
+            self.host = argv[argv.index("--host") + 1]
+            self.port = argv[argv.index("--port") + 1]
+            self.health_endpoint = f"http://{self.host}:{self.port}/health"
+            log(f"Watching: {self.health_endpoint}")
 
-        self.argv = argv
+            self.argv = argv
 
-        self.thread_watchdog = threading.Thread(
-            target=self.main_watchdog, 
-            daemon=True
-        )
-        self.thread_starter = threading.Thread(
-            target=self.main_starter, 
-            daemon=True
-        )
+            self.thread_watchdog = threading.Thread(
+                target=self.main_watchdog, 
+                daemon=True
+            )
+            self.thread_starter = threading.Thread(
+                target=self.main_starter, 
+                daemon=True
+            )
 
-        self.thread_starter.start()
-        time.sleep(self.sleep_step)
-        self.thread_watchdog.start()
+            self.thread_starter.start()
+            time.sleep(self.sleep_step)
+            self.thread_watchdog.start()
 
-        self.thread_watchdog.join()
-        self.thread_starter.join()
+            self.thread_watchdog.join()
+            self.thread_starter.join()
 
-        self.running = False
+            self.running = False
+        except KeyboardInterrupt:
+            self.kill_subprocess()
 
 if __name__ == '__main__':
     dog = Watchdog()
