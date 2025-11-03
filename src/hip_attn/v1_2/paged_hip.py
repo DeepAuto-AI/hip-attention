@@ -2,17 +2,85 @@ import copy
 import math
 import os
 import warnings
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 import cv2
 import numba
 import numpy as np
 import torch
 import triton
-from flash_attn import flash_attn_func
 from matplotlib import pyplot as plt
-from sgl_kernel.flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
-from sgl_kernel.flash_attn import flash_attn_with_kvcache
+
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
+
+try:
+    from sgl_kernel.flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
+    from sgl_kernel.flash_attn import flash_attn_with_kvcache
+    IS_AMD = False
+except ImportError:
+    # FIXME: better AMD detection algorithm
+    IS_AMD = True
+    
+    from flash_attn import flash_attn_varlen_func as __flash_attn_varlen_func
+    from flash_attn import flash_attn_with_kvcache as __flash_attn_with_kvcache
+
+    def flash_attn_with_kvcache(
+        q,
+        k_cache,
+        v_cache,
+        k=None,
+        v=None,
+        qv=None,
+        rotary_cos=None,
+        rotary_sin=None,
+        cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
+        cache_batch_idx: Optional[torch.Tensor] = None,
+        cache_leftpad: Optional[torch.Tensor] = None,
+        page_table: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_k_new: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        rotary_seqlens: Optional[torch.Tensor] = None,
+        q_descale: Optional[torch.Tensor] = None,
+        k_descale: Optional[torch.Tensor] = None,
+        v_descale: Optional[torch.Tensor] = None,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),  # -1 means infinite context window
+        softcap=0.0,  # 0.0 means deactivated
+        rotary_interleaved=True,
+        scheduler_metadata=None,
+        num_splits=0,  # Can be tuned for speed
+        pack_gqa=None,  # Can be tuned for speed
+        sm_margin=0,  # Can be tuned if some SMs are used for communication
+        return_softmax_lse=False,
+        sinks=None,
+        ver=3,
+    ):
+        return __flash_attn_with_kvcache(
+            q,
+            k_cache,
+            v_cache,
+            k=k,
+            v=v,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
+            cache_seqlens=cache_seqlens,
+            cache_batch_idx=cache_batch_idx,
+            cache_leftpad=cache_leftpad,
+            block_table=page_table,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,  # -1 means infinite context window
+            softcap=softcap, # 0.0 means deactivated
+            rotary_interleaved=rotary_interleaved,
+            alibi_slopes=None,
+            num_splits=num_splits,
+            return_softmax_lse=return_softmax_lse,
+        )
 
 from hip_attn.v1_2.hip_config import HiPAttentionConfig
 from hip_attn.v1_2.utils import capture
@@ -130,9 +198,14 @@ try:
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
+        get_tp_group,
     )
 
-    SGLANG_DIST_ACTIVATED = True
+    try:
+        get_tp_group()
+        SGLANG_DIST_ACTIVATED = True
+    except AssertionError:
+        SGLANG_DIST_ACTIVATED = False
 except ImportError as ex:
     SGLANG_DIST_ACTIVATED = False
 
@@ -365,8 +438,11 @@ def forward_paged_hip(
                     positions=positions[start_len : start_len + seq_len],
                     seq_lens=seq_lens[idx_batch : idx_batch + 1],
                     req_to_tokens=req_to_tokens,
-                    req_pool_indices=req_pool_indices[idx_batch : idx_batch + 1],
-                    block_table=None,
+                    req_pool_indices=(
+                        req_pool_indices[idx_batch : idx_batch + 1] 
+                        if req_pool_indices is not None else None
+                    ),
+                    block_table=block_table,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     rope_range=rope_range,

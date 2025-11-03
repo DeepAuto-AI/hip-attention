@@ -16,7 +16,12 @@ from torch import Tensor
 from hip_attn.utils.rope import adjust_rope
 from hip_attn.v1_2.attention_decode_bsa import decode_block_sparse_attention
 from hip_attn.v1_2.attention_extend_bsa import block_sparse_attention
-from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention_tilelang
+
+try:
+    from hip_attn.v1_2.attention_extend_bsa_tilelang import block_sparse_attention_tilelang
+except (ImportError, OSError):
+    block_sparse_attention_tilelang = None
+
 from hip_attn.v1_2.attention_metadata import (
     EnsembleScoreStage,
     EvalScoreStage,
