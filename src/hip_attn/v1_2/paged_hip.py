@@ -198,9 +198,14 @@ try:
         split_tensor_along_last_dim,
         tensor_model_parallel_all_gather,
         tensor_model_parallel_all_reduce,
+        get_tp_group,
     )
 
-    SGLANG_DIST_ACTIVATED = True
+    try:
+        get_tp_group()
+        SGLANG_DIST_ACTIVATED = True
+    except AssertionError:
+        SGLANG_DIST_ACTIVATED = False
 except ImportError as ex:
     SGLANG_DIST_ACTIVATED = False
 
@@ -433,8 +438,11 @@ def forward_paged_hip(
                     positions=positions[start_len : start_len + seq_len],
                     seq_lens=seq_lens[idx_batch : idx_batch + 1],
                     req_to_tokens=req_to_tokens,
-                    req_pool_indices=req_pool_indices[idx_batch : idx_batch + 1],
-                    block_table=None,
+                    req_pool_indices=(
+                        req_pool_indices[idx_batch : idx_batch + 1] 
+                        if req_pool_indices is not None else None
+                    ),
+                    block_table=block_table,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     rope_range=rope_range,
