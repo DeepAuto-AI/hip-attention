@@ -5,6 +5,7 @@ python scripts/benchmark_latency_paged_attn.py
 import os
 import json
 import traceback
+import pandas as pd
 import torch
 from transformers import AutoConfig
 import triton
@@ -108,7 +109,7 @@ def evaluate_autotune(
     try_set_environ("HIP_DISABLE_AUTOTUNE", "0")
 
     n_warmup = 3
-    n_measure = 20
+    n_measure = 100
     n_tp = 8
 
     config = AutoConfig.from_pretrained(model_name)
@@ -159,6 +160,8 @@ def evaluate_autotune(
             data_point = {
                 "dtype": str(dtype),
                 "seq_len": seq_len,
+                "bsa_block_k": bsa_block_k,
+                "sa_block_size": sa_block_size,
                 "model": model_name,
                 "latency": latency,
                 "exception": exception,
@@ -174,8 +177,8 @@ def main():
         json_override='{"__seq_thresh_fa3": 0}'
     )
 
-    bsa_block_ks = [32, 64]
-    sa_block_sizes = [64, 128, 256]
+    bsa_block_ks = [64, 32]
+    sa_block_sizes = [256, 128, 64]
 
     data = []
 
@@ -190,6 +193,9 @@ def main():
     os.makedirs("saves/bench_latency_paged_attn", exist_ok=True)
     with open("saves/bench_latency_paged_attn/measures.json", "w") as f:
         json.dump(data, f)
+    
+    df = pd.DataFrame(data)
+    df.to_csv("saves/bench_latency_paged_attn/measures.csv")
 
 if __name__ == "__main__":
     main()
