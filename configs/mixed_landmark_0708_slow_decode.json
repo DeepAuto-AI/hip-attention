@@ -1,0 +1,93 @@
+{
+    "__head_reduce": 3,
+    "__last_dense": -1,
+    "__using_landmark": false,
+    "using_extend": true,
+    "dense_layers": [
+        0,
+        1,
+        2,
+        3,
+        4
+    ],
+    "mask_refresh_interval": [48, 16, 8],
+    "layers": [
+        {
+            "sliding_window_size": 12288,
+            "sliding_window_size_for_masking_step": [32768, 16384, 8192],
+            "second_stage_k": 0,
+            "sa_extend_backend": "streaming"
+        },
+        {
+            "sliding_window_size": 1024,
+            "sliding_window_size_for_masking_step": [32768, 16384, 8192],
+            "second_stage_k": 2048,
+            "sa_extend_backend": "streaming",
+            "scan_extend_backend": "none",
+            "stages": [
+                {
+                    "stage_block_size_q":64,
+                    "stage_block_stride_q":2,
+                    "stage_chunk_size":64,
+                    "stage_k":null,
+                    "stage_stride":1
+                },
+                {
+                    "stage_block_size_q":64,
+                    "stage_block_stride_q":2,
+                    "stage_chunk_size":32,
+                    "stage_k":32768,
+                    "stage_stride":1
+                },
+                {
+                    "stage_block_size_q":64,
+                    "stage_block_stride_q":1,
+                    "stage_chunk_size":8,
+                    "stage_k":8192,
+                    "stage_stride":1
+                }
+            ]
+        }
+    ],
+    "prefill_layers": [
+        {
+            "sliding_window_size": 12288,
+            "second_stage_k": 0,
+            "sa_extend_backend": "streaming"
+        },
+        {
+            "sliding_window_size": 1024,
+            "second_stage_k": 4096,
+            "sink_token_size": 256,
+            "landmark_stage_k": [1, 1, 1],
+            "sa_extend_backend": "streaming",
+            "scan_extend_backend": "none",
+            "stages": [
+                {
+                    "stage_block_size_q":128,
+                    "stage_block_stride_q":4,
+                    "stage_chunk_size":128,
+                    "stage_k":null,
+                    "stage_stride":1,
+                    "using_landmark":false
+                },
+                {
+                    "stage_block_size_q":64,
+                    "stage_block_stride_q":1,
+                    "stage_chunk_size":8,
+                    "stage_k":32768,
+                    "stage_stride":1,
+                    "using_landmark":true
+                },
+                {
+                    "stage_block_size_q":64,
+                    "stage_block_stride_q":1,
+                    "stage_chunk_size":2,
+                    "stage_k":8192,
+                    "stage_stride":1,
+                    "using_landmark":true
+                }
+            ]
+        }
+    ]
+}

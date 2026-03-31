@@ -1,0 +1,41 @@
+{
+    "__delta_attention_args": "window_0-diff_1-w_8-dense_decode-adjust_norm_const",
+    "__using_dense_prefill": true,
+    "__head_reduce": 2,
+    "using_extend": false,
+    "dense_layers": [
+        0, 30, 31
+    ],
+    "mask_refresh_interval": [32, 16, 8],
+    "prefill_layers": [
+        {},
+        {
+            "second_stage_k": 2048,
+            "sliding_window_size": 512,
+            "sink_token_size": 64,
+            "stages": [
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 64,
+                    "stage_k": null,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 2,
+                    "stage_chunk_size": 32,
+                    "stage_k": 16384,
+                    "stage_stride": 1
+                },
+                {
+                    "stage_block_size_q": 64,
+                    "stage_block_stride_q": 1,
+                    "stage_chunk_size": 16,
+                    "stage_k": 4096,
+                    "stage_stride": 1
+                }
+            ]
+        }
+    ]
+}

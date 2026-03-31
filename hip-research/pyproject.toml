@@ -1,0 +1,33 @@
+[project]
+name = "hip-research"
+version = "0.1.0"
+description = "HiP Attention Research Folder"
+requires-python = ">=3.9, <3.13"
+dependencies = [
+    # Trainer
+    "torchmetrics",
+    "deepspeed",
+    "lightning",
+    "pytorch_lightning",
+    "scikit-learn",
+
+    # Dataset
+    "torchtext",
+    "datasets",
+
+    # Eval
+    "pypareto",
+    "pyrouge",
+
+    # Other dependencies
+    "requests",
+    "tqdm",
+    "matplotlib",
+    "numpy < 2.0.0",  # Numpy>=2.0 has breaking changes, see https://github.com/vllm-project/vllm/pull/5582/files
+    "scikit-image",
+    "wandb",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

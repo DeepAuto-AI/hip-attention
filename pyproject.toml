@@ -1,0 +1,100 @@
+[build-system]
+requires = [
+    "setuptools>=80.9.0",
+    "setuptools-scm",
+
+    # Build dependencies. (Especially for flash-attn)
+    "cmake>=3.21",
+    "ninja",
+    "packaging",
+    "wheel>=0.45.1",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hip-attn"  # Name of package when installed using pip
+version = "1.2.8"
+description = "HiP Attention"
+authors = [
+    { name="DeepAuto.ai", email="contact@deepauto.ai" },
+    { name="Heejun Lee", email="gmlwns5176@gmail.com" },
+    { name="Geon Park", email="mujjingun@gmail.com" },
+    { name="Bumsik Kim", email="k.bumsik@gmail.com" },
+]
+license = "LicenseRef-FSL-1.1-MIT"
+license-files = ["LICENSE.md"]
+readme = "README.md"
+requires-python = ">=3.9, <3.13"
+classifiers = [
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: GPU",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+]
+dependencies = [
+    # Required
+    "torch",
+    "triton",
+    "setuptools>=80.9.0",  # Required by triton amd backend
+    "numba",
+    "performer_pytorch",
+    "peft",
+    "seaborn",
+    "sympy",
+    "bitsandbytes",
+    "tilelang",
+    # CUDA 12
+    "cupy-cuda12x",
+    "nvtx",
+    # Debugging, multimodal
+    "opencv-python-headless>=4.11.0.86",
+]
+
+[project.urls]
+Homepage = "https://github.com/DeepAuto-AI/hip-attention"
+Repository = "https://github.com/DeepAuto-AI/hip-attention"
+Issues = "https://github.com/DeepAuto-AI/hip-attention/issues"
+
+[project.optional-dependencies]
+sglang = [
+    "sgl-kernel",
+    # Needs adding `--find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python`
+    # For uv, see tool.uv.sources and tool.uv.index sections
+    "flashinfer-python",
+    # See tool.uv.sources section
+    "flash-attn",
+    # See tool.uv.sources section
+    "sglang[all]",
+]
+
+[tool.uv.sources]
+hip-attn = { workspace = true }
+flash-attn = [
+    { git = "https://github.com/Dao-AILab/flash-attention.git", rev = "8c348fd79f423923710cb5a949c8e79f6aa29f7f" },
+    # # pip format: "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    # { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp39-cp39-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.9'" },
+    # { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.10'" },
+    # { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.11'" },
+    # { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.12'" },
+    # { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and python_version == '3.13'" },
+]
+sglang = [
+    # pip format: "sglang[all] @ git+https://github.com/DeepAuto-AI/sglang.git@deepauto/dev#subdirectory=python"
+    # To update sglang, run `uv lock --upgrade-package sglang`
+    { git = "https://github.com/DeepAuto-AI/sglang.git", subdirectory = "python", rev = "deepauto/dev" },
+    # For local devs, you can use this instead:
+    # { path = "../sglang/python", editable = true },
+]
+hip-research = { workspace = true }
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
+
+[tool.uv.workspace]
+members = ["hip-research"]
+
+[dependency-groups]
+dev = [
+    "hip-attn[sglang]",
+    "hip-research",
+    "pre-commit>=4.2.0",
+]
